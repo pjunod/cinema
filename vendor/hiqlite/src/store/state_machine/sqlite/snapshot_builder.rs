@@ -110,7 +110,13 @@ async fn snapshots_cleanup(
             continue;
         }
 
-        if name != keep_id {
+        // `begin_receiving_snapshot` owns this fixed staging name. A local
+        // snapshot build may finish while a peer snapshot is being received;
+        // deleting that live staging file here races `install_snapshot` and
+        // turns a valid install into ENOENT. The receiver removes stale
+        // staging data before opening a new transfer, so cleanup must leave it
+        // alone.
+        if name != keep_id && name != "temp" {
             deletes.push(name.to_string());
         }
     }
@@ -130,4 +136,57 @@ async fn snapshots_cleanup(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_metrics_cleanup_contract {
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_metrics_cleanup_preserves_an_inflight_install() {
+        let root =
+            std::env::temp_dir().join(format!("hiqlite-snapshot-cleanup-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root)
+            .await
+            .expect("create snapshot cleanup root");
+        let keep_id = Uuid::now_v7();
+        let keep_path = root.join(keep_id.to_string());
+        let receive_path = root.join("temp");
+        let old_path = root.join(Uuid::now_v7().to_string());
+        fs::write(&keep_path, b"keep")
+            .await
+            .expect("write retained snapshot");
+        fs::write(&receive_path, b"receiving")
+            .await
+            .expect("write inflight install");
+        fs::write(&old_path, b"old")
+            .await
+            .expect("write old snapshot");
+
+        #[cfg(feature = "backup")]
+        let backups = root.join("backups");
+        #[cfg(feature = "backup")]
+        fs::create_dir_all(&backups)
+            .await
+            .expect("create backup cleanup root");
+
+        snapshots_cleanup(
+            root.to_str().expect("UTF-8 snapshot cleanup root").to_owned(),
+            #[cfg(feature = "backup")]
+            backups
+                .to_str()
+                .expect("UTF-8 backup cleanup root")
+                .to_owned(),
+            keep_id,
+        )
+        .await
+        .expect("clean old snapshots");
+
+        assert!(keep_path.exists());
+        assert!(receive_path.exists());
+        assert!(!old_path.exists());
+        fs::remove_dir_all(root)
+            .await
+            .expect("remove snapshot cleanup root");
+    }
 }
