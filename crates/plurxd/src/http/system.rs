@@ -1176,46 +1176,33 @@ pub struct SettingsDto {
 }
 
 async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
-    let tmdb_api_key = state
-        .store
-        .get_setting(keys::TMDB_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let omdb_api_key = state
-        .store
-        .get_setting(keys::OMDB_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let monarr_url = state
-        .store
-        .get_setting(keys::MONARR_URL)
-        .await?
-        .unwrap_or_default();
-    let monarr_api_key = state
-        .store
-        .get_setting(keys::MONARR_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let trakt_client_id = state
-        .store
-        .get_setting(keys::TRAKT_CLIENT_ID)
-        .await?
-        .unwrap_or_default();
-    let trakt_client_secret = state
-        .store
-        .get_setting(keys::TRAKT_CLIENT_SECRET)
-        .await?
-        .unwrap_or_default();
-    let prefs = state.transcode.lang_prefs().await;
-    let stream_readrate = state
-        .store
-        .get_setting(keys::STREAM_READRATE)
-        .await?
+    // This page renders the settings as one administrative snapshot. On the
+    // clustered backend, reading each field independently turns one response
+    // into dozens of leader barriers; it can also mix values from different
+    // commits. `cache_bytes` below is one additional authoritative aggregate
+    // for this node's cache ownership when a cache location is configured.
+    let settings = state.store.settings_snapshot().await?;
+    let setting = |key: &str| settings.get(key).cloned();
+    let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
+    let omdb_api_key = setting(keys::OMDB_API_KEY).unwrap_or_default();
+    let monarr_url = setting(keys::MONARR_URL).unwrap_or_default();
+    let monarr_api_key = setting(keys::MONARR_API_KEY).unwrap_or_default();
+    let trakt_client_id = setting(keys::TRAKT_CLIENT_ID).unwrap_or_default();
+    let trakt_client_secret = setting(keys::TRAKT_CLIENT_SECRET).unwrap_or_default();
+    let mut prefs = plurx_core::tracks::LangPrefs::default();
+    if let Some(value) = setting(keys::AUDIO_LANG).filter(|value| !value.trim().is_empty()) {
+        prefs.audio_lang = value.trim().to_owned();
+    }
+    if let Some(value) = setting(keys::SUB_LANG).filter(|value| !value.trim().is_empty()) {
+        prefs.sub_lang = value.trim().to_owned();
+    }
+    if let Some(value) = setting(keys::SUB_MODE) {
+        prefs.sub_mode = plurx_core::tracks::SubMode::parse(value.trim());
+    }
+    let stream_readrate = setting(keys::STREAM_READRATE)
         .unwrap_or_else(|| crate::http::stream::READRATE_DEFAULT.to_string());
-    let (transcode_rate_mode, transcode_quality) = state
-        .store
-        .get_setting_pair(keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY)
-        .await?;
+    let transcode_rate_mode = setting(keys::TRANSCODE_RATE_MODE);
+    let transcode_quality = setting(keys::TRANSCODE_QUALITY);
     let (transcode_rate_mode, transcode_quality, _) =
         crate::transcode::normalize_rate_control_request(
             transcode_rate_mode.as_deref(),
@@ -1228,23 +1215,23 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or_else(|| default.to_owned())
     };
     let hls_readrate = text(
-        state.store.get_setting(keys::HLS_READRATE).await?,
+        setting(keys::HLS_READRATE),
         &crate::transcode::HLS_READRATE_DEFAULT.to_string(),
     );
     let hls_burst_secs = text(
-        state.store.get_setting(keys::HLS_BURST_SECS).await?,
+        setting(keys::HLS_BURST_SECS),
         &crate::transcode::HLS_BURST_SECS_DEFAULT.to_string(),
     );
     let hls_ahead_max_secs = text(
-        state.store.get_setting(keys::HLS_AHEAD_MAX_SECS).await?,
+        setting(keys::HLS_AHEAD_MAX_SECS),
         &crate::transcode::HLS_AHEAD_MAX_SECS_DEFAULT.to_string(),
     );
     let hls_ahead_max_bytes = text(
-        state.store.get_setting(keys::HLS_AHEAD_MAX_BYTES).await?,
+        setting(keys::HLS_AHEAD_MAX_BYTES),
         &crate::transcode::HLS_AHEAD_MAX_BYTES_DEFAULT.to_string(),
     );
     let hls_scratch_max_bytes = text(
-        state.store.get_setting(keys::HLS_SCRATCH_MAX_BYTES).await?,
+        setting(keys::HLS_SCRATCH_MAX_BYTES),
         &crate::transcode::HLS_SCRATCH_MAX_BYTES_DEFAULT.to_string(),
     );
     let mins = |v: Option<String>| -> i64 {
@@ -1252,33 +1239,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(0)
             .max(0)
     };
-    let probe_retry_mins = mins(state.store.get_setting(keys::JOB_PROBE_RETRY_MINS).await?);
+    let probe_retry_mins = mins(setting(keys::JOB_PROBE_RETRY_MINS));
     // Absent means the default here, not 0 — the settings page must show the
     // interval that is actually in force, or an admin reading "0" would
     // reasonably conclude nothing is retrying their artwork.
-    let artwork_retry_mins = state
-        .store
-        .get_setting(keys::JOB_ARTWORK_RETRY_MINS)
-        .await?
+    let artwork_retry_mins = setting(keys::JOB_ARTWORK_RETRY_MINS)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(keys::ARTWORK_RETRY_DEFAULT_MINS)
         .max(0);
-    let transcode_cleanup_mins = mins(
-        state
-            .store
-            .get_setting(keys::JOB_TRANSCODE_CLEANUP_MINS)
-            .await?,
-    );
-    let cache_produce_mins = mins(
-        state
-            .store
-            .get_setting(keys::JOB_CACHE_PRODUCE_MINS)
-            .await?,
-    );
-    let cache_max_gb = state
-        .store
-        .get_setting(keys::CACHE_MAX_GB)
-        .await?
+    let transcode_cleanup_mins = mins(setting(keys::JOB_TRANSCODE_CLEANUP_MINS));
+    let cache_produce_mins = mins(setting(keys::JOB_CACHE_PRODUCE_MINS));
+    let cache_max_gb = setting(keys::CACHE_MAX_GB)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(crate::cachekeep::DEFAULT_MAX_GB)
         .max(0);
@@ -1286,24 +1257,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
         None => 0,
     };
-    let telemetry_retain_days = state
-        .store
-        .get_setting(keys::TELEMETRY_RETAIN_DAYS)
-        .await?
+    let telemetry_retain_days = setting(keys::TELEMETRY_RETAIN_DAYS)
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
         .max(0);
-    let playback_network_priors = state
-        .store
-        .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
+    let playback_network_priors =
+        setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let offline_enabled = !matches!(
-        state
-            .store
-            .get_setting(keys::OFFLINE_ENABLED)
-            .await?
-            .as_deref(),
+        setting(keys::OFFLINE_ENABLED).as_deref(),
         Some("0" | "false" | "off" | "no")
     );
     let offline_integer = |value: Option<String>, default: i64| {
@@ -1313,33 +1274,19 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .max(0)
     };
     let offline_max_gb = offline_integer(
-        state.store.get_setting(keys::OFFLINE_MAX_GB).await?,
+        setting(keys::OFFLINE_MAX_GB),
         super::offline::DEFAULT_GLOBAL_GB,
     );
     let offline_max_gb_per_user = offline_integer(
-        state
-            .store
-            .get_setting(keys::OFFLINE_MAX_GB_PER_USER)
-            .await?,
+        setting(keys::OFFLINE_MAX_GB_PER_USER),
         super::offline::DEFAULT_USER_GB,
     );
     let offline_max_rows_per_user = offline_integer(
-        state
-            .store
-            .get_setting(keys::OFFLINE_MAX_ROWS_PER_USER)
-            .await?,
+        setting(keys::OFFLINE_MAX_ROWS_PER_USER),
         super::offline::DEFAULT_USER_ROWS,
     );
-    let scan_on_startup = state
-        .store
-        .get_setting(keys::JOB_SCAN_ON_STARTUP)
-        .await?
-        .is_some_and(|v| v.trim() == "1");
-    let genre_backfill = state
-        .store
-        .get_setting(keys::GENRE_BACKFILL)
-        .await?
-        .is_some_and(|v| v.trim() == "1");
+    let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
+    let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1348,12 +1295,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         monarr_configured: !monarr_url.is_empty() && !monarr_api_key.is_empty(),
         monarr_url,
         monarr_api_key,
-        monarr_watched_sync: state
-            .store
-            .get_setting(keys::MONARR_WATCHED_SYNC)
-            .await?
-            .unwrap_or_default()
-            == "1",
+        monarr_watched_sync: setting(keys::MONARR_WATCHED_SYNC).unwrap_or_default() == "1",
         trakt_configured: !trakt_client_id.is_empty() && !trakt_client_secret.is_empty(),
         trakt_client_id,
         trakt_client_secret,
@@ -1368,10 +1310,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_ahead_max_secs,
         hls_ahead_max_bytes,
         hls_scratch_max_bytes,
-        hls_typeless_sliding: state
-            .store
-            .get_setting(keys::HLS_TYPELESS_SLIDING)
-            .await?
+        hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         probe_retry_mins,
         artwork_retry_mins,
@@ -1819,34 +1758,26 @@ async fn offline_work(state: &AppState) -> Result<Vec<OfflineWork>, ApiError> {
         // now; this preserves the write bound without a false 40-second gap.
         .offline_activity_packages(&state.node_id, now, now.saturating_sub(65), 50)
         .await?;
-    let users: HashMap<i64, String> = state
-        .store
-        .list_users()
-        .await?
+    let rows: Vec<_> = rows
         .into_iter()
-        .map(|user| (user.id, user.username))
+        .filter_map(|row| {
+            let transfer_bytes = row
+                .lease_active
+                .then(|| state.offline.transfer_bytes(&row.package.id))
+                .flatten();
+            (row.package.state != "ready" || transfer_bytes.is_some())
+                .then_some((row, transfer_bytes))
+        })
         .collect();
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut work = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (row, transfer_bytes) in rows {
+        let item_id = row.item_id;
+        let title = row.title;
+        let user = row.user_name;
         let package = row.package;
-        let transfer_bytes = row
-            .lease_active
-            .then(|| state.offline.transfer_bytes(&package.id))
-            .flatten();
-        if package.state == "ready" && transfer_bytes.is_none() {
-            continue;
-        }
-        let file = state.store.get_file(package.file_id).await?;
-        let item_id = file.as_ref().map(|file| file.item_id);
-        let title = match item_id {
-            Some(item_id) => state
-                .store
-                .get_item(item_id)
-                .await?
-                .map(|item| item.title)
-                .unwrap_or_else(|| "Unavailable media".to_owned()),
-            None => "Unavailable media".to_owned(),
-        };
         work.push(OfflineWork {
             id: package.id.clone(),
             kind: if transfer_bytes.is_some() {
@@ -1854,10 +1785,7 @@ async fn offline_work(state: &AppState) -> Result<Vec<OfflineWork>, ApiError> {
             } else {
                 "prepare"
             },
-            user: users
-                .get(&package.user_id)
-                .cloned()
-                .unwrap_or_else(|| "Unknown profile".to_owned()),
+            user,
             file_id: package.file_id,
             item_id,
             title,
@@ -1892,13 +1820,6 @@ pub async fn activity(
 ) -> Result<Json<Vec<Activity>>, ApiError> {
     let mut activities = Vec::new();
 
-    let names: HashMap<i64, String> = state
-        .store
-        .list_libraries()
-        .await?
-        .into_iter()
-        .map(|l| (l.id, l.name))
-        .collect();
     let mut statuses: Vec<_> = state
         .jobs
         .all_statuses()
@@ -1907,6 +1828,17 @@ pub async fn activity(
         .filter(|(_, s)| s.running)
         .collect();
     statuses.sort_by_key(|(id, _)| *id);
+    let names: HashMap<i64, String> = if statuses.is_empty() {
+        HashMap::new()
+    } else {
+        state
+            .store
+            .list_libraries()
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l.name))
+            .collect()
+    };
     for (id, status) in statuses {
         let name = names.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
         let enriching = status.phase.as_deref() == Some("enriching");
@@ -2158,17 +2090,19 @@ pub async fn activity_detail(
     // were never listed at all.
     let (sessions, deliveries) = deliveries(&state).await;
     let offline = offline_work(&state).await?;
-    let names: HashMap<i64, String> = state
-        .store
-        .list_libraries()
-        .await?
-        .into_iter()
-        .map(|l| (l.id, l.name))
-        .collect();
-    let scans: Vec<serde_json::Value> = state
-        .jobs
-        .all_statuses()
-        .await
+    let statuses = state.jobs.all_statuses().await;
+    let names: HashMap<i64, String> = if statuses.is_empty() {
+        HashMap::new()
+    } else {
+        state
+            .store
+            .list_libraries()
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l.name))
+            .collect()
+    };
+    let scans: Vec<serde_json::Value> = statuses
         .into_iter()
         .map(|(id, st)| {
             serde_json::json!({

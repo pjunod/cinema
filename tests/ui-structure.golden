@@ -107,7 +107,6 @@ catalog|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 catalog|activity@1280x860|focus|009|a "Settings"
 catalog|activity@1280x860|focus|010|<wrap>
 catalog|activity@1280x860|req|GET /api/v1/activity/detail|2
-catalog|activity@1280x860|req|GET /api/v1/activity|2
 catalog|activity@1280x860|req|GET /api/v1/me|1
 catalog|activity@1280x860|req|GET /api/v1/server|1
 catalog|activity@390x780|dom|^ > div#app|1
@@ -184,7 +183,6 @@ catalog|activity@390x780|focus|009|button.px-tab "Search"
 catalog|activity@390x780|focus|010|a.px-tab.on "Activity"
 catalog|activity@390x780|focus|011|<wrap>
 catalog|activity@390x780|req|GET /api/v1/activity/detail|2
-catalog|activity@390x780|req|GET /api/v1/activity|2
 catalog|activity@390x780|req|GET /api/v1/me|1
 catalog|activity@390x780|req|GET /api/v1/server|1
 catalog|auth@1280x860|dom|^ > div#app|1
@@ -1960,7 +1958,7 @@ catalog|settings@1280x860|req|GET /api/v1/server|1
 catalog|settings@1280x860|req|GET /api/v1/settings|1
 catalog|settings@1280x860|req|GET /api/v1/system/playback-events|1
 catalog|settings@1280x860|req|GET /api/v1/system|1
-catalog|settings@1280x860|req|GET /api/v1/trakt/status|3
+catalog|settings@1280x860|req|GET /api/v1/trakt/status|1
 catalog|settings@1280x860|req|GET /api/v1/users|1
 catalog|settings@390x780|dom|^ > div#app|1
 catalog|settings@390x780|dom|a > span.px-lbl[text]|2
@@ -2162,7 +2160,7 @@ catalog|settings@390x780|req|GET /api/v1/server|1
 catalog|settings@390x780|req|GET /api/v1/settings|1
 catalog|settings@390x780|req|GET /api/v1/system/playback-events|1
 catalog|settings@390x780|req|GET /api/v1/system|1
-catalog|settings@390x780|req|GET /api/v1/trakt/status|3
+catalog|settings@390x780|req|GET /api/v1/trakt/status|1
 catalog|settings@390x780|req|GET /api/v1/users|1
 classic|activity@1280x860|dom|^ > div#app|1
 classic|activity@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -2208,7 +2206,6 @@ classic|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 classic|activity@1280x860|focus|009|a "Settings"
 classic|activity@1280x860|focus|010|<wrap>
 classic|activity@1280x860|req|GET /api/v1/activity/detail|2
-classic|activity@1280x860|req|GET /api/v1/activity|2
 classic|activity@1280x860|req|GET /api/v1/me|1
 classic|activity@1280x860|req|GET /api/v1/server|1
 classic|activity@390x780|dom|^ > div#app|1
@@ -2255,7 +2252,6 @@ classic|activity@390x780|focus|008|button.ghost.sm.profile "Account"
 classic|activity@390x780|focus|009|a "Settings"
 classic|activity@390x780|focus|010|<wrap>
 classic|activity@390x780|req|GET /api/v1/activity/detail|2
-classic|activity@390x780|req|GET /api/v1/activity|2
 classic|activity@390x780|req|GET /api/v1/me|1
 classic|activity@390x780|req|GET /api/v1/server|1
 classic|auth@1280x860|dom|^ > div#app|1
@@ -3558,7 +3554,7 @@ classic|settings@1280x860|req|GET /api/v1/server|1
 classic|settings@1280x860|req|GET /api/v1/settings|1
 classic|settings@1280x860|req|GET /api/v1/system/playback-events|1
 classic|settings@1280x860|req|GET /api/v1/system|1
-classic|settings@1280x860|req|GET /api/v1/trakt/status|3
+classic|settings@1280x860|req|GET /api/v1/trakt/status|1
 classic|settings@1280x860|req|GET /api/v1/users|1
 classic|settings@390x780|dom|^ > div#app|1
 classic|settings@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -3733,7 +3729,7 @@ classic|settings@390x780|req|GET /api/v1/server|1
 classic|settings@390x780|req|GET /api/v1/settings|1
 classic|settings@390x780|req|GET /api/v1/system/playback-events|1
 classic|settings@390x780|req|GET /api/v1/system|1
-classic|settings@390x780|req|GET /api/v1/trakt/status|3
+classic|settings@390x780|req|GET /api/v1/trakt/status|1
 classic|settings@390x780|req|GET /api/v1/users|1
 theater|activity@1280x860|dom|^ > div#app|1
 theater|activity@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -3782,7 +3778,6 @@ theater|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 theater|activity@1280x860|focus|009|a "Settings"
 theater|activity@1280x860|focus|010|<wrap>
 theater|activity@1280x860|req|GET /api/v1/activity/detail|2
-theater|activity@1280x860|req|GET /api/v1/activity|2
 theater|activity@1280x860|req|GET /api/v1/me|1
 theater|activity@1280x860|req|GET /api/v1/server|1
 theater|activity@390x780|dom|^ > div#app|1
@@ -3832,7 +3827,6 @@ theater|activity@390x780|focus|008|a.on "Activity"
 theater|activity@390x780|focus|009|a "Settings"
 theater|activity@390x780|focus|010|<wrap>
 theater|activity@390x780|req|GET /api/v1/activity/detail|2
-theater|activity@390x780|req|GET /api/v1/activity|2
 theater|activity@390x780|req|GET /api/v1/me|1
 theater|activity@390x780|req|GET /api/v1/server|1
 theater|auth@1280x860|dom|^ > div#app|1
@@ -5240,7 +5234,7 @@ theater|settings@1280x860|req|GET /api/v1/server|1
 theater|settings@1280x860|req|GET /api/v1/settings|1
 theater|settings@1280x860|req|GET /api/v1/system/playback-events|1
 theater|settings@1280x860|req|GET /api/v1/system|1
-theater|settings@1280x860|req|GET /api/v1/trakt/status|3
+theater|settings@1280x860|req|GET /api/v1/trakt/status|1
 theater|settings@1280x860|req|GET /api/v1/users|1
 theater|settings@390x780|dom|^ > div#app|1
 theater|settings@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -5418,5 +5412,5 @@ theater|settings@390x780|req|GET /api/v1/server|1
 theater|settings@390x780|req|GET /api/v1/settings|1
 theater|settings@390x780|req|GET /api/v1/system/playback-events|1
 theater|settings@390x780|req|GET /api/v1/system|1
-theater|settings@390x780|req|GET /api/v1/trakt/status|3
+theater|settings@390x780|req|GET /api/v1/trakt/status|1
 theater|settings@390x780|req|GET /api/v1/users|1

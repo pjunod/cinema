@@ -86,6 +86,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "ping",
     "get_setting",
     "get_setting_pair",
+    "settings_snapshot",
     "put_setting",
     "put_setting_if_absent",
     "put_setting_if_absent_if_artwork_repair_current",
@@ -4066,7 +4067,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 170, "review the Store method count");
+    assert_eq!(declared.len(), 171, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -4260,6 +4261,16 @@ async fn settings_contract_runs_through_dyn_store() {
             (Some("L".to_owned()), Some("R".to_owned())),
             "backend {backend}"
         );
+        let settings = store.settings_snapshot().await.expect("settings snapshot");
+        assert_eq!(
+            settings.get("contract.key").map(String::as_str),
+            Some("second")
+        );
+        assert_eq!(settings.get("contract.left").map(String::as_str), Some("L"));
+        assert_eq!(
+            settings.get("contract.right").map(String::as_str),
+            Some("R")
+        );
         let instance_id = store.instance_id().await.expect("instance id");
         uuid::Uuid::parse_str(&instance_id).expect("new instance ids are UUIDs");
         assert_eq!(
@@ -4269,6 +4280,133 @@ async fn settings_contract_runs_through_dyn_store() {
         );
     })
     .await;
+}
+
+/// Replicated Store-primitive gates are operation-count based rather than a
+/// timing threshold: CI scheduler noise can move p95 without changing the
+/// code, while an accidental per-key or per-package loop deterministically
+/// changes a fixed call count into N. This does not invoke the HTTP handlers:
+/// the Settings sequence below is the two Store calls used by `settings_dto`
+/// with a configured cache, and the Activity sequence is its joined offline
+/// package primitive. Authentication and process-local state are outside this
+/// boundary. The counters record attempted client API calls, not network RTTs.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn clustered_page_read_primitives_have_bounded_client_calls() {
+    let _case = HIQLITE_CASE.lock().await;
+    let store = open_contract_hiqlite_store().await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated contract state");
+    let values: Vec<(String, String)> = (0..64)
+        .map(|index| (format!("page.setting.{index}"), format!("value-{index}")))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = values
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    store
+        .put_settings(&borrowed)
+        .await
+        .expect("seed page settings");
+
+    store.validation_reset_operation_counts();
+    let snapshot = store.settings_snapshot().await.expect("settings snapshot");
+    let cache_bytes = store.cache_bytes("node-a").await.expect("cache bytes");
+    let counts = store.validation_operation_counts();
+
+    assert_eq!(
+        snapshot
+            .iter()
+            .filter(|(key, _)| key.starts_with("page.setting."))
+            .count(),
+        64
+    );
+    assert_eq!(cache_bytes, 0);
+    assert_eq!(
+        counts.consistent_query_calls, 2,
+        "one settings snapshot plus one cache aggregate"
+    );
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(
+        counts.write_calls, 0,
+        "the Settings Store-read sequence must be read-only"
+    );
+
+    // Activity's offline row count must not affect its store-call count. The
+    // joined query also carries the fields the HTTP DTO needs, so the handler
+    // has no reason to issue per-package user, file, or item lookups.
+    let dynamic_store: Arc<dyn Store> = Arc::new(store.clone());
+    let (user_id, file_id) = seed_file(&dynamic_store, "page-activity").await;
+    for index in 0..25 {
+        let request = offline_request(
+            &format!("page-package-{index}"),
+            &format!("page-request-{index}"),
+            user_id,
+            file_id,
+        );
+        assert!(matches!(
+            store
+                .create_offline_package(&request, 50, 1_000_000, 1_000_000)
+                .await
+                .expect("seed activity package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+    }
+    store.validation_reset_operation_counts();
+    let activity = store
+        .offline_activity_packages("offline-node", 1, 0, 50)
+        .await
+        .expect("activity packages");
+    let counts = store.validation_operation_counts();
+    assert_eq!(activity.len(), 25);
+    assert!(activity.iter().all(|row| row.item_id.is_some()));
+    assert!(activity
+        .iter()
+        .all(|row| row.title == "page-activity Movie"));
+    assert_eq!(counts.consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.write_calls, 0);
+
+    // Counter non-vacuity: prove each instrumented call family changes only
+    // its own field, including one transaction as one attempted write call.
+    store.validation_reset_operation_counts();
+    store
+        .get_setting("page.setting.0")
+        .await
+        .expect("single read");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.write_calls, 0);
+
+    store.validation_reset_operation_counts();
+    store.validation_local_dump().await.expect("local dump");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert!(counts.non_consistent_query_calls > 0);
+    assert_eq!(counts.write_calls, 0);
+
+    store.validation_reset_operation_counts();
+    store
+        .put_setting("page.counter.write", "one")
+        .await
+        .expect("single write");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.write_calls, 1);
+
+    store.validation_reset_operation_counts();
+    store
+        .put_settings(&[("page.counter.left", "L"), ("page.counter.right", "R")])
+        .await
+        .expect("transaction write");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.consistent_query_calls, 0);
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.write_calls, 1);
 }
 
 #[tokio::test]
@@ -6161,11 +6299,22 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .expect("renew package")
             .expect("renewed package");
         assert_eq!(renewed.expires_at, 20_000);
-        assert!(!store
+        let activity = store
             .offline_activity_packages("offline-node", 1, 0, 10)
             .await
             .expect("activity")
-            .is_empty());
+            .pop()
+            .expect("live activity package");
+        assert_eq!(
+            activity.item_id,
+            store
+                .get_file(file_id)
+                .await
+                .expect("file")
+                .map(|f| f.item_id)
+        );
+        assert_eq!(activity.title, "offline-contract Movie");
+        assert_eq!(activity.user_name, "offline-contract-user");
         let stats = store
             .offline_package_stats("offline-node", 1)
             .await

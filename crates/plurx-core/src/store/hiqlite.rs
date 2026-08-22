@@ -8,6 +8,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(feature = "cluster-read-cost-validation")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -101,6 +103,44 @@ pub struct ClusterCompatibility {
     pub protocol_version: i64,
 }
 
+/// Deterministic client-call accounting for clustered-read regression gates.
+///
+/// These are attempted [`TimedClient`] API calls, not network RTTs, quorum
+/// messages, or a claim that a non-consistent query executed locally. The
+/// validation feature is absent from production builds.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiqliteOperationCounts {
+    pub consistent_query_calls: u64,
+    pub non_consistent_query_calls: u64,
+    pub write_calls: u64,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[derive(Default)]
+struct OperationCounters {
+    consistent_query_calls: AtomicU64,
+    non_consistent_query_calls: AtomicU64,
+    write_calls: AtomicU64,
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+impl OperationCounters {
+    fn reset(&self) {
+        self.consistent_query_calls.store(0, Ordering::Relaxed);
+        self.non_consistent_query_calls.store(0, Ordering::Relaxed);
+        self.write_calls.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> HiqliteOperationCounts {
+        HiqliteOperationCounts {
+            consistent_query_calls: self.consistent_query_calls.load(Ordering::Relaxed),
+            non_consistent_query_calls: self.non_consistent_query_calls.load(Ordering::Relaxed),
+            write_calls: self.write_calls.load(Ordering::Relaxed),
+        }
+    }
+}
+
 impl ClusterCompatibility {
     pub const CURRENT: Self = Self {
         schema_version: AUTH_SCHEMA_VERSION,
@@ -188,7 +228,11 @@ impl Drop for ActivityRefreshReservation {
 /// boundary prevents new catalogue or durable-store calls from accidentally
 /// waiting forever on a wedged leader.
 #[derive(Clone)]
-pub(super) struct TimedClient(TimedClientInner);
+pub(super) struct TimedClient {
+    inner: TimedClientInner,
+    #[cfg(feature = "cluster-read-cost-validation")]
+    operations: Arc<OperationCounters>,
+}
 
 #[derive(Clone)]
 enum TimedClientInner {
@@ -199,11 +243,15 @@ enum TimedClientInner {
 
 impl TimedClient {
     fn new(client: Client) -> Self {
-        Self(TimedClientInner::Connected(client))
+        Self {
+            inner: TimedClientInner::Connected(client),
+            #[cfg(feature = "cluster-read-cost-validation")]
+            operations: Arc::new(OperationCounters::default()),
+        }
     }
 
     fn inner(&self) -> &Client {
-        match &self.0 {
+        match &self.inner {
             TimedClientInner::Connected(client) => client,
             #[cfg(test)]
             TimedClientInner::Disconnected => {
@@ -223,6 +271,10 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations
+            .consistent_query_calls
+            .fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().query_consistent_map(sql, params)).await
     }
 
@@ -237,6 +289,10 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations
+            .non_consistent_query_calls
+            .fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().query_map(sql, params)).await
     }
 
@@ -250,6 +306,8 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().execute(sql, params)).await
     }
 
@@ -264,6 +322,8 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().execute_returning_map(sql, params)).await
     }
 
@@ -278,6 +338,8 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().execute_returning_map_one(sql, params)).await
     }
 
@@ -296,6 +358,8 @@ impl TimedClient {
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
+        #[cfg(feature = "cluster-read-cost-validation")]
+        self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
         timeout_store(self.inner().txn(statements)).await
     }
 
@@ -306,12 +370,30 @@ impl TimedClient {
 
 #[cfg(test)]
 pub(super) fn disconnected_test_client() -> TimedClient {
-    TimedClient(TimedClientInner::Disconnected)
+    TimedClient {
+        inner: TimedClientInner::Disconnected,
+        #[cfg(feature = "cluster-read-cost-validation")]
+        operations: Arc::new(OperationCounters::default()),
+    }
 }
 
 impl HiqliteAuthStore {
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
+    }
+
+    /// Reset attempted client-call accounting before a validation workload.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_reset_operation_counts(&self) {
+        self.client.operations.reset();
+    }
+
+    /// Snapshot attempted client-call accounting after a validation workload.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_operation_counts(&self) -> HiqliteOperationCounts {
+        self.client.operations.snapshot()
     }
 
     /// Create the complete durable schema on a fresh cluster and seed its
@@ -942,6 +1024,19 @@ impl SettingsStore for HiqliteAuthStore {
             }
         }
         Ok(pair)
+    }
+
+    async fn settings_snapshot(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let sql = "SELECT key, value FROM settings ORDER BY key";
+        validate_sql(sql)?;
+        let rows = timeout_store(
+            self.client()
+                .query_consistent_map::<SettingEntryRow, _>(sql, params!()),
+        )
+        .await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
