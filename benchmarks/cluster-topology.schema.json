@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://plurx.tv/schemas/cluster-topology-v1.json",
   "title": "plurx three-versus-four-voter topology evidence",
+  "$comment": "Draft 2020-12 validates the complete shape, topology cardinality, and evidence-scope resource contract. Cross-field hashes, percentile recomputation, timestamps, applied lag, and stable leader/term semantics require validate_topology_artifact in plurx-cluster-check.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -36,6 +37,66 @@
       "items": { "$ref": "#/$defs/run" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "evidence_scope": { "const": "semantic_ci" } },
+        "required": ["evidence_scope"]
+      },
+      "then": {
+        "properties": {
+          "runs": {
+            "items": {
+              "properties": {
+                "resources": {
+                  "items": {
+                    "properties": {
+                      "cpu_seconds": { "type": "null" },
+                      "wall_seconds": { "type": "null" },
+                      "max_rss_bytes": { "type": "null" },
+                      "storage_read_bytes": { "type": "null" },
+                      "storage_write_bytes": { "type": "null" },
+                      "network_receive_bytes": { "type": "null" },
+                      "network_transmit_bytes": { "type": "null" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "evidence_scope": { "const": "named_runner" } },
+        "required": ["evidence_scope"]
+      },
+      "then": {
+        "properties": {
+          "runs": {
+            "items": {
+              "properties": {
+                "resources": {
+                  "items": {
+                    "properties": {
+                      "cpu_seconds": { "type": "number", "minimum": 0 },
+                      "wall_seconds": { "type": "number", "minimum": 0 },
+                      "max_rss_bytes": { "type": "integer", "minimum": 0 },
+                      "storage_read_bytes": { "type": "integer", "minimum": 0 },
+                      "storage_write_bytes": { "type": "integer", "minimum": 0 },
+                      "network_receive_bytes": { "type": "integer", "minimum": 0 },
+                      "network_transmit_bytes": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "workload": {
       "type": "object",
@@ -137,7 +198,90 @@
           "maxItems": 4,
           "items": { "$ref": "#/$defs/resource" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "voter_count": { "const": 3 } },
+            "required": ["voter_count"]
+          },
+          "then": {
+            "properties": {
+              "quorum": { "const": 2 },
+              "leader": { "maximum": 3 },
+              "applied_indexes": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              },
+              "corpus_observations": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              },
+              "resources": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "voter_count": { "const": 4 } },
+            "required": ["voter_count"]
+          },
+          "then": {
+            "properties": {
+              "quorum": { "const": 3 },
+              "leader": { "maximum": 4 },
+              "applied_indexes": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              },
+              "corpus_observations": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              },
+              "resources": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "applied_index": {
       "type": "object",

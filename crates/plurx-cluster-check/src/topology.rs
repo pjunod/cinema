@@ -794,6 +794,14 @@ mod tests {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
+        assert_eq!(
+            contract["required"]
+                .as_array()
+                .expect("schema object required")
+                .len(),
+            required.len(),
+            "schema required list contains a duplicate",
+        );
         assert_eq!(properties, required);
         assert_eq!(properties, serialized);
     }
@@ -867,6 +875,11 @@ mod tests {
         .expect("parse checked-in topology schema");
         let artifact = serde_json::to_value(fixture()).expect("serialize fixture");
         validate_json_artifact(&artifact).expect("valid serialized artifact");
+        jsonschema::draft202012::meta::validate(&schema)
+            .expect("schema satisfies the Draft 2020-12 meta-schema");
+        let schema_validator =
+            jsonschema::draft202012::new(&schema).expect("compile Draft 2020-12 schema");
+        assert!(schema_validator.is_valid(&artifact));
         assert_eq!(
             schema.get("$id").and_then(serde_json::Value::as_str),
             Some("https://plurx.tv/schemas/cluster-topology-v1.json")
@@ -916,18 +929,86 @@ mod tests {
             .as_object_mut()
             .expect("artifact object")
             .insert("invented".to_owned(), serde_json::Value::Bool(true));
+        assert!(!schema_validator.is_valid(&unknown));
         assert!(validate_json_artifact(&unknown).is_err());
 
         let mut drifted = artifact.clone();
         drifted["workload"]["operations"] = serde_json::json!(65);
+        assert!(!schema_validator.is_valid(&drifted));
         assert!(validate_json_artifact(&drifted).is_err());
 
-        let mut short_samples = artifact;
+        let mut short_samples = artifact.clone();
         short_samples["runs"][0]["raw_acknowledged_write_round_trip_us"]
             .as_array_mut()
             .expect("latency samples")
             .pop();
+        assert!(!schema_validator.is_valid(&short_samples));
         assert!(validate_json_artifact(&short_samples).is_err());
+
+        for (name, mut invalid) in [
+            ("three-voter quorum", artifact.clone()),
+            ("three-voter leader", artifact.clone()),
+            ("three-voter corpus cardinality", artifact.clone()),
+            ("duplicate corpus voter", artifact.clone()),
+        ] {
+            match name {
+                "three-voter quorum" => invalid["runs"][0]["quorum"] = serde_json::json!(3),
+                "three-voter leader" => invalid["runs"][0]["leader"] = serde_json::json!(99),
+                "three-voter corpus cardinality" => {
+                    let extra = invalid["runs"][0]["corpus_observations"][0].clone();
+                    invalid["runs"][0]["corpus_observations"]
+                        .as_array_mut()
+                        .expect("corpus observations")
+                        .push(extra);
+                }
+                "duplicate corpus voter" => {
+                    invalid["runs"][0]["corpus_observations"][1]["node_id"] = serde_json::json!(1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !schema_validator.is_valid(&invalid),
+                "schema accepted {name}"
+            );
+            assert!(
+                validate_json_artifact(&invalid).is_err(),
+                "Rust accepted {name}"
+            );
+        }
+
+        let mut semantic_with_resources = artifact.clone();
+        semantic_with_resources["runs"][0]["resources"][0]["cpu_seconds"] = serde_json::json!(0.0);
+        assert!(!schema_validator.is_valid(&semantic_with_resources));
+        assert!(validate_json_artifact(&semantic_with_resources).is_err());
+
+        let mut named = artifact.clone();
+        named["evidence_scope"] = serde_json::json!(NAMED_RUNNER_EVIDENCE_SCOPE);
+        for run in named["runs"].as_array_mut().expect("topology runs") {
+            for resource in run["resources"].as_array_mut().expect("resource samples") {
+                resource["cpu_seconds"] = serde_json::json!(0.1);
+                resource["wall_seconds"] = serde_json::json!(0.2);
+                resource["max_rss_bytes"] = serde_json::json!(1);
+                resource["storage_read_bytes"] = serde_json::json!(2);
+                resource["storage_write_bytes"] = serde_json::json!(3);
+                resource["network_receive_bytes"] = serde_json::json!(4);
+                resource["network_transmit_bytes"] = serde_json::json!(5);
+            }
+        }
+        assert!(schema_validator.is_valid(&named));
+        validate_json_artifact(&named).expect("valid named-runner artifact");
+
+        let mut cross_field_hash_mismatch = artifact;
+        cross_field_hash_mismatch["runs"][0]["corpus_observations"][0]["corpus_sha256"] =
+            serde_json::json!("b".repeat(64));
+        assert!(
+            schema_validator.is_valid(&cross_field_hash_mismatch),
+            "cross-field equality is intentionally outside portable JSON Schema"
+        );
+        assert!(validate_json_artifact(&cross_field_hash_mismatch).is_err());
+        assert!(schema["$comment"]
+            .as_str()
+            .expect("schema semantic-boundary comment")
+            .contains("validate_topology_artifact"));
     }
 
     #[test]

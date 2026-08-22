@@ -342,7 +342,10 @@ the artifact cannot support a hardware or absolute-latency claim. A
 counterbalanced semantic run can be requested with
 `cargo run -p plurx-cluster-check -- topology <output.json> 4,3`; P0c's named
 runner wraps the same schema with isolated load generation and real per-node
-resource counters.
+resource counters. The portable Draft 2020-12 schema enforces shape, topology,
+and evidence-scope resource fields; `validate_topology_artifact` remains the
+canonical check for cross-field hashes, recomputed percentiles, timestamps,
+applied lag, and leader/term semantics that JSON Schema cannot express.
 
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
 settings ship, `storage.data_dir` remains the compatibility root. On a fresh
