@@ -4613,7 +4613,7 @@ pub mod status {
                 let view = metrics.snapshot_at(5_000);
                 let sample = view.sample.expect("published sample");
                 assert_eq!(sample.last_applied_index, Some(sample.current_term * 10));
-                assert_eq!(sample.is_leader, sample.current_term % 2 != 0);
+                assert_eq!(sample.is_leader, !sample.current_term.is_multiple_of(2));
                 assert_eq!(view.leader_changes, sample.current_term.saturating_sub(1));
             }
             handle.join().expect("metrics writer");
