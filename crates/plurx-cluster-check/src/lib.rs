@@ -68,7 +68,7 @@ use production_progress::ProgressCoalescer;
 mod topology;
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
-    NodeAppliedIndex, ResourceSample, TopologyRun, TopologyWorkload,
+    NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
 };
 
@@ -2332,6 +2332,7 @@ pub enum Response {
     },
     Metrics {
         leader: Option<u64>,
+        current_term: u64,
         voters: Vec<u64>,
         applied_index: Option<u64>,
         quorum_acknowledged: bool,
@@ -3848,6 +3849,7 @@ async fn handle_request(
             voters.sort_unstable();
             Ok(Response::Metrics {
                 leader: metrics.current_leader,
+                current_term: metrics.current_term,
                 voters,
                 applied_index: metrics.last_applied.as_ref().map(|log| log.index),
                 quorum_acknowledged: metrics

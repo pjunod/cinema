@@ -26,6 +26,7 @@ const SEMANTIC_EVIDENCE_SCOPE: &str = "semantic_ci";
 const NAMED_RUNNER_EVIDENCE_SCOPE: &str = "named_runner";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterTopologyArtifact {
     pub schema_version: u32,
     pub evidence_scope: String,
@@ -39,21 +40,25 @@ pub struct ClusterTopologyArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TopologyWorkload {
     pub id: String,
     pub operation: String,
     pub operations: u64,
     pub concurrency: u64,
     pub value_bytes: u64,
+    pub value_pattern: String,
     pub latency_unit: String,
     pub index_unit: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TopologyRun {
     pub voter_count: u64,
     pub quorum: u64,
     pub leader: u64,
+    pub leader_term: u64,
     pub request_target: String,
     pub workload_sha256: String,
     pub started_at_unix_ms: i64,
@@ -62,10 +67,14 @@ pub struct TopologyRun {
     pub applied_index_before: u64,
     pub applied_index_after: u64,
     pub physical_commit_entries: u64,
-    pub commit_latency_p50_us: f64,
-    pub commit_latency_p95_us: f64,
-    pub commit_latency_p99_us: f64,
-    pub raw_commit_latency_us: Vec<u64>,
+    pub acknowledged_write_round_trip_p50_us: f64,
+    pub acknowledged_write_round_trip_p95_us: f64,
+    pub acknowledged_write_round_trip_p99_us: f64,
+    pub raw_acknowledged_write_round_trip_us: Vec<u64>,
+    pub dataset_rows: u64,
+    pub dataset_payload_bytes: u64,
+    pub expected_corpus_sha256: String,
+    pub corpus_observations: Vec<NodeCorpusObservation>,
     pub applied_indexes: Vec<NodeAppliedIndex>,
     pub max_apply_lag_entries: u64,
     pub controller_host: String,
@@ -74,12 +83,23 @@ pub struct TopologyRun {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeAppliedIndex {
     pub node_id: u64,
     pub applied_index: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCorpusObservation {
+    pub node_id: u64,
+    pub rows: u64,
+    pub payload_bytes: u64,
+    pub corpus_sha256: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceSample {
     pub node_id: u64,
     pub hardware: String,
@@ -102,6 +122,7 @@ impl TopologyWorkload {
             operations: TOPOLOGY_WRITE_OPERATIONS,
             concurrency: 1,
             value_bytes: TOPOLOGY_VALUE_BYTES as u64,
+            value_pattern: "ordinal_hex_then_x_padding".to_owned(),
             latency_unit: "microseconds".to_owned(),
             index_unit: "raft_entries".to_owned(),
         }
@@ -211,26 +232,43 @@ async fn exercise_topology(
     }
 
     let leader = cluster.leader().await?;
+    let leader_term = confirmed_leader_term(cluster, leader).await?;
     let applied_index_before = metric_index(cluster, leader).await?;
     let started_at_unix_ms = unix_ms()?;
-    let value = "x".repeat(usize::try_from(workload.value_bytes)?);
-    let mut raw_commit_latency_us = Vec::with_capacity(usize::try_from(workload.operations)?);
-    for ordinal in 0..workload.operations {
+    let expected_corpus = expected_corpus(workload)?;
+    let expected_corpus_sha256 = corpus_sha256(&expected_corpus)?;
+    let dataset_payload_bytes = expected_corpus
+        .iter()
+        .try_fold(0_u64, |total, (_, value)| {
+            total
+                .checked_add(u64::try_from(value.len())?)
+                .context("topology dataset payload size overflowed")
+        })?;
+    let mut raw_acknowledged_write_round_trip_us =
+        Vec::with_capacity(usize::try_from(workload.operations)?);
+    for (ordinal, (_, value)) in expected_corpus.iter().enumerate() {
         let started = Instant::now();
         cluster
             .request(
                 leader,
                 Request::TopologyWrite {
-                    ordinal,
+                    ordinal: u64::try_from(ordinal)?,
                     value: value.clone(),
                 },
             )
             .await?
             .require_ok()?;
-        raw_commit_latency_us.push(duration_us(started.elapsed()));
+        raw_acknowledged_write_round_trip_us.push(duration_us(started.elapsed()));
     }
     let applied_index_after = metric_index(cluster, leader).await?;
     let applied_indexes = wait_for_applied(cluster, &voters, applied_index_after).await?;
+    let corpus_observations = observe_corpus(cluster, &voters).await?;
+    let final_leader_term = confirmed_leader_term(cluster, leader).await?;
+    if final_leader_term != leader_term {
+        bail!(
+            "topology workload crossed a leader term boundary: voter {leader} moved from term {leader_term} to {final_leader_term}"
+        );
+    }
     let max_apply_lag_entries = applied_indexes
         .iter()
         .map(|sample| applied_index_after.saturating_sub(sample.applied_index))
@@ -242,6 +280,7 @@ async fn exercise_topology(
         voter_count,
         quorum: voter_count / 2 + 1,
         leader,
+        leader_term,
         request_target: "leader".to_owned(),
         workload_sha256: workload_sha256.to_owned(),
         started_at_unix_ms,
@@ -250,10 +289,23 @@ async fn exercise_topology(
         applied_index_before,
         applied_index_after,
         physical_commit_entries: applied_index_after.saturating_sub(applied_index_before),
-        commit_latency_p50_us: percentile_type7(&raw_commit_latency_us, 0.50)?,
-        commit_latency_p95_us: percentile_type7(&raw_commit_latency_us, 0.95)?,
-        commit_latency_p99_us: percentile_type7(&raw_commit_latency_us, 0.99)?,
-        raw_commit_latency_us,
+        acknowledged_write_round_trip_p50_us: percentile_type7(
+            &raw_acknowledged_write_round_trip_us,
+            0.50,
+        )?,
+        acknowledged_write_round_trip_p95_us: percentile_type7(
+            &raw_acknowledged_write_round_trip_us,
+            0.95,
+        )?,
+        acknowledged_write_round_trip_p99_us: percentile_type7(
+            &raw_acknowledged_write_round_trip_us,
+            0.99,
+        )?,
+        raw_acknowledged_write_round_trip_us,
+        dataset_rows: workload.operations,
+        dataset_payload_bytes,
+        expected_corpus_sha256,
+        corpus_observations,
         applied_indexes,
         max_apply_lag_entries,
         controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
@@ -279,6 +331,83 @@ async fn exercise_topology(
             })
             .collect(),
     })
+}
+
+async fn confirmed_leader_term(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {
+    match cluster.request(node_id, Request::Metrics).await? {
+        Response::Metrics {
+            leader: Some(leader),
+            current_term,
+            ..
+        } if leader == node_id => Ok(current_term),
+        response => {
+            bail!("topology target voter {node_id} was not the confirmed leader: {response:?}")
+        }
+    }
+}
+
+fn expected_corpus(workload: &TopologyWorkload) -> Result<Vec<(String, String)>> {
+    let value_bytes = usize::try_from(workload.value_bytes)?;
+    let mut corpus = Vec::with_capacity(usize::try_from(workload.operations)?);
+    for ordinal in 0..workload.operations {
+        let key = format!("cluster.topology.write.{ordinal:04}");
+        let mut value = format!("{ordinal:016x}");
+        if value.len() > value_bytes {
+            bail!("topology value width is too small for its ordinal prefix");
+        }
+        value.push_str(&"x".repeat(value_bytes - value.len()));
+        corpus.push((key, value));
+    }
+    Ok(corpus)
+}
+
+fn corpus_sha256(corpus: &[(String, String)]) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(corpus)?)))
+}
+
+async fn observe_corpus(
+    cluster: &mut ClusterProcesses,
+    voters: &[u64],
+) -> Result<Vec<NodeCorpusObservation>> {
+    let mut observations = Vec::with_capacity(voters.len());
+    for node_id in voters {
+        let (digest, dump) = match cluster.request(*node_id, Request::Dump).await? {
+            Response::Dump { digest, dump } => (digest, dump),
+            response => bail!("topology voter {node_id} omitted its local dump: {response:?}"),
+        };
+        if hex::encode(Sha256::digest(dump.as_bytes())) != digest {
+            bail!("topology voter {node_id} returned an unanchored local dump");
+        }
+        let dump: serde_json::Value = serde_json::from_str(&dump)?;
+        let settings = dump
+            .get("settings")
+            .and_then(serde_json::Value::as_array)
+            .context("topology local dump has no settings rows")?;
+        let mut corpus = settings
+            .iter()
+            .filter_map(|row| {
+                let key = row.get("key")?.as_str()?;
+                key.starts_with("cluster.topology.write.").then(|| {
+                    row.get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|value| (key.to_owned(), value.to_owned()))
+                })?
+            })
+            .collect::<Vec<_>>();
+        corpus.sort_unstable();
+        let payload_bytes = corpus.iter().try_fold(0_u64, |total, (_, value)| {
+            total
+                .checked_add(u64::try_from(value.len())?)
+                .context("topology observed payload size overflowed")
+        })?;
+        observations.push(NodeCorpusObservation {
+            node_id: *node_id,
+            rows: u64::try_from(corpus.len())?,
+            payload_bytes,
+            corpus_sha256: corpus_sha256(&corpus)?,
+        });
+    }
+    Ok(observations)
 }
 
 async fn metric_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {
@@ -382,7 +511,11 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
                 run.quorum
             );
         }
-        if run.leader == 0 || run.leader > run.voter_count || run.request_target != "leader" {
+        if run.leader == 0
+            || run.leader > run.voter_count
+            || run.leader_term == 0
+            || run.request_target != "leader"
+        {
             bail!("topology run did not target its elected leader");
         }
         if run.workload_sha256 != artifact.workload_sha256 {
@@ -397,7 +530,9 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
         if run.errors != 0 {
             bail!("topology run recorded {} write errors", run.errors);
         }
-        if u64::try_from(run.raw_commit_latency_us.len())? != artifact.workload.operations {
+        if u64::try_from(run.raw_acknowledged_write_round_trip_us.len())?
+            != artifact.workload.operations
+        {
             bail!("topology run sample count does not match the declared workload");
         }
         if run.physical_commit_entries != artifact.workload.operations
@@ -409,14 +544,30 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             bail!("topology run did not observe exactly one Raft entry per acknowledged write");
         }
         for (quantile, actual) in [
-            (0.50, run.commit_latency_p50_us),
-            (0.95, run.commit_latency_p95_us),
-            (0.99, run.commit_latency_p99_us),
+            (0.50, run.acknowledged_write_round_trip_p50_us),
+            (0.95, run.acknowledged_write_round_trip_p95_us),
+            (0.99, run.acknowledged_write_round_trip_p99_us),
         ] {
-            let expected = percentile_type7(&run.raw_commit_latency_us, quantile)?;
+            let expected = percentile_type7(&run.raw_acknowledged_write_round_trip_us, quantile)?;
             if (expected - actual).abs() > f64::EPSILON {
                 bail!("topology run percentile does not match its raw samples");
             }
+        }
+        let expected_corpus = expected_corpus(&artifact.workload)?;
+        let expected_payload_bytes =
+            expected_corpus
+                .iter()
+                .try_fold(0_u64, |total, (_, value)| -> Result<u64> {
+                    Ok(total
+                        .checked_add(u64::try_from(value.len())?)
+                        .context("topology expected payload size overflowed")?)
+                })?;
+        let expected_corpus_sha256 = corpus_sha256(&expected_corpus)?;
+        if run.dataset_rows != artifact.workload.operations
+            || run.dataset_payload_bytes != expected_payload_bytes
+            || run.expected_corpus_sha256 != expected_corpus_sha256
+        {
+            bail!("topology run dataset identity does not match the pinned workload");
         }
         let expected_nodes = (1..=run.voter_count).collect::<Vec<_>>();
         let applied_nodes = run
@@ -429,8 +580,23 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             .iter()
             .map(|sample| sample.node_id)
             .collect::<Vec<_>>();
-        if applied_nodes != expected_nodes || resource_nodes != expected_nodes {
+        let corpus_nodes = run
+            .corpus_observations
+            .iter()
+            .map(|sample| sample.node_id)
+            .collect::<Vec<_>>();
+        if applied_nodes != expected_nodes
+            || resource_nodes != expected_nodes
+            || corpus_nodes != expected_nodes
+        {
             bail!("topology run must report every voter exactly once in ascending order");
+        }
+        if run.corpus_observations.iter().any(|sample| {
+            sample.rows != run.dataset_rows
+                || sample.payload_bytes != run.dataset_payload_bytes
+                || sample.corpus_sha256 != run.expected_corpus_sha256
+        }) {
+            bail!("topology voter corpus does not match the expected logical dataset");
         }
         let expected_lag = run
             .applied_indexes
@@ -519,14 +685,21 @@ fn resolve_build_sha() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn fixture_run(voter_count: u64, workload_sha256: &str) -> TopologyRun {
-        let raw_commit_latency_us = (1..=TOPOLOGY_WRITE_OPERATIONS).collect::<Vec<_>>();
+        let workload = TopologyWorkload::semantic();
+        let corpus = expected_corpus(&workload).unwrap();
+        let expected_corpus_sha256 = corpus_sha256(&corpus).unwrap();
+        let raw_acknowledged_write_round_trip_us =
+            (1..=TOPOLOGY_WRITE_OPERATIONS).collect::<Vec<_>>();
         TopologyRun {
             voter_count,
             quorum: voter_count / 2 + 1,
             leader: 1,
+            leader_term: 7,
             request_target: "leader".to_owned(),
             workload_sha256: workload_sha256.to_owned(),
             started_at_unix_ms: 1_001,
@@ -535,10 +708,33 @@ mod tests {
             applied_index_before: 100,
             applied_index_after: 100 + TOPOLOGY_WRITE_OPERATIONS,
             physical_commit_entries: TOPOLOGY_WRITE_OPERATIONS,
-            commit_latency_p50_us: percentile_type7(&raw_commit_latency_us, 0.50).unwrap(),
-            commit_latency_p95_us: percentile_type7(&raw_commit_latency_us, 0.95).unwrap(),
-            commit_latency_p99_us: percentile_type7(&raw_commit_latency_us, 0.99).unwrap(),
-            raw_commit_latency_us,
+            acknowledged_write_round_trip_p50_us: percentile_type7(
+                &raw_acknowledged_write_round_trip_us,
+                0.50,
+            )
+            .unwrap(),
+            acknowledged_write_round_trip_p95_us: percentile_type7(
+                &raw_acknowledged_write_round_trip_us,
+                0.95,
+            )
+            .unwrap(),
+            acknowledged_write_round_trip_p99_us: percentile_type7(
+                &raw_acknowledged_write_round_trip_us,
+                0.99,
+            )
+            .unwrap(),
+            raw_acknowledged_write_round_trip_us,
+            dataset_rows: TOPOLOGY_WRITE_OPERATIONS,
+            dataset_payload_bytes: TOPOLOGY_WRITE_OPERATIONS * TOPOLOGY_VALUE_BYTES as u64,
+            expected_corpus_sha256: expected_corpus_sha256.clone(),
+            corpus_observations: (1..=voter_count)
+                .map(|node_id| NodeCorpusObservation {
+                    node_id,
+                    rows: TOPOLOGY_WRITE_OPERATIONS,
+                    payload_bytes: TOPOLOGY_WRITE_OPERATIONS * TOPOLOGY_VALUE_BYTES as u64,
+                    corpus_sha256: expected_corpus_sha256.clone(),
+                })
+                .collect(),
             applied_indexes: (1..=voter_count)
                 .map(|node_id| NodeAppliedIndex {
                     node_id,
@@ -564,6 +760,42 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn validate_json_artifact(value: &serde_json::Value) -> Result<()> {
+        let artifact: ClusterTopologyArtifact = serde_json::from_value(value.clone())?;
+        validate_topology_artifact(&artifact)
+    }
+
+    fn assert_closed_schema_matches_fixture(
+        schema: &serde_json::Value,
+        definition: Option<&str>,
+        fixture: &serde_json::Value,
+    ) {
+        let contract = definition
+            .map(|name| &schema["$defs"][name])
+            .unwrap_or(schema);
+        assert_eq!(contract["additionalProperties"], false);
+        let properties = contract["properties"]
+            .as_object()
+            .expect("schema object properties")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let required = contract["required"]
+            .as_array()
+            .expect("schema object required")
+            .iter()
+            .map(|value| value.as_str().expect("required property").to_owned())
+            .collect::<BTreeSet<_>>();
+        let serialized = fixture
+            .as_object()
+            .expect("serialized fixture object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(properties, required);
+        assert_eq!(properties, serialized);
     }
 
     fn fixture() -> ClusterTopologyArtifact {
@@ -618,24 +850,84 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must not claim"));
+
+        let mut wrong_corpus = fixture();
+        wrong_corpus.runs[0].corpus_observations[1].rows -= 1;
+        assert!(validate_topology_artifact(&wrong_corpus)
+            .unwrap_err()
+            .to_string()
+            .contains("logical dataset"));
     }
 
     #[test]
-    fn topology_artifact_schema_is_versioned_and_closed() {
+    fn topology_artifact_schema_and_serde_validator_are_exactly_aligned() {
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../benchmarks/cluster-topology.schema.json"
         ))
         .expect("parse checked-in topology schema");
+        let artifact = serde_json::to_value(fixture()).expect("serialize fixture");
+        validate_json_artifact(&artifact).expect("valid serialized artifact");
         assert_eq!(
             schema.get("$id").and_then(serde_json::Value::as_str),
             Some("https://plurx.tv/schemas/cluster-topology-v1.json")
         );
-        assert_eq!(
-            schema
-                .get("additionalProperties")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
+        assert_closed_schema_matches_fixture(&schema, None, &artifact);
+        assert_closed_schema_matches_fixture(&schema, Some("workload"), &artifact["workload"]);
+        assert_closed_schema_matches_fixture(&schema, Some("run"), &artifact["runs"][0]);
+        assert_closed_schema_matches_fixture(
+            &schema,
+            Some("applied_index"),
+            &artifact["runs"][0]["applied_indexes"][0],
         );
+        assert_closed_schema_matches_fixture(
+            &schema,
+            Some("corpus_observation"),
+            &artifact["runs"][0]["corpus_observations"][0],
+        );
+        assert_closed_schema_matches_fixture(
+            &schema,
+            Some("resource"),
+            &artifact["runs"][0]["resources"][0],
+        );
+        for (pointer, expected) in [
+            ("/$defs/workload/properties/operations/const", 64),
+            ("/$defs/workload/properties/concurrency/const", 1),
+            ("/$defs/workload/properties/value_bytes/const", 64),
+            ("/$defs/run/properties/physical_commit_entries/const", 64),
+            ("/$defs/run/properties/dataset_rows/const", 64),
+            ("/$defs/run/properties/dataset_payload_bytes/const", 4_096),
+            (
+                "/$defs/run/properties/raw_acknowledged_write_round_trip_us/minItems",
+                64,
+            ),
+            (
+                "/$defs/run/properties/raw_acknowledged_write_round_trip_us/maxItems",
+                64,
+            ),
+        ] {
+            assert_eq!(
+                schema.pointer(pointer).and_then(serde_json::Value::as_u64),
+                Some(expected)
+            );
+        }
+
+        let mut unknown = artifact.clone();
+        unknown
+            .as_object_mut()
+            .expect("artifact object")
+            .insert("invented".to_owned(), serde_json::Value::Bool(true));
+        assert!(validate_json_artifact(&unknown).is_err());
+
+        let mut drifted = artifact.clone();
+        drifted["workload"]["operations"] = serde_json::json!(65);
+        assert!(validate_json_artifact(&drifted).is_err());
+
+        let mut short_samples = artifact;
+        short_samples["runs"][0]["raw_acknowledged_write_round_trip_us"]
+            .as_array_mut()
+            .expect("latency samples")
+            .pop();
+        assert!(validate_json_artifact(&short_samples).is_err());
     }
 
     #[test]

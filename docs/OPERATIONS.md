@@ -331,11 +331,15 @@ an operator decision through the safe membership API, never an automated
 `make cluster-check` now creates
 `target/validation/cluster-topology-semantic.json`. It starts fresh independent
 three- and four-process clusters, sends the same 64 quorum-acknowledged setting
-writes to each elected leader, and records raw microsecond samples, type-7
-p50/p95/p99 values, quorum size, physical Raft-entry count, and every voter's
-applied index. This is deterministic semantic CI evidence: resource fields are
-explicitly null and the artifact cannot support a hardware or absolute-latency
-claim. A counterbalanced semantic run can be requested with
+writes to each elected leader, and records raw controller-to-node acknowledged
+write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
+physical Raft-entry count, the stable leader term, and every voter's applied
+index. Every voter locally reads back the deterministic 64-row/4,096-byte
+payload and must match the expected corpus digest. The round trip includes
+harness IPC and scheduling; it is not an internal Raft commit timer. This is
+deterministic semantic CI evidence: resource fields are explicitly null and
+the artifact cannot support a hardware or absolute-latency claim. A
+counterbalanced semantic run can be requested with
 `cargo run -p plurx-cluster-check -- topology <output.json> 4,3`; P0c's named
 runner wraps the same schema with isolated load generation and real per-node
 resource counters.

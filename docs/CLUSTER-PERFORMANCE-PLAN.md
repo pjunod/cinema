@@ -295,7 +295,7 @@ result. At minimum:
 | auth burst | one token · 120 authenticated requests in 60 s | physical activity commits · p50/p95/p99 request latency |
 | browse | home, library, item, and search mix against each node | authority/local counts · p50/p95/p99 · follower lag |
 | progress | existing 80-stream deterministic coalescer fixture | incoming beats · physical commits · compacted bytes |
-| topology | identical write mix on fresh independent three- and four-voter clusters, with run order counterbalanced | p50/p95/p99 write latency · CPU · network · disk |
+| topology | identical write mix on fresh independent three- and four-voter clusters, with run order counterbalanced | p50/p95/p99 acknowledged-write round trip · CPU · network · disk |
 | follower loss | kill one non-leader under load | errors · latency peak · recovery time |
 | leader loss | kill the reported leader under load | failed requests · election time · time until readiness |
 | snapshot | cross two 10,000-entry snapshot cycles | write tail latency · snapshot duration · retained bytes |
@@ -338,7 +338,8 @@ slices:
   sticky-stream behavior, and child-mount storage layout;
 - **P0b — deterministic topology artifact:** a versioned report schema,
   percentile/unit tests, fresh independent three- and four-process semantic
-  runs, and validation that both runs use identical logical work;
+  runs, a stable leader/term boundary, and per-voter local corpus validation
+  proving that both runs use identical logical work;
 - **P0c — named-runner evidence:** after the remaining separate-process M4
   takeover/partition proof, fresh
   independent clusters on the pinned four-machine runner, alternating run
@@ -389,7 +390,8 @@ but it cannot support an ordinary-load performance claim.
 
 **Acceptance:** CI's replicated-storage contract passes and validates that the
 artifact contains both voter counts, exact workload identity, quorum, commit
-percentiles, and declared units. CI may emit semantic/synthetic timings but
+entry count, acknowledged-write round-trip percentiles, per-voter corpus
+digests, and declared units. CI may emit semantic/synthetic timings but
 does not certify resource or tail-latency claims. The named runner, raw
 three-run results, median baseline, variance, and reviewed comparative budgets
 are committed in P0c before P2-P3 performance claims are accepted. P1 already

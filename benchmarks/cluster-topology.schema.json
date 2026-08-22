@@ -46,15 +46,17 @@
         "operations",
         "concurrency",
         "value_bytes",
+        "value_pattern",
         "latency_unit",
         "index_unit"
       ],
       "properties": {
         "id": { "const": "settings-put-v1" },
         "operation": { "const": "quorum_acknowledged_put_setting" },
-        "operations": { "type": "integer", "minimum": 1 },
-        "concurrency": { "type": "integer", "minimum": 1 },
-        "value_bytes": { "type": "integer", "minimum": 1 },
+        "operations": { "const": 64 },
+        "concurrency": { "const": 1 },
+        "value_bytes": { "const": 64 },
+        "value_pattern": { "const": "ordinal_hex_then_x_padding" },
         "latency_unit": { "const": "microseconds" },
         "index_unit": { "const": "raft_entries" }
       }
@@ -66,6 +68,7 @@
         "voter_count",
         "quorum",
         "leader",
+        "leader_term",
         "request_target",
         "workload_sha256",
         "started_at_unix_ms",
@@ -74,10 +77,14 @@
         "applied_index_before",
         "applied_index_after",
         "physical_commit_entries",
-        "commit_latency_p50_us",
-        "commit_latency_p95_us",
-        "commit_latency_p99_us",
-        "raw_commit_latency_us",
+        "acknowledged_write_round_trip_p50_us",
+        "acknowledged_write_round_trip_p95_us",
+        "acknowledged_write_round_trip_p99_us",
+        "raw_acknowledged_write_round_trip_us",
+        "dataset_rows",
+        "dataset_payload_bytes",
+        "expected_corpus_sha256",
+        "corpus_observations",
         "applied_indexes",
         "max_apply_lag_entries",
         "controller_host",
@@ -88,6 +95,7 @@
         "voter_count": { "enum": [3, 4] },
         "quorum": { "type": "integer", "minimum": 2, "maximum": 3 },
         "leader": { "type": "integer", "minimum": 1 },
+        "leader_term": { "type": "integer", "minimum": 1 },
         "request_target": { "const": "leader" },
         "workload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "started_at_unix_ms": { "type": "integer", "minimum": 0 },
@@ -95,14 +103,24 @@
         "errors": { "const": 0 },
         "applied_index_before": { "type": "integer", "minimum": 0 },
         "applied_index_after": { "type": "integer", "minimum": 0 },
-        "physical_commit_entries": { "type": "integer", "minimum": 1 },
-        "commit_latency_p50_us": { "type": "number", "minimum": 0 },
-        "commit_latency_p95_us": { "type": "number", "minimum": 0 },
-        "commit_latency_p99_us": { "type": "number", "minimum": 0 },
-        "raw_commit_latency_us": {
+        "physical_commit_entries": { "const": 64 },
+        "acknowledged_write_round_trip_p50_us": { "type": "number", "minimum": 0 },
+        "acknowledged_write_round_trip_p95_us": { "type": "number", "minimum": 0 },
+        "acknowledged_write_round_trip_p99_us": { "type": "number", "minimum": 0 },
+        "raw_acknowledged_write_round_trip_us": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 64,
+          "maxItems": 64,
           "items": { "type": "integer", "minimum": 0 }
+        },
+        "dataset_rows": { "const": 64 },
+        "dataset_payload_bytes": { "const": 4096 },
+        "expected_corpus_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "corpus_observations": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/corpus_observation" }
         },
         "applied_indexes": {
           "type": "array",
@@ -128,6 +146,17 @@
       "properties": {
         "node_id": { "type": "integer", "minimum": 1 },
         "applied_index": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "corpus_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "rows", "payload_bytes", "corpus_sha256"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1 },
+        "rows": { "const": 64 },
+        "payload_bytes": { "const": 4096 },
+        "corpus_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "resource": {
