@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 #[cfg(feature = "cluster-read-cost-validation")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -200,6 +201,25 @@ impl ActivityRefreshGate {
         if reservations.get(credential) == Some(&reserved_at) {
             reservations.remove(credential);
         }
+    }
+
+    async fn run<F>(
+        self: &Arc<Self>,
+        credential: ActivityCredential,
+        now: i64,
+        operation: F,
+    ) -> Result<(), StoreError>
+    where
+        F: Future<Output = Result<(), StoreError>>,
+    {
+        let Some(reservation) = self.try_reserve(credential, now) else {
+            return Ok(());
+        };
+        let outcome = operation.await;
+        if outcome.is_ok() {
+            reservation.retain();
+        }
+        outcome
     }
 }
 
@@ -809,81 +829,67 @@ impl HiqliteAuthStore {
             return Ok(());
         }
         let credential = ActivityCredential::Token(token_hash.to_owned());
-        let Some(reservation) = self.activity_refreshes.try_reserve(credential, now) else {
-            return Ok(());
-        };
-
-        let outcome = async {
-            let rows = self
-                .client()
-                .query_consistent_map::<ActivityTimestampRow, _>(
-                    "SELECT last_seen_at AS last_activity_at \
-                     FROM tokens WHERE token_hash = $1",
-                    params!(token_hash),
-                )
-                .await?;
-            let Some(current) = rows.into_iter().next() else {
-                return Ok(());
-            };
-            if crate::auth::activity_refresh_due(current.last_activity_at, now) {
-                self.execute(
-                    "UPDATE tokens SET last_seen_at = $1 \
-                     WHERE token_hash = $2 AND last_seen_at < $3",
-                    params!(
-                        now,
-                        token_hash,
-                        now.saturating_sub(crate::auth::ACTIVITY_REFRESH_SECS)
-                    ),
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if outcome.is_ok() {
-            reservation.retain();
-        }
-        outcome
+        self.activity_refreshes
+            .run(credential, now, async {
+                let rows = self
+                    .client()
+                    .query_consistent_map::<ActivityTimestampRow, _>(
+                        "SELECT last_seen_at AS last_activity_at \
+                         FROM tokens WHERE token_hash = $1",
+                        params!(token_hash),
+                    )
+                    .await?;
+                let Some(current) = rows.into_iter().next() else {
+                    return Ok(());
+                };
+                if crate::auth::activity_refresh_due(current.last_activity_at, now) {
+                    self.execute(
+                        "UPDATE tokens SET last_seen_at = $1 \
+                         WHERE token_hash = $2 AND last_seen_at < $3",
+                        params!(
+                            now,
+                            token_hash,
+                            now.saturating_sub(crate::auth::ACTIVITY_REFRESH_SECS)
+                        ),
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await
     }
 
     async fn refresh_api_key_activity(&self, id: i64, now: i64) -> Result<(), StoreError> {
         let credential = ActivityCredential::ApiKey(id);
-        let Some(reservation) = self.activity_refreshes.try_reserve(credential, now) else {
-            return Ok(());
-        };
-
-        let outcome = async {
-            let rows = self
-                .client()
-                .query_consistent_map::<ActivityTimestampRow, _>(
-                    "SELECT last_used_at AS last_activity_at \
-                     FROM api_keys WHERE id = $1 AND disabled = 0",
-                    params!(id),
-                )
-                .await?;
-            let Some(current) = rows.into_iter().next() else {
-                return Ok(());
-            };
-            if crate::auth::activity_refresh_due(current.last_activity_at, now) {
-                self.execute(
-                    "UPDATE api_keys SET last_used_at = $1 \
-                     WHERE id = $2 AND disabled = 0 \
-                       AND (last_used_at IS NULL OR last_used_at < $3)",
-                    params!(
-                        now,
-                        id,
-                        now.saturating_sub(crate::auth::ACTIVITY_REFRESH_SECS)
-                    ),
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-        if outcome.is_ok() {
-            reservation.retain();
-        }
-        outcome
+        self.activity_refreshes
+            .run(credential, now, async {
+                let rows = self
+                    .client()
+                    .query_consistent_map::<ActivityTimestampRow, _>(
+                        "SELECT last_used_at AS last_activity_at \
+                         FROM api_keys WHERE id = $1 AND disabled = 0",
+                        params!(id),
+                    )
+                    .await?;
+                let Some(current) = rows.into_iter().next() else {
+                    return Ok(());
+                };
+                if crate::auth::activity_refresh_due(current.last_activity_at, now) {
+                    self.execute(
+                        "UPDATE api_keys SET last_used_at = $1 \
+                         WHERE id = $2 AND disabled = 0 \
+                           AND (last_used_at IS NULL OR last_used_at < $3)",
+                        params!(
+                            now,
+                            id,
+                            now.saturating_sub(crate::auth::ACTIVITY_REFRESH_SECS)
+                        ),
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub(super) async fn execute(
@@ -1806,23 +1812,81 @@ dump_row!(JobLeaseDumpRow {
 mod tests {
     use super::*;
 
-    #[test]
-    fn unfinished_activity_reservation_is_released_for_retry() {
-        let gate = Arc::new(ActivityRefreshGate::default());
-        let credential = ActivityCredential::Token("token-hash".to_owned());
+    #[tokio::test]
+    async fn failed_activity_operations_release_both_credential_reservations_for_retry() {
+        for credential in [
+            ActivityCredential::Token("token-hash".to_owned()),
+            ActivityCredential::ApiKey(42),
+        ] {
+            let gate = Arc::new(ActivityRefreshGate::default());
+            let failure = gate
+                .run(credential.clone(), 1_000, async {
+                    Err(StoreError::Task(
+                        "injected activity write failure".to_owned(),
+                    ))
+                })
+                .await;
+            assert!(failure.is_err());
 
-        {
-            let _unfinished = gate
-                .try_reserve(credential.clone(), 1_000)
-                .expect("first reservation");
-            assert!(gate.try_reserve(credential.clone(), 1_000).is_none());
+            let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let retried_inside = Arc::clone(&retried);
+            gate.run(credential.clone(), 1_000, async move {
+                retried_inside.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("the same credential retries after its failed operation");
+            assert!(retried.load(std::sync::atomic::Ordering::Relaxed));
+
+            let suppressed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let suppressed_inside = Arc::clone(&suppressed);
+            gate.run(credential.clone(), 1_060, async move {
+                suppressed_inside.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("a retained reservation suppresses the exact boundary");
+            assert!(!suppressed.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(gate.try_reserve(credential, 1_061).is_some());
         }
-        let retained = gate
-            .try_reserve(credential.clone(), 1_000)
-            .expect("dropped reservation must permit retry");
-        retained.retain();
-        assert!(gate.try_reserve(credential.clone(), 1_060).is_none());
-        assert!(gate.try_reserve(credential, 1_061).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn three_independent_activity_gates_each_admit_one_concurrent_operation() {
+        let gates: [Arc<ActivityRefreshGate>; 3] =
+            std::array::from_fn(|_| Arc::new(ActivityRefreshGate::default()));
+        let admitted: [Arc<std::sync::atomic::AtomicUsize>; 3] =
+            std::array::from_fn(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let barrier = Arc::new(tokio::sync::Barrier::new(121));
+        let mut requests = tokio::task::JoinSet::new();
+        for ordinal in 0..120 {
+            let gate_index = ordinal % gates.len();
+            let gate = Arc::clone(&gates[gate_index]);
+            let admitted = Arc::clone(&admitted[gate_index]);
+            let barrier = Arc::clone(&barrier);
+            requests.spawn(async move {
+                barrier.wait().await;
+                gate.run(
+                    ActivityCredential::Token("shared-token-hash".to_owned()),
+                    1_000,
+                    async move {
+                        admitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(())
+                    },
+                )
+                .await
+            });
+        }
+        barrier.wait().await;
+        while let Some(result) = requests.join_next().await {
+            result
+                .expect("join gate request")
+                .expect("run gate operation");
+        }
+        assert_eq!(
+            admitted.map(|value| value.load(std::sync::atomic::Ordering::Relaxed)),
+            [1, 1, 1]
+        );
     }
 
     #[test]
