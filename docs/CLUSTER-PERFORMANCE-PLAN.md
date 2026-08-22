@@ -244,7 +244,8 @@ shows a repeatable need.
                  └─────────────┘
 
      optional fourth machine after §6.7:
-       non-voting learner/read worker · proxy · metrics · backup
+       non-voting learner/read worker · proxy · metrics
+       (a non-quorum replicated copy, not a restore-tested backup)
 ```
 
 Every voter must be capable of leadership: comparable durable storage, stable
@@ -309,24 +310,58 @@ microbenchmark alone.
 
 ## 6. Milestones — one correctness boundary per pull request
 
+Milestone numbers describe dependency order, not necessarily one GitHub pull
+request. P0 and P2 cross operational, deterministic-CI, vendor, and
+hardware-evidence boundaries, so they are delivered in the following truthful
+slices:
+
+- **P0a — operations contract:** voter-count guidance, readiness probe cadence,
+  sticky-stream behavior, and child-mount storage layout;
+- **P0b — deterministic topology artifact:** a versioned report schema,
+  percentile/unit tests, fresh independent three- and four-process semantic
+  runs, and validation that both runs use identical logical work;
+- **P0c — named-runner evidence:** fresh independent clusters on the pinned
+  four-machine runner, alternating run order, three raw runs per topology,
+  per-node resource captures, medians, variance, and reviewed budgets;
+- **P2a — observer-safe metrics snapshots:** remove Store calls from the scrape
+  path before Store instrumentation can observe itself;
+- **P2b — Store primitives:** RAII timing for `local_read`, `authority_read`,
+  and `write`, including `cancelled` outcomes;
+- **P2c — passive local Raft state:** applied index, term/leader observations,
+  and monotonic sample validity without claiming a commit watermark;
+- **P2d — quorum watermark:** a narrow vendored leader proof bound to term and
+  leader identity;
+- **P2e — snapshot hooks:** separate build/install operation labels and vendor
+  patch documentation; and
+- **P2f — named-runner overhead evidence:** the before/after artifact enforcing
+  the P0 instrumentation budget.
+
+GitHub-hosted CI accepts schemas, semantics, fixed labels, state transitions,
+and physical-entry budgets. It does not claim stable multi-machine CPU,
+network, disk, election, or p99 evidence; those claims require P0c/P2f on the
+named runner.
+
 ### 6.1 P0 — document and measure the three-versus-four-voter choice
 
 **Change:** After membership PRs #490 and #491 land, rebase before touching
 their shared cluster harness and `OPERATIONS.md` surfaces. Add the odd-voter
 guidance, reverse-proxy readiness contract, sticky stream recommendation, and
 durable-versus-scratch storage layout to the authoritative operations text.
-Extend the cluster benchmark harness to run the same write mix with three and
-four voters and emit the §5.2 record.
+Extend the cluster benchmark harness to run the same write mix on fresh,
+independent three- and four-voter clusters and emit the §5.2 record. Alternate
+the topology order on the named runner; never compare a warm post-removal
+three-voter run with the four-voter cluster that preceded it.
 
 Do not remove a live voter from automation. The operator selects the follower
 after confirming it owns no in-flight transfer and the existing removal API
 accepts the change.
 
-**Acceptance:** CI's replicated-storage contract passes; the benchmark artifact
-contains both voter counts and reports quorum, commit percentiles, lag, and
-resource use with the same dataset and load. The named runner, raw three-run
-results, median baseline, variance, and reviewed comparative budgets are
-committed before P1-P3 performance claims are accepted.
+**Acceptance:** CI's replicated-storage contract passes and validates that the
+artifact contains both voter counts, exact workload identity, quorum, commit
+percentiles, and declared units. CI may emit semantic/synthetic timings but
+does not certify resource or tail-latency claims. The named runner, raw
+three-run results, median baseline, variance, and reviewed comparative budgets
+are committed in P0c before P1-P3 performance claims are accepted.
 
 ### 6.2 P1 — suppress no-op auth activity writes
 
@@ -443,20 +478,58 @@ durable target. The chosen read-pool value has a retained benchmark artifact.
 ### 6.7 P6 — make the fourth machine useful without adding a vote
 
 **Change:** Add an explicit non-voting learner/read-worker role only after P3's
-lag gate exists. The role receives replication, serves readiness-gated local
-reads and ordinary HTTP/media work, never becomes leader, and never contributes
-to quorum. Joining as a voter remains the default because silently changing an
-existing token's role would alter availability.
+lag gate, P5's voter-grade storage eligibility, and `CLUSTERING-PLAN.md` M4's
+singleton-job fencing exist. The role receives replication, serves
+readiness-gated local reads and explicitly eligible HTTP/media work, never
+becomes leader, and never contributes to quorum. Joining as a voter remains the
+default because silently changing an existing token's role would alter
+availability.
 
-Promotion and removal are explicit admin operations. A learner may not claim
-HA redundancy, run leader-singleton jobs, or serve authority reads locally.
-Loss of every voter still makes authority operations unavailable even if the
-learner process is healthy.
+Learner admission is a new versioned protocol, not an optional field on the v1
+voter flow. Use a distinct endpoint plus v2 token prefix/AAD/payload and a v2
+`membership.json`; bind the role in the issued token record and derive it on
+redeem/finalize. An old coordinator or joiner must reject the v2 flow before it
+persists secrets or admits a voter. Effective role always comes from live
+committed membership: Hiqlite's `learner_only` startup hint is not a permanent
+leadership guard after promotion.
 
-**Acceptance:** a three-voter-plus-learner cluster preserves quorum size three,
-distributes bounded reads to the learner, refuses learner leadership, catches
-up after restart, and promotes only through the explicit operation. The UI and
-operations text distinguish compute/read capacity from voting redundancy.
+Publish one route/job eligibility matrix. Learners may run readiness-gated
+bounded catalogue reads and declared node-local media work, but never
+authority reads locally or any scheduler, migration, membership, provider, or
+other leader-singleton job. Report voter replication health and learner
+catch-up separately so a lagged learner cannot claim degraded voter
+redundancy.
+
+Promotion and removal are explicit admin operations. Promotion requires the P3
+watermark/apply catch-up proof, a blocking replication barrier, voter-grade
+durable-storage/headroom preflight, and the same crash-safe joint-configuration
+reconciliation as voter removal. Learner removal settles node-local work,
+persists the durable removal fence, removes the learner node, drains the target,
+and preserves restart refusal without imposing a voter-quorum-size check. Loss
+of every voter still makes authority operations unavailable even if the learner
+process is healthy.
+
+The present shared Hiqlite API secret makes every admitted node part of the
+membership trust boundary: a learner that holds it can call private membership
+routes directly. Either retain and state that all cluster nodes are trusted, or
+vendor a separate membership-mutation credential that learners never receive;
+the public UI alone is not an authorization boundary.
+
+Activation uses a bridge protocol rather than a one-step version bump: deploy
+binaries that support `[4,5]`, actively prove every current voter supports the
+learner protocol, commit activation to `5..5`, and only then admit learner
+traffic. Removal remains available during degraded rollback. Downgrade first
+removes every learner, proves voter-only membership from every voter, and
+deactivates the marker when the protocol permits it.
+
+**Acceptance:** a real separate-process three-voter-plus-learner cluster
+preserves quorum size three, distributes only bounded reads to the learner,
+refuses learner leadership and singleton work, catches up after restart and
+snapshot install, removes/drains safely, and promotes only after catch-up and
+storage preflight. Mixed-version tests prove an old voter blocks activation and
+cannot reinterpret v2 admission as a voter. The UI and operations text
+distinguish compute/read capacity, a non-quorum replicated copy, and voting
+redundancy.
 
 ### 6.8 P7 — close the loop with load-balancer and failure drills
 
@@ -492,21 +565,18 @@ documented discontinuity behavior.
 | 3 | lag-gated catalogue reads | PR 2 | PR 4 inventory only |
 | 4 | replaceable-write coalescers | PR 2 | PR 5 path design |
 | 5 | storage roots + measured read pool | PR 2; P3 measurements for pool | PR 4 |
-| 6 | non-voting learner/read worker | PR 3 | PR 5 |
+| 6 | non-voting learner/read worker | PR 3; PR 5 storage eligibility; clustering M4 singleton fencing | none |
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
 
 ### 7.2 Existing work and shared-file ownership
 
-Membership PRs #490 and #491 own overlapping changes in
+Membership PRs #490 and #491 have landed. The adversarial follow-up PR #496
+owns their shared artwork/removal corrections in
 `crates/plurx-cluster-check/src/lib.rs`, `crates/plurx-core/tests/store_contract.rs`,
-`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. At this plan revision #491
-has landed and #490 remains open. P0 waits for #490 and rebases before extending
-its harness or operations contract. P1 may develop in parallel with #490
-because it has no semantic dependency, but the two share `store_contract.rs`:
-whichever becomes merge-ready first may land, then the other rebases, resolves
-the shared contract deliberately, and reruns its required CI. Later milestones
-extend the merged M5/M6 contracts rather than copying them into a second
-harness or document.
+`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. P0a/P0b rebase after #496
+before extending that harness or operations contract. P1 landed as #493. Later
+milestones extend the merged M5/M6 contracts rather than copying them into a
+second harness or document.
 
 Before opening each PR, compare its path list with every open cluster PR. One
 branch owns a shared contract at a time; another either waits, moves an
@@ -523,7 +593,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly | move one non-leader only after its reverse path is proven | move bytes back and restore old config before downgrade |
-| P6 | learner membership mutation is refused until every voter advertises the learner protocol; old binaries must reject rather than reinterpret that membership | upgrade all voters first, then add a learner, then enable learner traffic | remove every learner and verify voter-only membership before downgrade; if the chosen compatibility marker is irreversible, old-binary downgrade is unsupported and rollback is a forward fix |
+| P6 | v2 learner admission is refused until an active challenge proves every voter runs the `[4,5]` bridge; old endpoints/joiners reject rather than ignore the role, then activation commits `5..5` | upgrade all voters, prove capability, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; if activation is irreversible, rollback is a forward fix |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or

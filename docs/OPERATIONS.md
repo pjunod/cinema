@@ -318,9 +318,31 @@ rejoining means discarding it.
 The rest of this section is the terminal path. It is the same three endpoints
 the Cluster tab drives, and is the right path for a scripted or headless setup.
 
-Use one, three, or more voters. Two voters are useful only while adding or
-removing a node: they require both processes for every write and survive no
-failure.
+Use one voter for a deliberately non-HA install and three voters for ordinary
+HA. Two voters are useful only while adding or removing a node: they require
+both processes for every write and survive no failure. Four voters still
+tolerate only one failure, but every write now needs three acknowledgements
+instead of two; it adds replica work without adding failure tolerance. Use five
+only when surviving two simultaneous voter losses is an explicit requirement
+and its measured write cost is acceptable. Removing a fourth voter is always
+an operator decision through the safe membership API, never an automated
+"performance" action.
+
+**Keep consensus storage separate from heavy local I/O.** Until dedicated path
+settings ship, `storage.data_dir` remains the compatibility root, but child
+mounts can isolate their workloads:
+
+| Path | Durability | Placement |
+|---|---|---|
+| `<data_dir>/hiqlite` plus `node.id`, `membership.json`, activation markers, and credential keys | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/cache`, `<data_dir>/offline`, and `<data_dir>/artwork` | persistent node-local bytes; some are regenerable, offline packages are user-visible | a stable local persistent mount with capacity monitoring |
+| `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
+
+Create and mount every child before starting `plurxd`; an empty fallback
+directory on the root filesystem is not a successful migration. Keep the
+credential key with the durable backup set. Each voter owns its own Hiqlite
+storage: sharing that directory between machines defeats Raft's independent
+failure model.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
@@ -422,6 +444,21 @@ machine. `/healthz` is insufficient here; it proves that HTTP is alive, not
 that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
+
+**Use readiness conservatively at the reverse proxy.** `/readyz` is an active
+replicated-store proof, not a free process counter: it checks cluster health and
+performs an authority `SELECT 1`. Start with a 10-second interval, a 2-second
+timeout, and three consecutive failures before ejecting a backend. Use
+`/healthz` for higher-frequency process supervision. Route new requests only to
+ready nodes, drain an ejected backend's existing connections, and do not
+automatically replay POST, PUT, PATCH, or DELETE requests after a backend
+failure.
+
+Keep HLS playlists, segments, and authenticated image traffic sticky to one
+ready backend for cache and session locality. A cookie or source-hash policy is
+fine; stickiness is an optimization, not an availability dependency. If that
+backend becomes unready, the next request may move to a survivor and the
+client-visible recovery contract still applies.
 
 **Let artwork converge before relying on a voter for failover.** Item rows name
 poster and backdrop files through Raft, while the image bytes remain in each
