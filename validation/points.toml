@@ -385,6 +385,24 @@ checks = ["rust-gate", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
+id = "cluster.page-reads"
+title = "Clustered page-read primitives"
+contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home preserves the established ordering of its two progress-derived reads while overlapping independent recently-added work. The three-voter gate measures the Settings and Activity Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Browser request concurrency, failure isolation, and overlapping-timer behavior are separate web-static contracts."
+paths = [
+  "crates/plurx-core/Cargo.toml",
+  "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/hiqlite.rs",
+  "crates/plurx-core/src/store/hiqlite_durable.rs",
+  "crates/plurx-core/src/store/sqlite/mod.rs",
+  "crates/plurx-core/src/store/sqlite/offline.rs",
+  "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurxd/src/http/browse.rs",
+  "crates/plurxd/src/http/system.rs",
+]
+checks = ["rust-gate", "cluster-auth"]
+depends_on = ["cluster.auth"]
+
+[[points]]
 id = "server.api"
 title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints and coordinates background work safely."
