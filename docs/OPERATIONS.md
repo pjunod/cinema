@@ -334,8 +334,8 @@ mounts can isolate their workloads:
 
 | Path | Durability | Placement |
 |---|---|---|
-| `<data_dir>/hiqlite` plus `node.id`, `membership.json`, activation markers, and credential keys | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
-| `<data_dir>/cache`, `<data_dir>/offline`, and `<data_dir>/artwork` | persistent node-local bytes; some are regenerable, offline packages are user-visible | a stable local persistent mount with capacity monitoring |
+| `<data_dir>/hiqlite` plus the `node.id`, `membership.json`, activation markers, and credential keys at the data-root level | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
 | `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
 
 Create and mount every child before starting `plurxd`; an empty fallback
@@ -426,9 +426,11 @@ join_token_file = "/secure/plurx.join"
 
 **Read the roster.** `availability` is `single_node`,
 `degraded_reconfiguration`, or `high_availability`. Node rows deliberately
-contain only node id · Raft id · role · reachable · last-seen; addresses and
-token material never enter this payload. `last_seen_at` is Unix milliseconds;
-read the nested `replication` object for lag using the meanings above.
+contain only node id · short hostname · advertised host without its listener
+port · Raft id · role · leadership · reachability · last-seen; internal Raft
+and API addresses, media paths, and token material never enter this payload.
+`last_seen_at` is Unix milliseconds; read the nested `replication` object for
+lag using the meanings above.
 
 ```bash
 curl -fsS "$PLURX/api/v1/cluster/nodes" \
