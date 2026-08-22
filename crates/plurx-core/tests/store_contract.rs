@@ -104,6 +104,7 @@ const USER_METHODS: &[&str] = &[
     "get_user",
     "get_user_by_username",
     "list_users",
+    "list_users_page",
     "delete_user",
     "count_admins",
     "set_password",
@@ -229,6 +230,8 @@ const CACHE_METHODS: &[&str] = &[
     "mark_cache_manifests_checked",
     "stale_cache_claims",
     "all_cache_rows",
+    "cache_ownership_inventory",
+    "cache_candidate_owners",
     "invalidate_cache_entry",
     "forget_cache_entry",
     "cache_bytes",
@@ -238,6 +241,7 @@ const PRETRANSCODE_METHODS: &[&str] = &[
     "enqueue_pretranscode_job",
     "claim_pretranscode_job",
     "pretranscode_staging_jobs",
+    "active_pretranscode_job_ids",
     "renew_pretranscode_job",
     "yield_pretranscode_job",
     "fail_pretranscode_job",
@@ -1493,6 +1497,16 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: dedupe enqueue: {error}")),
             "{backend}: an active dedupe key must be unique"
+        );
+        let mut active_ids = store
+            .active_pretranscode_job_ids()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: active job inventory: {error}"));
+        active_ids.sort_unstable();
+        assert_eq!(
+            active_ids,
+            jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>(),
+            "{backend}: active inventory must include every queued job"
         );
         assert!(
             store
@@ -5988,7 +6002,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 191, "review the Store method count");
+    assert_eq!(declared.len(), 192, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -6433,6 +6447,14 @@ async fn user_contract_runs_through_dyn_store() {
             viewer.id
         );
         assert_eq!(store.list_users().await.expect("list").len(), 2);
+        let first_page = store.list_users_page(0, 1).await.expect("first user page");
+        assert_eq!(first_page.len(), 1);
+        let second_page = store
+            .list_users_page(first_page[0].id, 1)
+            .await
+            .expect("second user page");
+        assert_eq!(second_page.len(), 1);
+        assert_ne!(first_page[0].id, second_page[0].id);
         assert!(store
             .set_password(viewer.id, "hash-3")
             .await
@@ -8125,6 +8147,19 @@ async fn transcode_cache_contract_runs_through_dyn_store() {
             .complete_cache_entry("recipe", node, 4_096)
             .await
             .expect("complete");
+        let ownership = store
+            .cache_ownership_inventory(node)
+            .await
+            .expect("complete ownership inventory");
+        assert!(ownership.complete);
+        assert_eq!(ownership.rows.len(), 1);
+        assert_eq!(ownership.rows[0].relative_dir, "aa/recipe");
+        let candidates = store
+            .cache_candidate_owners(node, &["aa/recipe".to_owned()], &[])
+            .await
+            .expect("candidate ownership recheck");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].recipe_hash, "recipe");
         assert!(store
             .cache_hit("recipe", node)
             .await

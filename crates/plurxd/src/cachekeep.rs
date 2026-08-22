@@ -82,10 +82,6 @@ struct CacheOrphanWalker {
 enum CacheActivity {
     Readers(usize),
     Evicting,
-    /// A recipe this process previously served. It is not protected, but it
-    /// is a positive ownership fact when the store returns an empty inventory
-    /// after the row disappeared under that reader.
-    IdleReader,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,10 +137,6 @@ impl ActiveCacheReaders {
         match states.get_mut(recipe) {
             Some(CacheActivity::Readers(count)) => *count += 1,
             Some(CacheActivity::Evicting) => return None,
-            Some(state @ CacheActivity::IdleReader) => {
-                *state = CacheActivity::Readers(1);
-                self.active_entries.fetch_add(1, Ordering::Relaxed);
-            }
             None => {
                 states.insert(recipe.to_owned(), CacheActivity::Readers(1));
                 self.active_entries.fetch_add(1, Ordering::Relaxed);
@@ -185,7 +177,6 @@ impl ActiveCacheReaders {
         match states.get(recipe) {
             Some(CacheActivity::Readers(_)) => return Err(CacheBusy::Readers),
             Some(CacheActivity::Evicting) => return Err(CacheBusy::Evicting),
-            Some(CacheActivity::IdleReader) => {}
             None => {}
         }
         states.insert(recipe.to_owned(), CacheActivity::Evicting);
@@ -231,12 +222,12 @@ impl Drop for CacheReadGuard {
                     *count -= 1;
                     false
                 }
-                Some(state @ CacheActivity::Readers(_)) => {
-                    *state = CacheActivity::IdleReader;
+                Some(CacheActivity::Readers(_)) => {
+                    states.remove(&self.recipe);
                     self.readers.active_entries.fetch_sub(1, Ordering::Relaxed);
                     false
                 }
-                Some(CacheActivity::Evicting | CacheActivity::IdleReader) | None => true,
+                Some(CacheActivity::Evicting) | None => true,
             }
         };
         if mismatch {
@@ -1529,6 +1520,24 @@ mod tests {
             .join()
             .expect("join active-entry reader")
             .expect("send");
+    }
+
+    #[test]
+    fn transient_cache_guards_leave_no_historical_ownership_entries() {
+        let readers = ActiveCacheReaders::default();
+        drop(readers.begin_lookup("miss").expect("lookup guard"));
+        drop(
+            readers
+                .begin_staging("recipe-j00000000-0000-4000-8000-000000000101")
+                .expect("staging guard"),
+        );
+        drop(
+            readers
+                .begin_publication("recipe", "recipe-f42")
+                .expect("publication guard"),
+        );
+        assert!(readers.lock_states().is_empty());
+        assert_eq!(readers.active_entries(), 0);
     }
 
     #[test]
