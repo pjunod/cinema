@@ -142,6 +142,18 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testEarlyEndGetsOneReopenButCannotLoopAtTheSamePosition"
 
 [[fixes]]
+id = "apple.build-claim-narrative-relocation"
+commits = ["05f930be"]
+# The regression this pins is a layout one: per-build narrative back at a shared
+# insertion point in the Apple README's status blockquote is what made every two
+# concurrent Apple changes conflict. The pointer below is what replaced it, and
+# the test is red the moment a `Build <n> …` sentence returns to that blockquote.
+source = "clients/apple/README.md"
+source_anchor = "Per-build release notes live in"
+test = "tests/operations/test_apple_build_claims.py"
+test_anchor = "test_the_shared_status_blockquotes_carry_no_per_build_narrative"
+
+[[fixes]]
 id = "apple.build-49-documentation-alignment"
 commits = ["c52c38b7"]
 # Issue #509 moved every per-build sentence out of the Apple README's status
