@@ -45,14 +45,13 @@ use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
-    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, LibraryStore,
-    MediaStore, OfflinePackageStore, PlaybackTelemetryStore, ReadingStore, SettingsStore,
-    TraktStore, TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
+    PlaybackTelemetryStore, ReadingStore, SettingsStore, TraktStore, TranscodeCacheStore,
+    UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 use plurx_core::store::{
-    ArtworkRepairFence, OutboxEntry, PublicationStore, ReconcileOutcome, RootFingerprintStatus,
-    SqliteStore, Store,
+    ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
+    RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
