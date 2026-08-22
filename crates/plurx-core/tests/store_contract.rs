@@ -43,6 +43,8 @@ use plurx_core::domain::{
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
+#[cfg(feature = "cluster-read-cost-validation")]
+use plurx_core::store::MetricsStore;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
