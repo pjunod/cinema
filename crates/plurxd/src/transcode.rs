@@ -3341,10 +3341,6 @@ impl TranscodeManager {
             .expect("test eviction claim")
     }
 
-    pub fn active_cache_entries(&self) -> usize {
-        self.cache_readers.active_entries()
-    }
-
     /// Narrow process-metrics handle with no session map or Store access.
     pub(crate) fn metrics_handle(&self) -> TranscodeMetrics {
         TranscodeMetrics {
@@ -6780,11 +6776,6 @@ impl TranscodeManager {
         self.sessions.lock().await.len()
     }
 
-    /// Lock-free active-session projection for Prometheus scrapes.
-    pub fn active_sessions_for_metrics(&self) -> usize {
-        self.active_session_count.load(Relaxed)
-    }
-
     /// Every live session, paired with how it is really delivering.
     ///
     /// The pair is what the activity array needs and `SessionInfo` cannot
@@ -8357,9 +8348,9 @@ mod tests {
         ));
         manager.active_session_count.store(2, Relaxed);
         let sessions = manager.sessions.lock().await;
-        let snapshot = Arc::clone(&manager);
+        let snapshot = manager.metrics_handle();
         let (sent, received) = std::sync::mpsc::sync_channel(1);
-        let handle = std::thread::spawn(move || sent.send(snapshot.active_sessions_for_metrics()));
+        let handle = std::thread::spawn(move || sent.send(snapshot.snapshot().0));
         assert_eq!(
             received
                 .recv_timeout(Duration::from_millis(100))

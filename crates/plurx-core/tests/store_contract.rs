@@ -50,8 +50,8 @@ use plurx_core::store::{
     UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 use plurx_core::store::{
-    ArtworkRepairFence, LibraryStore, MediaStore, MetricsStore, OutboxEntry, PublicationStore,
-    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+    ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
+    RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};

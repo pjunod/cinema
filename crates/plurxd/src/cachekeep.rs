@@ -149,6 +149,7 @@ impl ActiveCacheReaders {
     /// Number of recipes protected by at least one active playback session.
     /// Reader multiplicity stays internal; the operational question is how
     /// many cache entries housekeeping is presently forbidden to remove.
+    #[cfg(test)]
     pub fn active_entries(&self) -> usize {
         self.active_entries.load(Ordering::Relaxed)
     }

@@ -166,7 +166,7 @@ impl StoreMetricsCache {
     fn snapshot_at(&self, elapsed: u64) -> StoreMetricsView {
         loop {
             let before = self.inner.sequence.load(Ordering::Acquire);
-            if before % 2 != 0 {
+            if before & 1 != 0 {
                 std::hint::spin_loop();
                 continue;
             }
@@ -214,7 +214,7 @@ impl StoreMetricsCache {
     fn publish_at(&self, sample: PrometheusStoreSnapshot, elapsed: u64) {
         let sequence = loop {
             let current = self.inner.sequence.load(Ordering::Acquire);
-            if current % 2 == 0
+            if current & 1 == 0
                 && self
                     .inner
                     .sequence
