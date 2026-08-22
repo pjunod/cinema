@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P2d landed; P2e–P2f planned · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P2d landed; P2e staged for review · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -487,6 +487,14 @@ local applied index exists. Only that state derives saturating commit-to-apply
 lag. Metrics retain an invalid prior value for diagnosis, expose fixed
 `source="watermark"` validity, age, and error series, and never render either
 node identity.
+
+**P2e snapshot hooks:** the vendored SQLite state-machine builder and installer
+start an RAII timer at their real operation boundary and publish exactly one
+fixed `build|install` and `ok|error` outcome on every exit, including an early
+error or cancelled future. The local Hiqlite client exposes only cumulative
+integer histogram state. Prometheus converts that state to seconds without
+polling OpenRaft, SQLite, the filesystem, or a Store, and no path, snapshot id,
+or node identity enters a label.
 
 **Change:** Instrument `TimedClient` once so every replicated Store module uses
 the same bounded local-read · authority-read · write histograms and counters.

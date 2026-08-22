@@ -3885,7 +3885,10 @@ pub mod status {
 
     use serde::{Deserialize, Serialize};
 
-    use hiqlite::{Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+    use hiqlite::{
+        Client, DbQuorumWatermark, DbSnapshotMetricsSnapshot, LocalDbRaftMetrics,
+        LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+    };
     use std::sync::{Arc, Mutex};
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
@@ -3991,6 +3994,7 @@ pub mod status {
         pub watermark_age_millis: Option<u64>,
         pub watermark_valid: bool,
         pub watermark_errors: u64,
+        pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
     }
 
     #[derive(Default)]
@@ -4028,6 +4032,7 @@ pub mod status {
         started_at: Instant,
         local_source: bool,
         watermark_source: bool,
+        snapshot_metrics: Option<LocalDbSnapshotMetrics>,
     }
 
     impl PassiveRaftMetrics {
@@ -4037,7 +4042,13 @@ pub mod status {
                 started_at: Instant::now(),
                 local_source,
                 watermark_source: local_source,
+                snapshot_metrics: None,
             }
+        }
+
+        fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
+            self.snapshot_metrics = metrics;
+            self
         }
 
         /// Read one coherent snapshot without locks, Store access, or IO.
@@ -4131,6 +4142,7 @@ pub mod status {
                         watermark_age_millis: watermark_age_nanos.map(|age| age / 1_000_000),
                         watermark_valid,
                         watermark_errors,
+                        snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
                     };
                 }
             }
@@ -4493,7 +4505,9 @@ pub mod status {
         #[must_use]
         pub fn replicated(client: Client) -> Self {
             let local_metrics = client.local_db_raft_metrics().ok();
-            let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some());
+            let snapshot_metrics = client.local_db_snapshot_metrics().ok();
+            let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
+                .with_snapshot_metrics(snapshot_metrics);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
@@ -5004,6 +5018,35 @@ pub mod status {
         }
 
         #[test]
+        fn snapshot_metrics_use_explicit_build_and_install_hooks() {
+            let builder = include_str!(
+                "../../../../vendor/hiqlite/src/store/state_machine/sqlite/snapshot_builder.rs"
+            );
+            let state_machine = include_str!(
+                "../../../../vendor/hiqlite/src/store/state_machine/sqlite/state_machine.rs"
+            );
+            let metrics = include_str!("../../../../vendor/hiqlite/src/snapshot_metrics.rs");
+            assert!(builder.contains("SnapshotTimer::start(SnapshotOperation::Build)"));
+            assert!(builder.contains("timer.success()"));
+            assert!(state_machine.contains("SnapshotTimer::start(SnapshotOperation::Install)"));
+            assert!(state_machine.contains("timer.success()"));
+            assert!(metrics.contains("impl Drop for SnapshotTimer"));
+            assert!(metrics.contains("cancellation, panic, and an early `?` are errors"));
+            let private_handle =
+                ["pub struct LocalDbSnapshot", "Metrics {\n    _private: (),"].concat();
+            let public_default = ["impl Default for LocalDb", "SnapshotMetrics"].concat();
+            let lazy_global = ["Once", "Lock"].concat();
+            assert!(metrics.contains(&private_handle));
+            assert!(metrics.contains("ArcSwapOption::const_empty()"));
+            assert!(metrics.contains("load_full()"));
+            assert!(!metrics.contains(&public_default));
+            assert!(!metrics.contains(&lazy_global));
+            assert!(!metrics.contains("node_id"));
+            assert!(!metrics.contains("snapshot_id"));
+            assert!(!metrics.contains("path_snapshots"));
+        }
+
+        #[test]
         fn passive_metrics_refresh_idle_samples_and_expire_without_refresh() {
             let metrics = PassiveRaftMetrics::new(true);
             assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
@@ -5356,7 +5399,7 @@ pub mod status {
         }
 
         #[tokio::test]
-        async fn remote_client_cannot_construct_the_local_raft_observer() {
+        async fn remote_client_cannot_construct_local_raft_observers() {
             let remote = Client::remote(
                 vec!["127.0.0.1:1".to_owned()],
                 false,
@@ -5369,6 +5412,10 @@ pub mod status {
             .expect("construct remote client without discovery");
             match remote.local_db_raft_metrics() {
                 Ok(_) => panic!("remote client must not expose a local watch"),
+                Err(error) => assert!(error.to_string().contains("require a local node client")),
+            }
+            match remote.local_db_snapshot_metrics() {
+                Ok(_) => panic!("remote client must not expose local snapshot metrics"),
                 Err(error) => assert!(error.to_string().contains("require a local node client")),
             }
         }

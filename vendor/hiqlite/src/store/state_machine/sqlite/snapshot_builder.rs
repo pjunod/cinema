@@ -1,3 +1,4 @@
+use crate::snapshot_metrics::{SnapshotOperation, SnapshotTimer};
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::store::state_machine::sqlite::state_machine::StateMachineSqlite;
 use crate::store::state_machine::sqlite::writer::{SnapshotRequest, WriterRequest};
@@ -23,6 +24,7 @@ pub struct SQLiteSnapshotBuilder {
 impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfigSqlite>, StorageError<NodeId>> {
+        let timer = SnapshotTimer::start(SnapshotOperation::Build);
         // - build new snapshot id
         // - make sure target path exists
         // - send snapshot request to db writer
@@ -76,6 +78,7 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             snapshot: Box::new(snapshot),
         };
 
+        timer.success();
         Ok(snapshot)
     }
 }

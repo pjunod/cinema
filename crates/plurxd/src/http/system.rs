@@ -2302,7 +2302,55 @@ fn render_passive_raft_metrics(
             ));
         }
     }
+    if let Some(snapshot) = view.snapshot_metrics {
+        render_snapshot_metrics(&mut out, snapshot);
+    }
     out
+}
+
+fn render_snapshot_metrics(out: &mut String, snapshot: hiqlite::DbSnapshotMetricsSnapshot) {
+    out.push_str(
+        "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
+         # TYPE plurx_raft_snapshot_seconds histogram\n",
+    );
+    for (operation, outcome, histogram) in [
+        ("build", "ok", snapshot.build_ok),
+        ("build", "error", snapshot.build_error),
+        ("install", "ok", snapshot.install_ok),
+        ("install", "error", snapshot.install_error),
+    ] {
+        for (bound_nanos, count) in hiqlite::DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS
+            .iter()
+            .zip(histogram.cumulative_buckets)
+        {
+            let label = prometheus_seconds_label(*bound_nanos);
+            out.push_str(&format!(
+                "plurx_raft_snapshot_seconds_bucket{{operation=\"{operation}\",outcome=\"{outcome}\",le=\"{label}\"}} {count}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "plurx_raft_snapshot_seconds_bucket{{operation=\"{operation}\",outcome=\"{outcome}\",le=\"+Inf\"}} {}\n\
+             plurx_raft_snapshot_seconds_sum{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}.{:09}\n\
+             plurx_raft_snapshot_seconds_count{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}\n",
+            histogram.count,
+            histogram.sum_nanos / 1_000_000_000,
+            histogram.sum_nanos % 1_000_000_000,
+            histogram.count,
+        ));
+    }
+}
+
+fn prometheus_seconds_label(nanos: u64) -> String {
+    let whole = nanos / 1_000_000_000;
+    let remainder = nanos % 1_000_000_000;
+    if remainder == 0 {
+        return whole.to_string();
+    }
+    let mut fraction = format!("{remainder:09}");
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    format!("{whole}.{fraction}")
 }
 
 fn render_store_metrics(view: StoreMetricsView) -> String {
@@ -2440,6 +2488,18 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
+        let labels = hiqlite::DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.map(prometheus_seconds_label);
+        assert_eq!(
+            labels,
+            [
+                "0.001", "0.0025", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1",
+                "5", "10", "30", "60", "120", "300",
+            ]
+        );
+    }
+
+    #[test]
     fn prometheus_scrape_has_no_store_operation() {
         let source = include_str!("system.rs");
         let handler = source
@@ -2509,6 +2569,11 @@ mod tests {
         use plurx_core::cluster::migration::status::{
             PassiveRaftMetricsView, PassiveRaftSample, QuorumWatermarkSample,
         };
+        let zero_snapshot_histogram = hiqlite::DbSnapshotHistogram {
+            count: 0,
+            sum_nanos: 0,
+            cumulative_buckets: [0; 16],
+        };
 
         let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
             local_source: true,
@@ -2530,6 +2595,16 @@ mod tests {
             watermark_age_millis: Some(250),
             watermark_valid: true,
             watermark_errors: 5,
+            snapshot_metrics: Some(hiqlite::DbSnapshotMetricsSnapshot {
+                build_ok: hiqlite::DbSnapshotHistogram {
+                    count: 2,
+                    sum_nanos: 1_250_000_000,
+                    cumulative_buckets: [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2],
+                },
+                build_error: zero_snapshot_histogram,
+                install_ok: zero_snapshot_histogram,
+                install_error: zero_snapshot_histogram,
+            }),
         });
 
         assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
@@ -2547,6 +2622,15 @@ mod tests {
         assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
         assert!(rendered.contains("plurx_raft_commit_index 45"));
         assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"0.1\"} 1"
+        ));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"+Inf\"} 2"
+        ));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_sum{operation=\"build\",outcome=\"ok\"} 1.250000000"
+        ));
         assert!(!rendered.contains("node_id"));
         assert!(!rendered.contains("leader_id"));
 
@@ -2574,6 +2658,7 @@ mod tests {
                 watermark_age_millis: None,
                 watermark_valid: false,
                 watermark_errors: 1,
+                snapshot_metrics: None,
             }
         });
         assert!(stale.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
@@ -2592,6 +2677,7 @@ mod tests {
             watermark_age_millis: None,
             watermark_valid: false,
             watermark_errors: 0,
+            snapshot_metrics: None,
         });
         assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
         assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));

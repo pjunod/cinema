@@ -3,6 +3,7 @@
 use crate::helpers::{deserialize, set_path_access};
 use crate::migration::Migration;
 use crate::query::rows::RowOwned;
+use crate::snapshot_metrics::{SnapshotOperation, SnapshotTimer};
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::store::state_machine::sqlite::param::Param;
 use crate::store::state_machine::sqlite::snapshot_builder::SQLiteSnapshotBuilder;
@@ -867,6 +868,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         meta: &SnapshotMeta<NodeId, Node>,
         _snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
+        let timer = SnapshotTimer::start(SnapshotOperation::Install);
         let src = format!("{}/temp", self.path_snapshots);
         let dest = format!("{}/{}", self.path_snapshots, meta.snapshot_id);
         fs::copy(&src, &dest)
@@ -881,6 +883,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 
         self.update_state_machine_(dest).await?;
 
+        timer.success();
         Ok(())
     }
 
@@ -903,5 +906,77 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_metrics_contracts {
+    use super::*;
+    use crate::LocalDbSnapshotMetrics;
+    use openraft::RaftSnapshotBuilder;
+
+    #[tokio::test]
+    async fn snapshot_metrics_real_build_install_outcomes() {
+        let root =
+            std::env::temp_dir().join(format!("hiqlite-snapshot-metrics-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create test root");
+        let root = root.to_str().expect("UTF-8 temp path").to_owned();
+        let mut state = StateMachineSqlite::new(&root, "metrics.db", 1, false, 16, 1, false)
+            .await
+            .expect("create SQLite state machine");
+        let handle = LocalDbSnapshotMetrics::new();
+        let before = handle.snapshot();
+
+        let mut builder = state.get_snapshot_builder().await;
+        let snapshot = builder
+            .build_snapshot()
+            .await
+            .expect("build real SQLite snapshot");
+        let snapshot_path = format!("{}/{}", state.path_snapshots, snapshot.meta.snapshot_id);
+        let receive_path = format!("{}/temp", state.path_snapshots);
+        fs::copy(&snapshot_path, &receive_path)
+            .await
+            .expect("stage real snapshot install");
+        let receive = fs::File::open(&receive_path)
+            .await
+            .expect("open staged snapshot");
+        state
+            .install_snapshot(&snapshot.meta, Box::new(receive))
+            .await
+            .expect("install real SQLite snapshot");
+
+        let mut failing_builder = state.get_snapshot_builder().await;
+        failing_builder.path_snapshots = format!("{root}/missing/snapshots");
+        assert!(failing_builder.build_snapshot().await.is_err());
+
+        let placeholder = fs::File::open(&snapshot_path)
+            .await
+            .expect("open snapshot placeholder");
+        let missing_meta = SnapshotMeta {
+            last_log_id: snapshot.meta.last_log_id,
+            last_membership: snapshot.meta.last_membership.clone(),
+            snapshot_id: "missing-install-source".to_owned(),
+        };
+        assert!(
+            state
+                .install_snapshot(&missing_meta, Box::new(placeholder))
+                .await
+                .is_err()
+        );
+
+        let after = handle.snapshot();
+        assert_eq!(after.build_ok.count, before.build_ok.count + 1);
+        assert_eq!(after.install_ok.count, before.install_ok.count + 1);
+        assert_eq!(after.build_error.count, before.build_error.count + 1);
+        assert_eq!(after.install_error.count, before.install_error.count + 1);
+
+        let (shutdown, shutdown_ack) = oneshot::channel();
+        state
+            .write_tx
+            .send_async(WriterRequest::Shutdown(shutdown))
+            .await
+            .expect("request writer shutdown");
+        shutdown_ack.await.expect("writer shutdown ack");
+        fs::remove_dir_all(&root).await.expect("remove test root");
     }
 }
