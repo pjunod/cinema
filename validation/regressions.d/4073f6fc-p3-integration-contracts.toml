@@ -2,6 +2,24 @@ version = 1
 
 [[coverage]]
 commits = ["4073f6fc"]
-points = ["cluster.auth", "core.media", "persistence.upgrades", "playback.pipeline"]
-checks = ["rust-gate", "cluster-auth", "database-upgrades", "offline-contract"]
-reason = "The retained stale artwork recovery cases require the reread catalogue generation to be restored while a stale item or inherited-folder request still loses; manifest checkpoint cases bound cooperative probes while preserving resumable preemption; the timed-accessor contract rejects an outer timeout around TimedClient; and the publication, migration, and offline streaming cases pin live lease validity, SQLite v24, authenticated segment consumption, and transfer accounting."
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The timed-accessor contract rejects an outer timeout around TimedClient and includes the replicated pretranscode module, while the retained publication contracts require live atomic lease successors."
+
+[[coverage]]
+commits = ["4073f6fc"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The retained stale artwork recovery cases require the reread catalogue generation to be restored while a stale item or inherited-folder request still loses, and the offline response case consumes the authenticated segment before checking exact transfer accounting."
+
+[[coverage]]
+commits = ["4073f6fc"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "database-upgrades", "cluster-auth"]
+reason = "The SQLite migration inventory and the populated replicated import contract independently pin SQLite v24 and the complete twenty-table v14 import surface."
+
+[[coverage]]
+commits = ["4073f6fc"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained manifest checkpoint cases bound cooperative yield probes while requiring resumable prefix validation, empty-object preemption, and final fingerprint authority."
