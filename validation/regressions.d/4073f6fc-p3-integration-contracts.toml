@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4073f6fc"]
+points = ["cluster.auth", "core.media", "persistence.upgrades", "playback.pipeline"]
+checks = ["rust-gate", "cluster-auth", "database-upgrades", "offline-contract"]
+reason = "The retained stale artwork recovery cases require the reread catalogue generation to be restored while a stale item or inherited-folder request still loses; manifest checkpoint cases bound cooperative probes while preserving resumable preemption; the timed-accessor contract rejects an outer timeout around TimedClient; and the publication, migration, and offline streaming cases pin live lease validity, SQLite v24, authenticated segment consumption, and transfer accounting."
