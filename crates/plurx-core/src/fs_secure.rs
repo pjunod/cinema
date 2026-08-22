@@ -250,6 +250,13 @@ fn file_identity(file: &File) -> io::Result<FileIdentity> {
     })
 }
 
+#[allow(clippy::unnecessary_cast)]
+fn stat_device(stat: &libc::stat) -> u64 {
+    // `dev_t` is already u64 on Linux but narrower on other supported Unix
+    // targets, so the explicit normalization is intentionally portable.
+    stat.st_dev as u64
+}
+
 /// A directory opened component-by-component with `O_NOFOLLOW`. Clone keeps
 /// the same directory inode alive, so every later child operation remains
 /// relative to that authority even if its original pathname is renamed or
@@ -358,7 +365,7 @@ impl SecureDirectory {
             let kind = stat.st_mode & libc::S_IFMT;
             Ok(SecureChildMetadata {
                 identity: FileIdentity {
-                    device: stat.st_dev as u64,
+                    device: stat_device(&stat),
                     inode: stat.st_ino,
                     size: stat.st_size.max(0) as u64,
                     changed_seconds: stat.st_ctime,
