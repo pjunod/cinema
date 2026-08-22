@@ -93,6 +93,15 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   }
   assert.match(SHIPPED_UI, /localStorage\.setItem\("plurx_stats_mode",mode\)/);
   assert.match(SHIPPED_UI, /STATS_MODE==="debug"\?debugHtml:standardHtml/);
+  for (const tone of ["good", "warn", "bad", "muted"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`\\.statsov \\.stat-${tone}`),
+      `${tone} playback diagnostics must have a visible text treatment`,
+    );
+  }
+  assert.match(SHIPPED_UI, /function statsRunwayTone\(seconds,suspended\)/);
+  assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {

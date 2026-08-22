@@ -394,42 +394,46 @@
      never on screen together and had to be scrolled between and remembered.
      Capped against the viewport, so a narrow window still gets the old single
      column rather than a panel wider than the video. */
-  .statsov{position:absolute;top:64px;left:20px;width:min(880px,calc(100vw - 40px));max-height:calc(100dvh - 190px);
-    background:rgba(8,10,15,.84);border:1px solid rgba(255,255,255,.12);border-radius:10px;
-    font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e8ea;
+  .statsov{position:absolute;top:64px;left:16px;width:min(780px,calc(100vw - 32px));max-height:calc(100dvh - 178px);
+    background:rgba(8,10,15,.88);border:1px solid rgba(255,255,255,.12);border-radius:9px;
+    font:10.5px/1.34 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e8ea;
     display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(5px);z-index:5}
   .statsov.on{display:flex}
   .statshd{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;
-    padding:7px 7px 7px 13px;border-bottom:1px solid rgba(255,255,255,.1);
-    font:600 10.5px/1 ui-sans-serif,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.55)}
-  .statsmodes{display:flex;gap:4px;margin-left:auto}
+    padding:5px 5px 5px 9px;border-bottom:1px solid rgba(255,255,255,.1);
+    font:600 9px/1 ui-sans-serif,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.55)}
+  .statsmodes{display:flex;gap:3px;margin-left:auto}
   .statsmodes button{border:0;border-radius:999px;background:rgba(255,255,255,.07);color:rgba(255,255,255,.58);
-    padding:6px 10px;font:650 10px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em;cursor:pointer;text-transform:none}
+    padding:4px 8px;font:650 9px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em;cursor:pointer;text-transform:none}
   .statsmodes button.on{background:var(--accent);color:#fff}
   .statsmodes button:focus-visible{outline:2px solid #fff;outline-offset:2px}
-  .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:13px;line-height:1;cursor:pointer;padding:6px 8px;border-radius:6px}
+  .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:12px;line-height:1;cursor:pointer;padding:4px 6px;border-radius:5px}
   .statsx:hover{background:rgba(255,255,255,.1);color:#fff}
   /* The three levels intentionally match the native clients. Mini leaves the
      picture legible, Standard is the glanceable Source/Playing/Server view,
      and Debug retains the exhaustive browser readout below. */
-  .statsov[data-mode=mini]{left:auto;right:20px;width:min(760px,calc(100vw - 40px));max-height:none}
-  .statsov[data-mode=standard]{width:min(1120px,calc(100vw - 40px))}
-  .statsov[data-mode=debug]{width:min(1180px,calc(100vw - 40px))}
+  .statsov[data-mode=mini]{left:auto;right:16px;width:min(650px,calc(100vw - 32px));max-height:none}
+  .statsov[data-mode=standard]{width:min(900px,calc(100vw - 32px))}
+  .statsov[data-mode=debug]{width:min(1040px,calc(100vw - 32px))}
   .statsov[data-mode=mini] .statsbody,.statsov[data-mode=standard] .statsbody{columns:auto}
-  .statsmini{display:grid;grid-template-columns:minmax(160px,1.3fr) repeat(3,minmax(110px,1fr));gap:12px;align-items:center}
-  .statsmini .smethod{font:700 15px/1.3 ui-sans-serif,system-ui,sans-serif;color:#fff}
-  .statsmini .spos{margin-top:2px;color:rgba(255,255,255,.55)}
+  .statsmini{display:grid;grid-template-columns:minmax(140px,1.25fr) repeat(3,minmax(96px,1fr));gap:8px;align-items:center}
+  .statsmini .smethod{font:700 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#fff}
+  .statsmini .spos{margin-top:1px;color:rgba(255,255,255,.55)}
   .statsmini .sfact{min-width:0}
-  .statsmini .slab{font:700 9px/1.2 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.4);text-transform:uppercase}
-  .statsmini .sval{margin-top:2px;color:#fff;font:650 12px/1.35 ui-sans-serif,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .statsstandard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
-  .statsstandard .scard{padding:14px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px}
-  .statsstandard .scard h3{margin:0 0 10px;color:rgba(255,255,255,.5);font:750 10px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}
-  .statsstandard .scard>div{margin-top:8px}
-  .statsstandard .scard b{display:block;font:550 10px/1.25 ui-sans-serif,system-ui,sans-serif}
-  .statsstandard .scard span{display:block;margin-top:1px;color:#fff;font:650 13px/1.35 ui-sans-serif,system-ui,sans-serif;overflow-wrap:anywhere}
-  .statsstandard .sreason{grid-column:1/-1;color:rgba(255,255,255,.72);font:500 12px/1.45 ui-sans-serif,system-ui,sans-serif}
-  @media(max-width:720px){
+  .statsmini .slab{font:700 8px/1.1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.4);text-transform:uppercase}
+  .statsmini .sval{margin-top:1px;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .statsstandard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .statsstandard .scard{padding:9px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px}
+  .statsstandard .scard h3{margin:0 0 6px;color:var(--accent);font:750 9px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}
+  .statsstandard .scard>div{display:grid;grid-template-columns:76px minmax(0,1fr);gap:6px;margin-top:3px;align-items:baseline}
+  .statsstandard .scard b{display:block;font:550 8.5px/1.2 ui-sans-serif,system-ui,sans-serif}
+  .statsstandard .scard span{display:block;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif;overflow-wrap:anywhere}
+  .statsstandard .sreason{grid-column:1/-1;color:rgba(255,255,255,.68);font:500 10px/1.3 ui-sans-serif,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .statsov .stat-good{color:#6ddb98!important}
+  .statsov .stat-warn{color:#ffbd4a!important}
+  .statsov .stat-bad{color:#ff6268!important}
+  .statsov .stat-muted{color:rgba(255,255,255,.52)!important}
+  @media(max-width:560px){
     .statsmini{grid-template-columns:1fr 1fr}.statsmini .smethodwrap{grid-column:1/-1}
     .statsstandard{grid-template-columns:1fr}
     .statsstandard .sreason{grid-column:auto}
@@ -442,21 +446,18 @@
      guess it. The panel still scrolls if a session somehow outgrows even
      this — the max-height above is a bound, not a promise.
 
-     880/270/112 were measured, not picked: narrower columns fit three across
-     but wrapped the values so hard (46 wrapped lines against 32) that the
-     panel came out TALLER than at two columns, and squeezed the label column
-     until "Client estimate" broke over two lines. Fewer, wider columns is
-     the shorter answer here. */
-  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:10px 13px 11px;
-    columns:270px;column-gap:22px}
+     Compact label tracks and denser type keep three useful columns visible
+     without turning long diagnostic values into a wall of wrapped text. */
+  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:7px 9px 8px;
+    columns:240px;column-gap:12px}
   /* A section is the unit a column break may not fall inside — otherwise a
      header lands at the foot of one column and its rows at the head of the
      next, which reads as two unrelated sections. */
-  .stsec{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin-bottom:9px}
+  .stsec{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin-bottom:6px}
   /* Playback spans the full width: Reason and Switched are sentences, and a
      sentence in a 224px column is six short lines. Everything below it is
      label-and-number, which is what columns are good at. */
-  .stsec.wide{column-span:all;margin-bottom:11px}
+  .stsec.wide{column-span:none;margin-bottom:6px}
   /* A short screen — a phone held sideways, which is how a phone watches
      video — inverts the trade. There, vertical space is the scarce thing, and
      a full-width Playback section spends the entire visible panel on two
@@ -466,9 +467,9 @@
      they are arranged) — but what you see first is numbers beside their
      labels rather than prose. */
   @media(max-height:640px){
-    .stsec.wide{column-span:none;margin-bottom:9px}
-    .statsbody{columns:230px}
-    .stsec.wide > div{grid-template-columns:112px minmax(0,1fr)}
+    .stsec.wide{margin-bottom:6px}
+    .statsbody{columns:218px}
+    .stsec.wide > div{grid-template-columns:92px minmax(0,1fr)}
   }
   /* Two real columns rather than an inline-block label with a minimum width.
      That version had no gap of its own, so any label wider than the minimum
@@ -483,13 +484,13 @@
      PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED, one unbreakable token
      wider than any column here, and it was being clipped at the panel edge —
      losing the end of the sentence that says what went wrong. */
-  .stsec > div{display:grid;grid-template-columns:112px minmax(0,1fr);gap:0 10px;align-items:baseline;
-    overflow-wrap:anywhere}
+  .stsec > div{display:grid;grid-template-columns:92px minmax(0,1fr);gap:0 7px;align-items:baseline;
+    padding:1px 0;overflow-wrap:anywhere}
   /* The full-width section can afford the wider label column it always had. */
-  .stsec.wide > div{grid-template-columns:116px minmax(0,1fr)}
+  .stsec.wide > div{grid-template-columns:96px minmax(0,1fr)}
   .stsec > div.sechd{display:block}
   .statsov b{color:rgba(255,255,255,.5);font-weight:600}
-  .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:1px;text-transform:uppercase;letter-spacing:.05em;font-size:10.5px}
+  .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
   .pmenu{position:absolute;top:60px;right:20px;min-width:190px;max-width:300px;background:rgba(14,16,22,.97);border:1px solid rgba(255,255,255,.14);
     border-radius:10px;padding:6px;display:none;z-index:6;box-shadow:0 10px 30px rgba(0,0,0,.5)}
   /* Opened from the transport rather than the top bar: sit above the button
@@ -8425,6 +8426,28 @@ window.addEventListener("orientationchange",()=>setTimeout(positionStats,150));
 function clockFromSec(s){ s=Math.max(0,Math.round(s)); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return (h?h+":":"")+String(m).padStart(h?2:1,"0")+":"+String(ss).padStart(2,"0"); }
 function hdrLabel(h){ return ({hdr10:"HDR10",hlg:"HLG",dolby_vision:"Dolby Vision"})[h]||(h?h.toUpperCase():""); }
+function statsToneClass(tone){ return tone?`stat-${tone}`:""; }
+function statsRunwayTone(seconds,suspended){
+  if(suspended) return "good";
+  if(seconds==null) return "muted";
+  if(seconds<1.5) return "bad";
+  if(seconds<5) return "warn";
+  return "good";
+}
+function statsIdleTone(milliseconds,suspended){
+  if(suspended) return "good";
+  if(milliseconds==null) return "muted";
+  if(milliseconds>20000) return "bad";
+  if(milliseconds>8000) return "warn";
+  return "";
+}
+function statsRateTone(rate,ahead,suspended,final){
+  if(suspended||final) return "good";
+  if(rate==null) return "muted";
+  if(rate<.65&&(ahead||0)<2) return "bad";
+  if(rate<1&&(ahead||0)<10) return "warn";
+  return "good";
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
@@ -8442,7 +8465,7 @@ function updateStats(){
   const aLine=a? ([ (a.codec||'').toUpperCase(), a.channels?fmtChannels(a.channels):null, a.language?(langName(a.language)||a.language):null ].filter(Boolean).join(" · ")||'—') : '—';
   // now decoding (what the <video> element actually reports)
   const tgtRes = v.videoWidth? `${v.videoWidth}×${v.videoHeight}` : '—';
-  let dropped='—';
+  let dropped='—', droppedCount=null;
   // How fast frames are actually reaching the screen, measured rather than
   // inferred. The dropped counter alone cannot see this: `droppedVideoFrames`
   // counts frames the compositor discarded, and a decoder that is merely
@@ -8460,6 +8483,7 @@ function updateStats(){
     const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
     if(q){
       dropped=`${q.droppedVideoFrames} / ${q.totalVideoFrames}`;
+      droppedCount=q.droppedVideoFrames;
       const now=performance.now(), prev=PLAYER._fps;
       // Only while actually playing: a paused or seeking element produces no
       // frames, and reporting 0 fps for a stream nobody asked to advance is
@@ -8502,7 +8526,8 @@ function updateStats(){
     const tag=h.final?' · final':(stale?' · idle':'');
     const why=h.final?'the stream finished — these are its last figures'
             :stale?'nothing has been fetched recently — a full buffer, not a slow link':'';
-    net+=`<div><b>Delivery rate</b><span${why?` style="opacity:.7" title="${why}"`:''}>`
+    const deliveryTone=h.final?"good":statsIdleTone(h.delivered_idle_ms,h.suspended);
+    net+=`<div><b>Delivery rate</b><span class="${statsToneClass(deliveryTone)}"${why?` style="opacity:.78" title="${why}"`:''}>`
        + `${fmtMbps(h.delivered_bps)}${tag}</span></div>`;
   }
   if(PLAYER.hls){
@@ -8550,7 +8575,8 @@ function updateStats(){
                :slow?' — slower than realtime'
                :paced?' — at the configured pace'
                :fed?' — throttled by a full client buffer':'';
-      srv+=`<div><b>Encode speed</b><span${slow?' style="color:var(--warn,#fbbf24)"':''}>${rate.toFixed(2)}×${label}${note}</span></div>`;
+      const rateTone=statsRateTone(rate,reserve,h.suspended,h.final);
+      srv+=`<div><b>Encode speed</b><span class="${statsToneClass(rateTone)}">${rate.toFixed(2)}×${label}${note}</span></div>`;
     }
     if(h.ahead_seconds!=null){
       const release=!h.suspended?''
@@ -8561,7 +8587,7 @@ function updateStats(){
         :h.hold_reason==='global' && h.resume_below_bytes!=null
           ?` · global release ≤${fmtBytes(h.resume_below_bytes)}`:'';
       const transitions=h.suspend_count?` · ${h.suspend_count} suspend${h.suspend_count===1?'':'s'}`:'';
-      srv+=`<div><b>Server ahead</b>${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}</div>`;
+      srv+=`<div><b>Server ahead</b><span class="${statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended))}">${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}</span></div>`;
     }
     if(h.out_time_ms!=null && h.ahead_seconds==null){
       // A progressive stream has no published-media frontier to report; what
@@ -8584,7 +8610,8 @@ function updateStats(){
     // One <span> around the whole value, not a bare number plus a sibling:
     // the row is a two-column grid and a third child would drop into the next
     // row's label column.
-    srv+=`<div><b>Stalls</b><span>${PLAYER.stalls}${parts.length?` <span style="opacity:.7">(${parts.join(" · ")})</span>`:''}</span></div>`;
+    const stallTone=PLAYER.stalls>=3?"bad":"warn";
+    srv+=`<div><b>Stalls</b><span class="${statsToneClass(stallTone)}">${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}</span></div>`;
   }
   const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
   const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
@@ -8610,7 +8637,7 @@ function updateStats(){
     // The page and the binary are the same artifact — index.html is
     // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
     // That is what makes one line able to answer for both.
-    `<div><b>Build</b><span class="muted">${esc(buildLabel())}</span></div>`+
+    `<div><b>Build</b><span class="stat-muted">${esc(buildLabel())}</span></div>`+
     `<div><b>Method</b>${esc(method)}</div>`+
     // Said outright, because the two transports are different code paths in
     // the browser and "which one ran" was previously only inferable from
@@ -8618,7 +8645,7 @@ function updateStats(){
     // honestly: a transcode ships MPEG-TS segments that hls.js transmuxes,
     // a copy ships fMP4 that goes to the SourceBuffer untouched — and that
     // difference mattered to the stutter investigation (STUTTER-4K.md §4).
-    `<div><b>Transport</b><span class="muted">${
+    `<div><b>Transport</b><span class="stat-muted">${
       PLAYER.hls ? (PLAYER.method==='transcode'
           ? "segmented MPEG-TS · MediaSource (hls.js transmuxes)"
           : "segmented fMP4 · MediaSource")
@@ -8630,11 +8657,11 @@ function updateStats(){
     // answer, not a toast that disappears. The Reason line above is the
     // server's verdict on the FILE and does not change when the client
     // switches, so it cannot carry this.
-    (PLAYER.rescuedNote?`<div><b>Switched</b><span style="color:var(--warn,#fbbf24)">${
+    (PLAYER.rescuedNote?`<div><b>Switched</b><span class="stat-warn">${
       esc(PLAYER.rescuedNote)}</span></div>`:"")+
     autoLog+
     `<div><b>Position</b>${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}</div>`
-    , "Playback", " wide")+
+    , "Playback")+
     sec(
     `<div><b>Video</b>${esc(srcVideo)}</div>`+
     `<div><b>Resolution</b>${srcRes}</div>`+
@@ -8650,13 +8677,13 @@ function updateStats(){
     // the two can never drift into disagreeing. Absent for an SDR source:
     // there is no grade to have an opinion about.
     (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
-      return d?`<div><b>Dynamic range</b><span${d.off?' class="muted"':''}>${esc(d.panel)}</span></div>`:''; })()+
-    `<div><b>Dropped</b>${dropped} frames</div>`+
+      return d?`<div><b>Dynamic range</b><span${d.off?' class="stat-muted"':''}>${esc(d.panel)}</span></div>`:''; })()+
+    `<div><b>Dropped</b><span class="${statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad')}">${dropped} frames</span></div>`+
     (fps!=null?(()=>{
       const h=PLAYER.hitches, want=(v.playbackRate||1);
       const chased=h&&h.rate!=null&&Math.abs(h.rate-want)>0.02;
-      return `<div><b>Frame rate</b><span${fps<20?' style="color:var(--warn,#fbbf24)"':''}>${fps.toFixed(1)} fps rendered</span>${
-        chased?` · <span style="color:var(--warn,#fbbf24)">playing at ${(h.rate*100).toFixed(1)}% speed${
+      return `<div><b>Frame rate</b><span class="${fps<20?'stat-warn':''}">${fps.toFixed(1)} fps rendered</span>${
+        chased?` · <span class="stat-warn">playing at ${(h.rate*100).toFixed(1)}% speed${
           want===1?" — the browser is rate-chasing":""}</span>`:''}</div>`;
     })():'')+
     // The browser's own verdict on whether it is using the GPU for this. A
@@ -8669,9 +8696,9 @@ function updateStats(){
     // row would otherwise read as exoneration.
     (PLAYER.hitches&&!PLAYER.hitches.frames&&PLAYER.started
       &&PLAYER.hitchArmedAt&&(performance.now()-PLAYER.hitchArmedAt)>10000?
-      `<div><b>Hitches</b><span class="muted">this browser gives the detector no frame callbacks — faults here are invisible, not absent</span></div>`:'')+
+      `<div><b>Hitches</b><span class="stat-muted">this browser gives the detector no frame callbacks — faults here are invisible, not absent</span></div>`:'')+
     (PLAYER.hitches&&(PLAYER.hitches.back||PLAYER.hitches.held||PLAYER.hitches.late||PLAYER.hitches.drop||PLAYER.hitches.gap||PLAYER.hitches.slow)?
-      `<div><b>Hitches</b><span style="color:var(--warn,#fbbf24)">${
+      `<div><b>Hitches</b><span class="stat-warn">${
         [PLAYER.hitches.back?`${PLAYER.hitches.back} back`:null,
          PLAYER.hitches.held?`${PLAYER.hitches.held} held`:null,
          PLAYER.hitches.late?`${PLAYER.hitches.late} late`:null,
@@ -8679,8 +8706,8 @@ function updateStats(){
          PLAYER.hitches.gap?`${PLAYER.hitches.gap} skip`:null,
          PLAYER.hitches.slow?`${PLAYER.hitches.slow} slow`:null].filter(Boolean).join(" · ")
       }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}</span></div>`
-      +`<div><b></b><span class="muted" style="font-size:11px">${esc(PLAYER.hitches.last||'')}</span></div>`
-      +(hitchBlame()?`<div><b></b><span class="muted" style="font-size:11px">${esc(hitchBlame())}</span></div>`:''):'')+
+      +`<div><b></b><span class="stat-muted" style="font-size:9.5px">${esc(PLAYER.hitches.last||'')}</span></div>`
+      +(hitchBlame()?`<div><b></b><span class="stat-muted" style="font-size:9.5px">${esc(hitchBlame())}</span></div>`:''):'')+
     (PLAYER.hls&&PLAYER.hls.config?(()=>{
       // The peak is the number that matters, and it was the number nobody was
       // looking at: the browser holds the forward buffer, the back buffer AND
@@ -8690,8 +8717,7 @@ function updateStats(){
       const t=PLAYER.bufTarget, q=(PLAYER.bufferLimits&&PLAYER.bufferLimits.quota)|0;
       const peak=(t&&t.budgeted)?` · peak ${Math.round(t.peakBytes/1e6)}MB of ~${
         Math.round(MSE_QUOTA_BYTES/1e6)}MB (+ a ${t.seg}s segment)`:'';
-      return `<div><b>Buffer target</b><span class="${q?'':'muted'}"${
-        q?' style="color:var(--warn,#fbbf24)"':''}>${
+      return `<div><b>Buffer target</b><span class="${q?'stat-warn':'stat-muted'}">${
         PLAYER.hls.config.maxBufferLength}s ahead · ${PLAYER.hls.config.backBufferLength}s behind${
         peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}</span></div>`;
     })():'')+
@@ -8711,14 +8737,14 @@ function updateStats(){
         // them, and dressing it in a warning colour is how it came to be
         // believed. Frames lost per minute is the row that means something —
         // it is two lines up, under Hitches.
-        margin=` · <span class="muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
+        margin=` · <span class="stat-muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
           `against a ${b.toFixed(0)}ms budget — latency, not load</span>`;
       }
-      return `<div><b>Decoder</b><span${PLAYER.decodeInfo.hw?'':' style="color:var(--warn,#fbbf24)"'}>${
+      return `<div><b>Decoder</b><span class="${PLAYER.decodeInfo.hw?'stat-good':'stat-warn'}">${
         PLAYER.decodeInfo.hw?'hardware':'software — this machine has no GPU path for this stream'}${
         PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}</span>${margin}</div>`;
     })():'')+
-    `<div><b>Buffer</b>${buf}</div>`
+    `<div><b>Buffer</b><span class="${statsToneClass(statsRunwayTone(bufSec,false))}">${buf}</span></div>`
     , "Now decoding")+
     sec(net, "Network")+
     sec(srv, "Server");
@@ -8738,14 +8764,26 @@ function updateStats(){
     : health?(health.suspended?"Holding buffer":"Active")
     : "No server-side session";
   const serverRate=health&&((health.recent_speed!=null)?health.recent_speed:health.speed);
-  const cardRow=(label,value)=>`<div><b>${label}</b><span>${value}</span></div>`;
+  const deliveryTone=health
+    ? (health.final?"good":(statsIdleTone(health.delivered_idle_ms,health.suspended)||"good"))
+    : "muted";
+  const serverTone=health||PLAYER.vod?"good":"muted";
+  const serverRateTone=statsRateTone(
+    serverRate,
+    health&&health.ahead_seconds!=null?health.ahead_seconds:bufSec,
+    health&&health.suspended,
+    health&&health.final
+  );
+  const frameTone=droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad";
+  const runwayTone=statsRunwayTone(bufSec,false);
+  const cardRow=(label,value,tone)=>`<div><b>${label}</b><span class="${statsToneClass(tone)}">${value}</span></div>`;
   const reason=(PLAYER.reasons&&PLAYER.reasons.length)?esc(PLAYER.reasons.join(" · ")):"";
   const miniHtml=`<div class="statsmini">
     <div class="smethodwrap"><div class="smethod">${esc(method)}</div>
       <div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div></div>
-    <div class="sfact"><div class="slab">Playing</div><div class="sval">${esc(tgtRes)} · ${esc(rangeText)}</div></div>
-    <div class="sfact"><div class="slab">Buffer</div><div class="sval">${esc(buf)}</div></div>
-    <div class="sfact"><div class="slab">Network</div><div class="sval">${esc(clientRate)}</div></div>
+    <div class="sfact"><div class="slab">Playing</div><div class="sval ${statsToneClass(frameTone)}">${esc(tgtRes)} · ${esc(rangeText)}</div></div>
+    <div class="sfact"><div class="slab">Buffer</div><div class="sval ${statsToneClass(runwayTone)}">${esc(buf)}</div></div>
+    <div class="sfact"><div class="slab">Network</div><div class="sval ${statsToneClass(deliveryTone)}">${esc(clientRate)}</div></div>
   </div>`;
   const standardHtml=`<div class="statsstandard">
     <section class="scard"><h3>Source</h3>
@@ -8753,14 +8791,14 @@ function updateStats(){
       ${cardRow("Container",esc(srcCont))}${cardRow("Bitrate",esc(srcBr))}${cardRow("Audio",esc(aLine))}</section>
     <section class="scard"><h3>Playing</h3>
       ${cardRow("Resolution",esc(tgtRes))}${cardRow("Dynamic range",esc(rangeText))}
-      ${cardRow("Buffer",esc(buf))}${cardRow("Dropped / total",esc(dropped+" frames"))}
+      ${cardRow("Buffer",esc(buf),runwayTone)}${cardRow("Dropped / total",esc(dropped+" frames"),frameTone)}
       ${cardRow("Subtitles",esc(selectedSub))}</section>
     <section class="scard"><h3>Server</h3>
-      ${cardRow("Status",esc(serverState))}
+      ${cardRow("Status",esc(serverState),serverTone)}
       ${(health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):""}
-      ${serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×")):""}
-      ${health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s")):""}
-      ${cardRow("Delivery",esc(clientRate))}</section>
+      ${serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):""}
+      ${health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):""}
+      ${cardRow("Delivery",esc(clientRate),deliveryTone)}</section>
     ${reason?`<div class="sreason">${reason}</div>`:""}
   </div>`;
   body.innerHTML=STATS_MODE==="mini"?miniHtml:STATS_MODE==="debug"?debugHtml:standardHtml;

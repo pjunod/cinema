@@ -459,4 +459,4 @@ commits = ["05d276f5"]
 source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "enum TVPlaybackInfoPresentation"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testTVPlaybackInfoUsesTenFootScaleAndPlainHealthLabels"
+test_anchor = "testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale"

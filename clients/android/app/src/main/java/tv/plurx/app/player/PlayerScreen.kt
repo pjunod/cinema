@@ -291,6 +291,14 @@ internal enum class PlaybackStatsMode(val label: String) {
     Debug("Debug"),
 }
 
+private enum class PlaybackStatTone(val color: Color) {
+    Neutral(Color(0xFFEEEEF2)),
+    Muted(Color(0xFF9697A2)),
+    Good(Color(0xFF6DDB98)),
+    Warning(Color(0xFFFFBD4A)),
+    Critical(Color(0xFFFF6268)),
+}
+
 internal enum class PlayerBackAction { ClosePanel, HideControls, ExitPlayback }
 
 internal fun playerBackAction(panelOpen: Boolean, controlsVisible: Boolean): PlayerBackAction = when {
@@ -1596,8 +1604,8 @@ private fun PlaybackInfoMini(
     val shape = MaterialTheme.shapes.large
     Column(
         Modifier
-            .padding(18.dp)
-            .widthIn(max = 920.dp)
+            .padding(12.dp)
+            .widthIn(max = 820.dp)
             .fillMaxWidth()
             .clip(shape)
             .background(Color(0xE617181E))
@@ -1607,8 +1615,8 @@ private fun PlaybackInfoMini(
                 indication = null,
                 onClick = {},
             )
-            .padding(horizontal = 18.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 13.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         PlaybackInfoHeader(
             title = details.delivery,
@@ -1618,13 +1626,24 @@ private fun PlaybackInfoMini(
             onDismiss = onDismiss,
             closeFocusRequester = closeFocusRequester,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PlaybackMiniFact("Playing", details.playingVideo ?: "Waiting", Modifier.weight(1f))
-            PlaybackMiniFact("Buffer", details.buffer, Modifier.weight(1f))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PlaybackMiniFact(
+                "Playing",
+                details.playingVideo ?: "Waiting",
+                Modifier.weight(1f),
+                playbackTone(details),
+            )
+            PlaybackMiniFact(
+                "Buffer",
+                details.buffer,
+                Modifier.weight(1f),
+                bufferTone(details.sessionStatus?.ahead_seconds),
+            )
             PlaybackMiniFact(
                 "Network",
                 details.sessionStatus?.delivered_bps?.let(::formatBitrate) ?: "Measuring",
                 Modifier.weight(1f),
+                networkTone(details),
             )
         }
     }
@@ -1642,10 +1661,10 @@ private fun PlaybackInfoStandard(
     val shape = MaterialTheme.shapes.large
     Column(
         Modifier
-            .padding(horizontal = 20.dp, vertical = 28.dp)
-            .widthIn(max = 1180.dp)
+            .padding(horizontal = 14.dp, vertical = 18.dp)
+            .widthIn(max = 1040.dp)
             .fillMaxWidth()
-            .heightIn(max = 720.dp)
+            .heightIn(max = 620.dp)
             .clip(shape)
             .background(Color(0xE617181E))
             .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
@@ -1655,8 +1674,8 @@ private fun PlaybackInfoStandard(
                 onClick = {},
             )
             .verticalScroll(rememberScrollState())
-            .padding(22.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
         PlaybackInfoHeader(
             title = "Playback info",
@@ -1666,14 +1685,6 @@ private fun PlaybackInfoStandard(
             onDismiss = onDismiss,
             closeFocusRequester = closeFocusRequester,
         )
-        Text(
-            details.title,
-            color = Color.White.copy(alpha = 0.62f),
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val wide = maxWidth >= 760.dp
             val cards: @Composable (Boolean) -> Unit = { inRow ->
@@ -1687,34 +1698,59 @@ private fun PlaybackInfoStandard(
                     details.dynamicRange?.let { PlaybackCompactRow("Range", it) }
                     details.playingAudio?.let { PlaybackCompactRow("Audio", it) }
                     PlaybackCompactRow("Subtitles", details.subtitles)
-                    PlaybackCompactRow("Buffer", details.buffer)
+                    PlaybackCompactRow(
+                        "Buffer",
+                        details.buffer,
+                        bufferTone(details.sessionStatus?.ahead_seconds),
+                    )
+                    details.videoHealth?.let {
+                        PlaybackCompactRow("Frames", it, videoHealthTone(it))
+                    }
                 }
                 PlaybackInfoCard("SERVER", if (inRow) Modifier.fillMaxWidth(0.32f) else Modifier.fillMaxWidth()) {
                     val status = details.sessionStatus
-                    PlaybackCompactRow("Status", when {
-                        status == null -> "No server-side session"
-                        status.suspended == true -> "Holding buffer"
-                        else -> "Active"
-                    })
+                    PlaybackCompactRow(
+                        "Status",
+                        when {
+                            status == null -> "No server-side session"
+                            status.suspended == true -> "Holding buffer"
+                            else -> "Active"
+                        },
+                        if (status == null) PlaybackStatTone.Muted else PlaybackStatTone.Good,
+                    )
                     (status?.encoder ?: details.encoder)?.let { PlaybackCompactRow("Encoder", it) }
                     (status?.recent_speed ?: status?.speed)?.let {
-                        PlaybackCompactRow("Encode", String.format(Locale.US, "%.2f×", it))
+                        PlaybackCompactRow(
+                            "Encode",
+                            String.format(Locale.US, "%.2f×", it),
+                            encodeTone(it, status),
+                        )
                     }
-                    status?.ahead_seconds?.let { PlaybackCompactRow("Ahead", "${it.coerceAtLeast(0)} s") }
-                    status?.delivered_bps?.let { PlaybackCompactRow("Delivery", formatBitrate(it)) }
+                    status?.ahead_seconds?.let {
+                        PlaybackCompactRow(
+                            "Ahead",
+                            "${it.coerceAtLeast(0)} s",
+                            bufferTone(it, status.suspended == true),
+                        )
+                    }
+                    status?.delivered_bps?.let {
+                        PlaybackCompactRow("Delivery", formatBitrate(it), networkTone(details))
+                    }
                 }
             }
             if (wide) {
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) { cards(true) }
+                Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) { cards(true) }
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { cards(false) }
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { cards(false) }
             }
         }
         if (reasons.isNotEmpty()) {
             Text(
                 reasons.joinToString(" · "),
                 color = Color.White.copy(alpha = 0.74f),
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -1730,84 +1766,206 @@ private fun PlaybackInfoDebug(
     closeFocusRequester: FocusRequester,
 ) {
     val shape = MaterialTheme.shapes.large
-    Column(
-        Modifier
-            .padding(horizontal = 14.dp, vertical = 22.dp)
-            .widthIn(max = 1280.dp)
-            .fillMaxWidth()
-            .heightIn(max = 820.dp)
-            .clip(shape)
-            .background(Color(0xF017181E))
-            .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
+    BoxWithConstraints(Modifier.fillMaxSize().padding(10.dp)) {
+        val panelWidth = minOf(maxWidth, 1180.dp)
+        val panelHeight = minOf(maxHeight, 760.dp)
+        Column(
+            Modifier
+                .align(Alignment.Center)
+                .size(panelWidth, panelHeight)
+                .clip(shape)
+                .background(Color(0xF017181E))
+                .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            PlaybackInfoHeader(
+                title = "Playback debug",
+                subtitle = "Player · network · server",
+                mode = mode,
+                onMode = onMode,
+                onDismiss = onDismiss,
+                closeFocusRequester = closeFocusRequester,
             )
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        PlaybackInfoHeader(
-            title = "Playback debug",
-            subtitle = "Live player, network, and server diagnostics",
-            mode = mode,
-            onMode = onMode,
-            onDismiss = onDismiss,
-            closeFocusRequester = closeFocusRequester,
-        )
-        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+            HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+            Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()),
+            ) {
+                PlaybackDebugSections(details, reasons)
+            }
+        }
+    }
+}
 
-        PlaybackInfoSection("PLAYBACK")
+@Composable
+private fun PlaybackDebugSections(details: PlaybackInfoDetails, reasons: List<String>) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        when {
+            maxWidth >= 840.dp -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PlaybackDebugPlayback(details, reasons)
+                    PlaybackDebugNetwork(details)
+                }
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PlaybackDebugSource(details)
+                    PlaybackDebugDecoding(details)
+                }
+                PlaybackDebugServer(details, Modifier.weight(1f))
+            }
+            maxWidth >= 540.dp -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PlaybackDebugPlayback(details, reasons)
+                    PlaybackDebugSource(details)
+                }
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PlaybackDebugDecoding(details)
+                    PlaybackDebugNetwork(details)
+                    PlaybackDebugServer(details)
+                }
+            }
+            else -> Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                PlaybackDebugPlayback(details, reasons)
+                PlaybackDebugSource(details)
+                PlaybackDebugDecoding(details)
+                PlaybackDebugNetwork(details)
+                PlaybackDebugServer(details)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaybackDebugPlayback(details: PlaybackInfoDetails, reasons: List<String>) {
+    PlaybackDebugCard("PLAYBACK") {
         PlaybackInfoRow("Build", details.build)
         PlaybackInfoRow("Method", details.delivery)
         PlaybackInfoRow("Transport", details.transport)
         PlaybackInfoRow("Position", details.position)
-        PlaybackInfoRow("Player state", details.playerState)
+        PlaybackInfoRow("Player state", details.playerState, playerStateTone(details.playerState))
         PlaybackInfoRow("File ID", "#${details.fileId}")
         details.sessionId?.let { PlaybackInfoRow("Session", it) }
-        reasons.takeIf { it.isNotEmpty() }?.let { PlaybackInfoRow("Reason", it.joinToString("; ")) }
+        reasons.takeIf { it.isNotEmpty() }?.let {
+            PlaybackInfoRow("Reason", it.joinToString("; "), PlaybackStatTone.Muted)
+        }
+    }
+}
 
-        PlaybackInfoSection("SOURCE")
+@Composable
+private fun PlaybackDebugSource(details: PlaybackInfoDetails) {
+    PlaybackDebugCard("SOURCE") {
         details.sourceFile?.let { PlaybackInfoRow("File", it) }
         details.sourceVideo?.let { PlaybackInfoRow("Video", it) }
         details.sourceAudio?.let { PlaybackInfoRow("Audio", it) }
         details.audioSync?.let { PlaybackInfoRow("AV offset", it) }
+    }
+}
 
-        PlaybackInfoSection("NOW DECODING")
+@Composable
+private fun PlaybackDebugDecoding(details: PlaybackInfoDetails) {
+    PlaybackDebugCard("NOW DECODING") {
         details.playingVideo?.let { PlaybackInfoRow("Video", it) }
-        details.dynamicRange?.let { PlaybackInfoRow("Dynamic range", it) }
+        details.dynamicRange?.let { PlaybackInfoRow("Range", it) }
         details.playingAudio?.let { PlaybackInfoRow("Audio", it) }
         PlaybackInfoRow("Subtitles", details.subtitles)
-        PlaybackInfoRow("Buffer", details.buffer)
-        details.videoHealth?.let { PlaybackInfoRow("Frames", it) }
+        PlaybackInfoRow(
+            "Buffer",
+            details.buffer,
+            bufferTone(details.sessionStatus?.ahead_seconds),
+        )
+        details.videoHealth?.let {
+            PlaybackInfoRow("Frames", it, videoHealthTone(it))
+        }
+    }
+}
 
-        PlaybackInfoSection("NETWORK")
-        details.sessionStatus?.delivered_bps?.let { PlaybackInfoRow("Delivery rate", formatBitrate(it)) }
-        details.sessionStatus?.delivered_bytes?.let { PlaybackInfoRow("Delivered", formatBytes(it)) }
-        details.sessionStatus?.delivered_idle_ms?.let { PlaybackInfoRow("Delivery idle", "$it ms") }
+@Composable
+private fun PlaybackDebugNetwork(details: PlaybackInfoDetails) {
+    PlaybackDebugCard("NETWORK") {
+        val status = details.sessionStatus
+        status?.delivered_bps?.let {
+            PlaybackInfoRow("Delivery", formatBitrate(it), networkTone(details))
+        }
+        status?.delivered_bytes?.let { PlaybackInfoRow("Transferred", formatBytes(it)) }
+        status?.delivered_idle_ms?.let {
+            PlaybackInfoRow(
+                "Delivery idle",
+                "$it ms",
+                idleTone(it, status.suspended == true),
+            )
+        }
+    }
+}
 
-        PlaybackInfoSection("SERVER")
+@Composable
+private fun PlaybackDebugServer(
+    details: PlaybackInfoDetails,
+    modifier: Modifier = Modifier,
+) {
+    PlaybackDebugCard("SERVER", modifier) {
         val status = details.sessionStatus
         if (status == null) {
-            PlaybackInfoRow("Status", "No server-side session")
+            PlaybackInfoRow("Status", "No server session", PlaybackStatTone.Muted)
         } else {
+            PlaybackInfoRow("Status", if (status.suspended == true) "Holding" else "Active", PlaybackStatTone.Good)
             PlaybackInfoRow("Encoder", status.encoder ?: details.encoder ?: "—")
+            val speed = status.recent_speed ?: status.speed
             PlaybackInfoRow(
                 "Encode speed",
-                (status.recent_speed ?: status.speed)?.let { String.format(Locale.US, "%.2f×", it) } ?: "—",
+                speed?.let { String.format(Locale.US, "%.2f×", it) } ?: "—",
+                speed?.let { encodeTone(it, status) } ?: PlaybackStatTone.Muted,
             )
-            status.ahead_seconds?.let { PlaybackInfoRow("Server ahead", "${it.coerceAtLeast(0)} s") }
+            status.ahead_seconds?.let {
+                PlaybackInfoRow(
+                    "Server ahead",
+                    "${it.coerceAtLeast(0)} s",
+                    bufferTone(it, status.suspended == true),
+                )
+            }
             status.ahead_bytes?.let { PlaybackInfoRow("Ahead bytes", formatBytes(it)) }
             status.out_time_ms?.let { PlaybackInfoRow("Produced", formatTime(it)) }
-            status.progress_idle_ms?.let { PlaybackInfoRow("Progress idle", "$it ms") }
-            PlaybackInfoRow("Held", if (status.suspended == true) "Yes" else "No")
-            status.hold_reason?.let { PlaybackInfoRow("Hold reason", it) }
-            status.suspend_count?.let { PlaybackInfoRow("Suspend count", it.toString()) }
+            status.progress_idle_ms?.let {
+                PlaybackInfoRow("Progress idle", "$it ms", idleTone(it, status.suspended == true))
+            }
+            PlaybackInfoRow(
+                "Held",
+                if (status.suspended == true) "Yes" else "No",
+                if (status.suspended == true) PlaybackStatTone.Good else PlaybackStatTone.Neutral,
+            )
+            status.hold_reason?.let { PlaybackInfoRow("Hold reason", it, PlaybackStatTone.Good) }
+            status.suspend_count?.let {
+                PlaybackInfoRow(
+                    "Suspend count",
+                    it.toString(),
+                    if (it > 8) PlaybackStatTone.Warning else PlaybackStatTone.Neutral,
+                )
+            }
             status.readrate?.let { PlaybackInfoRow("Pacing", String.format(Locale.US, "%.2f×", it)) }
             status.playlist_shape?.let { PlaybackInfoRow("Playlist", it) }
             status.last_request?.let { PlaybackInfoRow("Last request", it) }
-            status.idle_seconds?.let { PlaybackInfoRow("Request idle", "$it s") }
+            status.idle_seconds?.let {
+                PlaybackInfoRow(
+                    "Request idle",
+                    "$it s",
+                    requestIdleTone(it, status.suspended == true),
+                )
+            }
             status.published_end_ms?.let { PlaybackInfoRow("Published end", "$it ms") }
             status.fetched_end_ms?.let { PlaybackInfoRow("Fetched end", "$it ms") }
             status.fetched_segment?.let { PlaybackInfoRow("Fetched segment", it.toString()) }
@@ -1827,11 +1985,11 @@ private fun PlaybackInfoHeader(
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, style = MaterialTheme.typography.titleLarge)
+            Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium)
             Text(
                 subtitle,
                 color = Color.White.copy(alpha = 0.62f),
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1839,7 +1997,7 @@ private fun PlaybackInfoHeader(
         PlaybackStatsModeSelector(mode, onMode)
         TvIconButton(
             onClick = onDismiss,
-            modifier = Modifier.focusRequester(closeFocusRequester),
+            modifier = Modifier.size(40.dp).focusRequester(closeFocusRequester),
         ) {
             Icon(Icons.Filled.Close, contentDescription = "Close playback info", tint = Color.White)
         }
@@ -1851,12 +2009,12 @@ private fun PlaybackStatsModeSelector(
     mode: PlaybackStatsMode,
     onMode: (PlaybackStatsMode) -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(horizontal = 10.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.padding(horizontal = 7.dp)) {
         PlaybackStatsMode.entries.forEach { candidate ->
             Text(
                 candidate.label,
                 color = if (candidate == mode) Color.White else Color.White.copy(alpha = 0.62f),
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier
                     .clip(MaterialTheme.shapes.extraLarge)
@@ -1864,20 +2022,25 @@ private fun PlaybackStatsModeSelector(
                     .tvFocusRing(MaterialTheme.shapes.extraLarge)
                     .clickable { onMode(candidate) }
                     .focusable()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
             )
         }
     }
 }
 
 @Composable
-private fun PlaybackMiniFact(label: String, value: String, modifier: Modifier = Modifier) {
+private fun PlaybackMiniFact(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+) {
     Column(modifier) {
         Text(label.uppercase(), color = Color.White.copy(alpha = 0.44f), style = MaterialTheme.typography.labelSmall)
         Text(
             value,
-            color = Color.White,
-            style = MaterialTheme.typography.bodyMedium,
+            color = tone.color,
+            style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1891,8 +2054,8 @@ private fun PlaybackInfoCard(title: String, modifier: Modifier = Modifier, conte
         modifier
             .background(Color.White.copy(alpha = 0.055f), MaterialTheme.shapes.medium)
             .border(1.dp, Color.White.copy(alpha = 0.08f), MaterialTheme.shapes.medium)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(11.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         PlaybackInfoSection(title)
         content()
@@ -1900,13 +2063,17 @@ private fun PlaybackInfoCard(title: String, modifier: Modifier = Modifier, conte
 }
 
 @Composable
-private fun PlaybackCompactRow(label: String, value: String) {
+private fun PlaybackCompactRow(
+    label: String,
+    value: String,
+    tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+) {
     Column(Modifier.fillMaxWidth()) {
         Text(label, color = Color.White.copy(alpha = 0.48f), style = MaterialTheme.typography.labelSmall)
         Text(
             value,
-            color = Color.White,
-            style = MaterialTheme.typography.bodyMedium,
+            color = tone.color,
+            style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
@@ -1915,40 +2082,130 @@ private fun PlaybackCompactRow(label: String, value: String) {
 }
 
 @Composable
+private fun PlaybackDebugCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.045f), MaterialTheme.shapes.medium)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), MaterialTheme.shapes.medium)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        PlaybackInfoSection(title)
+        content()
+    }
+}
+
+@Composable
 private fun PlaybackInfoSection(title: String) {
     Text(
         title,
-        color = Color.White.copy(alpha = 0.58f),
-        style = MaterialTheme.typography.labelMedium,
+        color = Accent,
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 4.dp),
+        modifier = Modifier.padding(bottom = 2.dp),
     )
 }
 
 @Composable
-private fun PlaybackInfoRow(label: String, value: String) {
+private fun PlaybackInfoRow(
+    label: String,
+    value: String,
+    tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.07f), MaterialTheme.shapes.medium)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.Top,
     ) {
         Text(
             label,
-            color = Color.White.copy(alpha = 0.62f),
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.width(112.dp),
+            color = Color.White.copy(alpha = 0.48f),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.width(86.dp),
         )
         Text(
             value,
-            color = Color.White,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
+            color = tone.color,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f),
         )
     }
+}
+
+private fun playbackTone(details: PlaybackInfoDetails): PlaybackStatTone =
+    videoHealthTone(details.videoHealth)
+
+private fun videoHealthTone(summary: String?): PlaybackStatTone = when {
+    summary == null -> PlaybackStatTone.Muted
+    summary.contains(" 0 dropped") -> PlaybackStatTone.Good
+    summary.contains(" max streak 1") -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Critical
+}
+
+private fun bufferTone(
+    seconds: Long?,
+    suspended: Boolean = false,
+): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    seconds == null -> PlaybackStatTone.Muted
+    seconds < 2 -> PlaybackStatTone.Critical
+    seconds < 5 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Good
+}
+
+private fun networkTone(details: PlaybackInfoDetails): PlaybackStatTone {
+    val status = details.sessionStatus ?: return PlaybackStatTone.Muted
+    return idleTone(status.delivered_idle_ms, status.suspended == true).let {
+        if (it == PlaybackStatTone.Neutral && (status.delivered_bps ?: 0) > 0) {
+            PlaybackStatTone.Good
+        } else {
+            it
+        }
+    }
+}
+
+private fun encodeTone(
+    speed: Double,
+    status: PlaybackSessionStatus?,
+): PlaybackStatTone {
+    if (status?.suspended == true) return PlaybackStatTone.Good
+    val ahead = status?.ahead_seconds ?: 0
+    return when {
+        speed < 0.65 && ahead < 2 -> PlaybackStatTone.Critical
+        speed < 1.0 && ahead < 10 -> PlaybackStatTone.Warning
+        else -> PlaybackStatTone.Good
+    }
+}
+
+private fun playerStateTone(state: String): PlaybackStatTone {
+    val normalized = state.lowercase()
+    return when {
+        "error" in normalized || "fail" in normalized -> PlaybackStatTone.Critical
+        "buffer" in normalized || "wait" in normalized -> PlaybackStatTone.Warning
+        "ready" in normalized || "play" in normalized -> PlaybackStatTone.Good
+        else -> PlaybackStatTone.Neutral
+    }
+}
+
+private fun idleTone(milliseconds: Long?, suspended: Boolean): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    milliseconds == null -> PlaybackStatTone.Muted
+    milliseconds > 20_000 -> PlaybackStatTone.Critical
+    milliseconds > 8_000 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Neutral
+}
+
+private fun requestIdleTone(seconds: Long, suspended: Boolean): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    seconds > 20 -> PlaybackStatTone.Critical
+    seconds > 8 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Neutral
 }
 
 internal fun deliveryLabel(mode: String): String = when (mode) {
