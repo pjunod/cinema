@@ -23,7 +23,73 @@ use std::clone::Clone;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 use std::sync::atomic::Ordering;
 
+/// Privacy-safe, local-only projection of the database Raft watch channel.
+///
+/// The projection deliberately omits node addresses and exposes no method
+/// that can issue an HTTP request. Consumers can therefore sample local Raft
+/// progress without accidentally falling back to the management API.
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalDbRaftSnapshot {
+    pub running: bool,
+    pub node_id: u64,
+    pub current_term: u64,
+    pub current_leader: Option<u64>,
+    pub last_applied_term: Option<u64>,
+    pub last_applied_index: Option<u64>,
+}
+
+/// Receiver for the in-process database Raft metrics watch channel.
+///
+/// This type can only be constructed for a [`Client`] backed by a local
+/// Hiqlite node. A remote client returns an error instead of silently turning
+/// a passive observation into network traffic.
+#[cfg(feature = "sqlite")]
+#[derive(Clone)]
+pub struct LocalDbRaftMetrics {
+    receiver: watch::Receiver<RaftMetrics<NodeId, Node>>,
+}
+
+#[cfg(feature = "sqlite")]
+impl LocalDbRaftMetrics {
+    /// Copy the latest in-process Raft observation without Store or network IO.
+    #[must_use]
+    pub fn snapshot(&self) -> LocalDbRaftSnapshot {
+        let metrics = self.receiver.borrow();
+        LocalDbRaftSnapshot {
+            running: metrics.running_state.is_ok(),
+            node_id: metrics.id,
+            current_term: metrics.current_term,
+            current_leader: metrics.current_leader,
+            last_applied_term: metrics
+                .last_applied
+                .as_ref()
+                .map(|log| log.leader_id.term),
+            last_applied_index: metrics.last_applied.as_ref().map(|log| log.index),
+        }
+    }
+
+    /// Wait for a new in-process observation. `false` means the Raft task
+    /// closed its watch channel and no future sample can become fresh.
+    pub async fn wait_for_change(&mut self) -> bool {
+        self.receiver.changed().await.is_ok()
+    }
+}
+
 impl Client {
+    /// Subscribe to database Raft metrics only when this client owns the local
+    /// node. Remote clients return an error; this method never performs IO.
+    #[cfg(feature = "sqlite")]
+    #[must_use]
+    pub fn local_db_raft_metrics(&self) -> Result<LocalDbRaftMetrics, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("local database Raft metrics require a local node client".to_owned())
+        })?;
+        Ok(LocalDbRaftMetrics {
+            receiver: state.raft_db.raft.metrics(),
+        })
+    }
+
     /// Get cluster metrics for the database Raft.
     #[cfg(feature = "sqlite")]
     pub async fn metrics_db(&self) -> Result<RaftMetrics<NodeId, Node>, Error> {
@@ -378,5 +444,24 @@ impl Client {
 
         info!("Shutdown complete");
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    #[test]
+    fn local_watch_accessor_has_no_remote_fallback() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("pub fn local_db_raft_metrics")
+            .expect("local watch accessor")
+            .1
+            .split_once("/// Get cluster metrics for the database Raft.")
+            .expect("end of local watch accessor")
+            .0;
+        assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
+        assert!(!accessor.contains("build_addr"));
+        assert!(!accessor.contains("get_metrics_remote"));
+        assert!(!accessor.contains(".await"));
     }
 }

@@ -418,7 +418,8 @@ async fn boot(
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
     state.transcode.initialize_rate_control().await?;
-    spawn_background_loops(&state);
+    let background_loops = BackgroundLoopGuard::new();
+    spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
     let leave_shutdown = state.shutdown.clone();
@@ -781,8 +782,35 @@ fn build_state(
 /// A retry scheduled two minutes out has no request to wake it, and a monarr
 /// that is down must not stall anything a viewer is waiting on — so each of
 /// these owns its own timing rather than riding on traffic.
-fn spawn_background_loops(state: &AppState) {
+struct BackgroundLoopGuard {
+    shutdown: tokio_util::sync::CancellationToken,
+}
+
+impl BackgroundLoopGuard {
+    fn new() -> Self {
+        Self {
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    fn token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
+    }
+}
+
+impl Drop for BackgroundLoopGuard {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+fn spawn_background_loops(
+    state: &AppState,
+    background_shutdown: tokio_util::sync::CancellationToken,
+) {
     tokio::spawn(state.clone().store_metrics_loop());
+    let replication = state.replication.clone();
+    tokio::spawn(replication.passive_metrics_loop(background_shutdown.cancelled_owned()));
     tokio::spawn(state.membership.clone().heartbeat_loop());
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
@@ -2357,7 +2385,8 @@ mod startup_tests {
             .initialize_rate_control()
             .await
             .expect("rate control");
-        spawn_background_loops(&state);
+        let background_loops = BackgroundLoopGuard::new();
+        spawn_background_loops(&state, background_loops.token());
 
         let progress = Arc::clone(&state.progress);
         let app = http::router(state);

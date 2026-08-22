@@ -24,6 +24,8 @@ use std::fmt::{Debug, Display};
 use crate::store::state_machine::sqlite::state_machine::Response;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};
+#[cfg(feature = "sqlite")]
+pub use crate::client::mgmt::{LocalDbRaftMetrics, LocalDbRaftSnapshot};
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use config::{NodeConfig, RaftConfig, RateLimitConfig};
 #[cfg(feature = "sqlite")]

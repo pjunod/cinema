@@ -1802,6 +1802,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn repeated_metrics_scrapes_do_not_record_store_operations() {
+        let (app, _) = test_state();
+        let before = plurx_core::store::prometheus_store_operations();
+        for _ in 0..3 {
+            let (status, body) = call_text(&app, get("/metrics", None)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        }
+        assert_eq!(plurx_core::store::prometheus_store_operations(), before);
+    }
+
     /// The seam between "another app told us the id" and "go and enrich it".
     ///
     /// These two features can each be right and still combine into an item
@@ -4096,6 +4108,8 @@ mod tests {
         assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
         assert!(metrics
             .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
+        assert!(metrics.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!metrics.contains("plurx_raft_commit_index"));
         assert!(
             !metrics.contains("Flight"),
             "titles must never become labels"
