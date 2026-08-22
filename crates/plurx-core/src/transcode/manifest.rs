@@ -594,10 +594,6 @@ where
     }
     let mut needs_repair = false;
     loop {
-        if should_yield() {
-            remember_checkpoint_resume(resume);
-            return CheckpointLoad::Yielded;
-        }
         let record = match read_checkpoint_record(&mut reader, MAX_CHECKPOINT_RECORD_BYTES).await {
             Ok(Some(record)) => record,
             Ok(None) => break,
@@ -762,10 +758,7 @@ where
     let mut hasher = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; 128 * 1024];
-    loop {
-        if should_yield() {
-            return Ok(None);
-        }
+    while bytes < opened_fingerprint.bytes {
         let read_limit = MAX_OBJECT_BYTES
             .saturating_sub(bytes)
             .saturating_add(1)
@@ -782,6 +775,9 @@ where
             return Err(format!("generation object {name} grew beyond its bound"));
         }
         hasher.update(&buffer[..read]);
+        if bytes < opened_fingerprint.bytes && should_yield() {
+            return Ok(None);
+        }
     }
     let final_metadata = file
         .metadata()
@@ -1464,7 +1460,7 @@ mod tests {
         assert!(
             publish_controlled_directory(&capability, "generation-corrupt", &names, || {
                 calls += 1;
-                calls >= 7
+                calls >= 3
             })
             .await
             .expect("checkpointed publication")
@@ -1780,7 +1776,7 @@ mod tests {
         let yielded =
             publish_controlled_directory(&capability, "generation-post-load-yield", &names, || {
                 probes += 1;
-                probes >= 133
+                probes >= 67
             })
             .await
             .expect("yield after loading the durable prefix");
@@ -2018,7 +2014,7 @@ mod tests {
         let mut calls = 0usize;
         let yielded = publish_controlled_directory(&capability, "generation-a", &names, || {
             calls += 1;
-            calls >= 7
+            calls >= 3
         })
         .await
         .expect("yielded publication");

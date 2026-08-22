@@ -1704,6 +1704,10 @@ mod tests {
         fixture: &Fixture,
         package: &OfflinePackage,
     ) -> plurx_core::transcode::manifest::GenerationManifest {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time")
+            .as_millis() as i64;
         let recipe = package.recipe_hash.as_deref().expect("ready recipe");
         let relative = format!("ready/{}", package.id);
         let directory = fixture.state.cache_dir.join(&relative);
@@ -1720,8 +1724,8 @@ mod tests {
             .acquire_lease(
                 &format!("offline-manifest-adoption:{}", package.id),
                 "scheduler",
-                100,
-                2_000,
+                now_ms,
+                now_ms + 120_000,
             )
             .await
             .expect("candidate lease")
@@ -1755,8 +1759,8 @@ mod tests {
                     requirements_json: requirements,
                     reason: "recent".to_owned(),
                     priority: 100,
-                    not_before_ms: 110,
-                    created_at_ms: 110,
+                    not_before_ms: now_ms + 10,
+                    created_at_ms: now_ms + 10,
                 },
                 &lease,
                 &lease
@@ -1781,8 +1785,8 @@ mod tests {
                     scratch_bytes: 2,
                 },
                 &[],
-                120,
-                1_000,
+                now_ms + 20,
+                now_ms + 60_000,
             )
             .await
             .expect("claim manifest adoption")
@@ -1799,7 +1803,7 @@ mod tests {
                 100,
                 None,
                 &manifest.manifest_digest,
-                130,
+                now_ms + 30,
             )
             .await
             .expect("adopt fenced manifest"));
@@ -2420,6 +2424,13 @@ mod tests {
         .await
         .expect("segment");
         assert_eq!(media_segment.headers()[header::CONTENT_TYPE], "video/mp2t");
+        let media_segment = media_segment
+            .into_body()
+            .collect()
+            .await
+            .expect("read streamed segment")
+            .to_bytes();
+        assert_eq!(media_segment.as_ref(), b"portable-video");
         let expected_transfer_bytes = crate::offline::master_playlist(&package).len()
             + b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:90,\nseg00000.ts\n#EXT-X-ENDLIST\n"
                 .len()

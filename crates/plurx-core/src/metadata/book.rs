@@ -163,12 +163,21 @@ pub async fn materialize_item_cover(
     if !matches!(item.kind, ItemKind::Book | ItemKind::Audiobook) {
         return Ok(Some(false));
     }
+    let published = item
+        .poster_path
+        .iter()
+        .chain(item.backdrop_path.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if published.is_empty() {
+        return Ok(Some(false));
+    }
     if item.book_metadata_source.as_deref() == Some(BookMetadataSource::Curator.as_str())
         && has_curator_cover_origin(
             store,
             item.id,
             item.book_edition_id.as_deref().unwrap_or_default(),
-            expected,
+            &published,
         )
         .await?
     {
@@ -193,7 +202,7 @@ pub async fn materialize_item_cover(
                 item.id,
                 &file.path,
                 stream_index,
-                Some(expected),
+                Some(&published),
             )
             .await
             else {
@@ -222,7 +231,7 @@ pub async fn materialize_item_cover(
         return Ok(Some(false));
     };
     let Ok(filename) =
-        write_cached_cover(&publisher, artwork_dir, item.id, cover, Some(expected)).await
+        write_cached_cover(&publisher, artwork_dir, item.id, cover, Some(&published)).await
     else {
         return Ok(Some(false));
     };

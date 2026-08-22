@@ -881,8 +881,12 @@ mod tests {
             })
             .await
             .expect("artwork fence fixture");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_millis() as i64;
         let first = match store
-            .acquire_lease("provider:artwork", "node-a", 100, 300)
+            .acquire_lease("provider:artwork", "node-a", now_ms, now_ms + 120_000)
             .await
             .expect("job lease")
         {
@@ -984,7 +988,7 @@ mod tests {
         current_lease = replacement;
         let stale_job_lease = current_lease.clone();
         let renewed = store
-            .renew_lease(&current_lease, 160, 400)
+            .renew_lease(&current_lease, now_ms + 160, now_ms + 180_000)
             .await
             .expect("renew result")
             .expect("renewed lease");

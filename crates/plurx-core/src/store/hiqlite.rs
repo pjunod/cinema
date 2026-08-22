@@ -1692,14 +1692,13 @@ impl UserStore for HiqliteAuthStore {
         let sql = "SELECT id, username, password_hash, is_admin, created_at \
                    FROM users WHERE id > $1 ORDER BY id LIMIT $2";
         validate_sql(sql)?;
-        Ok(timeout_store(
-            self.client()
-                .query_consistent_map::<UserRow, _>(sql, params!(after_id, limit)),
-        )
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect())
+        Ok(self
+            .client()
+            .query_consistent_map::<UserRow, _>(sql, params!(after_id, limit))
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
@@ -2639,6 +2638,7 @@ mod tests {
             ("media", include_str!("hiqlite_media.rs")),
             ("durable", include_str!("hiqlite_durable.rs")),
             ("import", include_str!("hiqlite_import.rs")),
+            ("pretranscode", include_str!("hiqlite_pretranscode.rs")),
             ("publication", include_str!("hiqlite_publication.rs")),
             ("reading", include_str!("hiqlite_reading.rs")),
         ] {

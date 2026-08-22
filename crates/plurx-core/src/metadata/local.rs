@@ -44,6 +44,15 @@ pub async fn materialize_item_artwork(
     let Ok(Some(mut item)) = store.get_item(item_id).await else {
         return false;
     };
+    let published = item
+        .poster_path
+        .iter()
+        .chain(item.backdrop_path.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if published.is_empty() {
+        return false;
+    }
     if item.kind == ItemKind::Folder {
         let Ok(children) = store.get_item_children(item.id).await else {
             return false;
@@ -55,16 +64,17 @@ pub async fn materialize_item_artwork(
             let Some(directory) = path.parent() else {
                 continue;
             };
-            if let Some(name) =
-                adopt_folder_art(&publisher, artwork_dir, item.id, directory, Some(expected)).await
+            if let Some(name) = adopt_folder_art(
+                &publisher,
+                artwork_dir,
+                item.id,
+                directory,
+                Some(&published),
+            )
+            .await
             {
-                if expected.contains(&name) {
-                    return cached_file_is_complete(artwork_dir, &name).await;
-                }
-                // A stale caller cannot safely remove a final name after its
-                // publication slot has been released. Leave mismatches to the
-                // grace-aged sweep, which rechecks replicated ownership while
-                // holding that same slot.
+                return expected.contains(&name)
+                    && cached_file_is_complete(artwork_dir, &name).await;
             }
             break;
         }
@@ -72,7 +82,7 @@ pub async fn materialize_item_artwork(
             child
                 .poster_path
                 .as_ref()
-                .is_some_and(|poster| expected.contains(poster))
+                .is_some_and(|poster| published.contains(poster))
                 && matches!(child.kind, ItemKind::Video | ItemKind::Photo)
         }) else {
             return false;
@@ -86,29 +96,24 @@ pub async fn materialize_item_artwork(
         return false;
     };
     if let Some(name) =
-        adopt_local_art(&publisher, artwork_dir, item.id, &path, Some(expected)).await
+        adopt_local_art(&publisher, artwork_dir, item.id, &path, Some(&published)).await
     {
-        if expected.contains(&name) {
-            return cached_file_is_complete(artwork_dir, &name).await;
-        }
-        // See the folder path above: eager cleanup can race a newer writer.
+        return expected.contains(&name) && cached_file_is_complete(artwork_dir, &name).await;
     }
-    let generated = format!("{}-poster.jpg", item.id);
-    if !expected.contains(&generated) {
-        return false;
-    }
-    generate_thumb(
+    let Some(generated) = generate_thumb(
         &publisher,
         artwork_dir,
         item.id,
         &path,
         item.kind,
         duration(store, item.id).await,
-        Some(expected),
+        Some(&published),
     )
     .await
-    .is_some_and(|name| expected.contains(&name))
-        && cached_file_is_complete(artwork_dir, &generated).await
+    else {
+        return false;
+    };
+    expected.contains(&generated) && cached_file_is_complete(artwork_dir, &generated).await
 }
 
 async fn cached_file_is_complete(artwork_dir: &Path, filename: &str) -> bool {
@@ -645,6 +650,40 @@ mod tests {
             .expect("get")
             .expect("present");
         assert!(folder_after.poster_path.is_some());
+
+        let stale_inherited = folder_after.poster_path.expect("inherited poster");
+        let current_inherited = children
+            .iter()
+            .filter_map(|child| child.poster_path.as_ref())
+            .find(|poster| poster.as_str() != stale_inherited.as_str())
+            .expect("a second child generation")
+            .clone();
+        store
+            .apply_metadata(
+                folder.id,
+                &MetadataPatch {
+                    poster_path: Some(current_inherited.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("advance inherited folder generation");
+        std::fs::remove_file(artwork.join(&current_inherited))
+            .expect("delete current inherited poster");
+        assert!(
+            !materialize_item_artwork(
+                &store,
+                &artwork,
+                folder.id,
+                std::slice::from_ref(&stale_inherited),
+            )
+            .await,
+            "a stale folder request must not claim the reread child generation"
+        );
+        assert!(
+            artwork.join(&current_inherited).is_file(),
+            "stale repair still restores the current inherited child generation"
+        );
 
         std::fs::write(media.join("folder.jpg"), b"folder-owned-art").expect("folder art");
         let folder_refresh =

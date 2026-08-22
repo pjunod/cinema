@@ -4,4 +4,4 @@ version = 1
 commits = ["074b3793"]
 points = ["cluster.auth"]
 checks = ["rust-gate", "cluster-auth"]
-reason = "The retained three-voter publication and distributed-pretranscode contracts exercise every renewal, enqueue, claim, retry, cancellation, and completion statement through Hiqlite's numeric bindings, and the populated v14 import contract pins the complete twenty-table parity inventory."
+reason = "The retained three-voter publication and distributed-pretranscode contracts exercise the renewal, enqueue, successful claim, retry, and completion paths whose Hiqlite numeric bindings changed here, and the populated v14 import contract pins the complete twenty-table parity inventory."
