@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["62aa054e"]
+commits = ["62aa054e", "7d00f646"]
 points = [
   "cluster.auth",
   "cluster.page-reads",
