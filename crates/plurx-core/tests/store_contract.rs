@@ -1208,6 +1208,51 @@ async fn contract_applied_index(client: &Client) -> u64 {
 }
 
 #[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContractLeaderPoint {
+    leader_id: u64,
+    term: u64,
+    applied_index: u64,
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn contract_leader_point(client: &Client) -> ContractLeaderPoint {
+    let mut last_observation = "no metrics sample".to_owned();
+    for _ in 0..100 {
+        match client.metrics_db().await {
+            Ok(metrics) => {
+                last_observation = format!(
+                    "endpoint={}, leader={:?}, term={}, applied={:?}",
+                    metrics.id, metrics.current_leader, metrics.current_term, metrics.last_applied
+                );
+                if metrics.current_leader == Some(metrics.id) {
+                    if let Some(applied) = metrics.last_applied {
+                        return ContractLeaderPoint {
+                            leader_id: metrics.id,
+                            term: metrics.current_term,
+                            applied_index: applied.index,
+                        };
+                    }
+                }
+            }
+            Err(error) => last_observation = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("remote measurement client did not resolve the applied leader: {last_observation}");
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLeaderPoint) -> u64 {
+    assert_eq!(
+        (after.leader_id, after.term),
+        (before.leader_id, before.term),
+        "auth activity entry accounting requires one stable leader and term"
+    );
+    after.applied_index.saturating_sub(before.applied_index)
+}
+
+#[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
     let _case = HIQLITE_CASE.lock().await;
@@ -1567,7 +1612,7 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -1604,7 +1649,7 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
         .await
         .expect("make token activity refresh due");
 
-    let before = contract_applied_index(&client).await;
+    let before = contract_leader_point(&client).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(121));
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..120 {
@@ -1624,10 +1669,10 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
     while let Some(result) = requests.join_next().await {
         assert_eq!(result.expect("join authentication request"), user.id);
     }
-    let after_concurrent = contract_applied_index(&client).await;
+    let after_concurrent = contract_leader_point(&client).await;
 
     assert_eq!(
-        after_concurrent.saturating_sub(before),
+        contract_stable_leader_delta(before, after_concurrent),
         1,
         "one process may append one token touch for 120 simultaneous requests"
     );
@@ -1644,15 +1689,15 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
         );
     }
     assert_eq!(
-        contract_applied_index(&client).await,
-        after_concurrent,
+        contract_stable_leader_delta(after_concurrent, contract_leader_point(&client).await),
+        0,
         "warm sequential authentication must append no activity entries"
     );
 }
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_activity_refresh_burst_is_bounded_by_serving_process_count() {
+async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = contract_cluster();
     let client = Client::remote(
@@ -1660,20 +1705,32 @@ async fn token_activity_refresh_burst_is_bounded_by_serving_process_count() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
     .expect("connect multi-process activity-budget client");
     let mut stores = Vec::new();
     for ordinal in 0..3 {
+        let mut addresses = cluster.addresses.clone();
+        addresses.rotate_left(ordinal);
+        let store_client = Client::remote(
+            addresses,
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect independent token activity-budget client");
         let telemetry = cluster
             ._root
             .path()
             .join(format!("auth-activity-budget-process-{ordinal}.db"));
         stores.push(
             HiqliteAuthStore::validation_bootstrap_at(
-                client.clone(),
+                store_client,
                 CONTRACT_INSTANCE_ID,
                 &telemetry,
                 1_000,
@@ -1702,7 +1759,16 @@ async fn token_activity_refresh_burst_is_bounded_by_serving_process_count() {
         .await
         .expect("make multi-process token activity refresh due");
 
-    let before = contract_applied_index(&client).await;
+    let seeded: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT last_seen_at AS value FROM tokens WHERE token_hash = $1",
+            hiqlite::params!("multi-process-activity-budget-token"),
+        )
+        .await
+        .expect("confirm the due token timestamp through the measurement leader");
+    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded[0].value, 1);
+    let before = contract_leader_point(&client).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(121));
     let mut requests = tokio::task::JoinSet::new();
     for ordinal in 0..120 {
@@ -1724,10 +1790,134 @@ async fn token_activity_refresh_burst_is_bounded_by_serving_process_count() {
     while let Some(result) = requests.join_next().await {
         assert_eq!(result.expect("join multi-process request"), user.id);
     }
-    let delta = contract_applied_index(&client).await.saturating_sub(before);
+    let delta = contract_stable_leader_delta(before, contract_leader_point(&client).await);
     assert!(
         (1..=3).contains(&delta),
-        "120 simultaneous requests on three serving processes appended {delta} activity entries"
+        "120 simultaneous requests on three independent Stores appended {delta} activity entries"
+    );
+    let timestamps: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT last_seen_at AS value FROM tokens WHERE token_hash = $1",
+            hiqlite::params!("multi-process-activity-budget-token"),
+        )
+        .await
+        .expect("read the durable multi-process token activity timestamp");
+    assert_eq!(timestamps.len(), 1);
+    assert_eq!(
+        timestamps[0].value, 1_000,
+        "all accepted touches converge on one durable timestamp change"
+    );
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = contract_cluster();
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect multi-process API-key activity-budget client");
+    let mut stores = Vec::new();
+    for ordinal in 0..3 {
+        let mut addresses = cluster.addresses.clone();
+        addresses.rotate_left(ordinal);
+        let store_client = Client::remote(
+            addresses,
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("connect independent API-key activity-budget client");
+        let telemetry = cluster
+            ._root
+            .path()
+            .join(format!("api-key-activity-budget-process-{ordinal}.db"));
+        stores.push(
+            HiqliteAuthStore::validation_bootstrap_at(
+                store_client,
+                CONTRACT_INSTANCE_ID,
+                &telemetry,
+                1_000,
+            )
+            .await
+            .expect("bootstrap independent API-key activity-budget store"),
+        );
+    }
+    stores[0]
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated multi-process API-key activity-budget state");
+    let key = stores[0]
+        .create_api_key(
+            "multi-process-activity-budget",
+            "multi-process-api-key-activity-budget-hash",
+            &[scopes::SCAN_TRIGGER.to_owned()],
+        )
+        .await
+        .expect("create multi-process activity-budget API key");
+
+    let seeded: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM api_keys WHERE id = $1 AND last_used_at IS NULL",
+            hiqlite::params!(key.id),
+        )
+        .await
+        .expect("confirm the due API-key timestamp through the measurement leader");
+    assert_eq!(seeded.len(), 1);
+    assert_eq!(seeded[0].value, 1);
+    let before = contract_leader_point(&client).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(121));
+    let mut requests = tokio::task::JoinSet::new();
+    for ordinal in 0..120 {
+        // Clones within each group share a gate. The three independently
+        // bootstrapped stores model serving processes with separate gates.
+        let store = stores[ordinal % stores.len()].clone();
+        let barrier = Arc::clone(&barrier);
+        requests.spawn(async move {
+            barrier.wait().await;
+            let key = store
+                .api_key_for_hash("multi-process-api-key-activity-budget-hash")
+                .await
+                .expect("look up multi-process API key")
+                .expect("resolve multi-process API key");
+            assert!(!key.disabled);
+            assert!(key.allows(scopes::SCAN_TRIGGER));
+            store
+                .touch_api_key(key.id)
+                .await
+                .expect("touch multi-process API key");
+        });
+    }
+    barrier.wait().await;
+    while let Some(result) = requests.join_next().await {
+        result.expect("join multi-process API-key request");
+    }
+    let delta = contract_stable_leader_delta(before, contract_leader_point(&client).await);
+    assert!(
+        (1..=3).contains(&delta),
+        "120 simultaneous requests on three independent Stores appended {delta} API-key activity entries"
+    );
+    let timestamps: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT last_used_at AS value FROM api_keys WHERE id = $1",
+            hiqlite::params!(key.id),
+        )
+        .await
+        .expect("read the durable multi-process API-key activity timestamp");
+    assert_eq!(timestamps.len(), 1);
+    assert_eq!(
+        timestamps[0].value, 1_000,
+        "all accepted API-key touches converge on one durable timestamp change"
     );
 }
 
@@ -1741,7 +1931,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -1771,7 +1961,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         .await
         .expect("create activity-budget API key");
 
-    let before = contract_applied_index(&client).await;
+    let before = contract_leader_point(&client).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(121));
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..120 {
@@ -1793,9 +1983,9 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     while let Some(result) = requests.join_next().await {
         result.expect("join API-key request");
     }
-    let after_concurrent = contract_applied_index(&client).await;
+    let after_concurrent = contract_leader_point(&client).await;
     assert_eq!(
-        after_concurrent.saturating_sub(before),
+        contract_stable_leader_delta(before, after_concurrent),
         1,
         "one process may append one API-key touch for 120 simultaneous requests"
     );
@@ -1813,7 +2003,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         .set_api_key_disabled(key.id, true)
         .await
         .expect("disable API key"));
-    let after_disable = contract_applied_index(&client).await;
+    let after_disable = contract_leader_point(&client).await;
     for _ in 0..120 {
         let disabled = store
             .api_key_for_hash("api-key-activity-budget-hash")
@@ -1823,8 +2013,8 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         assert!(disabled.disabled);
     }
     assert_eq!(
-        contract_applied_index(&client).await,
-        after_disable,
+        contract_stable_leader_delta(after_disable, contract_leader_point(&client).await),
+        0,
         "disabled-key checks must not append activity entries"
     );
 
@@ -1832,7 +2022,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
         .delete_api_key(key.id)
         .await
         .expect("delete disabled API key"));
-    let after_delete = contract_applied_index(&client).await;
+    let after_delete = contract_leader_point(&client).await;
     for _ in 0..120 {
         assert!(store
             .api_key_for_hash("api-key-activity-budget-hash")
@@ -1841,8 +2031,8 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
             .is_none());
     }
     assert_eq!(
-        contract_applied_index(&client).await,
-        after_delete,
+        contract_stable_leader_delta(after_delete, contract_leader_point(&client).await),
+        0,
         "deleted-key checks must not append activity entries"
     );
 }

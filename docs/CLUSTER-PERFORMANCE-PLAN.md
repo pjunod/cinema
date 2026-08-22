@@ -397,7 +397,7 @@ three-run results, median baseline, variance, and reviewed comparative budgets
 are committed in P0c before P2-P3 performance claims are accepted. P1 already
 landed as the separately bounded no-op-write removal in #493.
 
-### 6.2 P1 — suppress no-op auth activity writes (implementation in #493; acceptance follow-up pending)
+### 6.2 P1 — suppress no-op auth activity writes
 
 **Landed change:** `HiqliteAuthStore::user_for_token` returns the durable
 `last_seen_at` beside the user and skips `execute` inside the 60-second window.
@@ -414,14 +414,18 @@ unauthorized credentials never reserve or touch. The implementation gives one
 process at most one submitted touch per credential per window; `N` serving
 processes may submit at most `N`, independent of request count.
 
-**Retained evidence and remaining gate:** `cluster.auth` and the HTTP auth
-matrix keep revocation immediate; the merged replicated-store case proves 120
-sequential token authentications produce one physical activity entry. The
-follow-up must still retain a synchronized 120-request burst through three
-independent Store instances for both token and API-key paths, prove no more
-than three submitted entries and exactly one durable timestamp change, and
-prove failed touches release their reservations. Those checks remain required
-after later Store instrumentation changes.
+**Retained evidence:** `cluster.auth` and the HTTP auth matrix keep revocation
+immediate. Replicated-store contracts pin synchronized 120-request bursts
+through one and three independently bootstrapped Store instances for both
+token and API-key paths. The three-Store serving-process model uses distinct
+leader-discovering clients and submits between one and three Raft entries while
+every accepted write converges on the fixed-clock durable timestamp. A
+separate synchronized unit contract proves that each independent gate admits
+exactly one operation. Warm sequential requests submit no additional entries,
+disabled or deleted keys never touch, and the operation-level reservation
+contract proves a failed token or API-key touch releases its reservation for a
+successful retry. Those checks remain required after later Store
+instrumentation changes.
 
 ### 6.3 P2 — instrument Store and Raft cost
 
