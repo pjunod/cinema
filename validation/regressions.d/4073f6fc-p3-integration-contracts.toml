@@ -2,24 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["4073f6fc"]
-points = ["cluster.auth"]
-checks = ["rust-gate", "cluster-auth"]
-reason = "The timed-accessor contract rejects an outer timeout around TimedClient and includes the replicated pretranscode module, while the retained publication contracts require live atomic lease successors."
-
-[[coverage]]
-commits = ["4073f6fc"]
-points = ["core.media"]
+points = ["cluster.auth", "core.media", "persistence.upgrades", "playback.pipeline"]
 checks = ["rust-gate"]
-reason = "The retained stale artwork recovery cases require the reread catalogue generation to be restored while a stale item or inherited-folder request still loses, and the offline response case consumes the authenticated segment before checking exact transfer accounting."
-
-[[coverage]]
-commits = ["4073f6fc"]
-points = ["persistence.upgrades"]
-checks = ["rust-gate", "database-upgrades", "cluster-auth"]
-reason = "The SQLite migration inventory and the populated replicated import contract independently pin SQLite v24 and the complete twenty-table v14 import surface."
-
-[[coverage]]
-commits = ["4073f6fc"]
-points = ["playback.pipeline"]
-checks = ["rust-gate"]
-reason = "The retained manifest checkpoint cases bound cooperative yield probes while requiring resumable prefix validation, empty-object preemption, and final fingerprint authority."
+reason = "The retained Rust regressions require stale item and inherited-folder artwork repair to restore the reread catalogue generation while the old request loses; reject an outer timeout around TimedClient; pin live atomic publication leases, SQLite v24, and the complete twenty-table v14 import surface; consume authenticated offline segments before exact transfer accounting; and bound resumable manifest yield probes, including zero-length objects, while preserving final fingerprint authority."
