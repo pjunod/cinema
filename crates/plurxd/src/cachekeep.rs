@@ -220,13 +220,6 @@ impl ActiveCacheReaders {
             Some(CacheActivity::Readers(_))
         )
     }
-
-    /// Whether this process has positive evidence that a recipe was real.
-    /// Used only to narrow an orphan pass when the durable owner inventory is
-    /// empty; it never authorizes deletion of unrelated directories.
-    fn knows_recipe(&self, recipe: &str) -> bool {
-        self.lock_states().contains_key(recipe)
-    }
 }
 
 impl Drop for CacheReadGuard {
