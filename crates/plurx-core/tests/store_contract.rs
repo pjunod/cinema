@@ -43,6 +43,8 @@ use plurx_core::domain::{
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
+#[cfg(feature = "cluster-read-cost-validation")]
+use plurx_core::store::MetricsStore;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
@@ -283,6 +285,7 @@ const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "complete_cache_entry_fenced",
     "forget_cache_entry_fenced",
 ];
+const METRICS_METHODS: &[&str] = &["prometheus_store_snapshot"];
 
 struct StoreFixture {
     name: &'static str,
@@ -327,6 +330,57 @@ where
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
     }
+}
+
+#[tokio::test]
+async fn prometheus_store_snapshot_is_one_backend_neutral_aggregate() {
+    for_each_backend(|store, backend| async move {
+        store
+            .create_user("metrics-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed metrics user: {error}"));
+        store
+            .create_library(&NewLibrary {
+                name: "Metrics Library".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed metrics library: {error}"));
+        let (offline_user, offline_file) = seed_file(&store, "metrics-offline").await;
+        let mut offline = offline_request(
+            "metrics-package",
+            "metrics-request",
+            offline_user,
+            offline_file,
+        );
+        offline.node_id = "metrics-node".to_owned();
+        assert!(matches!(
+            store
+                .create_offline_package(&offline, 10, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed offline metrics: {error}")),
+            OfflineCreateOutcome::Created(_)
+        ));
+        store
+            .enqueue_watched(r#"{"type":"movie","watched":true}"#)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed outbox metrics: {error}"));
+        let snapshot = store
+            .prometheus_store_snapshot("metrics-node", 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read metrics snapshot: {error}"));
+        assert_eq!(snapshot.users, 2, "{backend}");
+        assert_eq!(snapshot.libraries, 2, "{backend}");
+        assert_eq!(snapshot.offline.queued, 1, "{backend}");
+        assert_eq!(snapshot.offline.queued_bytes, 5_000, "{backend}");
+        assert_eq!(snapshot.offline.preparing, 0, "{backend}");
+        assert_eq!(snapshot.offline.ready, 0, "{backend}");
+        assert_eq!(snapshot.offline.failed, 0, "{backend}");
+        assert_eq!(snapshot.watched_outbox, (1, 0, 0), "{backend}");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -4251,13 +4305,14 @@ fn contract_inventory_matches_every_store_method() {
         NETWORK_PRIOR_METHODS,
         COORDINATION_METHODS,
         FENCED_PUBLICATION_METHODS,
+        METRICS_METHODS,
     ]
     .into_iter()
     .flatten()
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 171, "review the Store method count");
+    assert_eq!(declared.len(), 172, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -4523,6 +4578,18 @@ async fn clustered_page_read_primitives_have_bounded_client_calls() {
         counts.write_calls, 0,
         "the Settings Store-read sequence must be read-only"
     );
+
+    store.validation_reset_operation_counts();
+    let metrics = store
+        .prometheus_store_snapshot("node-a", 1)
+        .await
+        .expect("aggregate Prometheus Store sample");
+    let counts = store.validation_operation_counts();
+    assert_eq!(metrics.libraries, 0);
+    assert_eq!(metrics.users, 0);
+    assert_eq!(counts.consistent_query_calls, 1);
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.write_calls, 0);
 
     // Activity's offline row count must not affect its store-call count. The
     // joined query also carries the fields the HTTP DTO needs, so the handler

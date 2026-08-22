@@ -62,7 +62,7 @@ struct TransferSample {
 /// counters. A scraper handles resets; durable package state supplies gauges.
 /// Arrays encode every permitted label value so request data can never create
 /// a new series.
-struct OfflineMetrics {
+pub(crate) struct OfflineMetrics {
     requests: [AtomicU64; 4],
     quota_rejections: [AtomicU64; 3],
     prepare_count: [AtomicU64; 3],
@@ -213,7 +213,7 @@ impl OfflineMetrics {
             .remove(package_id);
     }
 
-    fn prometheus(&self) -> String {
+    pub(crate) fn prometheus(&self) -> String {
         let mut out = String::from(
             "# HELP plurx_offline_requests_total New offline packages accepted, by quality.\n\
              # TYPE plurx_offline_requests_total counter\n",
@@ -324,7 +324,7 @@ pub struct OfflineManager {
     transcode: Arc<TranscodeManager>,
     node_id: String,
     active: tokio::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
-    metrics: OfflineMetrics,
+    metrics: Arc<OfflineMetrics>,
 }
 
 impl OfflineManager {
@@ -338,7 +338,7 @@ impl OfflineManager {
             transcode,
             node_id,
             active: tokio::sync::Mutex::new(HashMap::new()),
-            metrics: OfflineMetrics::new(),
+            metrics: Arc::new(OfflineMetrics::new()),
         })
     }
 
@@ -366,6 +366,12 @@ impl OfflineManager {
         self.metrics.forget_transfer(package_id);
     }
 
+    /// Store-free counter handle for the Prometheus substate.
+    pub(crate) fn metrics_handle(&self) -> Arc<OfflineMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prometheus(&self) -> String {
         self.metrics.prometheus()
     }

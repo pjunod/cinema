@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64,
+    AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use std::sync::Arc;
@@ -3147,6 +3147,10 @@ pub struct TranscodeManager {
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Lock-free projection for Prometheus. The session map remains the
+    /// authority; every production insert/removal publishes its resulting
+    /// length while holding that map's lock.
+    active_session_count: Arc<AtomicUsize>,
     /// Creation requests by `request_id` — reserved *before* work starts, so
     /// two concurrent creates with the same id cannot both pass the check and
     /// spawn two encoders (the check-then-act race this map used to have).
@@ -3203,6 +3207,22 @@ pub struct TranscodeManager {
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
 }
 
+/// Store-free, lock-free projection used by the Prometheus handler.
+#[derive(Clone)]
+pub(crate) struct TranscodeMetrics {
+    active_sessions: Arc<AtomicUsize>,
+    active_cache: crate::cachekeep::ActiveCacheMetrics,
+}
+
+impl TranscodeMetrics {
+    pub(crate) fn snapshot(&self) -> (usize, usize) {
+        (
+            self.active_sessions.load(Relaxed),
+            self.active_cache.active_entries(),
+        )
+    }
+}
+
 impl TranscodeManager {
     /// `pipeline` is the tone-map graph this node proved at boot — see
     /// [`crate::pipeprobe`]. It is fixed for the manager's life because it is
@@ -3240,6 +3260,7 @@ impl TranscodeManager {
             cache: None,
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             sessions: Mutex::new(HashMap::new()),
+            active_session_count: Arc::new(AtomicUsize::new(0)),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
@@ -3320,8 +3341,12 @@ impl TranscodeManager {
             .expect("test eviction claim")
     }
 
-    pub fn active_cache_entries(&self) -> usize {
-        self.cache_readers.active_entries()
+    /// Narrow process-metrics handle with no session map or Store access.
+    pub(crate) fn metrics_handle(&self) -> TranscodeMetrics {
+        TranscodeMetrics {
+            active_sessions: Arc::clone(&self.active_session_count),
+            active_cache: self.cache_readers.metrics(),
+        }
     }
 
     /// Override [`ProducerTuning`]. Tests only — there is deliberately no
@@ -4002,10 +4027,11 @@ impl TranscodeManager {
             typeless_sliding: false,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id.clone(), Arc::clone(&session));
+            self.active_session_count.store(sessions.len(), Relaxed);
+        }
         tracing::info!(
             %session_id, recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
@@ -6067,10 +6093,11 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id.clone(), Arc::clone(&session));
+            self.active_session_count.store(sessions.len(), Relaxed);
+        }
         self.emit_session_event(
             &session_id,
             &session,
@@ -6586,10 +6613,11 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id.clone(), Arc::clone(&session));
+            self.active_session_count.store(sessions.len(), Relaxed);
+        }
         self.emit_session_event(
             &session_id,
             &session,
@@ -6869,6 +6897,7 @@ impl TranscodeManager {
             if still_live {
                 session.retired.store(true, Release);
                 sessions.remove(session_id);
+                self.active_session_count.store(sessions.len(), Relaxed);
             }
             still_live
         };
@@ -8304,6 +8333,33 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn metrics_session_snapshot_does_not_wait_for_the_session_map() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = tempfile::tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager.active_session_count.store(2, Relaxed);
+        let sessions = manager.sessions.lock().await;
+        let snapshot = manager.metrics_handle();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let handle = std::thread::spawn(move || sent.send(snapshot.snapshot().0));
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_millis(100))
+                .expect("atomic session snapshot must not wait for the map"),
+            2
+        );
+        drop(sessions);
+        handle.join().expect("join session reader").expect("send");
+    }
 
     fn profile5_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {

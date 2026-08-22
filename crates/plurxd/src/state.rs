@@ -2,16 +2,16 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MetadataPatch,
-    PlaybackEvent,
+    OfflinePackageStats, PlaybackEvent,
 };
 use plurx_core::error::StoreError;
 use plurx_core::metadata::book::BookEnrichReport;
@@ -20,7 +20,9 @@ use plurx_core::metadata::local::LocalArtReport;
 use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
-use plurx_core::store::{keys, ArtworkRepairFence, PublicationFence, PublicationStore, Store};
+use plurx_core::store::{
+    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationFence, PublicationStore, Store,
+};
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -101,6 +103,188 @@ pub struct Dirs {
     pub subs: PathBuf,
 }
 
+const STORE_METRICS_FRESHNESS_SECS: u64 = 120;
+
+#[derive(Default)]
+struct StoreMetricsAtomics {
+    sequence: AtomicU64,
+    published: AtomicBool,
+    sampled_elapsed: AtomicU64,
+    errors: AtomicU64,
+    libraries: AtomicI64,
+    users: AtomicI64,
+    queued: AtomicI64,
+    preparing: AtomicI64,
+    ready: AtomicI64,
+    failed: AtomicI64,
+    queued_bytes: AtomicI64,
+    preparing_bytes: AtomicI64,
+    ready_bytes: AtomicI64,
+    failed_bytes: AtomicI64,
+    active_leases: AtomicI64,
+    pinned_bytes: AtomicI64,
+    outbox_pending: AtomicI64,
+    outbox_ok: AtomicI64,
+    outbox_failed: AtomicI64,
+}
+
+/// Lock-free view consumed by the Prometheus handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreMetricsView {
+    pub sample: Option<PrometheusStoreSnapshot>,
+    pub age_seconds: Option<u64>,
+    pub valid: bool,
+    pub errors: u64,
+}
+
+/// Last complete Store-backed sample used by the Prometheus handler.
+///
+/// A single-writer sequence protects atomic publication without putting a
+/// mutex on a runtime thread. Scrapes see the complete preceding or complete
+/// next sample, never a mixture of both.
+#[derive(Clone)]
+pub struct StoreMetricsCache {
+    inner: Arc<StoreMetricsAtomics>,
+    started_at: Instant,
+}
+
+impl Default for StoreMetricsCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(StoreMetricsAtomics::default()),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl StoreMetricsCache {
+    #[must_use]
+    pub fn snapshot(&self) -> StoreMetricsView {
+        self.snapshot_at(self.started_at.elapsed().as_secs())
+    }
+
+    fn snapshot_at(&self, elapsed: u64) -> StoreMetricsView {
+        loop {
+            let before = self.inner.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let published = self.inner.published.load(Ordering::Relaxed);
+            let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+            let errors = self.inner.errors.load(Ordering::Relaxed);
+            let sample = PrometheusStoreSnapshot {
+                libraries: self.inner.libraries.load(Ordering::Relaxed),
+                users: self.inner.users.load(Ordering::Relaxed),
+                offline: OfflinePackageStats {
+                    queued: self.inner.queued.load(Ordering::Relaxed),
+                    preparing: self.inner.preparing.load(Ordering::Relaxed),
+                    ready: self.inner.ready.load(Ordering::Relaxed),
+                    failed: self.inner.failed.load(Ordering::Relaxed),
+                    queued_bytes: self.inner.queued_bytes.load(Ordering::Relaxed),
+                    preparing_bytes: self.inner.preparing_bytes.load(Ordering::Relaxed),
+                    ready_bytes: self.inner.ready_bytes.load(Ordering::Relaxed),
+                    failed_bytes: self.inner.failed_bytes.load(Ordering::Relaxed),
+                    active_leases: self.inner.active_leases.load(Ordering::Relaxed),
+                    pinned_bytes: self.inner.pinned_bytes.load(Ordering::Relaxed),
+                },
+                watched_outbox: (
+                    self.inner.outbox_pending.load(Ordering::Relaxed),
+                    self.inner.outbox_ok.load(Ordering::Relaxed),
+                    self.inner.outbox_failed.load(Ordering::Relaxed),
+                ),
+            };
+            let after = self.inner.sequence.load(Ordering::Acquire);
+            if before == after {
+                let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
+                return StoreMetricsView {
+                    sample: published.then_some(sample),
+                    age_seconds,
+                    valid: age_seconds.is_some_and(|age| age <= STORE_METRICS_FRESHNESS_SECS),
+                    errors,
+                };
+            }
+        }
+    }
+
+    fn publish(&self, sample: PrometheusStoreSnapshot) {
+        self.publish_at(sample, self.started_at.elapsed().as_secs());
+    }
+
+    fn publish_at(&self, sample: PrometheusStoreSnapshot, elapsed: u64) {
+        let sequence = loop {
+            let current = self.inner.sequence.load(Ordering::Acquire);
+            if current & 1 == 0
+                && self
+                    .inner
+                    .sequence
+                    .compare_exchange(
+                        current,
+                        current.wrapping_add(1),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                break current;
+            }
+            std::hint::spin_loop();
+        };
+        self.inner
+            .libraries
+            .store(sample.libraries, Ordering::Relaxed);
+        self.inner.users.store(sample.users, Ordering::Relaxed);
+        self.inner
+            .queued
+            .store(sample.offline.queued, Ordering::Relaxed);
+        self.inner
+            .preparing
+            .store(sample.offline.preparing, Ordering::Relaxed);
+        self.inner
+            .ready
+            .store(sample.offline.ready, Ordering::Relaxed);
+        self.inner
+            .failed
+            .store(sample.offline.failed, Ordering::Relaxed);
+        self.inner
+            .queued_bytes
+            .store(sample.offline.queued_bytes, Ordering::Relaxed);
+        self.inner
+            .preparing_bytes
+            .store(sample.offline.preparing_bytes, Ordering::Relaxed);
+        self.inner
+            .ready_bytes
+            .store(sample.offline.ready_bytes, Ordering::Relaxed);
+        self.inner
+            .failed_bytes
+            .store(sample.offline.failed_bytes, Ordering::Relaxed);
+        self.inner
+            .active_leases
+            .store(sample.offline.active_leases, Ordering::Relaxed);
+        self.inner
+            .pinned_bytes
+            .store(sample.offline.pinned_bytes, Ordering::Relaxed);
+        self.inner
+            .outbox_pending
+            .store(sample.watched_outbox.0, Ordering::Relaxed);
+        self.inner
+            .outbox_ok
+            .store(sample.watched_outbox.1, Ordering::Relaxed);
+        self.inner
+            .outbox_failed
+            .store(sample.watched_outbox.2, Ordering::Relaxed);
+        self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
+        self.inner.published.store(true, Ordering::Relaxed);
+        self.inner
+            .sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
+    }
+
+    fn record_error(&self) {
+        self.inner.errors.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Everything a request handler needs. Cheap to clone (all shared via `Arc`).
 #[derive(Clone)]
 pub struct AppState {
@@ -166,6 +350,8 @@ pub struct AppState {
     /// lifetimes, so this holds only what would otherwise be invisible; see
     /// [`crate::delivery`].
     pub direct_plays: Arc<crate::delivery::DirectPlays>,
+    /// Store-backed gauges sampled away from the Prometheus request path.
+    pub store_metrics: StoreMetricsCache,
     /// Application-initiated graceful drain. Signals still use the process
     /// watcher in `main`; the cluster leave endpoint cancels this only after
     /// its own voter removal has committed.
@@ -302,8 +488,59 @@ impl AppState {
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             streams: crate::progressive::Streams::new(),
             direct_plays: crate::delivery::DirectPlays::new(),
+            store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             started_at: Instant::now(),
+        }
+    }
+
+    /// Refresh all Store-backed Prometheus gauges as one complete sample.
+    /// A failure preserves the previous sample and increments its bounded
+    /// source counter.
+    pub async fn refresh_store_metrics(&self) -> Result<(), StoreError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64;
+        match self
+            .store
+            .prometheus_store_snapshot(&self.node_id, now)
+            .await
+        {
+            Ok(snapshot) => {
+                self.store_metrics.publish(snapshot);
+                Ok(())
+            }
+            Err(error) => {
+                self.store_metrics.record_error();
+                Err(error)
+            }
+        }
+    }
+
+    /// Keep the scrape snapshot fresh without coupling availability to a
+    /// Store or leader round trip. The first sample starts immediately.
+    pub async fn store_metrics_loop(self) {
+        let stagger = self.node_id.bytes().fold(0_u64, |hash, byte| {
+            hash.wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(byte))
+        }) % 15;
+        let base_interval = Duration::from_secs(30 + stagger);
+        let mut consecutive_errors = 0_u32;
+        loop {
+            if let Err(error) = self.refresh_store_metrics().await {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                tracing::debug!(%error, "refreshing Store-backed metrics snapshot failed");
+            } else {
+                consecutive_errors = 0;
+            }
+            let backoff = 1_u32 << consecutive_errors.min(3);
+            let interval = base_interval.saturating_mul(backoff);
+            tokio::select! {
+                () = self.shutdown.cancelled() => break,
+                () = tokio::time::sleep(interval) => {}
+            }
         }
     }
 }
@@ -488,7 +725,7 @@ pub struct JobManager {
     pending_retries: Mutex<HashSet<i64>>,
     /// Recent targeted-scan requests and their outcomes, newest last.
     requests: Mutex<VecDeque<ScanRequestRecord>>,
-    metrics: IntegrationMetrics,
+    metrics: Arc<IntegrationMetrics>,
     /// A pre-transcode pass is running. Not a mutex, because the answer wanted
     /// is "is one going" rather than "wait for it": a second pass would fight
     /// the first for the same slots, and queuing one behind an encode that
@@ -900,7 +1137,7 @@ impl JobManager {
             pending: Mutex::new(HashMap::new()),
             pending_retries: Mutex::new(HashSet::new()),
             requests: Mutex::new(VecDeque::new()),
-            metrics: IntegrationMetrics::default(),
+            metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
@@ -973,6 +1210,11 @@ impl JobManager {
     /// Counters for `/metrics` and the system page.
     pub fn metrics(&self) -> &IntegrationMetrics {
         &self.metrics
+    }
+
+    /// Store-free counter handle for the Prometheus substate.
+    pub(crate) fn metrics_handle(&self) -> Arc<IntegrationMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// Like [`trigger_scan`], but forces a full metadata refresh — re-enriches
@@ -2795,6 +3037,84 @@ mod tests {
     use plurx_core::transcode::Pipeline;
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
+
+    fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
+        PrometheusStoreSnapshot {
+            libraries: value,
+            users: value,
+            offline: OfflinePackageStats {
+                queued: value,
+                preparing: value,
+                ready: value,
+                failed: value,
+                queued_bytes: value,
+                preparing_bytes: value,
+                ready_bytes: value,
+                failed_bytes: value,
+                active_leases: value,
+                pinned_bytes: value,
+            },
+            watched_outbox: (value, value, value),
+        }
+    }
+
+    #[test]
+    fn store_metrics_cache_distinguishes_absent_stale_and_failed_samples() {
+        let cache = StoreMetricsCache::default();
+        assert_eq!(
+            cache.snapshot_at(0),
+            StoreMetricsView {
+                sample: None,
+                age_seconds: None,
+                valid: false,
+                errors: 0,
+            }
+        );
+
+        cache.record_error();
+        assert_eq!(cache.snapshot_at(30).sample, None);
+        assert_eq!(cache.snapshot_at(30).errors, 1);
+
+        let complete = metrics_sample(7);
+        cache.publish_at(complete, 40);
+        assert_eq!(
+            cache.snapshot_at(41),
+            StoreMetricsView {
+                sample: Some(complete),
+                age_seconds: Some(1),
+                valid: true,
+                errors: 1,
+            }
+        );
+
+        cache.record_error();
+        let stale = cache.snapshot_at(40 + STORE_METRICS_FRESHNESS_SECS + 1);
+        assert_eq!(stale.sample, Some(complete));
+        assert_eq!(stale.age_seconds, Some(STORE_METRICS_FRESHNESS_SECS + 1));
+        assert!(!stale.valid);
+        assert_eq!(stale.errors, 2);
+    }
+
+    #[test]
+    fn store_metrics_cache_never_exposes_a_torn_complete_sample() {
+        let cache = StoreMetricsCache::default();
+        cache.publish_at(metrics_sample(1), 0);
+        let writer = cache.clone();
+        let handle = std::thread::spawn(move || {
+            for ordinal in 0..10_000 {
+                writer.publish_at(metrics_sample(if ordinal % 2 == 0 { 2 } else { 3 }), 0);
+            }
+        });
+        for _ in 0..10_000 {
+            let sample = cache
+                .snapshot_at(0)
+                .sample
+                .expect("the initial complete sample remains present");
+            let expected = sample.libraries;
+            assert_eq!(sample, metrics_sample(expected));
+        }
+        handle.join().expect("join metrics publisher");
+    }
 
     #[test]
     fn re_pairing_provider_art_waits_for_its_replacement_cover() {
