@@ -7,3 +7,4 @@ docs/
 _to_delete/
 *.db
 *.md
+.swarm/
