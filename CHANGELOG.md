@@ -10,6 +10,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Cluster topology guidance and comparable three-versus-four-voter evidence
+  are now executable.** Operations recommends three voters for ordinary HA,
+  documents readiness-aware sticky proxying and a complete durable authority
+  set, and keeps scratch/cache I/O off consensus storage. The separate-process
+  harness runs an identical quorum-acknowledged write workload on fresh three-
+  and four-voter clusters and emits a versioned semantic artifact with raw
+  acknowledged-write round trips, type-7 percentiles, a stable leader term,
+  quorum, commit count, applied lag, and per-voter validation of the expected
+  logical corpus. Hosted CI leaves resource fields null so it cannot
+  masquerade as named-runner evidence.
+
 - **Cluster schedulers now spend shared work once, even when every voter ticks
   together.** Scans and refreshes share a per-library lease across startup,
   scheduled, manual, and targeted integration triggers; probe repair, artwork

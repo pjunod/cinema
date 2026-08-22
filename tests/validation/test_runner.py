@@ -181,6 +181,11 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
 
+        topology_schema = scope_for_paths(
+            catalog, ("benchmarks/cluster-topology.schema.json",)
+        )
+        self.assertTrue(topology_schema["cluster_auth"])
+
         core = scope_for_paths(catalog, ("crates/plurx-core/src/domain.rs",))
         self.assertTrue(core["hiqlite_spike"])
         self.assertTrue(core["cluster_auth"])

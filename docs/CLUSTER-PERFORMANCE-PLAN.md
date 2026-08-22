@@ -58,7 +58,11 @@ records a comparable four-versus-three-voter workload, then the operator
 removes a follower through the existing safe membership API. The current
 leader is never a removal target.
 
-### 2.2 Authentication performs consensus bookkeeping on the request path
+### 2.2 Authentication performed consensus bookkeeping on the request path
+
+This was the pre-#493 baseline. PR #493 completed P1 by retaining the
+authority lookup while suppressing activity writes inside the durability
+window and coalescing concurrent touches per process.
 
 `AuthUser::from_request_parts` calls `Store::user_for_token` for every
 authenticated request. The Hiqlite implementation performs a consistent user
@@ -71,18 +75,18 @@ WHERE token_hash = $2 AND last_seen_at < $3
 
 The predicate prevents a SQLite row change inside the state machine, but it
 does not prevent the command from becoming a Raft log entry. A segment, image,
-or JSON request inside the 60-second activity window therefore still pays for
+or JSON request inside the 60-second activity window therefore used to pay for
 a no-op consensus write.
 
-Scoped API keys have the same shape with no SQL-side window at all:
+Scoped API keys had the same shape with no SQL-side window at all:
 
 ```sql
 UPDATE api_keys SET last_used_at = $1 WHERE id = $2
 ```
 
 `last_seen_at` and `last_used_at` are operator activity hints, not authorization
-facts. They must remain durable enough to be useful, but they do not earn one
-physical commit per request.
+facts. They remain durable enough to be useful without earning one physical
+commit per request. §6.2 records the landed behavior and retained evidence.
 
 ### 2.3 Most replicated reads still rendezvous at the leader
 
@@ -158,17 +162,22 @@ The code should name the class at the call site. A generic helper named only
 `query` or `query_map` is insufficient once two correctness contracts exist.
 
 `BoundedReplica` requires two bounds. First, the node must hold a leader-issued
-watermark containing `(term, leader_id, committed_index, issued_at)` that was
-renewed by a successful quorum `ReadIndex` or equivalent heartbeat proof. The
-term and leader identity must match, and the proof may be at most one second
-old initially. An isolated former leader cannot renew it. Second, the local
-applied index must be known and no farther behind that committed index than the
-configured entry budget. The time lease bounds commits made after the sampled
-index; the entry gate bounds apply backlog at the sample. A node that cannot
-prove every fact falls back to an `Authority` read or fails readiness according
-to the caller's contract. Local `metrics_db()` state and
-`last_log_index - last_applied` alone are explicitly insufficient: they can
-look current on a partitioned follower while a new majority keeps committing.
+watermark containing `(term, leader_id, committed_index)` that was renewed by a
+successful quorum `ReadIndex` or equivalent heartbeat proof. The receiver sets
+a non-persisted monotonic `Instant` deadline one second after the bounded quorum
+request began; network time consumes the lease instead of extending it. The
+proof is invalid after process restart or any observed term or leader-identity
+change. Wall-clock timestamps may be diagnostic fields, but never establish
+freshness. Tests jump wall time both forward and backward and prove the
+monotonic deadline still expires. An isolated former leader cannot renew it.
+Second, the local applied index must be known and no farther behind that
+committed index than the configured entry budget. The time lease bounds commits
+made after the sampled index; the entry gate bounds apply backlog at the
+sample. A node that cannot prove every fact falls back to an `Authority` read
+or fails readiness according to the caller's contract. Local `metrics_db()`
+state and `last_log_index - last_applied` alone are explicitly insufficient:
+they can look current on a partitioned follower while a new majority keeps
+committing.
 
 ### 3.3 Authorization remains immediately revocable
 
@@ -244,7 +253,8 @@ shows a repeatable need.
                  └─────────────┘
 
      optional fourth machine after §6.7:
-       non-voting learner/read worker · proxy · metrics · backup
+       non-voting learner/read worker · proxy · metrics
+       (a non-quorum replicated copy, not a restore-tested backup)
 ```
 
 Every voter must be capable of leadership: comparable durable storage, stable
@@ -266,10 +276,10 @@ Add these families with fixed label vocabularies:
 | `plurx_raft_applied_index` | gauge | none | OpenRaft local metrics watch: latest entry applied on this node |
 | `plurx_raft_apply_lag_entries` | gauge | none | saturating watermark commit minus local applied; meaningful only while both sources are valid |
 | `plurx_raft_leader_changes_total` | counter | none | OpenRaft metrics watch: process-observed leader identity changes |
-| `plurx_raft_snapshot_seconds` | histogram | `outcome` | explicit snapshot build/install start-to-finish hooks, not monitor polling |
-| `plurx_raft_metric_sample_errors_total` | counter | `source` | failed samples from the fixed `watermark` · `local` · `snapshot` vocabulary |
-| `plurx_raft_metric_sample_age_seconds` | gauge | `source` | age of the last successful sample from each fixed source |
-| `plurx_raft_metric_sample_valid` | gauge | `source` | `1` only while the source is present and inside its freshness contract |
+| `plurx_raft_snapshot_seconds` | histogram | `operation`, `outcome` | explicit `build` · `install` snapshot start-to-finish hooks, not monitor polling |
+| `plurx_raft_metric_sample_errors_total` | counter | `source` | failed samples from the fixed `watermark` · `local` vocabulary |
+| `plurx_raft_metric_sample_age_seconds` | gauge | `source` | age of the last successful `watermark` · `local` sample |
+| `plurx_raft_metric_sample_valid` | gauge | `source` | `1` only while the `watermark` · `local` source is present and inside its freshness contract |
 
 Do not label by SQL, route, token, user, node UUID, item, session, or dynamic
 error text. Those values either leak data or create unbounded series.
@@ -285,13 +295,23 @@ result. At minimum:
 | auth burst | one token · 120 authenticated requests in 60 s | physical activity commits · p50/p95/p99 request latency |
 | browse | home, library, item, and search mix against each node | authority/local counts · p50/p95/p99 · follower lag |
 | progress | existing 80-stream deterministic coalescer fixture | incoming beats · physical commits · compacted bytes |
-| topology | identical write mix on four voters, then three | p50/p95/p99 write latency · CPU · network · disk |
+| topology | identical write mix on fresh independent three- and four-voter clusters, with run order counterbalanced | p50/p95/p99 acknowledged-write round trip · CPU · network · disk |
 | follower loss | kill one non-leader under load | errors · latency peak · recovery time |
 | leader loss | kill the reported leader under load | failed requests · election time · time until readiness |
 | snapshot | cross two 10,000-entry snapshot cycles | write tail latency · snapshot duration · retained bytes |
 
-P0 runs each scenario three times on the named cluster-performance runner and
-commits the median baseline plus raw artifacts under a versioned schema. It
+P0 runs at least three paired repetitions of each scenario on the named
+cluster-performance runner. The topology estimand is the paired four-voter ÷
+three-voter ratio for write p99, CPU seconds, storage-write bytes, and network
+transmit bytes. Runs alternate `3→4` and `4→3`; after three pairs, collection
+may stop only when every ratio's two-sided 95% Student-t confidence interval on
+the log scale has a half-width no greater than 5%. Collection stops after seven
+pairs even if that precision is not reached; such a result is recorded as
+`inconclusive` and cannot justify a tuning or latency claim. This pre-registered
+3–7-pair rule prevents optional stopping. Every run records
+the external load-generator host, its resource isolation, and sample count;
+the same pinned client placement is used for both topologies. P0 commits the
+median baseline plus every raw artifact under a versioned schema. It
 also records concrete go/no-go limits before later behavior PRs begin. The
 initial limits are: zero additional request errors; no more than a 10% p99
 regression in unaffected Store classes; less than 2% CPU and wall-time overhead
@@ -309,48 +329,99 @@ microbenchmark alone.
 
 ## 6. Milestones — one correctness boundary per pull request
 
+Milestone numbers describe dependency order, not necessarily one GitHub pull
+request. P0 and P2 cross operational, deterministic-CI, vendor, and
+hardware-evidence boundaries, so they are delivered in the following truthful
+slices:
+
+- **P0a — operations contract:** voter-count guidance, readiness probe cadence,
+  sticky-stream behavior, and child-mount storage layout;
+- **P0b — deterministic topology artifact:** a versioned report schema,
+  percentile/unit tests, fresh independent three- and four-process semantic
+  runs, a stable leader/term boundary, and per-voter local corpus validation
+  proving that both runs use identical logical work;
+- **P0c — named-runner evidence:** after the remaining separate-process M4
+  takeover/partition proof, fresh
+  independent clusters on the pinned four-machine runner, alternating run
+  order, at least three paired runs continued until uncertainty is narrower
+  than the acceptance budget, a pinned isolated load-generator placement,
+  per-node resource captures, medians, the pre-registered paired confidence
+  intervals above, and reviewed budgets;
+- **P2a — observer-safe metrics snapshots:** remove Store calls from the scrape
+  path before Store instrumentation can observe itself;
+- **P2b — Store primitives:** RAII timing for `local_read`, `authority_read`,
+  and `write`, including `cancelled` outcomes;
+- **P2c — passive local Raft state:** applied index, term/leader observations,
+  and monotonic sample validity without claiming a commit watermark;
+- **P2d — quorum watermark:** a narrow vendored leader proof bound to term and
+  leader identity;
+- **P2e — snapshot hooks:** separate build/install operation labels and vendor
+  patch documentation; and
+- **P2f — named-runner overhead evidence:** the before/after artifact enforcing
+  the P0 instrumentation budget.
+
+GitHub-hosted CI accepts schemas, semantics, fixed labels, state transitions,
+and physical-entry budgets. It does not claim stable multi-machine CPU,
+network, disk, election, or p99 evidence; those claims require P0c/P2f on the
+named runner.
+
 ### 6.1 P0 — document and measure the three-versus-four-voter choice
 
 **Change:** After membership PRs #490 and #491 land, rebase before touching
 their shared cluster harness and `OPERATIONS.md` surfaces. Add the odd-voter
 guidance, reverse-proxy readiness contract, sticky stream recommendation, and
 durable-versus-scratch storage layout to the authoritative operations text.
-Extend the cluster benchmark harness to run the same write mix with three and
-four voters and emit the §5.2 record.
+Extend the cluster benchmark harness to run the same write mix on fresh,
+independent three- and four-voter clusters and emit the §5.2 record. Alternate
+the topology order on the named runner; never compare a warm post-removal
+three-voter run with the four-voter cluster that preceded it.
 
 Do not remove a live voter from automation. The operator selects the follower
 after confirming it owns no in-flight transfer and the existing removal API
 accepts the change.
 
-**Acceptance:** CI's replicated-storage contract passes; the benchmark artifact
-contains both voter counts and reports quorum, commit percentiles, lag, and
-resource use with the same dataset and load. The named runner, raw three-run
-results, median baseline, variance, and reviewed comparative budgets are
-committed before P1-P3 performance claims are accepted.
+The M4 core landed in #505: generic lease-fenced publications and coordinated
+scan, provider, genre, and candidate schedulers now share one production
+boundary. P0c remains blocked only on M4's retained real-process proof: pause
+the owner, force takeover and a partition, then bound physical provider calls
+and Raft commits while rejecting the stale owner. Until that proof lands, a
+limited diagnostic baseline may explicitly disable scheduler/provider loops,
+but it cannot support an ordinary-load performance claim.
 
-### 6.2 P1 — suppress no-op auth activity writes
+**Acceptance:** CI's replicated-storage contract passes and validates that the
+artifact contains both voter counts, exact workload identity, quorum, commit
+entry count, acknowledged-write round-trip percentiles, per-voter corpus
+digests, and declared units. CI may emit semantic/synthetic timings but
+does not certify resource or tail-latency claims. The named runner, raw
+three-run results, median baseline, variance, and reviewed comparative budgets
+are committed in P0c before P2-P3 performance claims are accepted. P1 already
+landed as the separately bounded no-op-write removal in #493.
 
-**Change:** In `HiqliteAuthStore::user_for_token`, return the durable
-`last_seen_at` beside the user and skip `execute` inside the 60-second window.
-Apply the same due check to API-key `last_used_at` before the extractor calls
-`touch_api_key`. Add a process-local per-credential singleflight reservation
-before either mutation so concurrent requests on one process submit only one
-entry; clear the reservation on write failure. Keep both authority lookups and
-the SQL race predicates.
+### 6.2 P1 — suppress no-op auth activity writes (implementation in #493; acceptance follow-up pending)
 
-Pin the predicate as `last_activity < now - 60`: never-used is due, 59 seconds
-and exactly 60 seconds are suppressed, 61 seconds is due, and a clock rollback
-suppresses the best-effort touch. Disabled, deleted, or otherwise unauthorized
-credentials never reserve or touch. Add real replicated-store budget tests that
-compare the Raft log delta for sequential and simultaneous requests. One
-process may submit at most one touch per credential per window; `N` serving
+**Landed change:** `HiqliteAuthStore::user_for_token` returns the durable
+`last_seen_at` beside the user and skips `execute` inside the 60-second window.
+The API-key path applies the same due check to `last_used_at` before the
+extractor calls `touch_api_key`. A process-local per-credential singleflight
+reservation makes concurrent requests on one process submit only one entry and
+clears on write failure. Both authority lookups and the SQL race predicates
+remain intact.
+
+The predicate is pinned as `last_activity < now - 60`: never-used is due, 59
+seconds and exactly 60 seconds are suppressed, 61 seconds is due, and a clock
+rollback suppresses the best-effort touch. Disabled, deleted, or otherwise
+unauthorized credentials never reserve or touch. The implementation gives one
+process at most one submitted touch per credential per window; `N` serving
 processes may submit at most `N`, independent of request count.
 
-**Acceptance:** the `cluster.auth` CI point and HTTP auth matrix pass; revocation
-remains immediate; 120 sequential requests inside one window produce no more
-than one physical activity entry after the initial due read. A synchronized
-120-request burst distributed across three HTTP nodes produces no more than
-three entries and exactly one durable timestamp change.
+**Retained evidence and remaining gate:** `cluster.auth` and the HTTP auth
+matrix keep revocation immediate; the merged replicated-store case proves 120
+sequential token authentications produce one physical activity entry. The
+follow-up must still retain a synchronized 120-request burst through three
+independent Store instances for both token and API-key paths, prove no more
+than three submitted entries and exactly one durable timestamp change, and
+prove failed touches release their reservations. Those checks remain required
+after later Store instrumentation changes.
 
 ### 6.3 P2 — instrument Store and Raft cost
 
@@ -443,20 +514,64 @@ durable target. The chosen read-pool value has a retained benchmark artifact.
 ### 6.7 P6 — make the fourth machine useful without adding a vote
 
 **Change:** Add an explicit non-voting learner/read-worker role only after P3's
-lag gate exists. The role receives replication, serves readiness-gated local
-reads and ordinary HTTP/media work, never becomes leader, and never contributes
-to quorum. Joining as a voter remains the default because silently changing an
-existing token's role would alter availability.
+lag gate, P5's voter-grade storage eligibility, and `CLUSTERING-PLAN.md` M4's
+remaining separate-process acceptance. That pause/takeover/partition proof is
+also a prerequisite for P0c ordinary-load evidence; without it, an undetected
+scheduler/provider duplication defect could contaminate the baseline. The role receives replication, serves
+readiness-gated local reads and explicitly eligible HTTP/media work, never
+becomes leader, and never contributes to quorum. Joining as a voter remains the
+default because silently changing an existing token's role would alter
+availability.
 
-Promotion and removal are explicit admin operations. A learner may not claim
-HA redundancy, run leader-singleton jobs, or serve authority reads locally.
-Loss of every voter still makes authority operations unavailable even if the
-learner process is healthy.
+Learner admission is a new versioned protocol, not an optional field on the v1
+voter flow. Use a distinct endpoint plus v2 token prefix/AAD/payload and a v2
+`membership.json`; bind the role in the issued token record and derive it on
+redeem/finalize. An old coordinator or joiner must reject the v2 flow before it
+persists secrets or admits a voter. Effective role always comes from live
+committed membership: Hiqlite's `learner_only` startup hint is not a permanent
+leadership guard after promotion.
 
-**Acceptance:** a three-voter-plus-learner cluster preserves quorum size three,
-distributes bounded reads to the learner, refuses learner leadership, catches
-up after restart, and promotes only through the explicit operation. The UI and
-operations text distinguish compute/read capacity from voting redundancy.
+Publish one route/job eligibility matrix. Learners may run readiness-gated
+bounded catalogue reads and declared node-local media work, but never
+authority reads locally or any scheduler, migration, membership, provider, or
+other leader-singleton job. Report voter replication health and learner
+catch-up separately so a lagged learner cannot claim degraded voter
+redundancy.
+
+Promotion and removal are explicit admin operations. Promotion requires the P3
+watermark/apply catch-up proof, a blocking replication barrier, voter-grade
+durable-storage/headroom preflight, and the same crash-safe joint-configuration
+reconciliation as voter removal. Learner removal first ejects the target from
+routing, activates a generalized admission fence for every eligible HTTP/media
+route, and drains current work. It then settles node-local ownership, persists
+the durable removal fence, removes the learner node, tombstones the data
+directory, and preserves restart refusal without imposing a voter-quorum-size
+check. Every stage is idempotent across crashes and retries, and no new
+node-local work may appear after settlement. Loss
+of every voter still makes authority operations unavailable even if the learner
+process is healthy.
+
+The present shared Hiqlite API secret makes every admitted node part of the
+membership trust boundary: a learner that holds it can call private membership
+routes directly. Either retain and state that all cluster nodes are trusted, or
+vendor a separate membership-mutation credential that learners never receive;
+the public UI alone is not an authorization boundary.
+
+Activation uses a bridge protocol rather than a one-step version bump: deploy
+binaries that support `[4,5]`, actively prove every current voter supports the
+learner protocol, commit activation to `5..5`, and only then admit learner
+traffic. Removal remains available during degraded rollback. Downgrade first
+removes every learner, proves voter-only membership from every voter, and
+deactivates the marker when the protocol permits it.
+
+**Acceptance:** a real separate-process three-voter-plus-learner cluster
+preserves quorum size three, distributes only bounded reads to the learner,
+refuses learner leadership and singleton work, catches up after restart and
+snapshot install, removes/drains safely, and promotes only after catch-up and
+storage preflight. Mixed-version tests prove an old voter blocks activation and
+cannot reinterpret v2 admission as a voter. The UI and operations text
+distinguish compute/read capacity, a non-quorum replicated copy, and voting
+redundancy.
 
 ### 6.8 P7 — close the loop with load-balancer and failure drills
 
@@ -492,21 +607,25 @@ documented discontinuity behavior.
 | 3 | lag-gated catalogue reads | PR 2 | PR 4 inventory only |
 | 4 | replaceable-write coalescers | PR 2 | PR 5 path design |
 | 5 | storage roots + measured read pool | PR 2; P3 measurements for pool | PR 4 |
-| 6 | non-voting learner/read worker | PR 3 | PR 5 |
+| 6 | non-voting learner/read worker | PR 3; PR 5 storage eligibility; clustering M4 singleton fencing | none |
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
+
+`CLUSTERING-PLAN.md` M4's core implementation landed in #505. Its real-process
+pause/takeover/partition acceptance remains before P0c and before any PR in
+this table claims ordinary-load performance. Code instrumentation may be
+prepared before the named-runner baseline, but P0c/P2f acceptance and tuning
+decisions remain blocked until that remaining singleton-work proof passes.
 
 ### 7.2 Existing work and shared-file ownership
 
-Membership PRs #490 and #491 own overlapping changes in
+Membership PRs #490 and #491 have landed. The adversarial follow-up PR #496
+owns their shared artwork/removal corrections in
 `crates/plurx-cluster-check/src/lib.rs`, `crates/plurx-core/tests/store_contract.rs`,
-`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. At this plan revision #491
-has landed and #490 remains open. P0 waits for #490 and rebases before extending
-its harness or operations contract. P1 may develop in parallel with #490
-because it has no semantic dependency, but the two share `store_contract.rs`:
-whichever becomes merge-ready first may land, then the other rebases, resolves
-the shared contract deliberately, and reruns its required CI. Later milestones
-extend the merged M5/M6 contracts rather than copying them into a second
-harness or document.
+`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. P0a/P0b are reconstructed
+from #496's reviewed head rather than replaying its superseded commits. P1's
+implementation landed as #493 and retains the follow-up gate above. Later
+milestones extend the merged M5/M6 contracts rather than copying them into a
+second harness or document.
 
 Before opening each PR, compare its path list with every open cluster PR. One
 branch owns a shared contract at a time; another either waits, moves an
@@ -523,7 +642,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly | move one non-leader only after its reverse path is proven | move bytes back and restore old config before downgrade |
-| P6 | learner membership mutation is refused until every voter advertises the learner protocol; old binaries must reject rather than reinterpret that membership | upgrade all voters first, then add a learner, then enable learner traffic | remove every learner and verify voter-only membership before downgrade; if the chosen compatibility marker is irreversible, old-binary downgrade is unsupported and rollback is a forward fix |
+| P6 | v2 learner admission is refused until an active challenge proves every voter runs the `[4,5]` bridge; old endpoints/joiners reject rather than ignore the role, then activation commits `5..5` | upgrade all voters, prove capability, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; if activation is irreversible, rollback is a forward fix |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or

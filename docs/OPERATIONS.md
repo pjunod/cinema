@@ -318,9 +318,83 @@ rejoining means discarding it.
 The rest of this section is the terminal path. It is the same three endpoints
 the Cluster tab drives, and is the right path for a scripted or headless setup.
 
-Use one, three, or more voters. Two voters are useful only while adding or
-removing a node: they require both processes for every write and survive no
-failure.
+Use one voter for a deliberately non-HA install and three voters for ordinary
+HA. Two voters are useful only while adding or removing a node: they require
+both processes for every write and survive no failure. Four voters still
+tolerate only one failure, but every write now needs three acknowledgements
+instead of two; it adds replica work without adding failure tolerance. Use five
+only when surviving two simultaneous voter losses is an explicit requirement
+and its measured write cost is acceptable. Removing a fourth voter is always
+an operator decision through the safe membership API, never an automated
+"performance" action.
+
+`make cluster-check` now creates
+`target/validation/cluster-topology-semantic.json`. It starts fresh independent
+three- and four-process clusters, sends the same 64 quorum-acknowledged setting
+writes to each elected leader, and records raw controller-to-node acknowledged
+write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
+physical Raft-entry count, the stable leader term, and every voter's applied
+index. Every voter locally reads back the deterministic 64-row/4,096-byte
+payload and must match the expected corpus digest. The round trip includes
+harness IPC and scheduling; it is not an internal Raft commit timer. This is
+deterministic semantic CI evidence: resource fields are explicitly null and
+the artifact cannot support a hardware or absolute-latency claim. A
+counterbalanced semantic run can be requested with
+`cargo run -p plurx-cluster-check -- topology <output.json> 4,3`; P0c's named
+runner wraps the same schema with isolated load generation and real per-node
+resource counters. The portable Draft 2020-12 schema enforces shape, topology,
+and evidence-scope resource fields; `validate_topology_artifact` remains the
+canonical check for cross-field hashes, recomputed percentiles, timestamps,
+applied lag, and leader/term semantics that JSON Schema cannot express.
+
+**Keep consensus storage separate from heavy local I/O.** Until dedicated path
+settings ship, `storage.data_dir` remains the compatibility root. On a fresh
+install, child mounts can isolate their workloads:
+
+| Path | Durability | Placement |
+|---|---|---|
+| `<data_dir>/hiqlite` plus the data-root authority set described below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
+| `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
+
+Create and mount every child before the first `plurxd` start; an empty fallback
+directory on the root filesystem is not a successful installation. The
+data-root authority set is the entire `hiqlite/` tree (including its
+`activation.json`), `node.id`, `membership.json`, `secret_raft`, `secret_api`,
+`hiqlite-activated.json`, `hiqlite-readdress.json` when present, and the
+`migration/` directory when present. Preserve the retained `plurx.db` and
+`backups/` with that set for rollback and recovery; do not confuse the root
+`hiqlite-activated.json` lost-target fence with `hiqlite/activation.json`.
+Keep every secret and marker owner-only while copying. Keep the credential key
+with the same durable backup set. If
+`cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
+that exact owner-only file is authoritative and belongs in the same backup and
+move procedure. Each voter owns its own Hiqlite storage: sharing that directory
+between machines defeats Raft's independent failure model.
+
+Do not mount over a populated child directory: that merely hides its data. To
+move an existing cluster, work one non-leader voter at a time. Eject it from
+the load balancer, stop `plurxd`, copy the child contents to the intended device
+while preserving ownership, modes, timestamps, and links, mount the device,
+and verify the copied tree plus free space before restart. Restart and require
+readiness, membership catch-up, and the expected cache/artwork inventory before
+moving the next voter. On failure, stop the daemon, unmount the new device, and
+restart from the untouched original directory; delete neither copy until the
+cluster has completed a soak period. If the authoritative device changes,
+copy the whole stopped data root first and mount `cache/`, `artwork/`, and
+`transcode/` separately only after the authority-set copy is verified. This
+include-first procedure automatically preserves new control files introduced
+by a later release. Never move two voters concurrently.
+
+**Synchronize clocks before cluster work.** All voters and the external load
+generator must run NTP/chrony (or an equivalent disciplined source), and
+monitor offset continuously. Membership reachability and artwork repair proofs
+currently compare Unix timestamps from different nodes. Treat an absolute
+offset above 250 ms, loss of synchronization, or an offset outside the bound
+recorded in the benchmark artifact as a go/no-go failure for membership changes,
+failure drills, or performance runs. Bounded-replica freshness uses a local
+monotonic deadline, but clock synchronization remains an operational
+prerequisite for the existing cross-node protocols and comparable evidence.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
@@ -404,9 +478,11 @@ join_token_file = "/secure/plurx.join"
 
 **Read the roster.** `availability` is `single_node`,
 `degraded_reconfiguration`, or `high_availability`. Node rows deliberately
-contain only node id · Raft id · role · reachable · last-seen; addresses and
-token material never enter this payload. `last_seen_at` is Unix milliseconds;
-read the nested `replication` object for lag using the meanings above.
+contain only node id · short hostname · advertised host without its listener
+port · Raft id · role · leadership · reachability · last-seen; internal Raft
+and API addresses, media paths, and token material never enter this payload.
+`last_seen_at` is Unix milliseconds; read the nested `replication` object for
+lag using the meanings above.
 
 ```bash
 curl -fsS "$PLURX/api/v1/cluster/nodes" \
@@ -422,6 +498,21 @@ machine. `/healthz` is insufficient here; it proves that HTTP is alive, not
 that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
+
+**Use readiness conservatively at the reverse proxy.** `/readyz` is an active
+replicated-store proof, not a free process counter: it checks cluster health and
+performs an authority `SELECT 1`. Start with a 10-second interval, a 2-second
+timeout, and three consecutive failures before ejecting a backend. Use
+`/healthz` for higher-frequency process supervision. Route new requests only to
+ready nodes, drain an ejected backend's existing connections, and do not
+automatically replay POST, PUT, PATCH, or DELETE requests after a backend
+failure.
+
+Keep HLS playlists, segments, and authenticated image traffic sticky to one
+ready backend for cache and session locality. A cookie or source-hash policy is
+fine; stickiness is an optimization, not an availability dependency. If that
+backend becomes unready, the next request may move to a survivor and the
+client-visible recovery contract still applies.
 
 **Let artwork converge before relying on a voter for failover.** Item rows name
 poster and backdrop files through Raft, while the image bytes remain in each

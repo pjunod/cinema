@@ -389,6 +389,11 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("run: make cluster-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
+        self.assertIn("name: cluster-topology-semantic", cluster)
+        self.assertIn(
+            "path: target/validation/cluster-topology-semantic.json", cluster
+        )
+        self.assertIn("if-no-files-found: error", cluster)
 
         # The docker smoke build keeps the GHA layer cache wired so the
         # ffmpeg runtime layers stop re-downloading on every run.
