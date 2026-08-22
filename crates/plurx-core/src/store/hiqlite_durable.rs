@@ -1057,55 +1057,59 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         manifest_digest: Option<&str>,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
-        let results = self
-            .client()
-            .txn(vec![
-                (
-                    "UPDATE offline_packages
+        let statements = vec![
+            (
+                "UPDATE offline_packages
                         SET state = 'failed', phase = 'integrity',
                             error_code = 'cache_integrity',
                             error_message = 'Prepared media failed its generation integrity check.',
-                            updated_at = $6
-                      WHERE node_id = $2 AND recipe_hash = $1 AND state = 'ready'
+                            updated_at = $1
+                      WHERE node_id = $2 AND recipe_hash = $3 AND state = 'ready'
                         AND EXISTS (
                             SELECT 1 FROM transcode_cache_locations location
-                             WHERE location.recipe_hash = $1 AND location.node_id = $2
-                               AND location.storage_class = $3
-                               AND location.relative_dir = $4
-                               AND (location.manifest_digest = $5
-                                 OR (location.manifest_digest IS NULL AND $5 IS NULL)))"
-                        .to_owned(),
-                    params!(
-                        recipe_hash,
-                        node_id,
-                        storage_class,
-                        relative_dir,
-                        manifest_digest,
-                        now
-                    ),
+                             WHERE location.recipe_hash = $3 AND location.node_id = $2
+                               AND location.storage_class = $4
+                               AND location.relative_dir = $5
+                               AND (location.manifest_digest = $6
+                                 OR (location.manifest_digest IS NULL AND $6 IS NULL)))"
+                    .to_owned(),
+                params!(
+                    now,
+                    node_id,
+                    recipe_hash,
+                    storage_class,
+                    relative_dir,
+                    manifest_digest
                 ),
-                (
-                    "DELETE FROM transcode_cache_locations WHERE recipe_hash = $1
+            ),
+            (
+                "DELETE FROM transcode_cache_locations WHERE recipe_hash = $1
                        AND node_id = $2 AND storage_class = $3 AND relative_dir = $4
                        AND (manifest_digest = $5
                          OR (manifest_digest IS NULL AND $5 IS NULL))"
-                        .to_owned(),
-                    params!(
-                        recipe_hash,
-                        node_id,
-                        storage_class,
-                        relative_dir,
-                        manifest_digest
-                    ),
+                    .to_owned(),
+                params!(
+                    recipe_hash,
+                    node_id,
+                    storage_class,
+                    relative_dir,
+                    manifest_digest
                 ),
-                (
-                    "DELETE FROM transcode_cache_recipes WHERE recipe_hash = $1
+            ),
+            (
+                "DELETE FROM transcode_cache_recipes WHERE recipe_hash = $1
                        AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations
                                        WHERE recipe_hash = $1)"
-                        .to_owned(),
-                    params!(recipe_hash),
-                ),
-            ])
+                    .to_owned(),
+                params!(recipe_hash),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let results = self
+            .client()
+            .txn(statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
