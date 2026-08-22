@@ -558,9 +558,9 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             expected_corpus
                 .iter()
                 .try_fold(0_u64, |total, (_, value)| -> Result<u64> {
-                    Ok(total
+                    total
                         .checked_add(u64::try_from(value.len())?)
-                        .context("topology expected payload size overflowed")?)
+                        .context("topology expected payload size overflowed")
                 })?;
         let expected_corpus_sha256 = corpus_sha256(&expected_corpus)?;
         if run.dataset_rows != artifact.workload.operations
@@ -691,8 +691,8 @@ mod tests {
 
     fn fixture_run(voter_count: u64, workload_sha256: &str) -> TopologyRun {
         let workload = TopologyWorkload::semantic();
-        let corpus = expected_corpus(&workload).unwrap();
-        let expected_corpus_sha256 = corpus_sha256(&corpus).unwrap();
+        let corpus = expected_corpus(&workload).expect("build fixture corpus");
+        let expected_corpus_sha256 = corpus_sha256(&corpus).expect("hash fixture corpus");
         let raw_acknowledged_write_round_trip_us =
             (1..=TOPOLOGY_WRITE_OPERATIONS).collect::<Vec<_>>();
         TopologyRun {
@@ -712,17 +712,17 @@ mod tests {
                 &raw_acknowledged_write_round_trip_us,
                 0.50,
             )
-            .unwrap(),
+            .expect("fixture p50"),
             acknowledged_write_round_trip_p95_us: percentile_type7(
                 &raw_acknowledged_write_round_trip_us,
                 0.95,
             )
-            .unwrap(),
+            .expect("fixture p95"),
             acknowledged_write_round_trip_p99_us: percentile_type7(
                 &raw_acknowledged_write_round_trip_us,
                 0.99,
             )
-            .unwrap(),
+            .expect("fixture p99"),
             raw_acknowledged_write_round_trip_us,
             dataset_rows: TOPOLOGY_WRITE_OPERATIONS,
             dataset_payload_bytes: TOPOLOGY_WRITE_OPERATIONS * TOPOLOGY_VALUE_BYTES as u64,
@@ -808,7 +808,7 @@ mod tests {
 
     fn fixture() -> ClusterTopologyArtifact {
         let workload = TopologyWorkload::semantic();
-        let workload_sha256 = workload.sha256().unwrap();
+        let workload_sha256 = workload.sha256().expect("hash fixture workload");
         ClusterTopologyArtifact {
             schema_version: TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
             evidence_scope: SEMANTIC_EVIDENCE_SCOPE.to_owned(),
@@ -828,8 +828,8 @@ mod tests {
     #[test]
     fn topology_artifact_uses_linear_type7_percentiles() {
         let samples = [7, 15, 36, 39, 40, 41];
-        assert_eq!(percentile_type7(&samples, 0.50).unwrap(), 37.5);
-        assert_eq!(percentile_type7(&samples, 0.95).unwrap(), 40.75);
+        assert_eq!(percentile_type7(&samples, 0.50).expect("p50"), 37.5);
+        assert_eq!(percentile_type7(&samples, 0.95).expect("p95"), 40.75);
         assert!(percentile_type7(&[], 0.50).is_err());
         assert!(percentile_type7(&samples, 1.01).is_err());
     }
@@ -841,28 +841,28 @@ mod tests {
         let mut wrong_hash = fixture();
         wrong_hash.runs[1].workload_sha256 = "b".repeat(64);
         assert!(validate_topology_artifact(&wrong_hash)
-            .unwrap_err()
+            .expect_err("reject mismatched workload hash")
             .to_string()
             .contains("identical workload"));
 
         let mut wrong_commits = fixture();
         wrong_commits.runs[0].physical_commit_entries = 3;
         assert!(validate_topology_artifact(&wrong_commits)
-            .unwrap_err()
+            .expect_err("reject incorrect physical commit count")
             .to_string()
             .contains("one Raft entry"));
 
         let mut invented_resources = fixture();
         invented_resources.runs[0].resources[0].cpu_seconds = Some(0.0);
         assert!(validate_topology_artifact(&invented_resources)
-            .unwrap_err()
+            .expect_err("reject semantic resource claims")
             .to_string()
             .contains("must not claim"));
 
         let mut wrong_corpus = fixture();
         wrong_corpus.runs[0].corpus_observations[1].rows -= 1;
         assert!(validate_topology_artifact(&wrong_corpus)
-            .unwrap_err()
+            .expect_err("reject mismatched voter corpus")
             .to_string()
             .contains("logical dataset"));
     }
@@ -1013,8 +1013,11 @@ mod tests {
 
     #[test]
     fn topology_artifact_order_is_explicit_and_counterbalanced() {
-        assert_eq!(parse_topology_order(None).unwrap(), [3, 4]);
-        assert_eq!(parse_topology_order(Some("4,3")).unwrap(), [4, 3]);
+        assert_eq!(parse_topology_order(None).expect("default order"), [3, 4]);
+        assert_eq!(
+            parse_topology_order(Some("4,3")).expect("reverse order"),
+            [4, 3]
+        );
         assert!(parse_topology_order(Some("3")).is_err());
         assert!(parse_topology_order(Some("3,3")).is_err());
     }
