@@ -1337,7 +1337,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     require_membership_error(
         cluster
             .request(
-                observer,
+                leader,
                 Request::RemoveVoter {
                     node_id: format!("node-{quorum_target}"),
                 },
