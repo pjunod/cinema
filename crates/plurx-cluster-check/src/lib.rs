@@ -4138,7 +4138,13 @@ async fn handle_request(
             if observed_at_ms >= lease.expires_at_unix_ms {
                 return Ok(Response::Flag { value: false });
             }
-            let replacement = lease.publication_successor()?;
+            let replacement = match lease.publication_successor() {
+                Ok(replacement) => replacement,
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => {
+                    return Ok(Response::Flag { value: false });
+                }
+                Err(error) => return Err(error.into()),
+            };
             match store_ref(store)?
                 .put_setting_fenced(key, "removed-owner-write", lease, &replacement)
                 .await
