@@ -117,8 +117,25 @@ pub(crate) async fn snapshots_cleanup(
     #[cfg(feature = "backup")] path_backups: String,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
 ) -> Result<(), StorageError<NodeId>> {
-    let snapshot_files = snapshot_files.lock().await;
-    let keep_id = snapshot_files.current_id.as_deref();
+    let mut snapshot_files = snapshot_files.lock().await;
+    // The pointer is the durable publication boundary. Process-local state can
+    // lag it when cancellation or an fsync error arrives after the atomic
+    // rename, so cleanup must resolve ownership from disk and fail closed when
+    // that decision cannot be read.
+    let keep_id = match load_current_snapshot(&path_snapshots).await? {
+        SnapshotPointer::Snapshot(snapshot_id) => Some(snapshot_id),
+        SnapshotPointer::Empty => None,
+        SnapshotPointer::Missing => {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "snapshot cleanup refused without a current pointer",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            });
+        }
+    };
+    snapshot_files.current_id.clone_from(&keep_id);
     let mut list = tokio::fs::read_dir(&path_snapshots)
         .await
         .map_err(|err| StorageError::IO {
@@ -126,7 +143,16 @@ pub(crate) async fn snapshots_cleanup(
         })?;
 
     let mut deletes = Vec::new();
-    while let Ok(Some(entry)) = list.next_entry().await {
+    loop {
+        let Some(entry) = list
+            .next_entry()
+            .await
+            .map_err(|error| StorageError::IO {
+                source: StorageIOError::read(&error),
+            })?
+        else {
+            break;
+        };
         let file_name = entry.file_name();
         let name = file_name.to_str().unwrap_or("UNKNOWN");
 
@@ -140,11 +166,11 @@ pub(crate) async fn snapshots_cleanup(
             continue;
         }
 
-        // `begin_receiving_snapshot` owns `temp`; the shared current id owns
-        // whichever local build or peer install actually completed last. A
-        // cleanup task may run long after the build that spawned it, so its
-        // captured build id is not a safe retention decision.
-        if Some(name) != keep_id
+        // `begin_receiving_snapshot` owns `temp`; the durable pointer owns the
+        // current local build or peer install. A cleanup task may run long
+        // after the build that spawned it, so process-local state is not a safe
+        // retention decision.
+        if Some(name) != keep_id.as_deref()
             && name != "temp"
             && name != CURRENT_SNAPSHOT_POINTER
             && name != CURRENT_SNAPSHOT_POINTER_TEMP
@@ -323,7 +349,9 @@ mod snapshot_metrics_cleanup_contract {
             .expect("create backup cleanup root");
 
         let snapshot_files = Arc::new(Mutex::new(SnapshotFileState {
-            current_id: Some(installed_id.to_string()),
+            // Emulate cancellation or directory-fsync failure after the
+            // durable pointer rename but before the process-local assignment.
+            current_id: Some(newer_orphan_id.to_string()),
         }));
         snapshots_cleanup(
             root.to_str().expect("UTF-8 snapshot cleanup root").to_owned(),
