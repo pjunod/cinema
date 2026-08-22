@@ -9,10 +9,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-#[cfg(feature = "cluster-read-cost-validation")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hiqlite::macros::params;
@@ -245,6 +244,255 @@ impl Drop for ActivityRefreshReservation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StoreOperationClass {
+    LocalRead,
+    AuthorityRead,
+    Write,
+}
+
+impl StoreOperationClass {
+    const ALL: [Self; 3] = [Self::LocalRead, Self::AuthorityRead, Self::Write];
+
+    fn index(self) -> usize {
+        match self {
+            Self::LocalRead => 0,
+            Self::AuthorityRead => 1,
+            Self::Write => 2,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalRead => "local_read",
+            Self::AuthorityRead => "authority_read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StoreOperationOutcome {
+    Ok,
+    Error,
+    Cancelled,
+}
+
+impl StoreOperationOutcome {
+    const ALL: [Self; 3] = [Self::Ok, Self::Error, Self::Cancelled];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Ok => 0,
+            Self::Error => 1,
+            Self::Cancelled => 2,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+const STORE_OPERATION_BUCKETS: [(u64, &str); 12] = [
+    (1_000_000, "0.001"),
+    (5_000_000, "0.005"),
+    (10_000_000, "0.01"),
+    (25_000_000, "0.025"),
+    (50_000_000, "0.05"),
+    (100_000_000, "0.1"),
+    (250_000_000, "0.25"),
+    (500_000_000, "0.5"),
+    (1_000_000_000, "1"),
+    (2_500_000_000, "2.5"),
+    (5_000_000_000, "5"),
+    (10_000_000_000, "10"),
+];
+
+#[derive(Default)]
+struct StoreOperationCell {
+    count: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; STORE_OPERATION_BUCKETS.len()],
+}
+
+struct StoreOperationMetrics {
+    cells: [StoreOperationCell; 9],
+}
+
+impl Default for StoreOperationMetrics {
+    fn default() -> Self {
+        Self {
+            cells: std::array::from_fn(|_| StoreOperationCell::default()),
+        }
+    }
+}
+
+impl StoreOperationMetrics {
+    fn saturating_add(target: &AtomicU64, amount: u64) {
+        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current != u64::MAX).then(|| current.saturating_add(amount))
+        });
+    }
+
+    fn cell(
+        &self,
+        class: StoreOperationClass,
+        outcome: StoreOperationOutcome,
+    ) -> &StoreOperationCell {
+        &self.cells[class.index() * StoreOperationOutcome::ALL.len() + outcome.index()]
+    }
+
+    fn record(
+        &self,
+        class: StoreOperationClass,
+        outcome: StoreOperationOutcome,
+        elapsed: Duration,
+    ) {
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let cell = self.cell(class, outcome);
+        Self::saturating_add(&cell.count, 1);
+        Self::saturating_add(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = STORE_OPERATION_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            Self::saturating_add(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_store_operation_seconds Replicated Store operation latency by consistency class and outcome.\n\
+             # TYPE plurx_store_operation_seconds histogram\n",
+        );
+        for class in StoreOperationClass::ALL {
+            for outcome in StoreOperationOutcome::ALL {
+                let cell = self.cell(class, outcome);
+                let mut cumulative = 0_u64;
+                for (index, (_, upper)) in STORE_OPERATION_BUCKETS.iter().enumerate() {
+                    cumulative =
+                        cumulative.saturating_add(cell.buckets[index].load(Ordering::Relaxed));
+                    let _ = writeln!(
+                        out,
+                        "plurx_store_operation_seconds_bucket{{class=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
+                        class.label(),
+                        outcome.label(),
+                        upper,
+                        cumulative,
+                    );
+                }
+                let count = cell.count.load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "plurx_store_operation_seconds_bucket{{class=\"{}\",outcome=\"{}\",le=\"+Inf\"}} {}",
+                    class.label(),
+                    outcome.label(),
+                    count,
+                );
+                let elapsed_nanos = cell.elapsed_nanos.load(Ordering::Relaxed);
+                let seconds = elapsed_nanos as f64 / 1_000_000_000.0;
+                let _ = writeln!(
+                    out,
+                    "plurx_store_operation_seconds_sum{{class=\"{}\",outcome=\"{}\"}} {seconds:.9}",
+                    class.label(),
+                    outcome.label(),
+                );
+                let _ = writeln!(
+                    out,
+                    "plurx_store_operation_seconds_count{{class=\"{}\",outcome=\"{}\"}} {count}",
+                    class.label(),
+                    outcome.label(),
+                );
+            }
+        }
+        out.push_str(
+            "# HELP plurx_store_operations_total Replicated Store operations by consistency class and outcome.\n\
+             # TYPE plurx_store_operations_total counter\n",
+        );
+        for class in StoreOperationClass::ALL {
+            for outcome in StoreOperationOutcome::ALL {
+                let count = self.cell(class, outcome).count.load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "plurx_store_operations_total{{class=\"{}\",outcome=\"{}\"}} {count}",
+                    class.label(),
+                    outcome.label(),
+                );
+            }
+        }
+        out
+    }
+}
+
+static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
+    LazyLock::new(StoreOperationMetrics::default);
+
+struct StoreOperationTimer {
+    metrics: &'static StoreOperationMetrics,
+    class: StoreOperationClass,
+    started_at: Instant,
+    completed: bool,
+}
+
+impl StoreOperationTimer {
+    fn start(metrics: &'static StoreOperationMetrics, class: StoreOperationClass) -> Self {
+        Self {
+            metrics,
+            class,
+            started_at: Instant::now(),
+            completed: false,
+        }
+    }
+
+    fn complete(mut self, outcome: StoreOperationOutcome) {
+        self.metrics
+            .record(self.class, outcome, self.started_at.elapsed());
+        self.completed = true;
+    }
+}
+
+impl Drop for StoreOperationTimer {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.metrics.record(
+                self.class,
+                StoreOperationOutcome::Cancelled,
+                self.started_at.elapsed(),
+            );
+        }
+    }
+}
+
+async fn time_store_operation<T>(
+    metrics: &'static StoreOperationMetrics,
+    class: StoreOperationClass,
+    operation: impl Future<Output = Result<T, StoreError>>,
+    successful: impl FnOnce(&T) -> bool,
+) -> Result<T, StoreError> {
+    let timer = StoreOperationTimer::start(metrics, class);
+    let result = operation.await;
+    timer.complete(match result.as_ref() {
+        Ok(value) if successful(value) => StoreOperationOutcome::Ok,
+        Ok(_) | Err(_) => StoreOperationOutcome::Error,
+    });
+    result
+}
+
+/// Render fixed-cardinality process metrics for all replicated Store calls.
+///
+/// SQLite mode leaves these series at zero. Rendering reads only atomics and
+/// cannot execute or wait on the Store operation it describes.
+pub fn prometheus_store_operations() -> String {
+    STORE_OPERATION_METRICS.render()
+}
+
 /// The only application-facing path to hiqlite. Keeping the timeout at this
 /// boundary prevents new catalogue or durable-store calls from accidentally
 /// waiting forever on a wedged leader.
@@ -296,7 +544,13 @@ impl TimedClient {
         self.operations
             .consistent_query_calls
             .fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().query_consistent_map(sql, params)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::AuthorityRead,
+            timeout_store(self.inner().query_consistent_map(sql, params)),
+            |_| true,
+        )
+        .await
     }
 
     pub(super) async fn query_map<T, S>(
@@ -314,7 +568,13 @@ impl TimedClient {
         self.operations
             .non_consistent_query_calls
             .fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().query_map(sql, params)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::LocalRead,
+            timeout_store(self.inner().query_map(sql, params)),
+            |_| true,
+        )
+        .await
     }
 
     pub(super) async fn execute<S>(
@@ -329,7 +589,13 @@ impl TimedClient {
         validate_sql(&sql)?;
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().execute(sql, params)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().execute(sql, params)),
+            |_| true,
+        )
+        .await
     }
 
     pub(super) async fn execute_returning_map<S, T>(
@@ -345,7 +611,13 @@ impl TimedClient {
         validate_sql(&sql)?;
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().execute_returning_map(sql, params)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().execute_returning_map(sql, params)),
+            |rows| rows.iter().all(Result::is_ok),
+        )
+        .await
     }
 
     pub(super) async fn execute_returning_map_one<S, T>(
@@ -361,7 +633,13 @@ impl TimedClient {
         validate_sql(&sql)?;
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().execute_returning_map_one(sql, params)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().execute_returning_map_one(sql, params)),
+            |_| true,
+        )
+        .await
     }
 
     pub(super) async fn txn<C, Q>(
@@ -381,7 +659,13 @@ impl TimedClient {
         }
         #[cfg(feature = "cluster-read-cost-validation")]
         self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
-        timeout_store(self.inner().txn(statements)).await
+        time_store_operation(
+            &STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            timeout_store(self.inner().txn(statements)),
+            |results| results.iter().all(Result::is_ok),
+        )
+        .await
     }
 
     pub(super) async fn is_healthy_db(&self) -> Result<(), StoreError> {
@@ -415,6 +699,61 @@ impl HiqliteAuthStore {
     #[doc(hidden)]
     pub fn validation_operation_counts(&self) -> HiqliteOperationCounts {
         self.client.operations.snapshot()
+    }
+
+    /// Snapshot successful calls from the production metrics recorder. The
+    /// validation contract compares deltas while it exclusively owns its
+    /// three-voter fixture; production exposition remains process-wide.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_successful_metric_counts(&self) -> HiqliteOperationCounts {
+        HiqliteOperationCounts {
+            consistent_query_calls: STORE_OPERATION_METRICS
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            non_consistent_query_calls: STORE_OPERATION_METRICS
+                .cell(StoreOperationClass::LocalRead, StoreOperationOutcome::Ok)
+                .count
+                .load(Ordering::Relaxed),
+            write_calls: STORE_OPERATION_METRICS
+                .cell(StoreOperationClass::Write, StoreOperationOutcome::Ok)
+                .count
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    /// Current production-metric count for statement-level write failures.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_failed_write_metric_count(&self) -> u64 {
+        STORE_OPERATION_METRICS
+            .cell(StoreOperationClass::Write, StoreOperationOutcome::Error)
+            .count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Submit a valid transaction whose statement violates the seeded
+    /// instance-id uniqueness constraint. Hiqlite returns this as an inner
+    /// statement error, which the production timer must classify as failed.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub async fn validation_duplicate_instance_id_transaction(&self) -> Result<(), StoreError> {
+        let results = self
+            .client()
+            .txn([(
+                "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)",
+                params!(keys::INSTANCE_ID, "duplicate", self.now()?),
+            )])
+            .await?;
+        results
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(())
     }
 
     /// Create the complete durable schema on a fresh cluster and seed its
@@ -700,33 +1039,34 @@ impl HiqliteAuthStore {
         for sql in statements {
             validate_sql(sql)?;
         }
-        timeout_store(self.client().txn(vec![
-            (statements[0].to_owned(), params!()),
-            (statements[1].to_owned(), params!()),
-            (statements[2].to_owned(), params!()),
-            (statements[3].to_owned(), params!()),
-            (statements[4].to_owned(), params!()),
-            (statements[5].to_owned(), params!()),
-            (statements[6].to_owned(), params!()),
-            (statements[7].to_owned(), params!()),
-            (statements[8].to_owned(), params!()),
-            (statements[9].to_owned(), params!()),
-            (statements[10].to_owned(), params!()),
-            (statements[11].to_owned(), params!()),
-            (statements[12].to_owned(), params!()),
-            (statements[13].to_owned(), params!()),
-            (statements[14].to_owned(), params!()),
-            (statements[15].to_owned(), params!()),
-            (statements[16].to_owned(), params!()),
-            (statements[17].to_owned(), params!()),
-            (statements[18].to_owned(), params!()),
-            (statements[19].to_owned(), params!()),
-            (statements[20].to_owned(), params!(keys::INSTANCE_ID)),
-        ]))
-        .await?
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)?;
+        self.client()
+            .txn(vec![
+                (statements[0].to_owned(), params!()),
+                (statements[1].to_owned(), params!()),
+                (statements[2].to_owned(), params!()),
+                (statements[3].to_owned(), params!()),
+                (statements[4].to_owned(), params!()),
+                (statements[5].to_owned(), params!()),
+                (statements[6].to_owned(), params!()),
+                (statements[7].to_owned(), params!()),
+                (statements[8].to_owned(), params!()),
+                (statements[9].to_owned(), params!()),
+                (statements[10].to_owned(), params!()),
+                (statements[11].to_owned(), params!()),
+                (statements[12].to_owned(), params!()),
+                (statements[13].to_owned(), params!()),
+                (statements[14].to_owned(), params!()),
+                (statements[15].to_owned(), params!()),
+                (statements[16].to_owned(), params!()),
+                (statements[17].to_owned(), params!()),
+                (statements[18].to_owned(), params!()),
+                (statements[19].to_owned(), params!()),
+                (statements[20].to_owned(), params!(keys::INSTANCE_ID)),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         Ok(())
     }
 
@@ -769,40 +1109,40 @@ impl HiqliteAuthStore {
             .map_err(|_| {
                 StoreError::Database("replicated store operation timed out".to_owned())
             })??,
-            cluster_meta: timeout_store(self.client().query_map(
+            cluster_meta: self.client().query_map(
                 "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
                      FROM cluster_meta ORDER BY singleton",
                 params!(),
-            ))
+            )
             .await?,
-            settings: timeout_store(self.client().query_map(
+            settings: self.client().query_map(
                 "SELECT key, value, updated_at FROM settings ORDER BY key",
                 params!(),
-            ))
+            )
             .await?,
-            users: timeout_store(self.client().query_map(
+            users: self.client().query_map(
                 "SELECT id, username, password_hash, is_admin, created_at \
                      FROM users ORDER BY id",
                 params!(),
-            ))
+            )
             .await?,
-            tokens: timeout_store(self.client().query_map(
+            tokens: self.client().query_map(
                 "SELECT token_hash, user_id, device, created_at, last_seen_at \
                      FROM tokens ORDER BY token_hash",
                 params!(),
-            ))
+            )
             .await?,
-            api_keys: timeout_store(self.client().query_map(
+            api_keys: self.client().query_map(
                 "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
                      FROM api_keys ORDER BY id",
                 params!(),
-            ))
+            )
             .await?,
-            job_leases: timeout_store(self.client().query_map(
+            job_leases: self.client().query_map(
                 "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
                      FROM job_leases ORDER BY resource",
                 params!(),
-            ))
+            )
             .await?,
         })
     }
@@ -899,7 +1239,7 @@ impl HiqliteAuthStore {
         params: hiqlite::Params,
     ) -> Result<usize, StoreError> {
         validate_sql(sql)?;
-        timeout_store(self.client().execute(sql, params)).await
+        self.client().execute(sql, params).await
     }
 
     async fn user_optional(
@@ -908,11 +1248,10 @@ impl HiqliteAuthStore {
         params: hiqlite::Params,
     ) -> Result<Option<User>, StoreError> {
         validate_sql(sql)?;
-        let mut rows = timeout_store(
-            self.client()
-                .query_consistent_map::<UserRow, _>(sql, params),
-        )
-        .await?;
+        let mut rows = self
+            .client()
+            .query_consistent_map::<UserRow, _>(sql, params)
+            .await?;
         Ok(rows.pop().map(Into::into))
     }
 
@@ -922,11 +1261,10 @@ impl HiqliteAuthStore {
         params: hiqlite::Params,
     ) -> Result<Option<ApiKey>, StoreError> {
         validate_sql(sql)?;
-        let mut rows = timeout_store(
-            self.client()
-                .query_consistent_map::<ApiKeyRow, _>(sql, params),
-        )
-        .await?;
+        let mut rows = self
+            .client()
+            .query_consistent_map::<ApiKeyRow, _>(sql, params)
+            .await?;
         Ok(rows.pop().map(Into::into))
     }
 }
@@ -1035,14 +1373,13 @@ impl MetricsStore for HiqliteAuthStore {
 #[async_trait]
 impl SettingsStore for HiqliteAuthStore {
     async fn ping(&self) -> Result<(), StoreError> {
-        timeout_store(self.client().is_healthy_db()).await?;
+        self.client().is_healthy_db().await?;
         let sql = "SELECT 1 AS healthy";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<PingRow, _>(sql, params!()),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<PingRow, _>(sql, params!())
+            .await?;
         if rows.len() == 1 && rows[0].healthy == 1 {
             Ok(())
         } else {
@@ -1055,11 +1392,10 @@ impl SettingsStore for HiqliteAuthStore {
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
         let sql = "SELECT value FROM settings WHERE key = $1";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<SettingValueRow, _>(sql, params!(key)),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<SettingValueRow, _>(sql, params!(key))
+            .await?;
         Ok(rows.into_iter().next().map(|row| row.value))
     }
 
@@ -1070,11 +1406,10 @@ impl SettingsStore for HiqliteAuthStore {
     ) -> Result<(Option<String>, Option<String>), StoreError> {
         let sql = "SELECT key, value FROM settings WHERE key = $1 OR key = $2 ORDER BY key";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<SettingEntryRow, _>(sql, params!(first, second)),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<SettingEntryRow, _>(sql, params!(first, second))
+            .await?;
         let mut pair = (None, None);
         for row in rows {
             if row.key == first {
@@ -1092,11 +1427,10 @@ impl SettingsStore for HiqliteAuthStore {
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
         let sql = "SELECT key, value FROM settings ORDER BY key";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<SettingEntryRow, _>(sql, params!()),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<SettingEntryRow, _>(sql, params!())
+            .await?;
         Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
     }
 
@@ -1187,11 +1521,10 @@ impl UserStore for HiqliteAuthStore {
     async fn count_users(&self) -> Result<i64, StoreError> {
         let sql = "SELECT COUNT(*) AS count FROM users";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<CountRow, _>(sql, params!()),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(sql, params!())
+            .await?;
         one_count(rows)
     }
 
@@ -1207,11 +1540,13 @@ impl UserStore for HiqliteAuthStore {
                    VALUES ($1, $2, $3, $4) \
                    RETURNING id, username, password_hash, is_admin, created_at";
         validate_sql(sql)?;
-        let row = timeout_store(self.client().execute_returning_map_one::<_, UserRow>(
-            sql,
-            params!(username, password_hash, is_admin, now),
-        ))
-        .await?;
+        let row = self
+            .client()
+            .execute_returning_map_one::<_, UserRow>(
+                sql,
+                params!(username, password_hash, is_admin, now),
+            )
+            .await?;
         Ok(row.into())
     }
 
@@ -1237,14 +1572,13 @@ impl UserStore for HiqliteAuthStore {
         let sql = "SELECT id, username, password_hash, is_admin, created_at \
                    FROM users ORDER BY username";
         validate_sql(sql)?;
-        Ok(timeout_store(
-            self.client()
-                .query_consistent_map::<UserRow, _>(sql, params!()),
-        )
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect())
+        Ok(self
+            .client()
+            .query_consistent_map::<UserRow, _>(sql, params!())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
@@ -1257,11 +1591,10 @@ impl UserStore for HiqliteAuthStore {
     async fn count_admins(&self) -> Result<i64, StoreError> {
         let sql = "SELECT COUNT(*) AS count FROM users WHERE is_admin = 1";
         validate_sql(sql)?;
-        let rows = timeout_store(
-            self.client()
-                .query_consistent_map::<CountRow, _>(sql, params!()),
-        )
-        .await?;
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(sql, params!())
+            .await?;
         one_count(rows)
     }
 
@@ -1317,11 +1650,10 @@ impl UserStore for HiqliteAuthStore {
                  FROM users u JOIN tokens t ON t.user_id = u.id \
                  WHERE t.token_hash = $1";
         validate_sql(sql)?;
-        let mut rows = timeout_store(
-            self.client()
-                .query_consistent_map::<TokenUserRow, _>(sql, params!(token_hash)),
-        )
-        .await?;
+        let mut rows = self
+            .client()
+            .query_consistent_map::<TokenUserRow, _>(sql, params!(token_hash))
+            .await?;
         let row = rows.pop();
         if let Some(row) = row.as_ref() {
             let now = self.now()?;
@@ -1358,11 +1690,9 @@ impl ApiKeyStore for HiqliteAuthStore {
                    VALUES ($1, $2, $3, $4, 0) \
                    RETURNING id, name, key_hash, scopes, created_at, last_used_at, disabled";
         validate_sql(sql)?;
-        let row =
-            timeout_store(self.client().execute_returning_map_one::<_, ApiKeyRow>(
-                sql,
-                params!(name, key_hash, scopes, now),
-            ))
+        let row = self
+            .client()
+            .execute_returning_map_one::<_, ApiKeyRow>(sql, params!(name, key_hash, scopes, now))
             .await?;
         Ok(row.into())
     }
@@ -1371,14 +1701,13 @@ impl ApiKeyStore for HiqliteAuthStore {
         let sql = "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
                    FROM api_keys ORDER BY created_at, id";
         validate_sql(sql)?;
-        Ok(timeout_store(
-            self.client()
-                .query_consistent_map::<ApiKeyRow, _>(sql, params!()),
-        )
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect())
+        Ok(self
+            .client()
+            .query_consistent_map::<ApiKeyRow, _>(sql, params!())
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     async fn api_key_for_hash(&self, key_hash: &str) -> Result<Option<ApiKey>, StoreError> {
@@ -1929,6 +2258,180 @@ dump_row!(JobLeaseDumpRow {
 mod tests {
     use super::*;
 
+    static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
+        LazyLock::new(StoreOperationMetrics::default);
+
+    #[tokio::test]
+    async fn store_operation_timer_classifies_completion_error_and_cancellation() {
+        let count = |class, outcome| {
+            TEST_STORE_OPERATION_METRICS
+                .cell(class, outcome)
+                .count
+                .load(Ordering::Relaxed)
+        };
+        let ok_before = count(StoreOperationClass::LocalRead, StoreOperationOutcome::Ok);
+        let error_before = count(
+            StoreOperationClass::AuthorityRead,
+            StoreOperationOutcome::Error,
+        );
+        let cancelled_before = count(StoreOperationClass::Write, StoreOperationOutcome::Cancelled);
+        let statement_error_before =
+            count(StoreOperationClass::Write, StoreOperationOutcome::Error);
+
+        time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::LocalRead,
+            async { Ok::<_, StoreError>(()) },
+            |_| true,
+        )
+        .await
+        .expect("successful timed operation");
+        let error = time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::AuthorityRead,
+            async { Err::<(), _>(StoreError::Database("injected failure".to_owned())) },
+            |_| true,
+        )
+        .await;
+        assert!(error.is_err());
+
+        let nested = time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            async {
+                Ok::<_, StoreError>(vec![Ok::<(), &'static str>(()), Err("constraint failure")])
+            },
+            |results| results.iter().all(Result::is_ok),
+        )
+        .await
+        .expect("Hiqlite returns statement errors inside the operation result");
+        assert!(nested.iter().any(Result::is_err));
+
+        let mut cancelled = Box::pin(time_store_operation(
+            &TEST_STORE_OPERATION_METRICS,
+            StoreOperationClass::Write,
+            std::future::pending::<Result<(), StoreError>>(),
+            |_| true,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut cancelled),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+
+        assert_eq!(
+            count(StoreOperationClass::LocalRead, StoreOperationOutcome::Ok),
+            ok_before + 1
+        );
+        assert_eq!(
+            count(
+                StoreOperationClass::AuthorityRead,
+                StoreOperationOutcome::Error
+            ),
+            error_before + 1
+        );
+        assert_eq!(
+            count(StoreOperationClass::Write, StoreOperationOutcome::Cancelled),
+            cancelled_before + 1
+        );
+        assert_eq!(
+            count(StoreOperationClass::Write, StoreOperationOutcome::Error),
+            statement_error_before + 1
+        );
+    }
+
+    #[test]
+    fn store_operation_histogram_pins_boundaries_and_saturates() {
+        let metrics = StoreOperationMetrics::default();
+        metrics.record(
+            StoreOperationClass::LocalRead,
+            StoreOperationOutcome::Ok,
+            Duration::from_nanos(1_000_000),
+        );
+        metrics.record(
+            StoreOperationClass::LocalRead,
+            StoreOperationOutcome::Ok,
+            Duration::from_nanos(1_000_001),
+        );
+        metrics.record(
+            StoreOperationClass::LocalRead,
+            StoreOperationOutcome::Ok,
+            Duration::from_secs(11),
+        );
+        let cell = metrics.cell(StoreOperationClass::LocalRead, StoreOperationOutcome::Ok);
+        assert_eq!(cell.count.load(Ordering::Relaxed), 3);
+        assert_eq!(cell.elapsed_nanos.load(Ordering::Relaxed), 11_002_000_001);
+        assert_eq!(cell.buckets[0].load(Ordering::Relaxed), 1);
+        assert_eq!(cell.buckets[1].load(Ordering::Relaxed), 1);
+        assert_eq!(cell.buckets[2].load(Ordering::Relaxed), 0);
+
+        let exposition = metrics.render();
+        assert!(exposition.contains(
+            "plurx_store_operation_seconds_bucket{class=\"local_read\",outcome=\"ok\",le=\"0.001\"} 1"
+        ));
+        assert!(exposition.contains(
+            "plurx_store_operation_seconds_bucket{class=\"local_read\",outcome=\"ok\",le=\"0.005\"} 2"
+        ));
+        assert!(exposition.contains(
+            "plurx_store_operation_seconds_bucket{class=\"local_read\",outcome=\"ok\",le=\"+Inf\"} 3"
+        ));
+
+        let saturated = metrics.cell(
+            StoreOperationClass::AuthorityRead,
+            StoreOperationOutcome::Error,
+        );
+        saturated.count.store(u64::MAX, Ordering::Relaxed);
+        saturated
+            .elapsed_nanos
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        saturated.buckets[0].store(u64::MAX, Ordering::Relaxed);
+        metrics.record(
+            StoreOperationClass::AuthorityRead,
+            StoreOperationOutcome::Error,
+            Duration::from_nanos(10),
+        );
+        assert_eq!(saturated.count.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(saturated.elapsed_nanos.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(saturated.buckets[0].load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn store_operation_exposition_has_only_the_fixed_label_matrix() {
+        let exposition = TEST_STORE_OPERATION_METRICS.render();
+        assert!(exposition.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(exposition.contains("# TYPE plurx_store_operations_total counter"));
+        assert!(!exposition.contains("sql="));
+        assert!(!exposition.contains("route="));
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_store_operations_total{"))
+                .count(),
+            9
+        );
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_store_operation_seconds_count{"))
+                .count(),
+            9
+        );
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_store_operation_seconds_bucket{"))
+                .count(),
+            9 * (STORE_OPERATION_BUCKETS.len() + 1)
+        );
+        for class in ["local_read", "authority_read", "write"] {
+            for outcome in ["ok", "error", "cancelled"] {
+                assert!(exposition.contains(&format!(
+                    "plurx_store_operations_total{{class=\"{class}\",outcome=\"{outcome}\"}}"
+                )));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn failed_activity_operations_release_both_credential_reservations_for_retry() {
         for credential in [
@@ -2013,6 +2516,9 @@ mod tests {
             ("coordination", include_str!("hiqlite_coordination.rs")),
             ("media", include_str!("hiqlite_media.rs")),
             ("durable", include_str!("hiqlite_durable.rs")),
+            ("import", include_str!("hiqlite_import.rs")),
+            ("publication", include_str!("hiqlite_publication.rs")),
+            ("reading", include_str!("hiqlite_reading.rs")),
         ] {
             let compact: String = source
                 .chars()
@@ -2023,6 +2529,15 @@ mod tests {
                 "{name} store bypasses HiqliteAuthStore::client(), which enforces the 3s timeout"
             );
         }
+        let own_source = include_str!("hiqlite.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let forbidden_nested_timeout = ["timeout_store(", "self.client()"].concat();
+        assert!(
+            !own_source.contains(&forbidden_nested_timeout),
+            "TimedClient owns the only operation timeout; an equal outer timeout races its terminal metric classification"
+        );
     }
 
     #[tokio::test]

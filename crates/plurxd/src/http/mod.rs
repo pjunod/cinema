@@ -4093,6 +4093,9 @@ mod tests {
         assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
         assert!(metrics.contains("plurx_offline_requests_total{height=\"720\"} 2"));
         assert!(metrics.contains("plurx_cache_protected_entries{reason=\"active_playback\"} 0"));
+        assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(metrics
+            .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
         assert!(
             !metrics.contains("Flight"),
             "titles must never become labels"
