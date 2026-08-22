@@ -1,17 +1,22 @@
 # Cluster page latency fix plan — restore quorum truth, then unblock first paint
 
-**Status:** ready for review · **Executes:** findings from
-[CLUSTER_PAGE_LATENCY_REVIEW.md](CLUSTER_PAGE_LATENCY_REVIEW.md) · **Written:**
-2026-08-22 · **Code:** `origin/main` at `a0f9fc14`
+**Status:** review reconciled · **Executes:** findings from
+[CLUSTER_PAGE_LATENCY_REVIEW.md](CLUSTER_PAGE_LATENCY_REVIEW.md) and decisions
+from
+[CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md](CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md)
+· **Written:** 2026-08-22 · **Re-pinned:** 2026-08-22 · **Code:**
+`origin/main` at `64e96aa7`
 
-Read the review brief first, then
+Read the review brief and adversarial review first, then
 [OPERATIONS.md](OPERATIONS.md) sections on readiness and voter removal. Execute
-this plan milestone by milestone. Do not combine the production recovery, WAL
-repair, health projection, and web hydration changes into one pull request:
-each has a different rollback boundary. If any step appears to require editing
-Raft files, restoring an activated node from `plurx.db`, forcing a minority to
-reconfigure, or weakening authorization consistency, stop and return it for
-operator review.
+this plan milestone by milestone. The reconciliation in §2.2 is controlling:
+extend the cluster-performance primitives already on `main`; do not build a
+second observer, watermark, Store timer, or cluster lifecycle harness. Do not
+combine the production recovery, WAL repair, health projection, and web
+hydration changes into one pull request because each has a different rollback
+boundary. If any step appears to require editing Raft files, restoring an
+activated node from `plurx.db`, forcing a minority to reconfigure, or weakening
+authorization consistency, stop and return it for operator review.
 
 This plan deliberately contains two kinds of work:
 
@@ -97,7 +102,7 @@ acceptance metric because they hide the pauses the user notices.
 
 ## 2. Starting contract — preserve these boundaries while changing the path
 
-Line numbers refer to `origin/main` at `a0f9fc14`; re-verify every boundary at
+Line numbers refer to `origin/main` at `64e96aa7`; re-verify every boundary at
 implementation time.
 
 | Boundary | Current contract | Required preservation |
@@ -106,9 +111,9 @@ implementation time.
 | Store deadline | [`TimedClient`](../crates/plurx-core/src/store/hiqlite.rs) bounds every Hiqlite operation at three seconds. | A wedged leader cannot hold an HTTP task forever. |
 | Readiness | `GET /readyz` performs `Store::ping`, including an authority `SELECT 1`. | Liveness stays Store-free; readiness remains an active serving proof. |
 | Roster reachability | [`MembershipManager::status`](../crates/plurx-core/src/cluster/membership.rs) sets `reachable` from a 30-second heartbeat window. | Keep the heartbeat fact, but label it as heartbeat rather than Raft health. |
-| Replication projection | [`ReplicationMonitor`](../crates/plurx-core/src/cluster/migration.rs) classifies local running state, leader visibility, apply lag, and leader-visible peer lag. | Do not invent peer certainty on a follower. Preserve privacy-safe output. |
+| Replication projection | [`ReplicationMonitor`](../crates/plurx-core/src/cluster/migration.rs) classifies local running state, leader visibility, apply lag, and leader-visible peer lag; its merged passive observer and quorum watermark publish validity-gated local/apply facts. | Reuse the merged proof sources, do not invent peer certainty on a follower, and preserve privacy-safe output. |
 | Voter removal | `DELETE /api/v1/cluster/nodes/{node_id}` fences work, resolves offline ownership, commits membership, and tombstones the identity. | Never bypass quorum, offline-work, leader, or job-owner fences. |
-| Home | `viewHome` waits for `/libraries`, `/hubs`, `/coming-soon`, then one preview request per library before painting. | Preserve grouping, ordering, failure isolation, 401 behavior, and generation fences. |
+| Home | `loadHome` waits for `/libraries`, `/hubs`, and `/coming-soon` together, then starts one preview request per library and waits for all of them before `viewHome` paints. | Preserve grouping, ordering, failure isolation, 401 behavior, and generation fences. |
 | Activity | `viewActivity` installs `Loading…`, awaits `/activity/detail`, then owns one non-overlapping poll. | Preserve one-request cardinality, poll ownership, and stale-response fences. |
 | Settings | `viewSettings` waits for seven endpoints before rendering any tab. | Preserve admin gating, join-token lifetime, mutation behavior, and tab-specific polling. |
 | Native clients | Existing Apple and Android code consumes existing APIs. | Add endpoints; do not change or remove existing response contracts. |
@@ -128,6 +133,22 @@ implementation time.
   to retained metadata naming a log that no longer exists. This is a design
   hypothesis until the captured voter or a deterministic failpoint proves it.
 
+### 2.2 Merged cluster-performance work is an input, not duplicate scope
+
+The re-pin includes PRs #517, #518, and #519 from
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md). Those commits change
+how PR-A, PR-C, and PR-D are built:
+
+| Milestone | Merged source of truth | This plan adds |
+|---|---|---|
+| PR-A | P0b's `cluster-topology` artifact supplies the versioned provenance, `semantic_ci` versus `named_runner` evidence split, Type-7 percentile rule, raw-sample retention, and resource-disclosure convention. P2f remains unlanded. | A browser page-outcome artifact that follows those conventions. It does not start a cluster, replace the topology artifact, or create a second cluster lifecycle harness. |
+| PR-C | P2c's `PassiveRaftMetricsView` supplies validity-gated local term, leader, and applied-index facts. P2d's quorum watermark supplies a validity-gated quorum-confirmed commit index and apply lag. | An additive public projection and truthful UI wording. The existing leader metrics map remains the only source for every-peer confirmation because the watermark proves quorum, not an all-peer count. No request performs a new Store read or peer fan-out. |
+| PR-D | P2b's fixed-label `plurx_store_operation_seconds` histogram exposes local-read, authority-read, and write outcomes. | Backoff and bounded diagnostics for the existing probe loop. Correlate it with P2b rather than adding a duplicate Store timer; add a probe-specific metric only if a reviewed operational question cannot be answered from the bounded logs and existing histogram. |
+
+The page-read work remains separate from bounded-replica reads. Authentication,
+settings, offline ownership, and removal fences continue to use authority
+semantics.
+
 ## 3. Target contracts — the interfaces the milestones converge on
 
 ### 3.1 WAL inspection is read-only and emits no application data
@@ -146,6 +167,7 @@ never start Hiqlite or contact cluster peers. Its versioned JSON contains:
 | Field | Meaning |
 |---|---|
 | metadata CRC and format version | Whether `meta.hql` is structurally valid. |
+| `last_purged_log_id_present` | Whether the purge boundary is absent or stale-non-`None`; this distinguishes the already-covered first-purge reconstruction case from the uncovered repeat-purge crash window. |
 | decoded `last_purged_log_id` | The boundary OpenRaft is told no longer exists. |
 | WAL number · first index · last index · byte size · file hash | Whether retained files have gaps, overlap, or unexpected replacement. |
 | first and last decodable retained log id | Whether headers agree with actual entries. |
@@ -164,6 +186,10 @@ The candidate repair is metadata-first, physical-cleanup-second:
 ```text
 snapshot is already durable
           │
+          ▼
+flush + sync the active WAL header when its durable end advances
+          │
+          ├── preserves the existing append-side hole guard
           ▼
 stage + fsync new purge boundary
           │
@@ -184,6 +210,12 @@ is expected to be safe because extra bytes below the authoritative purge
 boundary are disposable; the reverse ordering can expose a missing required
 entry. If the WAL reader cannot tolerate those extra bytes, startup must prune
 them idempotently after it has accepted the metadata boundary.
+
+The active-header flush currently preceding physical removal in
+`Action::Remove` remains in place and remains ordered before removal. It guards
+the independent append-side hole between a snapshot boundary and the latest
+entry. The metadata-first experiment may move `Metadata::write`; it must not
+delete, weaken, or move that header flush behind physical cleanup.
 
 Do not add an automatic production repair that guesses a new purge id from a
 hole. Reconstruction is allowed only when the snapshot, metadata, and retained
@@ -227,10 +259,14 @@ pub voter_count: usize,
 pub confirmed_peer_count: Option<usize>,
 ```
 
-`scope = cluster` only when this sample has leader-visible replication entries
-for the configured peers. A follower that has applied its own latest known
-entry reports `scope = local`; it may be locally in sync, but it does not claim
-every peer is healthy. `confirmed_peer_count` is absent for local scope.
+`scope = cluster` only when the validity-gated quorum watermark agrees with the
+local passive term/leader observation and the existing leader metrics sample
+contains replication entries for the configured peers. A follower that has
+applied through a valid quorum watermark reports `scope = local`; it proves its
+own apply lag, not every peer's health. `confirmed_peer_count` is absent for
+local scope and is counted from the existing leader replication map for
+cluster scope. It cannot be derived from `DbQuorumWatermark`, which proves a
+quorum-confirmed index but carries no every-peer roster.
 
 The existing `ClusterAvailability` remains topology arithmetic. The web banner
 uses topology plus replication proof:
@@ -380,15 +416,17 @@ than displaying cached protected data as current.
 | Order | Deliverable | Depends on | Rollback |
 |---:|---|---|---|
 | OP-0 | Preserve evidence and remove the damaged fourth voter through the supported API. | Explicit operator approval. | Before membership commit, restart the unchanged voter; after commit, the old identity is permanently tombstoned. |
-| PR-A | Page-latency measurement artifact and deterministic phase tests. | None. | Remove the harness; no runtime behavior changes. |
-| PR-B | WAL forensic inspector, deterministic crash reproducer, and the smallest proven WAL repair. | Captured evidence or synthetic reproduction. | Revert code only if on-disk format remains unchanged; never restore the damaged live directory into membership. |
-| PR-C | Proof-scoped replication status and truthful Cluster UI wording. | PR-A for outcome evidence. | Extra JSON fields are additive; old web code ignores them. |
-| PR-D | Probe-loop failure backoff and deduplicated diagnostics. | PR-C reason vocabulary where useful. | Restore fixed cadence; no durable format change. |
+| PR-A | Page-latency measurement artifact and deterministic phase tests, extending P0b/P2f evidence conventions. | Merged topology artifact contract; no runtime dependency. | Remove the browser runner; no runtime behavior changes. |
+| PR-B1 | Read-only WAL forensic inspector and synthetic invariant fixtures. | Preserved copy or synthetic layouts. | Remove the command; it never changes a WAL. |
+| EV-B | Run PR-B1 against the preserved copy and record only its privacy-safe verdict. | Operator access to the stopped forensic copy. | Evidence-only; the copy remains byte-for-byte preserved. |
+| PR-B2 | Deterministic crash reproducer and the smallest repair matching EV-B. | EV-B identifies the crash window, or an equivalent deterministic synthetic reproducer does. | Revert code only if the on-disk format remains unchanged; never restore the damaged live directory into membership. |
+| PR-C | Proof-scoped replication status and truthful Cluster UI wording. | PR-A for outcome evidence; merged P2c passive observer and P2d quorum watermark. | Extra JSON fields are additive; old web code ignores them. |
+| PR-D | Probe-loop failure backoff and deduplicated diagnostics. | Merged P2b Store metrics; PR-C reason vocabulary where useful. | Restore fixed cadence; no durable format change. |
 | PR-E | Constant-cardinality `/home/previews` endpoint and Store primitive. | Existing Store-call gate plus the PR-A request artifact. | Web does not use it yet; revert safely. |
 | PR-F | Incremental Home/Activity hydration and active-tab Settings loading. | PR-E. | Revert the embedded web app while leaving the additive endpoint in place. |
 | REL-1 | Named-runner evidence, rolling deploy, and production observation. | All accepted PRs. | Roll back runtime code one voter at a time; do not undo committed OP-0 membership with the old identity. |
 
-Do not stack PR-B through PR-F as one review unit. Stacking branches is fine;
+Do not stack PR-B1 through PR-F as one review unit. Stacking branches is fine;
 merging them without their individual gates is not.
 
 ## 5. OP-0 — recover the live cluster without destroying the evidence
@@ -404,23 +442,31 @@ From direct, node-specific HTTP addresses:
    leader.
 2. Confirm the other three voters run attributable builds and answer
    `/healthz` plus `/readyz` twice, ten seconds apart.
-3. Confirm their reported applied indexes converge and none logs its own WAL or
-   state-machine error.
-4. Stop new offline-package admissions to `nuc4` at the routing layer and let
+3. On each survivor, require valid local and watermark samples, zero apply lag,
+   converged applied indexes, and no local WAL or state-machine error. Use the
+   merged P2c/P2d metrics rather than inferring convergence from heartbeat.
+4. Audit offline work before removal. `settle_offline_work` performs
+   authority-backed reads and writes, and the survivor probe loops use that
+   same replicated Store path. If any probe pass still reports
+   `membership_internal`, or the Store histogram records failures during the
+   preflight window, stop: the removal path is not healthy enough to commit.
+5. Stop new offline-package admissions to `nuc4` at the routing layer and let
    active transfers finish. The removal API still owns the final resolution;
    routing quiets the race rather than bypassing it.
-5. Open a maintenance window. Three surviving voters are exactly the quorum of
+6. Open a maintenance window. Three surviving voters are exactly the quorum of
    the current four-voter configuration; another failure during removal stops
    progress.
 
-**Stop condition:** if fewer than three non-target voters are ready, if the
+**Stop condition:** if fewer than three non-target voters are ready, if either
+Raft sample is invalid, if the probe/removal Store path is failing, if the
 target is the leader, or if two voters show independent storage faults, do not
 remove anything. Preserve all directories and recover the original majority
 as [OPERATIONS.md](OPERATIONS.md) requires.
 
 **Acceptance:** a timestamped preflight record names the four node ids, Raft
-ids, leader, builds, applied indexes, readiness results, and active offline
-work count without including tokens or media paths.
+ids, leader, builds, applied indexes, sample validity, apply lag, readiness
+results, probe health, Store failure delta, and active offline-work count
+without including tokens or media paths.
 
 ### 5.2 Preserve a stopped forensic copy before membership changes
 
@@ -433,7 +479,7 @@ manifest with hashes.
 
 The copy remains offline. Do not start `plurxd` against it, because its
 membership and secrets still name the live cluster. Run only the read-only
-inspector from PR-B, or inspect a second disposable copy while preserving the
+inspector from PR-B1, or inspect a second disposable copy while preserving the
 first byte-for-byte.
 
 **Acceptance:** the source is stopped, the forensic copy hash manifest
@@ -478,7 +524,7 @@ baseline.
 errors; all three applied indexes converge; `/readyz` stays healthy; Home,
 Activity, and Settings no longer cluster at the three-second Store deadline.
 
-## 6. PR-A and PR-B — measure first, then repair the recurrence path
+## 6. PR-A and PR-B — measure first, then prove the recurrence path
 
 ### 6.1 PR-A adds a page outcome artifact, not a noisy CI stopwatch
 
@@ -491,6 +537,14 @@ Add:
   and malformed samples; and
 - a validation point mapping the harness, schema, embedded web markers, and
   tests.
+
+This is a page-outcome extension of the existing cluster evidence contract,
+not another topology harness. Reuse P0b's `schema_version` · `build_sha` ·
+`evidence_scope` · raw-sample · Type-7 percentile · resource-disclosure
+vocabulary. The script targets an already-running deployment and never starts,
+joins, stops, or reconfigures voters. Map its audited files to the existing
+`cluster.page-reads` functionality point rather than creating a competing
+cluster-performance point.
 
 The runner accepts a base URL, an owner-only browser storage-state file,
 sample count, and output path. It never accepts a bearer token on the command
@@ -523,11 +577,33 @@ The deterministic harness tests pass, a synthetic delayed endpoint produces
 the expected phase ordering, and an artifact containing a token-like value is
 rejected by its redaction test.
 
-### 6.2 PR-B turns the `520000` failure into a deterministic test
+### 6.2 PR-B1 turns the stopped voter into a privacy-safe verdict
 
-Start with the read-only inspector from §3.1. Compare the forensic copy's
-snapshot id, purge metadata, actual retained ranges, and applied index. Then
-build the smallest reproducer that creates the same invariant violation.
+Implement the read-only inspector from §3.1 before changing purge ordering.
+Synthetic fixtures cover absent metadata, stale-non-`None` metadata, retained
+gaps, snapshot mismatch, and a clean directory. EV-B then compares the
+forensic copy's snapshot id, purge-metadata presence and value, actual retained
+ranges, and applied index. Preserve before/after hashes proving the inspector
+did not modify any file.
+
+**Acceptance:**
+
+```bash
+make cluster-check
+make check
+```
+
+Every synthetic fixture receives its stable verdict, secret-shaped fixture
+content never appears in JSON, and the forensic-copy manifest is byte-for-byte
+unchanged after inspection. EV-B records whether `last_purged_log_id` is absent
+or stale-non-`None`; it does not publish raw WAL contents.
+
+### 6.3 PR-B2 repairs only a reproduced failure
+
+Build the smallest reproducer that creates EV-B's invariant violation. If the
+forensic copy is not available, a synthetic reproducer may establish the same
+window, but the production cause remains unconfirmed and the PR stays draft
+until that limitation is explicit in its evidence.
 
 Exercise at least these failpoints:
 
@@ -539,10 +615,11 @@ Exercise at least these failpoints:
 6. restart after at least 60 reduced-threshold snapshot/purge cycles, because
    the live missing index is near the 52nd production threshold.
 
-The exact failpoint that reproduces the live shape lands in the regression
-name. If none reproduces it, do not merge a speculative reorder: keep the
-inspector and expand the evidence to filesystem errors, storage replacement,
-and concurrent snapshot installation.
+The exact failpoint that reproduces the observed shape lands in the regression
+name. Preserve the existing pre-removal active-header flush in every path. If
+none reproduces the observed shape, do not merge a speculative reorder: keep
+PR-B1 and expand the evidence to filesystem errors, storage replacement, and
+concurrent snapshot installation.
 
 Candidate test names:
 
@@ -565,17 +642,19 @@ make cluster-check
 make check
 ```
 
-The new failpoint fails on the pre-fix vendor code, passes with the repair,
-reopens repeatedly, catches up to a live leader, and answers a consistent read.
-The inspector classifies the preserved production copy without modifying it.
+The new failpoint fails on the pre-fix vendor code, EV-B's verdict matches that
+pre-fix invariant, and the repaired code passes the test, reopens repeatedly,
+catches up to a live leader, and answers a consistent read.
 
 ## 7. PR-C and PR-D — make degradation visible without creating new load
 
 ### 7.1 PR-C extends the existing replication classifier
 
 Implement §3.3 inside the current `ReplicationMonitor`; do not add a Store read
-to the `/metrics` scrape path or a new per-request peer fan-out. The existing
-local Hiqlite metrics source decides local versus cluster scope.
+to the `/metrics` scrape path or a new per-request peer fan-out. Read the merged
+`PassiveRaftMetricsView` for validity-gated local and quorum/apply facts. Keep
+the existing `metrics_db` sample as the leader-only source of every-peer match
+indexes; do not pretend the quorum watermark contains an all-peer count.
 
 Required classifier cases:
 
@@ -626,6 +705,11 @@ the retry deadline nondeterministic in unit tests.
 Log the first failure, then one summary per 60 seconds containing first seen ·
 last seen · count · stable error code. Dynamic internal error text remains in
 the first diagnostic, not a metric label.
+
+Use the merged P2b Store histogram to correlate authority-read/write failures
+with probe backoff. Do not add another Store timer. A probe-specific counter or
+gauge requires a separate bounded-label justification and is not required for
+this PR's acceptance.
 
 **Acceptance:**
 
@@ -768,11 +852,12 @@ silently skipped or converted into unit-test claims.
 
 ### 10.1 Merge and deploy order follows the rollback table
 
-Merge PR-A first so every behavior PR has outcome evidence. Merge PR-B before
-allowing another damaged voter to cycle through production snapshots. PR-C and
-PR-D may follow once their classifier and cadence tests are independent. Merge
-PR-E before PR-F so old web code ignores the new endpoint and the new web code
-never deploys without its server route.
+Merge PR-A first so every behavior PR has outcome evidence. Merge PR-B1 before
+EV-B, and merge PR-B2 only after the inspector verdict and reproducer agree.
+Do not allow another damaged voter to cycle through production snapshots while
+that repair remains open. PR-C and PR-D may follow once their classifier and
+cadence tests are independent. Merge PR-E before PR-F so old web code ignores
+the new endpoint and the new web code never deploys without its server route.
 
 None of these PRs changes the replicated schema. Roll one non-leader voter at a
 time, require `/readyz`, local applied-index catch-up, and an attributable build
@@ -803,48 +888,55 @@ Then complete the rolling deploy and measure the leader plus another follower.
   classifier/UI together so prose and JSON do not disagree.
 - PR-D cadence failure: restore the 500 ms loop while preserving the first
   diagnostic evidence.
-- PR-B WAL failure: stop the rollout. Because the format is intended to remain
-  unchanged, the preceding binary can reopen a healthy voter, but the reviewer
-  must confirm this with the restart test before deployment.
+- PR-B1 inspector failure: remove the diagnostic binary; no WAL was changed.
+- PR-B2 WAL failure: stop the rollout. Because the format is intended to
+  remain unchanged, the preceding binary can reopen a healthy voter, but the
+  reviewer must confirm this with the restart test before deployment.
 - OP-0 removal: never restart the tombstoned directory. A capacity rollback is
   a fresh join under the supported runbook, with a new token and identity.
 
-## 11. Reviewer decisions — resolve these before implementation begins
+## 11. Review decisions — Fable's findings are incorporated
 
-Return a decision on each item, with a reason and any required plan edit:
+[CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md](CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md)
+is the completed adversarial review. These decisions now control execution:
 
-1. **Live recovery:** Is the 4→3 follower removal safe with the observed
-   remaining majority, and what additional evidence must be captured first?
-2. **WAL candidate:** Does metadata-first purge ordering satisfy OpenRaft 0.9,
-   including crashes that leave extra bytes below the purge boundary?
-3. **Forensic scope:** Are the §3.1 fields sufficient to distinguish metadata
-   loss, WAL deletion, snapshot mismatch, and external filesystem damage?
-4. **Health contract:** Are `scope`, `reason`, `voter_count`, and
-   `confirmed_peer_count` the smallest truthful additive API, or can existing
-   fields express the same proof without ambiguity?
-5. **Home endpoint:** Does the windowed Store primitive preserve every current
-   top-level and ordering rule, and should the limit remain fixed at 24 rather
-   than caller-selectable?
-6. **Settings dependencies:** Does any mutation or panel read a field outside
-   the manifest in §3.5?
-7. **Latency budgets:** Accept or replace the proposed 500 ms healthy and
-   1,000 ms degraded p95 first-content targets using named-runner variance.
-8. **PR boundaries:** Identify any milestone that is too large to review or
-   any pair whose separate deployment would create an invalid intermediate
-   state.
-9. **Mobile boundary:** Confirm the additive endpoint and unchanged existing
-   contracts require regression testing but no native client feature work.
+1. **Live recovery:** code review approves the supported 4→3 follower path,
+   subject to §5.1's live quorum, valid-watermark, Store-path, offline-work, and
+   explicit operator gates. Source review cannot supply those live facts.
+2. **WAL candidate:** metadata-first ordering is endorsed only after PR-B1 and
+   EV-B identify the matching stale-boundary shape. The existing active-header
+   flush remains mandatory.
+3. **Forensic scope:** §3.1 is sufficient with the added
+   `last_purged_log_id_present` fact distinguishing absent from stale-non-`None`
+   metadata.
+4. **Health contract:** the additive fields are accepted. P2c/P2d supply
+   validity-gated local and quorum facts; the existing leader replication map,
+   not the quorum watermark, supplies every-peer confirmation.
+5. **Home endpoint:** the windowed primitive matches both current backends. The
+   public page limit is fixed at 24 rather than caller-selectable.
+6. **Settings dependencies:** the read manifest is accepted. Every mutation is
+   re-verified when PR-F lands because a future mutation-side dependency must
+   not be hidden by a stale manifest.
+7. **Latency budgets:** the percentile shape is accepted, while the numeric
+   500 ms healthy and 1,000 ms degraded targets remain provisional until PR-A
+   produces named-runner variance. Implementation may proceed; release cannot
+   claim those budgets before that evidence exists.
+8. **PR boundaries:** PR-A, PR-C, and PR-D are reconciled with the sibling
+   performance plan in §2.2. The WAL inspector and WAL mutation are split into
+   PR-B1 and PR-B2 because their rollback boundaries differ.
+9. **Mobile boundary:** accepted. The additive endpoint requires native
+   regression gates but no Apple or Android feature change.
 
-The requested review output is: `P0` correctness/safety findings · `P1`
-design/validation findings · `P2` cleanup/observability findings · an edited
-merge order · explicit approval points for every production or destructive
-operation.
+Any later reviewer change is recorded as an edit to this section with its
+source PR. Production and availability-affecting actions still require the
+explicit approvals in the adversarial review's §8 table.
 
 ## 12. Source map — re-verify before each milestone
 
 | Boundary | Source |
 |---|---|
 | Incident evidence and causal chain | [CLUSTER_PAGE_LATENCY_REVIEW.md](CLUSTER_PAGE_LATENCY_REVIEW.md) |
+| Completed adversarial review and approval table | [CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md](CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md) |
 | Supported readiness and removal runbook | [OPERATIONS.md](OPERATIONS.md), readiness and voter-removal sections |
 | Existing cluster measurement contract | [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) |
 | Hiqlite Store timeout and operation wrappers | [`crates/plurx-core/src/store/hiqlite.rs`](../crates/plurx-core/src/store/hiqlite.rs), `TimedClient` |

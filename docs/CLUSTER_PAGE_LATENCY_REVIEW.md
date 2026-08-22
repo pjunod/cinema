@@ -224,8 +224,8 @@ N parallel HTTP requests
 the Home critical path:
 
 1. It awaits `/libraries`, `/hubs`, and `/coming-soon` together.
-2. After `/libraries` returns, it starts one preview request per library, with
-   at most six active at once.
+2. After that entire first request group resolves, it starts one preview
+   request per library, with at most six active at once.
 3. It awaits every preview worker.
 4. Only then does `viewHome` replace the `Loading…` body with rendered content.
 

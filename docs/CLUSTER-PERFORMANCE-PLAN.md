@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P2c landed; P2d staged for review · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P2d landed; P2e–P2f planned · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
