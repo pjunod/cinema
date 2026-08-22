@@ -81,6 +81,9 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 
 .PHONY: cluster-check
 cluster-check: ## Run WAL recovery plus M1b-M2 durable-state, import, growth, and failure contracts
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  metadata::tests::interrupted_metadata_replacement_keeps_the_previous_record_readable \
 	  -- --exact

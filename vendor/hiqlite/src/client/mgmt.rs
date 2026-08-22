@@ -145,6 +145,19 @@ impl Client {
         })
     }
 
+    /// Obtain the process-local database snapshot instrumentation handle.
+    ///
+    /// Remote clients fail immediately. Reading this handle performs no
+    /// management request, storage operation, allocation, or lock acquisition.
+    #[cfg(feature = "sqlite")]
+    #[must_use]
+    pub fn local_db_snapshot_metrics(&self) -> Result<crate::LocalDbSnapshotMetrics, Error> {
+        self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("local database snapshot metrics require a local node client".to_owned())
+        })?;
+        Ok(crate::LocalDbSnapshotMetrics::new())
+    }
+
     /// Obtain a commit watermark after the database leader has confirmed its
     /// current term with a quorum and applied through the returned read index.
     ///

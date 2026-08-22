@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries five compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -26,8 +26,22 @@ Apache-2.0. Plurx carries five compatibility patches for clustered deployments:
   term, leader identity, and committed index. Followers use the existing
   authenticated leader stream; callers remain responsible for a monotonic
   lease and matching the proof to their local Raft observation.
+- The SQLite snapshot builder and installer publish process-local, lock-free
+  duration histograms through `Client::local_db_snapshot_metrics`. Explicit
+  RAII start/finish hooks classify build/install success and every error or
+  cancelled exit without polling storage or exposing paths and snapshot ids.
+- Snapshot build, install, read, and asynchronous cleanup share one
+  file-ownership boundary. Completed files use fsync plus atomic rename, and a
+  separately fsynced pointer publishes the exact current generation (including
+  an explicit empty state). Install uses a durable pending-generation marker;
+  publication failures stop further state-machine work and startup completes
+  the pending recovery before serving. Read-only inspection leaves generations
+  immutable. Startup migrates legacy directories from live database metadata
+  or applied Raft order; normal reads and recovery never infer recency from UUID
+  ordering, so delayed cleanup and interrupted publication cannot replace or
+  delete current state.
 
-Remove this vendor when an upstream Hiqlite release contains all five patches
+Remove this vendor when an upstream Hiqlite release contains all seven patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
 

@@ -1583,6 +1583,7 @@ name = "hiqlite"
 version = "0.14.0"
 dependencies = [
  "argon2",
+ "arc-swap",
  "axum",
  "axum-extra",
  "axum-server",
