@@ -666,6 +666,9 @@ pub struct OfflinePackage {
 pub struct OfflineActivityPackage {
     pub package: OfflinePackage,
     pub lease_active: bool,
+    pub item_id: Option<i64>,
+    pub title: String,
+    pub user_name: String,
 }
 
 /// Fixed-cardinality offline gauges for one server node.

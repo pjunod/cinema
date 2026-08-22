@@ -2574,7 +2574,11 @@ async function api(path, {method="GET", body=null, raw=false}={}){
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
   const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null});
-  if(res.status===401){ logout(); throw new Error("unauthorized"); }
+  if(res.status===401){
+    logout();
+    const error=new Error("unauthorized"); error.status=401;
+    throw error;
+  }
   // `{error}` is the legacy body; `{code, message}` is the typed one routes
   // migrate to as their client contracts need a machine-readable cause. Read
   // both, or a typed refusal — "this server's ffmpeg has no subtitles filter"
@@ -3264,24 +3268,37 @@ window.addEventListener("keydown",e=>{
 // ---- global activity indicator --------------------------------------------
 // Always-visible pill: whatever the server is doing right now (scans,
 // metadata, streams — later: moves, backups). Empty response = hidden.
-let ACT_TIMER=null;
-async function pollActivity(){
-  if(!TOKEN||!ME) return;
+let ACT_TIMER=null, ACT_POLLING=false;
+function paintActivity(acts){
   const el=document.getElementById("activity");
   if(!el) return;
+  // the cursor is the status light: blinking = working, solid = idle (noirr)
+  document.documentElement.classList.toggle("working", acts.length>0);
+  if(!acts.length){ el.style.display="none"; el.innerHTML=""; return; }
+  const a=acts[0];
+  const bits=[esc(a.label)];
+  if(a.detail) bits.push(esc(a.detail));
+  if(a.percent!=null) bits.push(a.percent+"%");
+  const extra=acts.length>1?` &nbsp;+${acts.length-1}`:"";
+  el.innerHTML=`<span class="spin"></span><span>${bits.join(" · ")}${extra}</span>`;
+  el.style.display="flex";
+}
+async function pollActivity(){
+  // The Activity page has a richer poll of its own. Do not make both pollers
+  // pay separate auth and leader-read costs for the same screen, and never
+  // stack requests when a slow cluster round outlives the timer interval.
+  if(!TOKEN||!ME||location.hash==="#/activity"||document.visibilityState==="hidden"||ACT_POLLING) return;
+  const el=document.getElementById("activity");
+  if(!el) return;
+  const generation=PAGE_RENDER_GENERATION;
+  const route=location.hash;
+  ACT_POLLING=true;
   try{
     const acts=await api("/activity");
-    // the cursor is the status light: blinking = working, solid = idle (noirr)
-    document.documentElement.classList.toggle("working", acts.length>0);
-    if(!acts.length){ el.style.display="none"; el.innerHTML=""; return; }
-    const a=acts[0];
-    const bits=[esc(a.label)];
-    if(a.detail) bits.push(esc(a.detail));
-    if(a.percent!=null) bits.push(a.percent+"%");
-    const extra=acts.length>1?` &nbsp;+${acts.length-1}`:"";
-    el.innerHTML=`<span class="spin"></span><span>${bits.join(" · ")}${extra}</span>`;
-    el.style.display="flex";
+    if(generation!==PAGE_RENDER_GENERATION||route!==location.hash||location.hash==="#/activity") return;
+    paintActivity(acts);
   }catch(e){}
+  finally{ ACT_POLLING=false; }
 }
 
 // ---- cards ----------------------------------------------------------------
@@ -3571,13 +3588,34 @@ function groupToggleHtml(group){
 // first; activity, settings, search, auth and the player keep their existing
 // renderers behind the layout chrome until a gate converts them.
 //
-// The hard rule for a conversion: it must not change the route's network
-// behaviour. Same endpoints, same counts, same order, before and after — which
-// is why loadHome() reproduces the original's awkward sequencing (one awaited
-// batch per category, or one awaited request per share) rather than tidying it
-// into a single Promise.all. Tidying it would be a performance change smuggled
-// in under a refactor, and it would show up as a diff in the request log the
-// gate compares.
+// A large library roster must not become a burst of unbounded HTTP requests.
+// Six workers keep the critical path short while capping simultaneous cluster
+// and database work; the current wire contract still uses one preview request
+// per library.
+const HOME_PREVIEW_CONCURRENCY=6;
+async function loadHomePreviews(libs){
+  const entries=new Array(libs.length);
+  let cursor=0, stopped=false;
+  async function worker(){
+    while(true){
+      if(stopped) return;
+      const index=cursor++;
+      if(index>=libs.length) return;
+      const lib=libs[index];
+      let page;
+      try{
+        page=await api(`/libraries/${lib.id}/items?limit=24&sort=added`);
+      }catch(error){
+        if(error&&error.status===401){ stopped=true; throw error; }
+        page={items:[],total:null,unavailable:true};
+      }
+      entries[index]=[lib.id,page];
+    }
+  }
+  const workers=Math.min(HOME_PREVIEW_CONCURRENCY,libs.length);
+  await Promise.all(Array.from({length:workers},worker));
+  return Object.fromEntries(entries);
+}
 async function loadHome(){
   // coming-soon is fetched with the rest but never allowed to fail the page:
   // it depends on another application, and the home screen must not.
@@ -3588,6 +3626,7 @@ async function loadHome(){
   const group=homeGroup();
   const sections=[];
   if(libs.length){
+    const previews=await loadHomePreviews(libs);
     if(group==="category"){
       // Bucket libraries by category, keeping Movies before TV before others.
       const order=[], byKey={};
@@ -3595,28 +3634,33 @@ async function loadHome(){
       order.sort((a,b)=>catOrder(a)-catOrder(b)||a.localeCompare(b));
       for(const key of order){
         const g=byKey[key];
-        const pages=await Promise.all(g.libs.map(l=>api(`/libraries/${l.id}/items?limit=24&sort=added`)));
+        const pages=g.libs.map(l=>previews[l.id]);
+        const unavailable=pages.some(page=>page.unavailable);
         sections.push({
           key,
           name:g.cat.name,
           items:[].concat(...pages.map(p=>p.items)).slice(0,24),
-          total:pages.reduce((n,p)=>n+(p.total||0),0),
+          total:unavailable?null:pages.reduce((n,p)=>n+(p.total||0),0),
+          unavailable,
           // One share in this category → link straight to it; several → merged category page.
           href:g.libs.length===1 ? `#/library/${g.libs[0].id}` : `#/category/${encodeURIComponent(key)}`,
         });
       }
     } else {
       for(const lib of libs){
-        const page=await api(`/libraries/${lib.id}/items?limit=24&sort=added`);
-        sections.push({key:String(lib.id), name:lib.name, items:page.items, total:page.total, href:`#/library/${lib.id}`});
+        const page=previews[lib.id];
+        sections.push({key:String(lib.id), name:lib.name, items:page.items, total:page.total,
+          unavailable:!!page.unavailable, href:`#/library/${lib.id}`});
       }
     }
   }
   return {kind:"home", hubs, soon, libs, group, sections};
 }
-async function viewHome(){
+async function viewHome(generation=++PAGE_RENDER_GENERATION){
+  const route=location.hash;
   layoutChrome("home", `<div id="hubs"><div class="empty">Loading…</div></div>`);
   const page=await loadHome();
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
   document.getElementById("main").innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
   wireRails();
   restoreScroll();
@@ -3674,7 +3718,9 @@ function classicHomeBody(p){
   if(p.libs.length){
     html+=groupToggleHtml(p.group);
     for(const s of p.sections){
-      html+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· view all (${s.total})</a></h2>${grid(s.items)}`;
+      const count=s.total==null?"preview unavailable":`view all (${s.total})`;
+      const unavailable=s.unavailable?`<div class="hint">Some library previews are unavailable right now.</div>`:"";
+      html+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
     }
   } else {
     html+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
@@ -8840,15 +8886,37 @@ const ITEM_FOR_FILE={};
 // ---- activity page --------------------------------------------------------
 // Where the header pill lands: live streams (with a stop for admins),
 // per-library scan state, and the Trakt story — refreshed every 3s.
-async function viewActivity(){
+async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   layoutChrome("activity", `<div class="empty">Loading…</div>`);
-  await renderActivityBody();
-  setPageTimer(renderActivityBody, 3000);
+  await renderActivityBody(generation);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  setPageTimer(()=>renderActivityBody(generation), 3000, generation);
 }
-async function renderActivityBody(){
-  if(location.hash!=="#/activity") return;
+let ACTIVITY_DETAIL_BUSY=0;
+function detailActivitySummary(d,deliveries){
+  const acts=[];
+  for(const scan of (d.scans||[])){
+    if(scan.status&&scan.status.running) acts.push({label:"Scanning library",detail:scan.library});
+  }
+  if(deliveries.length) acts.push({label:`${deliveries.length} active stream${deliveries.length===1?'':'s'}`});
+  if(d.producing) acts.push({label:"Pre-transcoding",detail:d.producing.title});
+  if((d.offline||[]).length) acts.push({label:`${d.offline.length} offline download${d.offline.length===1?'':'s'}`});
+  if(d.trakt&&d.trakt.syncing) acts.push({label:"Syncing Trakt"});
+  return acts;
+}
+async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
+  ACTIVITY_DETAIL_BUSY=generation;
+  try{
   let d; try{ d=await api("/activity/detail"); }
-  catch(e){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  catch(e){ if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return; const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  paintActivityBody(d);
+  } finally {
+    if(ACTIVITY_DETAIL_BUSY===generation) ACTIVITY_DETAIL_BUSY=0;
+  }
+}
+function paintActivityBody(d){
   // S2's consumer check. This table read `d.sessions`, which is the transcode
   // manager's list — so it showed transcodes and HLS copy-remuxes (mislabelled
   // as transcodes) and missed direct play and progressive remux entirely. It
@@ -8856,9 +8924,10 @@ async function renderActivityBody(){
   // recorded rather than inferred: the `encoder` label says "cached" on a cache
   // hit and is rewritten by the hardware-to-software fallback, so a copy remux
   // read off that string would relabel itself mid-play.
-  const dels=d.deliveries||d.sessions.map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
+  const dels=d.deliveries||(d.sessions||[]).map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
     title:se.item_title,started_unix:se.started_unix,idle_seconds:se.idle_seconds,session_id:se.id,
     target_height:se.target_height,encoder:se.encoder}));
+  paintActivity(detailActivitySummary(d,dels));
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   const rows=dels.map(de=>{
     const se=de.session_id?sessionsById[de.session_id]:null;
@@ -8995,21 +9064,25 @@ function statusText(st){
   }
   return "idle";
 }
-let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false;
-async function viewSettings(){
+let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=false;
+let LOGS_PROMISE=null, LOGS_ACTIVE=null, LOGS_PENDING=null;
+let CLUSTER_LOGS_PROMISE=null, CLUSTER_LOGS_ACTIVE=null, CLUSTER_LOGS_PENDING=null;
+async function viewSettings(generation=++PAGE_RENDER_GENERATION){
   if(!ME.is_admin){ location.hash="#/"; return; }
+  const route=location.hash;
   layoutChrome("settings",`<div class="empty">Loading…</div>`);
   const since7d=Date.now()-7*24*60*60*1000;
   const [libs,settings,status,sys,users,trakt,playbackEvents]=await Promise.all([
     api("/libraries"),api("/settings"),api("/scan/status"),api("/system"),api("/users"),
     api("/trakt/status").catch(()=>null),
     api(`/system/playback-events?since=${since7d}&limit=2000`).catch(()=>[])]);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
   SETTINGS=settings; TRAKT=trakt; TRAKT_EDIT=false;
   // Re-entering Settings re-reads the roster and drops any token still held.
   CLUSTER_LOADED=false; forgetJoinToken();
   SETTINGS_DATA={libs,settings,status,sys,users,trakt,playbackEvents,cluster:null};
   renderSettings();
-  setPageTimer(settingsTick, 2000);
+  setPageTimer(settingsTick, 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
 let SETTINGS_DATA=null;
@@ -9837,45 +9910,86 @@ async function refreshAll(){
 }
 async function settingsTick(){
   const h=location.hash;
-  if(h!=="#/settings"&&h!=="#/admin") return;
+  if((h!=="#/settings"&&h!=="#/admin")||document.visibilityState==="hidden"||SETTINGS_TICKING) return;
+  SETTINGS_TICKING=true;
   try{
-    const status=await api("/scan/status");
-    for(const [id,st] of Object.entries(status)){
-      const el=document.getElementById("st-"+id);
-      if(el) el.innerHTML=statusText(st);
+    const tab=settingsTab();
+    if(tab==="libraries"){
+      const status=await api("/scan/status");
+      for(const [id,st] of Object.entries(status)){
+        const el=document.getElementById("st-"+id);
+        if(el) el.innerHTML=statusText(st);
+      }
     }
+    const secondary=[];
     const auto=document.getElementById("logauto");
-    if(auto&&auto.checked) refreshLogs();
+    if(auto&&auto.checked) secondary.push(refreshLogs());
     const clusterAuto=document.getElementById("cllogauto");
-    if(clusterAuto&&clusterAuto.checked) refreshClusterLogs();
+    if(clusterAuto&&clusterAuto.checked) secondary.push(refreshClusterLogs());
     // Live Trakt card: the device-link poll and sync state resolve server-side.
-    if(!TRAKT_EDIT){
+    if(tab==="metadata"&&!TRAKT_EDIT){
       const t=await api("/trakt/status");
       if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ TRAKT=t; paintTrakt(); }
     }
+    await Promise.all(secondary);
   }catch(e){}
+  finally{ SETTINGS_TICKING=false; }
 }
-async function refreshLogs(){
-  const box=document.getElementById("logbox"); if(!box) return;
-  const sel=document.getElementById("loglvl");
+function sameLogRequest(left,right){ return !!left&&left.box===right.box&&left.level===right.level; }
+async function runLogRequest(request,cluster){
+  const {box,level}=request;
+  const boxId=cluster?"cllogbox":"logbox", levelId=cluster?"clloglvl":"loglvl";
   try{
-    const lines=await api(`/system/logs?level=${sel?sel.value:"info"}&limit=300`);
+    const scope=cluster?"scope=cluster&":"";
+    const lines=await api(`/system/logs?${scope}level=${level}&limit=300`);
+    const currentBox=document.getElementById(boxId);
+    const currentLevel=document.getElementById(levelId);
+    if(currentBox!==box||(currentLevel?currentLevel.value:"info")!==level) return;
     const stick = box.scrollHeight-box.scrollTop-box.clientHeight < 40;
     box.innerHTML=lines.map(l=>`<div class="log-${esc(l.level)}">${fmtTs(l.ts_ms)} <b>${esc(l.level)}</b> ${esc(l.target)} — ${esc(l.message)}</div>`).join("")
       ||'<span class="muted">Nothing at this level yet.</span>';
     if(stick) box.scrollTop=box.scrollHeight;
-  }catch(e){ box.textContent="Failed to load logs: "+e.message; }
+  }catch(e){
+    const currentBox=document.getElementById(boxId);
+    const currentLevel=document.getElementById(levelId);
+    if(currentBox===box&&(currentLevel?currentLevel.value:"info")===level){
+      box.textContent=`Failed to load ${cluster?"cluster ":""}logs: ${e.message}`;
+    }
+  }
 }
-async function refreshClusterLogs(){
+function refreshLogs(){
+  const box=document.getElementById("logbox"); if(!box) return Promise.resolve();
+  const sel=document.getElementById("loglvl");
+  const desired={box,level:sel?sel.value:"info"};
+  if(sameLogRequest(LOGS_ACTIVE,desired)){ LOGS_PENDING=null; return LOGS_PROMISE; }
+  LOGS_PENDING=desired;
+  if(LOGS_PROMISE) return LOGS_PROMISE;
+  LOGS_PROMISE=(async()=>{
+    try{
+      while(LOGS_PENDING){
+        LOGS_ACTIVE=LOGS_PENDING; LOGS_PENDING=null;
+        await runLogRequest(LOGS_ACTIVE,false);
+      }
+    }finally{ LOGS_ACTIVE=null; LOGS_PROMISE=null; }
+  })();
+  return LOGS_PROMISE;
+}
+function refreshClusterLogs(){
   const box=document.getElementById("cllogbox"); if(!box) return;
   const sel=document.getElementById("clloglvl");
-  try{
-    const lines=await api(`/system/logs?scope=cluster&level=${sel?sel.value:"info"}&limit=300`);
-    const stick = box.scrollHeight-box.scrollTop-box.clientHeight < 40;
-    box.innerHTML=lines.map(l=>`<div class="log-${esc(l.level)}">${fmtTs(l.ts_ms)} <b>${esc(l.level)}</b> ${esc(l.target)} — ${esc(l.message)}</div>`).join("")
-      ||'<span class="muted">Nothing at this level yet.</span>';
-    if(stick) box.scrollTop=box.scrollHeight;
-  }catch(e){ box.textContent="Failed to load cluster logs: "+e.message; }
+  const desired={box,level:sel?sel.value:"info"};
+  if(sameLogRequest(CLUSTER_LOGS_ACTIVE,desired)){ CLUSTER_LOGS_PENDING=null; return CLUSTER_LOGS_PROMISE; }
+  CLUSTER_LOGS_PENDING=desired;
+  if(CLUSTER_LOGS_PROMISE) return CLUSTER_LOGS_PROMISE;
+  CLUSTER_LOGS_PROMISE=(async()=>{
+    try{
+      while(CLUSTER_LOGS_PENDING){
+        CLUSTER_LOGS_ACTIVE=CLUSTER_LOGS_PENDING; CLUSTER_LOGS_PENDING=null;
+        await runLogRequest(CLUSTER_LOGS_ACTIVE,true);
+      }
+    }finally{ CLUSTER_LOGS_ACTIVE=null; CLUSTER_LOGS_PROMISE=null; }
+  })();
+  return CLUSTER_LOGS_PROMISE;
 }
 async function addLib(){
   const name=ln.value.trim(), sel=lk.value, paths=lp.value.split(",").map(s=>s.trim()).filter(Boolean);
@@ -10452,6 +10566,7 @@ function catalogHomeBody(p){
       html += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
+      if(s.unavailable) html+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   }else{
     html+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
@@ -11040,7 +11155,8 @@ function theaterHomeBody(p){
   if(p.libs.length){
     body+=groupToggleHtml(p.group);
     for(const s of p.sections){
-      const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· view all (${esc(String(s.total))})</a>`;
+      const count=s.total==null?"preview unavailable":`view all (${esc(String(s.total))})`;
+      const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· ${count}</a>`;
       // Two cases still take a grid rather than a rail, both inherited from
       // the catalog drop's reasoning. An EMPTY section, because rail() on an
       // empty row renders a heading over nothing while grid([]) renders the
@@ -11052,6 +11168,7 @@ function theaterHomeBody(p){
       body += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
+      if(s.unavailable) body+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   } else {
     body+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
@@ -11685,11 +11802,20 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 
 // ---- router ---------------------------------------------------------------
 // One page-scoped poller at a time; routing away always clears it.
-let PAGE_TIMER=null;
-function setPageTimer(fn,ms){ clearInterval(PAGE_TIMER); PAGE_TIMER=setInterval(fn,ms); }
-async function render(){
-  if(!TOKEN||!ME) return boot();
+let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
+function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION) return;
   clearInterval(PAGE_TIMER);
+  const timer=setInterval(()=>{
+    if(generation!==PAGE_RENDER_GENERATION){ clearInterval(timer); if(PAGE_TIMER===timer) PAGE_TIMER=null; return; }
+    fn();
+  },ms);
+  PAGE_TIMER=timer;
+}
+async function render(){
+  const generation=++PAGE_RENDER_GENERATION;
+  if(!TOKEN||!ME) return boot();
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
   const h=location.hash||"#/";
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
@@ -11705,16 +11831,16 @@ async function render(){
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
-    else if(h==="#/activity") await viewActivity();
-    else if(h==="#/admin"||h==="#/settings") await viewSettings();
-    else await viewHome();
+    else if(h==="#/activity") await viewActivity(generation);
+    else if(h==="#/admin"||h==="#/settings") await viewSettings(generation);
+    else await viewHome(generation);
     // Converted routes restore at the moment their content lands; this catches
     // the ones that do not, and — because it is consume-once — guarantees a
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
-    restoreScroll();
+    if(generation===PAGE_RENDER_GENERATION) restoreScroll();
   }catch(e){
-    if(e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; else toast(e.message); }
+    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; else toast(e.message); }
   }
 }
 window.addEventListener("hashchange",render);

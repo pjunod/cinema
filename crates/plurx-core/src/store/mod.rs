@@ -39,8 +39,11 @@ mod hiqlite_reading;
 
 pub mod replicated;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[cfg(feature = "cluster-read-cost-validation")]
+pub use self::hiqlite::HiqliteOperationCounts;
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
@@ -308,6 +311,12 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read the complete settings table from one database snapshot.
+    ///
+    /// Administrative views render many independent settings at once. A
+    /// single snapshot keeps those values mutually consistent and, on a
+    /// replicated backend, avoids paying one linearizable read per field.
+    async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
     /// Insert an immutable setting value. Returns false when the key already
     /// exists and leaves the first committed value unchanged.
