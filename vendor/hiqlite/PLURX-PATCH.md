@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries four compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries five compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -21,8 +21,13 @@ Apache-2.0. Plurx carries four compatibility patches for clustered deployments:
   back to management HTTP, and the copied snapshot omits membership, addresses,
   replication maps, and quorum-ack state so passive application metrics cannot
   be mistaken for a quorum-confirmed watermark.
+- `Client::db_quorum_watermark` asks the current database leader to run
+  OpenRaft's quorum-backed linearizable-read proof and returns only the proof
+  term, leader identity, and committed index. Followers use the existing
+  authenticated leader stream; callers remain responsible for a monotonic
+  lease and matching the proof to their local Raft observation.
 
-Remove this vendor when an upstream Hiqlite release contains all four patches
+Remove this vendor when an upstream Hiqlite release contains all five patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
 

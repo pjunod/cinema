@@ -10,6 +10,14 @@ use tokio::sync::watch;
 use tokio::time;
 use tracing::{debug, info};
 
+#[cfg(feature = "sqlite")]
+pub(crate) const DB_QUORUM_WATERMARK_MARKER: &str =
+    "/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL";
+
+#[cfg(feature = "sqlite")]
+pub(crate) const DB_QUORUM_WATERMARK_COMPAT_PROBE: &str =
+    "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
+
 #[cfg(feature = "cache")]
 use crate::network::management::{self, ClusterLeaveReq};
 #[cfg(feature = "sqlite")]
@@ -37,6 +45,19 @@ pub struct LocalDbRaftSnapshot {
     pub current_leader: Option<u64>,
     pub last_applied_term: Option<u64>,
     pub last_applied_index: Option<u64>,
+}
+
+/// A leader-issued database commit watermark backed by a quorum heartbeat.
+///
+/// The term and leader identity describe the leadership proof, not the term
+/// that originally appended the committed entry. Callers must bind this tuple
+/// to a fresh local Raft observation before using it for a bounded read.
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DbQuorumWatermark {
+    pub term: u64,
+    pub leader_id: u64,
+    pub committed_index: u64,
 }
 
 /// Receiver for the in-process database Raft metrics watch channel.
@@ -76,6 +97,40 @@ impl LocalDbRaftMetrics {
     }
 }
 
+#[cfg(feature = "sqlite")]
+pub(crate) async fn db_quorum_watermark_local(
+    state: &Arc<AppState>,
+) -> Result<DbQuorumWatermark, Error> {
+    let before = state.raft_db.raft.metrics().borrow().clone();
+    before.running_state?;
+
+    let committed = tokio::time::timeout(
+        Duration::from_secs(1),
+        state.raft_db.raft.ensure_linearizable(),
+    )
+    .await
+    .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??
+    .ok_or_else(|| Error::LeaderChange("database leader has no read index".into()))?;
+    let after = state.raft_db.raft.metrics().borrow().clone();
+    after.running_state?;
+    if after.state != ServerState::Leader
+        || after.current_term != before.current_term
+        || after.current_term != committed.leader_id.term
+        || after.current_leader != Some(state.id)
+        || committed.leader_id.node_id != state.id
+    {
+        return Err(Error::LeaderChange(
+            "database leadership changed during quorum watermark proof".into(),
+        ));
+    }
+
+    Ok(DbQuorumWatermark {
+        term: after.current_term,
+        leader_id: state.id,
+        committed_index: committed.index,
+    })
+}
+
 impl Client {
     /// Subscribe to database Raft metrics only when this client owns the local
     /// node. Remote clients return an error; this method never performs IO.
@@ -88,6 +143,55 @@ impl Client {
         Ok(LocalDbRaftMetrics {
             receiver: state.raft_db.raft.metrics(),
         })
+    }
+
+    /// Obtain a commit watermark after the database leader has confirmed its
+    /// current term with a quorum and applied through the returned read index.
+    ///
+    /// A follower forwards this narrow request over Hiqlite's authenticated
+    /// leader stream. The method performs no SQL or state-machine mutation.
+    #[cfg(feature = "sqlite")]
+    pub async fn db_quorum_watermark(&self) -> Result<DbQuorumWatermark, Error> {
+        match self.db_quorum_watermark_req().await {
+            Ok(watermark) => Ok(watermark),
+            Err(error) => {
+                if self
+                    .was_leader_update_error(
+                        &error,
+                        &self.inner.leader_db,
+                        &self.inner.tx_client_db,
+                    )
+                    .await
+                {
+                    self.db_quorum_watermark_req().await
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn db_quorum_watermark_req(&self) -> Result<DbQuorumWatermark, Error> {
+        if let Some(state) = self.is_leader_db_with_state().await {
+            db_quorum_watermark_local(state).await
+        } else {
+            let mut rows = self
+                .query_remote_req(
+                    crate::store::state_machine::sqlite::state_machine::Query {
+                        sql: DB_QUORUM_WATERMARK_MARKER.into(),
+                        params: Vec::new(),
+                    },
+                    true,
+                )
+                .await?;
+            if rows.len() != 1 {
+                return Err(Error::Connect(
+                    "database quorum watermark returned an invalid response".into(),
+                ));
+            }
+            rows.swap_remove(0).into_db_quorum_watermark()
+        }
     }
 
     /// Get cluster metrics for the database Raft.
@@ -456,12 +560,44 @@ mod tests {
             .split_once("pub fn local_db_raft_metrics")
             .expect("local watch accessor")
             .1
-            .split_once("/// Get cluster metrics for the database Raft.")
+            .split_once("/// Obtain a commit watermark")
             .expect("end of local watch accessor")
             .0;
         assert!(accessor.contains("self.inner.state.as_ref().ok_or_else"));
         assert!(!accessor.contains("build_addr"));
         assert!(!accessor.contains("get_metrics_remote"));
         assert!(!accessor.contains(".await"));
+    }
+
+    #[test]
+    fn quorum_watermark_reuses_the_existing_consistent_query_wire_variant() {
+        let source = include_str!("mgmt.rs");
+        let accessor = source
+            .split_once("async fn db_quorum_watermark_req")
+            .expect("quorum watermark request")
+            .1
+            .split_once("/// Get cluster metrics for the database Raft.")
+            .expect("end of quorum watermark request")
+            .0;
+        assert!(accessor.contains("query_remote_req"));
+        assert!(accessor.contains("DB_QUORUM_WATERMARK_MARKER"));
+        assert!(!accessor.contains("ApiStreamRequestPayload"));
+
+        let stream = include_str!("../network/api.rs");
+        assert!(stream.contains("ApiStreamRequestPayload::QueryConsistent"));
+        assert!(!stream.contains("ApiStreamRequestPayload::QuorumWatermark"));
+    }
+
+    #[test]
+    fn quorum_watermark_row_round_trips_full_u64_values() {
+        let expected = super::DbQuorumWatermark {
+            term: u64::MAX,
+            leader_id: u64::MAX - 1,
+            committed_index: u64::MAX - 2,
+        };
+        let actual = crate::query::rows::RowOwned::from_db_quorum_watermark(expected)
+            .into_db_quorum_watermark()
+            .expect("watermark row");
+        assert_eq!(actual, expected);
     }
 }
