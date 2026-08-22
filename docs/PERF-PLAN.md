@@ -1460,10 +1460,13 @@ producer resumes "from that boundary" without saying what carries the
 boundary across a process restart. It is the claim row plus the staged
 parts, read back off disk — which keeps the bookmark and the bytes the
 same fact, so a crash between writing one and the other cannot leave them
-disagreeing. Resuming therefore rests on one producer per node at a time;
-`JobManager::produce_pass` enforces it and `TranscodeManager::produce`
-documents it. A `kill -9` mid-encode is tested: the next process picks up
-at the boundary and publishes a gapless asset.
+disagreeing. Resuming therefore rests on one producer per node at a time. The
+distributed queue worker's process-local guard enforces it, while a job-stable
+staging identity lets that node resume after yield or restart. A successor on
+another node starts from zero because checkpoint bytes are deliberately local;
+its new row fence prevents the predecessor from publishing. A `kill -9`
+mid-encode is tested: the same node can pick up at the boundary and publish a
+gapless asset.
 
 **Staging needs its own lifecycle rule.** Putting the temp directory under
 the cache root (so publication is a rename on one filesystem) puts it at
