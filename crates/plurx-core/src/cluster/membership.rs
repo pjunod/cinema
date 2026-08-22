@@ -829,9 +829,9 @@ impl MembershipManager {
         }
         let metrics = inner.client.metrics_db().await?;
         if metrics.current_leader != Some(inner.identity.raft_id)
-            || !metrics
+            || metrics
                 .millis_since_quorum_ack
-                .is_some_and(|age| age <= ARTWORK_LEADER_QUORUM_FRESH_MS)
+                .is_none_or(|age| age > ARTWORK_LEADER_QUORUM_FRESH_MS)
         {
             return Ok(None);
         }
