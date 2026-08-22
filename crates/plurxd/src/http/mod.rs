@@ -2774,7 +2774,7 @@ mod tests {
             .jobs
             .set_producing(Some(crate::state::ProducingNow {
                 title: "Willow".into(),
-                reason: crate::produce::REASON_IN_PROGRESS,
+                reason: crate::produce::REASON_IN_PROGRESS.to_owned(),
                 index: 2,
                 total: 12,
             }))

@@ -76,7 +76,9 @@ impl Part {
     }
 
     pub fn duration_ms(&self) -> i64 {
-        self.durations_ms.iter().sum()
+        self.durations_ms
+            .iter()
+            .fold(0_i64, |total, value| total.saturating_add(*value))
     }
 }
 
@@ -107,7 +109,9 @@ pub struct Assembled {
 /// error accumulates in the direction that loses picture: resuming from a
 /// point *after* the last published frame silently drops whatever is between.
 pub fn resume_at_ms(parts: &[Part]) -> i64 {
-    parts.iter().map(Part::duration_ms).sum()
+    parts.iter().fold(0_i64, |total, part| {
+        total.saturating_add(part.duration_ms())
+    })
 }
 
 /// Renumber every part's segments into one run and write the playlist that
@@ -129,7 +133,7 @@ pub fn assemble(parts: &[Part]) -> Assembled {
                 to: to.clone(),
             });
             playlist.push_str(&format!("#EXTINF:{:.6},\n{to}\n", *ms as f64 / 1000.0));
-            duration_ms += ms;
+            duration_ms = duration_ms.saturating_add(*ms);
             longest_ms = longest_ms.max(*ms);
         }
     }
@@ -171,6 +175,16 @@ pub struct Candidate {
     pub reason: &'static str,
 }
 
+/// A cheap rail row before resolving an item to its media files. Ranking this
+/// first is what keeps candidate discovery from issuing one file query for
+/// every duplicate across every user's rails.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveryCandidate {
+    pub item_id: i64,
+    pub title: String,
+    pub reason: &'static str,
+}
+
 /// Where a candidate came from, in the order the producer should spend its
 /// hardware on them.
 ///
@@ -182,6 +196,16 @@ pub const REASON_IN_PROGRESS: &str = "in progress";
 pub const REASON_NEXT_UP: &str = "next up";
 pub const REASON_RECENT: &str = "recently added";
 
+/// Stable persisted queue identifier for a user-facing discovery label.
+pub fn queue_reason(reason: &str) -> Option<&'static str> {
+    match reason {
+        REASON_IN_PROGRESS => Some("in_progress"),
+        REASON_NEXT_UP => Some("next_up"),
+        REASON_RECENT => Some("recent"),
+        _ => None,
+    }
+}
+
 /// Merge the rails into one work list, best bet first, with no repeats.
 ///
 /// `rails` is in priority order and each candidate already knows which rail it
@@ -192,6 +216,7 @@ pub const REASON_RECENT: &str = "recently added";
 /// both Next Up and recently-added is one encode, and producing it twice would
 /// be an hour of GPU spent to lose a race with itself. The first rail to name
 /// a file also gives it its reason, which is why the better rail goes first.
+#[cfg(test)]
 pub fn rank(rails: &[Vec<Candidate>], limit: usize) -> Vec<Candidate> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -202,6 +227,23 @@ pub fn rank(rails: &[Vec<Candidate>], limit: usize) -> Vec<Candidate> {
             }
             if seen.insert(c.file_id) {
                 out.push(c.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Merge and deduplicate item rails before any file lookup.
+pub fn rank_discovery(rails: &[Vec<DiscoveryCandidate>], limit: usize) -> Vec<DiscoveryCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for rail in rails {
+        for candidate in rail {
+            if out.len() >= limit {
+                return out;
+            }
+            if seen.insert(candidate.item_id) {
+                out.push(candidate.clone());
             }
         }
     }

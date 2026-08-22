@@ -11,7 +11,8 @@ use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MetadataPatch,
-    OfflinePackageStats, PlaybackEvent,
+    NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
+    PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
 use plurx_core::metadata::book::BookEnrichReport;
@@ -25,13 +26,14 @@ use plurx_core::store::{
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
-use crate::transcode::TranscodeManager;
+use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
 
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
@@ -46,6 +48,8 @@ pub struct SystemInfo {
     /// PLURX_HWACCEL preference, or "auto".
     pub hwaccel_pref: String,
     pub encoders: EncoderCaps,
+    /// Portable video decoders reported by this exact ffmpeg at boot.
+    pub decoders: Vec<String>,
     /// Human label of the encoder the transcoder will actually pick.
     pub encoder_selected: String,
     /// What the tone-map probe found at boot: the graph this node uses, and
@@ -434,6 +438,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
+            .with_decoders(system.decoders.clone())
             .with_dv_strippable(system.dovi_rpu)
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
@@ -742,6 +747,14 @@ pub struct JobManager {
     now_producing: Mutex<Option<ProducingNow>>,
     /// Set to ask the running pass to stop after the title it is on.
     stop_producing: std::sync::atomic::AtomicBool,
+    /// Jobs this node proved it cannot currently read. Claim filtering keeps
+    /// the refusal local: a peer with the same absolute path mounted may take
+    /// the row immediately, while this process avoids reclaiming and burning
+    /// the shared retry budget every scheduler tick.
+    pretranscode_refusals: Mutex<HashMap<String, i64>>,
+    /// Per-node maintenance cadence for node-local cache bytes. Candidate
+    /// generation is cluster-singleton and cannot maintain every worker disk.
+    last_pretranscode_cache_sweep_ms: AtomicI64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -768,7 +781,7 @@ pub struct ProducingNow {
     /// One of [`crate::produce::REASON_IN_PROGRESS`] and friends — the rail
     /// this candidate came off. "Why is it encoding *that*" is half the
     /// question, and the answer is never obvious from the filename.
-    pub reason: &'static str,
+    pub reason: String,
     /// 1-based position within this pass, and how many it means to attempt.
     pub index: usize,
     pub total: usize,
@@ -826,6 +839,10 @@ const PRODUCE_RAIL: i64 = 5;
 
 /// Ceiling on what one pass will attempt, across every user and rail.
 const PRODUCE_MAX_PER_PASS: usize = 12;
+/// Hard fan-out bounds for one singleton discovery pass. The rotating user
+/// cursor gives every account a turn without an all-users allocation.
+const PRODUCE_USER_PAGE: i64 = 64;
+const PRODUCE_DISCOVERY_ITEMS: usize = 64;
 
 /// How long one pass may spend. A bound rather than "until the list is done"
 /// because the list is never done: it is regenerated every interval from what
@@ -939,6 +956,13 @@ const MAX_PENDING_PER_LIBRARY: usize = 256;
 
 const JOB_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
 const JOB_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+const PRETRANSCODE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const PRETRANSCODE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
+const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
+// The store admits at most 4,096 active queue rows. Retaining that entire
+// bounded universe avoids rotating one unreadable high-priority row back into
+// eligibility before a lower-priority row on this node's mount can be found.
+const MAX_PRETRANSCODE_REFUSALS: usize = 4_096 + PRODUCE_MAX_PER_PASS;
 
 pub(crate) struct ActiveJobLease {
     coordinator: StoreCoordinator,
@@ -1040,10 +1064,6 @@ impl ActiveJobLease {
         self.lost.clone()
     }
 
-    fn publication_fence(&self) -> PublicationFence {
-        self.fence.clone()
-    }
-
     pub(crate) async fn release(mut self) {
         self.cancel.cancel();
         if let Some(heartbeat) = self.heartbeat.take() {
@@ -1066,14 +1086,141 @@ impl ActiveJobLease {
 }
 
 fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
-    let now_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(i64::MAX);
+    let now_unix_ms = clock_ms();
     std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
 }
 
+fn clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(i64::MAX)
+}
+
 impl Drop for ActiveJobLease {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.lost.cancel();
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
+    }
+}
+
+/// Heartbeat and self-fence for one distributed queue row.
+struct ActivePretranscodeJob {
+    fence: PretranscodeFence,
+    cancel: tokio_util::sync::CancellationToken,
+    lost: tokio_util::sync::CancellationToken,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ActivePretranscodeJob {
+    fn start(store: Arc<dyn Store>, job: PretranscodeJob) -> Self {
+        let fence = PretranscodeFence::new(job);
+        let heartbeat_fence = fence.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let heartbeat_cancel = cancel.clone();
+        let lost = tokio_util::sync::CancellationToken::new();
+        let heartbeat_lost = lost.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(PRETRANSCODE_HEARTBEAT);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                tokio::select! {
+                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+                let Some(current) = heartbeat_fence.snapshot().await else {
+                    heartbeat_lost.cancel();
+                    break;
+                };
+                let now_unix_ms = clock_ms();
+                if now_unix_ms >= current.lease_expires_ms {
+                    let _ = heartbeat_fence.invalidate(&current).await;
+                    heartbeat_lost.cancel();
+                    tracing::warn!(
+                        job = current.id,
+                        fence = current.fence,
+                        "pre-transcode queue heartbeat missed its lease deadline"
+                    );
+                    break;
+                }
+                let expires_at =
+                    now_unix_ms.saturating_add(
+                        PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64,
+                    );
+                let renewal = heartbeat_fence.renew(store.as_ref(), now_unix_ms, expires_at);
+                tokio::pin!(renewal);
+                let expiry = tokio::time::sleep(lease_time_remaining(current.lease_expires_ms));
+                tokio::pin!(expiry);
+                let renewed = tokio::select! {
+                    biased;
+                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = &mut expiry => {
+                        let _ = heartbeat_fence.invalidate(&current).await;
+                        heartbeat_lost.cancel();
+                        tracing::warn!(
+                            job = current.id,
+                            fence = current.fence,
+                            "pre-transcode queue renewal exceeded its lease deadline and self-fenced"
+                        );
+                        break;
+                    }
+                    result = &mut renewal => result,
+                };
+                match renewed {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        heartbeat_lost.cancel();
+                        tracing::warn!(
+                            job = current.id,
+                            fence = current.fence,
+                            "pre-transcode queue job lost its fence"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        heartbeat_lost.cancel();
+                        tracing::warn!(
+                            job = current.id,
+                            fence = current.fence,
+                            %error,
+                            "pre-transcode queue renewal failed and self-fenced"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            fence,
+            cancel,
+            lost,
+            heartbeat: Some(heartbeat),
+        }
+    }
+
+    fn fence(&self) -> PretranscodeFence {
+        self.fence.clone()
+    }
+
+    fn loss_token(&self) -> tokio_util::sync::CancellationToken {
+        self.lost.clone()
+    }
+
+    async fn finish(mut self) {
+        self.cancel.cancel();
+        if let Some(heartbeat) = self.heartbeat.take() {
+            if let Err(error) = heartbeat.await {
+                tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
+            }
+        }
+    }
+}
+
+impl Drop for ActivePretranscodeJob {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.lost.cancel();
@@ -1141,6 +1288,8 @@ impl JobManager {
             producing: std::sync::atomic::AtomicBool::new(false),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
+            pretranscode_refusals: Mutex::new(HashMap::new()),
+            last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -2396,18 +2545,25 @@ impl JobManager {
                     }
                 }
                 DueJob::ProduceCache => {
-                    // Spawned rather than run inline: this one takes hours, and
-                    // the scheduler tick it is on is also what starts scans and
-                    // sweeps. `run_due_jobs` is stamped-before-run, so a
-                    // producer still going when the next tick arrives simply
-                    // finds itself already stamped and does not double up —
-                    // and `produce_pass` refuses a second concurrent run
-                    // outright.
+                    // Candidate generation is the singleton half. It only
+                    // ranks and enqueues; every node's worker below competes
+                    // for distinct execution rows.
                     let state = Arc::clone(self);
                     let transcode = Arc::clone(transcode);
-                    tokio::spawn(async move { state.produce_pass(transcode).await });
+                    tokio::spawn(async move {
+                        state.enqueue_pretranscode_pass(transcode).await;
+                    });
                 }
             }
+        }
+
+        // Execution has no interval of its own. Every node asks once per
+        // scheduler tick while speculative production is enabled, and the
+        // process-local guard keeps a long title from stacking worker loops.
+        if global.cache_produce_mins > 0 {
+            let state = Arc::clone(self);
+            let transcode = Arc::clone(transcode);
+            tokio::spawn(async move { state.work_pretranscode_queue(transcode).await });
         }
 
         // Not a `DueJob`: there is no interval to decide about. It runs on
@@ -2560,14 +2716,9 @@ impl JobManager {
         lease.release().await;
     }
 
-    /// One producer pass: sweep the cache back under budget, work out what
-    /// somebody is likely to play next, and pre-transcode as much of it as the
-    /// window allows (PERF-PLAN §6.2).
-    ///
-    /// Everything here is best-effort by construction. A candidate that fails
-    /// is logged and skipped rather than ending the pass: the list is a
-    /// prediction, and one bad prediction is not a reason to stop making them.
-    async fn produce_pass(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+    /// Singleton half of speculative production: rank likely titles and put
+    /// their immutable source generations on the distributed queue.
+    async fn enqueue_pretranscode_pass(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         let lease = match self.acquire_job("candidate:pretranscode".to_owned()).await {
             Ok(Some(lease)) => lease,
             Ok(None) => return,
@@ -2578,63 +2729,51 @@ impl JobManager {
         };
         let publisher = lease.publisher(self.store.as_ref());
         self.stamp(keys::JOB_LAST_CACHE_PRODUCE, &publisher).await;
-        drop(publisher);
         let lost = lease.loss_token();
-        self.produce_pass_owned(transcode, &lost, lease.publication_fence())
-            .await;
-        lease.release().await;
-    }
-
-    async fn produce_pass_owned(
-        self: &Arc<Self>,
-        transcode: Arc<TranscodeManager>,
-        lease_lost: &tokio_util::sync::CancellationToken,
-        publication_fence: PublicationFence,
-    ) {
         use crate::produce;
-        if lease_lost.is_cancelled() {
-            return;
-        }
-        let Some((root, node)) = transcode.cache_location() else {
-            self.emit_producer_pass(0, 0, serde_json::json!({"unavailable": 1}));
-            return;
-        };
-        // One at a time. Two passes would fight for the same slots and the
-        // same claims — the claims would sort it out correctly, but only after
-        // both had spawned encoders.
-        if self.producing.swap(true, Ordering::Relaxed) {
-            tracing::debug!("a producer pass is already running; skipping this one");
-            self.emit_producer_pass(0, 1, serde_json::json!({"already_running": 1}));
-            return;
-        }
-        let _running = ProducingGuard(Arc::clone(self));
-
-        // Under budget BEFORE producing, not after. Producing first would push
-        // the cache over its ceiling and then evict — and the eviction is LRU,
-        // so what it takes could easily be the entry just made.
-        crate::cachekeep::sweep_with_readers(
-            &self.store,
-            root,
-            node,
-            transcode.cache_readers(),
-            now(),
-        )
-        .await;
-        if crate::cachekeep::budget_bytes(&self.store).await.is_none() {
-            tracing::debug!("cache is switched off; nothing to produce");
-            self.emit_producer_pass(0, 1, serde_json::json!({"cache_off": 1}));
-            return;
-        }
-
-        let users = match self.store.list_users().await {
+        let user_cursor = publisher
+            .get_setting(keys::CACHE_PRETRANSCODE_USER_CURSOR)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+        let mut users = match self
+            .store
+            .list_users_page(user_cursor, PRODUCE_USER_PAGE)
+            .await
+        {
             Ok(users) => users,
             Err(e) => {
-                tracing::warn!(error = %e, "producer: cannot list users");
-                self.emit_producer_pass(0, 1, serde_json::json!({"store_error": 1}));
+                tracing::warn!(error = %e, "candidate generator cannot page users");
+                drop(publisher);
+                lease.release().await;
                 return;
             }
         };
-        let mut rails: Vec<Vec<produce::Candidate>> = Vec::new();
+        if users.is_empty() && user_cursor > 0 {
+            users = self
+                .store
+                .list_users_page(0, PRODUCE_USER_PAGE)
+                .await
+                .unwrap_or_default();
+        }
+        let next_user_cursor = if users.len() < PRODUCE_USER_PAGE as usize {
+            0
+        } else {
+            users.last().map_or(0, |user| user.id)
+        };
+        if let Err(error) = publisher
+            .put_setting(
+                keys::CACHE_PRETRANSCODE_USER_CURSOR,
+                &next_user_cursor.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(%error, "candidate generator could not advance its user cursor");
+        }
+        let mut rails: Vec<Vec<produce::DiscoveryCandidate>> = Vec::new();
         let mut in_progress = Vec::new();
         let mut next_up = Vec::new();
         for user in &users {
@@ -2657,9 +2796,6 @@ impl JobManager {
             .map(|r| (r.item.id, r.item.title))
             .collect();
 
-        // Resolve items to their files here rather than in `rank`, so the
-        // ranking stays a pure list operation and an item with no playable
-        // file simply never enters it.
         for (reason, items) in [
             (produce::REASON_IN_PROGRESS, in_progress),
             (produce::REASON_NEXT_UP, next_up),
@@ -2667,113 +2803,540 @@ impl JobManager {
         ] {
             let mut rail = Vec::new();
             for (item_id, title) in items {
-                if let Ok(files) = self.store.files_for_item(item_id).await {
-                    if let Some(f) = files.first() {
-                        rail.push(produce::Candidate {
-                            file_id: f.id,
-                            item_id,
-                            title,
-                            reason,
-                        });
-                    }
-                }
+                rail.push(produce::DiscoveryCandidate {
+                    item_id,
+                    title,
+                    reason,
+                });
             }
             rails.push(rail);
         }
 
-        let candidates = produce::rank(&rails, PRODUCE_MAX_PER_PASS);
-        if candidates.is_empty() {
-            self.emit_producer_pass(0, 0, serde_json::json!({"no_candidates": 1}));
-            return;
+        // Dedupe/rank cheap item ids first, then perform at most one bounded
+        // file lookup per globally selected item. This is O(1) store fan-out
+        // as users/history grow: 64 users, 129 rail reads, and 64 file reads.
+        let discoveries = produce::rank_discovery(&rails, PRODUCE_DISCOVERY_ITEMS);
+        let mut candidates = Vec::with_capacity(PRODUCE_MAX_PER_PASS);
+        for discovery in discoveries {
+            let Ok(files) = self.store.files_for_item(discovery.item_id).await else {
+                continue;
+            };
+            let Some(file) = files.into_iter().next() else {
+                continue;
+            };
+            if !produce::worth_producing(&file) {
+                continue;
+            }
+            candidates.push((
+                produce::Candidate {
+                    file_id: file.id,
+                    item_id: discovery.item_id,
+                    title: discovery.title,
+                    reason: discovery.reason,
+                },
+                file,
+            ));
+            if candidates.len() == PRODUCE_MAX_PER_PASS {
+                break;
+            }
         }
-        let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
-        tracing::info!(
-            candidates = candidates.len(),
-            window_mins = PRODUCE_WINDOW.as_secs() / 60,
-            "pre-transcode pass starting"
-        );
         let total = candidates.len();
-        let mut produced = 0_u64;
+        let mut enqueued = 0_u64;
         let mut skipped = 0_u64;
         let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
-        for (i, c) in candidates.into_iter().enumerate() {
-            if lease_lost.is_cancelled() {
-                tracing::warn!("pre-transcode pass stopped after losing its cluster lease");
+        let policy = match transcode.try_pretranscode_policy_snapshot().await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "candidate generation could not read transcode policy");
+                drop(publisher);
+                lease.release().await;
+                return;
+            }
+        };
+        for (i, (c, file)) in candidates.into_iter().enumerate() {
+            if lost.is_cancelled() {
+                tracing::warn!("candidate generation stopped after losing its cluster lease");
                 skipped += (total - i) as u64;
                 reasons.insert("lease_lost", (total - i) as u64);
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                tracing::info!("pre-transcode pass out of time");
-                skipped += (total - i) as u64;
-                reasons.insert("deadline", (total - i) as u64);
-                break;
-            }
-            if self.stop_producing.load(Ordering::Relaxed) {
-                tracing::info!("pre-transcode pass stopped by request");
-                skipped += (total - i) as u64;
-                reasons.insert("stopped", (total - i) as u64);
-                break;
-            }
-            let Ok(Some(file)) = self.store.get_file(c.file_id).await else {
+            let height = policy.target_height(&file);
+            let decoder = match file.video_codec.as_deref() {
+                Some("h264" | "avc") => "h264",
+                Some("hevc" | "h265" | "hevc10") => "hevc",
+                Some("vp8") => "vp8",
+                Some("vp9") => "vp9",
+                Some("av1") => "av1",
+                Some("mpeg4") => "mpeg4",
+                Some("mpeg2video") => "mpeg2video",
+                _ => {
+                    skipped += 1;
+                    *reasons.entry("unsupported_decoder_contract").or_default() += 1;
+                    continue;
+                }
+            };
+            // Dolby Vision needs an RPU-aware renderer capability, not the
+            // ordinary HDR tone-map bit. Keep it on the live path until the
+            // queue contract can express that exact proof.
+            if file.hdr.as_deref() == Some("dolby_vision") {
                 skipped += 1;
-                *reasons.entry("missing_file").or_default() += 1;
+                *reasons
+                    .entry("dolby_renderer_contract_pending")
+                    .or_default() += 1;
+                continue;
+            }
+            let Some(duration_ms) = file.duration_ms.filter(|duration| *duration > 0) else {
+                skipped += 1;
+                *reasons.entry("missing_duration").or_default() += 1;
                 continue;
             };
-            if !produce::worth_producing(&file) {
+            let Some(peak_kbps) = crate::transcode::ladder(file.height)
+                .into_iter()
+                .find(|rung| rung.height == height)
+                .map(|rung| rung.peak_kbps)
+            else {
                 skipped += 1;
-                *reasons.entry("not_worth_producing").or_default() += 1;
+                *reasons.entry("missing_output_contract").or_default() += 1;
                 continue;
+            };
+            const GENERATION_OVERHEAD_BYTES: i64 = 64 * 1024 * 1024;
+            let artifact_bytes = duration_ms
+                .saturating_mul(i64::from(peak_kbps))
+                .saturating_div(8);
+            // Retained parts plus one complete copied generation are the
+            // portable worst case on filesystems without hard-link support.
+            let scratch_bytes = artifact_bytes
+                .saturating_mul(2)
+                .saturating_add(GENERATION_OVERHEAD_BYTES);
+            let mut hasher = Sha256::new();
+            for value in [
+                file.id.to_string(),
+                file.size.to_string(),
+                file.mtime.to_string(),
+                height.to_string(),
+                policy.generation.clone(),
+            ] {
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value.as_bytes());
             }
-            // Published BEFORE the encode starts, not after it finishes. The
-            // encode is the part that takes hours and holds the hardware, so
-            // announcing it afterwards describes only work that is already
-            // over — which is exactly the gap that made a busy ffmpeg
-            // unattributable from inside the product.
-            self.set_producing(Some(ProducingNow {
-                title: c.title.clone(),
-                reason: c.reason,
-                index: i + 1,
-                total,
-            }))
+            let requirements = PretranscodeRequirements {
+                version: PretranscodeRequirements::VERSION,
+                decoder: decoder.to_owned(),
+                acceptable_encoder_families: policy.acceptable_encoder_families(),
+                output_contract: "hls-mpegts-v1".to_owned(),
+                tone_map: file.hdr.is_some(),
+                output_grade: "sdr".to_owned(),
+                scratch_bytes,
+            };
+            let created_at_ms = clock_ms();
+            let priority_base = match c.reason {
+                produce::REASON_IN_PROGRESS => 300,
+                produce::REASON_NEXT_UP => 200,
+                _ => 100,
+            };
+            let job = NewPretranscodeJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: hex::encode(hasher.finalize()),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                target_height: height,
+                policy_generation: policy.generation.clone(),
+                requirements_json: serde_json::to_string(&requirements)
+                    .expect("bounded pre-transcode requirements serialize"),
+                reason: produce::queue_reason(c.reason)
+                    .expect("ranked discovery reasons have stable queue identifiers")
+                    .to_owned(),
+                priority: priority_base + i64::try_from(total.saturating_sub(i)).unwrap_or(0),
+                not_before_ms: created_at_ms,
+                created_at_ms,
+            };
+            match publisher.enqueue_pretranscode_job(&job).await {
+                Ok(true) => {
+                    enqueued += 1;
+                    tracing::info!(
+                        job = job.id,
+                        file = file.id,
+                        title = %c.title,
+                        reason = c.reason,
+                        height,
+                        "queued speculative transcode"
+                    );
+                }
+                Ok(false) => {
+                    skipped += 1;
+                    *reasons.entry("already_active_or_ready").or_default() += 1;
+                }
+                Err(error) => {
+                    skipped += 1;
+                    *reasons.entry("enqueue_failed").or_default() += 1;
+                    tracing::warn!(title = %c.title, %error, "could not queue speculative transcode");
+                    if lost.is_cancelled() {
+                        break;
+                    }
+                }
+            }
+        }
+        crate::telemetry::emit(
+            Arc::clone(&self.store),
+            PlaybackEvent {
+                at_unix_ms: clock_ms(),
+                event: "producer_candidates".to_owned(),
+                extra: Some(
+                    serde_json::json!({
+                        "enqueued": enqueued,
+                        "skipped": skipped,
+                        "reasons": reasons,
+                    })
+                    .to_string(),
+                ),
+                ..PlaybackEvent::default()
+            },
+        );
+        drop(publisher);
+        lease.release().await;
+    }
+
+    /// Non-singleton half: every idle compatible node drains distinct queue
+    /// rows through the existing preemptible producer.
+    async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        let Some((root, node)) = transcode.cache_location() else {
+            return;
+        };
+        if self.producing.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _running = ProducingGuard(Arc::clone(&self));
+        const LOCAL_SWEEP_INTERVAL_MS: i64 = 15 * 60 * 1_000;
+        let sweep_now = clock_ms();
+        let previous = self
+            .last_pretranscode_cache_sweep_ms
+            .load(Ordering::Acquire);
+        if sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
+            && self
+                .last_pretranscode_cache_sweep_ms
+                .compare_exchange(previous, sweep_now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            // This runs even when the queue is empty. Every producer-enabled
+            // node therefore maintains its own disk without multiplying work
+            // on each scheduler tick.
+            crate::cachekeep::sweep_with_readers(
+                &self.store,
+                root,
+                node,
+                transcode.cache_readers(),
+                now(),
+            )
             .await;
-            tracing::info!(
-                title = %c.title, reason = c.reason, n = i + 1, of = total,
-                "pre-transcoding"
-            );
-            // The rung a viewer would actually be given, so the entry matches
-            // what a real playback looks up. Asking the manager rather than
-            // assuming is what keeps the two in step when Auto's policy moves.
-            let height = transcode.auto_height_for_file(Some(&file), None).await;
-            match transcode
-                .produce_cancelled(
-                    &file,
-                    height,
-                    deadline,
-                    lease_lost,
-                    publication_fence.clone(),
+        }
+        let cache_ceiling = match crate::cachekeep::budget_bytes_fallible(&self.store).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "speculative queue cannot read its cache budget");
+                return;
+            }
+        };
+
+        let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
+        let mut produced = 0_u64;
+        let mut skipped = 0_u64;
+        let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
+        let has_refusals = !self.pretranscode_refusals.lock().await.is_empty();
+        if has_refusals {
+            let active_job_ids = match self.store.active_pretranscode_job_ids().await {
+                Ok(ids) if ids.len() <= 4_096 => ids.into_iter().collect::<HashSet<_>>(),
+                Ok(_) => {
+                    tracing::error!("active speculative queue exceeded its hard row bound");
+                    *reasons.entry("active_queue_bound_exceeded").or_default() += 1;
+                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not prune stale node-local queue refusals");
+                    *reasons.entry("refusal_prune_failed").or_default() += 1;
+                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+                    return;
+                }
+            };
+            let now_unix_ms = clock_ms();
+            self.pretranscode_refusals
+                .lock()
+                .await
+                .retain(|id, retry_at| *retry_at > now_unix_ms && active_job_ids.contains(id));
+        }
+        for index in 0..PRODUCE_MAX_PER_PASS {
+            if self.stop_producing.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            if !transcode.pretranscode_worker_idle() {
+                *reasons.entry("foreground_or_offline_busy").or_default() += 1;
+                break;
+            }
+            // `statvfs` is cheap enough to refresh after every title. Full
+            // cache reconciliation stays on the cleanup schedule: doing its
+            // database inventory and filesystem walk here would make an empty
+            // queue tax every media-serving node once per scheduler tick.
+            let used_bytes = match self.store.cache_bytes(node).await {
+                Ok(bytes) => bytes.max(0),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read durable cache usage before queue claim");
+                    *reasons.entry("cache_usage_unavailable").or_default() += 1;
+                    break;
+                }
+            };
+            let remaining_budget = cache_ceiling.saturating_sub(used_bytes);
+            if remaining_budget <= 0 {
+                tracing::info!(
+                    used_bytes,
+                    cache_ceiling,
+                    "speculative worker stopped at cache budget"
+                );
+                *reasons.entry("cache_budget_full").or_default() += 1;
+                break;
+            }
+            let mut capabilities = transcode.pretranscode_capabilities();
+            // Requirements carry the estimated complete artifact plus 64 MiB
+            // generation headroom. Advertising only the lesser of physical
+            // scratch and durable budget remainder prevents a claim whose
+            // expected publication is already known not to fit.
+            capabilities.scratch_bytes = capabilities.scratch_bytes.min(remaining_budget);
+            if !capabilities.validate() || capabilities.scratch_bytes == 0 {
+                tracing::warn!(
+                    decoders = ?capabilities.decoders,
+                    scratch_bytes = capabilities.scratch_bytes,
+                    "speculative worker has no proved decoder inventory or cache scratch"
+                );
+                *reasons.entry("unproved_capability_or_scratch").or_default() += 1;
+                break;
+            }
+            let now_unix_ms = clock_ms();
+            let expires_at = now_unix_ms
+                .saturating_add(PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64);
+            let excluded_job_ids = {
+                let mut refusals = self.pretranscode_refusals.lock().await;
+                refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
+                refusals
+                    .keys()
+                    .take(MAX_PRETRANSCODE_REFUSALS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let job = match self
+                .store
+                .claim_pretranscode_job(
+                    node,
+                    &capabilities,
+                    &excluded_job_ids,
+                    now_unix_ms,
+                    expires_at,
                 )
                 .await
             {
-                Ok(Some(made)) => {
-                    produced += 1;
-                    tracing::info!(
-                        recipe = %made.recipe, title = %c.title, reason = c.reason, height,
-                        minutes = made.duration_ms / 60_000, segments = made.segments,
-                        mb = made.bytes / 1_048_576, parts = made.parts,
-                        "pre-transcoded"
+                Ok(Some(job)) => job,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "could not claim speculative-transcode work");
+                    *reasons.entry("claim_failed").or_default() += 1;
+                    break;
+                }
+            };
+            let active = ActivePretranscodeJob::start(Arc::clone(&self.store), job.clone());
+            let fence = active.fence();
+            let lost = active.loss_token();
+            let file = match self.store.get_file(job.file_id).await {
+                Ok(Some(file))
+                    if file.size == job.source_size && file.mtime == job.source_mtime =>
+                {
+                    file
+                }
+                Ok(Some(_)) | Ok(None) => {
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
+                        .await;
+                    active.finish().await;
+                    skipped += 1;
+                    *reasons.entry("source_changed").or_default() += 1;
+                    continue;
+                }
+                Err(error) => {
+                    let now_unix_ms = clock_ms();
+                    tracing::warn!(job = job.id, %error, "source row unavailable for speculative transcode");
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    active.finish().await;
+                    skipped += 1;
+                    *reasons.entry("store_unavailable").or_default() += 1;
+                    continue;
+                }
+            };
+            let trusted_roots = match self.store.get_item(file.item_id).await {
+                Ok(Some(item)) => self
+                    .store
+                    .get_library(item.library_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|library| library.paths)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let Some(source_snapshot) =
+                crate::transcode::pretranscode_source_snapshot(&file, &trusted_roots).await
+            else {
+                let now_unix_ms = clock_ms();
+                {
+                    let mut refusals = self.pretranscode_refusals.lock().await;
+                    refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
+                    if refusals.len() >= MAX_PRETRANSCODE_REFUSALS {
+                        if let Some(oldest) = refusals
+                            .iter()
+                            .min_by_key(|(_, retry_at)| **retry_at)
+                            .map(|(id, _)| id.clone())
+                        {
+                            refusals.remove(&oldest);
+                        }
+                    }
+                    refusals.insert(
+                        job.id.clone(),
+                        now_unix_ms.saturating_add(PRETRANSCODE_REFUSAL_TTL_MS),
                     );
                 }
-                Ok(None) => {
-                    skipped += 1;
-                    *reasons.entry("already_cached_or_claimed").or_default() += 1;
+                let _ = fence
+                    .yield_job(self.store.as_ref(), now_unix_ms, now_unix_ms)
+                    .await;
+                active.finish().await;
+                skipped += 1;
+                *reasons.entry("source_unreadable_on_node").or_default() += 1;
+                tracing::debug!(
+                    job = job.id,
+                    path = %file.path.display(),
+                    "speculative transcode refused on a node without the source snapshot"
+                );
+                continue;
+            };
+            let title = self
+                .store
+                .get_item(file.item_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| file.path.display().to_string(), |item| item.title);
+            self.set_producing(Some(ProducingNow {
+                title: title.clone(),
+                reason: job.reason.clone(),
+                index: index + 1,
+                total: PRODUCE_MAX_PER_PASS,
+            }))
+            .await;
+            let result = transcode
+                .produce_pretranscode_job(
+                    &file,
+                    job.target_height,
+                    deadline,
+                    &lost,
+                    source_snapshot,
+                    fence.clone(),
+                )
+                .await;
+            match result {
+                Ok(PretranscodeProduceOutcome::Ready(made)) => {
+                    produced += 1;
+                    tracing::info!(
+                        job = job.id,
+                        recipe = %made.recipe,
+                        title = %title,
+                        reason = job.reason,
+                        height = job.target_height,
+                        segments = made.segments,
+                        mb = made.bytes / 1_048_576,
+                        parts = made.parts,
+                        "distributed speculative transcode ready"
+                    );
                 }
-                Err(e) => {
+                Ok(PretranscodeProduceOutcome::Yielded) if lost.is_cancelled() => {
+                    skipped += 1;
+                    *reasons.entry("lease_lost").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::Yielded) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(1_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("yielded").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::StoreUnavailable) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("store_unavailable").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::PolicyChanged) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("policy_changed").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::SourceChanged) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("source_changed").or_default() += 1;
+                }
+                Err(error) if crate::transcode::is_retryable_capacity_error(&error) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("capacity").or_default() += 1;
+                }
+                Err(error) => {
+                    let now_unix_ms = clock_ms();
+                    let exponent = u32::try_from(job.attempts.clamp(0, 7)).unwrap_or(0);
+                    let backoff_ms = 30_000_i64
+                        .saturating_mul(1_i64 << exponent)
+                        .min(60 * 60 * 1_000);
+                    let _ = fence
+                        .fail_job(
+                            self.store.as_ref(),
+                            "encode_failed",
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(backoff_ms),
+                        )
+                        .await;
                     skipped += 1;
                     *reasons.entry("failed").or_default() += 1;
-                    tracing::warn!(title = %c.title, error = %e, "pre-transcode failed");
+                    tracing::warn!(job = job.id, title = %title, %error, "speculative transcode failed");
                 }
             }
+            active.finish().await;
             self.set_producing(None).await;
         }
         self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
@@ -3277,6 +3840,47 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn empty_pretranscode_queue_rate_limits_local_cache_maintenance() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("empty queue store"));
+        store
+            .put_setting(keys::CACHE_MAX_GB, "50")
+            .await
+            .expect("enable cache");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let cache = tempfile::tempdir().expect("cache");
+        let cache_root = cache.path().join("transcode");
+        let recipe = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let orphan = cache_root
+            .join("dd")
+            .join(format!("{recipe}-j00000000-0000-4000-8000-000000000303-f1"));
+        tokio::fs::create_dir_all(&orphan)
+            .await
+            .expect("queue-shaped orphan");
+        tokio::fs::write(orphan.join("index.m3u8"), b"unbound")
+            .await
+            .expect("orphan bytes");
+
+        let shared: Arc<dyn Store> = store;
+        let jobs = manager(Arc::clone(&shared), artwork.path());
+        let transcode = Arc::new(
+            TranscodeManager::new(
+                shared,
+                cache.path().join("work"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_decoders(vec!["h264".to_owned()])
+            .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
+        );
+
+        Arc::clone(&jobs).work_pretranscode_queue(transcode).await;
+        assert!(
+            !orphan.exists(),
+            "a producer-enabled node did not maintain its local cache on an empty queue"
+        );
+    }
+
     fn targeted_show_tmdb(
         show_hits: Arc<AtomicUsize>,
         season_one_hits: Arc<AtomicUsize>,
@@ -3495,7 +4099,7 @@ mod tests {
         jobs.producing.store(true, Ordering::Relaxed);
         jobs.set_producing(Some(ProducingNow {
             title: "Heat".into(),
-            reason: crate::produce::REASON_RECENT,
+            reason: crate::produce::REASON_RECENT.to_owned(),
             index: 1,
             total: 2,
         }))

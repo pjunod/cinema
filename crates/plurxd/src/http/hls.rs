@@ -1730,7 +1730,7 @@ pub async fn segment(
         );
     }
     let opened_len = opened.len;
-    let reader = tokio_util::io::ReaderStream::new(opened.file);
+    let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let delivery = opened.delivery;
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —

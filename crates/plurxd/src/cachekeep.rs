@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use plurx_core::domain::CachedTranscode;
+use plurx_core::domain::{CacheManifestCheck, CachedTranscode};
 use plurx_core::store::{keys, Store};
 
 /// Process-local ownership for finished cache entries that are being served.
@@ -51,6 +51,8 @@ use plurx_core::store::{keys, Store};
 pub struct ActiveCacheReaders {
     states: Arc<Mutex<HashMap<String, CacheActivity>>>,
     active_entries: Arc<AtomicUsize>,
+    orphan_walker: Arc<tokio::sync::Mutex<CacheOrphanWalker>>,
+    sweep: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Read-only, lock-free cache activity projection for process metrics.
@@ -66,6 +68,14 @@ impl ActiveCacheMetrics {
     pub(crate) fn active_entries(&self) -> usize {
         self.active_entries.load(Ordering::Relaxed)
     }
+}
+
+#[derive(Default)]
+struct CacheOrphanWalker {
+    root: Option<PathBuf>,
+    prefixes: Option<tokio::fs::ReadDir>,
+    final_entries: Option<(PathBuf, tokio::fs::ReadDir)>,
+    staging_entries: Option<tokio::fs::ReadDir>,
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +99,14 @@ pub struct CacheReadGuard {
     recipe: String,
 }
 
+/// Two-dimensional ownership for queue publication. Budget eviction keys by
+/// recipe while orphan cleanup keys by the final directory name; both guards
+/// must span rename through fenced completion.
+pub(crate) struct CachePublicationGuard {
+    _recipe: CacheReadGuard,
+    _final_directory: CacheReadGuard,
+}
+
 pub(crate) struct CacheEvictionGuard {
     readers: ActiveCacheReaders,
     recipe: String,
@@ -110,6 +128,15 @@ impl ActiveCacheReaders {
 
     /// Start serving one recipe, unless eviction already owns it.
     pub fn begin_read(&self, recipe: &str) -> Option<CacheReadGuard> {
+        self.begin_guard(recipe)
+    }
+
+    /// Protect a lookup without claiming that a miss was ever a real recipe.
+    pub(crate) fn begin_lookup(&self, recipe: &str) -> Option<CacheReadGuard> {
+        self.begin_guard(recipe)
+    }
+
+    fn begin_guard(&self, recipe: &str) -> Option<CacheReadGuard> {
         let mut states = self.lock_states();
         match states.get_mut(recipe) {
             Some(CacheActivity::Readers(count)) => *count += 1,
@@ -127,6 +154,28 @@ impl ActiveCacheReaders {
             readers: self.clone(),
             recipe: recipe.to_owned(),
         })
+    }
+
+    /// Block both eviction of an older location for this recipe and orphan
+    /// removal of the just-renamed generation until its durable row exists.
+    pub(crate) fn begin_publication(
+        &self,
+        recipe: &str,
+        final_directory: &str,
+    ) -> Option<CachePublicationGuard> {
+        let recipe = self.begin_guard(recipe)?;
+        let final_directory = self.begin_guard(final_directory)?;
+        Some(CachePublicationGuard {
+            _recipe: recipe,
+            _final_directory: final_directory,
+        })
+    }
+
+    /// Exclude orphan cleanup from a producer's resumable directory. Fenced
+    /// producers key staging by canonical recipe; queue producers key it by
+    /// job-stable directory name, matching the orphan walk below.
+    pub(crate) fn begin_staging(&self, staging_directory: &str) -> Option<CacheReadGuard> {
+        self.begin_guard(staging_recipe(staging_directory))
     }
 
     /// Claim a recipe for removal. Active readers make eviction skip it; the
@@ -152,6 +201,24 @@ impl ActiveCacheReaders {
     #[cfg(test)]
     pub fn active_entries(&self) -> usize {
         self.active_entries.load(Ordering::Relaxed)
+    }
+
+    /// Whether anything except one housekeeping read owns this recipe.
+    /// Unrelated foreground playback must not starve integrity work for the
+    /// rest of the cache; the physical and wall-clock budgets bound aggregate
+    /// background pressure instead.
+    fn has_readers_besides(&self, recipe: &str) -> bool {
+        matches!(
+            self.lock_states().get(recipe),
+            Some(CacheActivity::Readers(count)) if *count > 1
+        )
+    }
+
+    fn has_reader(&self, recipe: &str) -> bool {
+        matches!(
+            self.lock_states().get(recipe),
+            Some(CacheActivity::Readers(_))
+        )
     }
 
     /// Whether this process has positive evidence that a recipe was real.
@@ -222,6 +289,34 @@ pub const STALE_CLAIM_SECS: i64 = 24 * 3600;
 /// safe default on a NAS.
 pub const DEFAULT_MAX_GB: i64 = 50;
 
+/// A sweep advances only this many generation locations. Successful pages
+/// update `last_seen_at`, so the oldest-first query rotates across the full
+/// inventory without an unbounded filesystem walk.
+const MANIFEST_SCRUB_BATCH: i64 = 128;
+
+/// CPU/syscall ceiling for degenerate manifests containing many tiny objects.
+/// The byte and wall-clock budgets usually stop the scrub first.
+const MANIFEST_SCRUB_MAX_OBJECTS: usize = 4_096;
+const MANIFEST_SCRUB_MAX_WALL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Physical I/O ceiling for one cleanup pass. The manifest format rejects any
+/// individual object above this same bound, so the first object can never
+/// punch through it.
+// One maximally valid object must still fit after loading the maximally valid
+// manifest and reserving both EOF probes. Otherwise the oldest row can pin the
+// durable cursor forever and starve every later generation.
+const MANIFEST_SCRUB_BYTES: u64 = plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+    + plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
+    + 2;
+
+fn reserve_scrub_bytes(remaining: &mut u64, bytes: u64) -> bool {
+    if bytes > *remaining {
+        return false;
+    }
+    *remaining -= bytes;
+    true
+}
+
 /// Where a producer assembles an entry before publishing it: one directory per
 /// recipe, under the cache root so the publish is a rename on one filesystem.
 ///
@@ -251,6 +346,324 @@ fn staging_recipe(name: &str) -> &str {
         .map_or(name, |(recipe, _)| recipe)
 }
 
+/// Distributed queue staging is kept by job id instead of an incomplete
+/// cache location. The recipe prefix still ensures one encoder identity per
+/// directory; the job suffix is the durable housekeeping authority.
+fn staging_queue_job(name: &str) -> Option<&str> {
+    let (recipe, job_id) = name.rsplit_once("-j")?;
+    if recipe.len() != 64 || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    uuid::Uuid::parse_str(job_id).ok().map(|_| job_id)
+}
+
+fn staging_queue_recipe(name: &str) -> Option<&str> {
+    let (recipe, job_id) = name.rsplit_once("-j")?;
+    (recipe.len() == 64
+        && recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && uuid::Uuid::parse_str(job_id).is_ok())
+    .then_some(recipe)
+}
+
+/// A queue generation renamed into its final fanout directory but not yet
+/// bound by the fenced transaction. This exact syntax lets the durable queue
+/// inventory authorize cleanup even when the cache-location inventory is
+/// legitimately empty after a restart.
+fn final_queue_job(name: &str) -> Option<&str> {
+    let (staging_name, fence) = name.rsplit_once("-f")?;
+    if fence.is_empty() || !fence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    staging_queue_job(staging_name)
+}
+
+fn final_recipe(name: &str) -> Option<&str> {
+    if final_queue_job(name).is_some() {
+        return name
+            .rsplit_once("-f")
+            .and_then(|(staging, _)| staging_queue_recipe(staging));
+    }
+    let recipe = staging_recipe(name);
+    (recipe.len() == 64 && recipe.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(recipe)
+}
+
+const ORPHAN_RECHECK_BATCH: usize = 128;
+const ORPHAN_SCAN_LIMIT: usize = 10_000;
+const ORPHAN_DELETE_LIMIT: usize = 256;
+
+struct OrphanCandidate {
+    path: PathBuf,
+    parent: PathBuf,
+    name: String,
+    identity: plurx_core::fs_secure::FileIdentity,
+    max_depth: usize,
+    _eviction: Option<CacheEvictionGuard>,
+}
+
+const MAX_FLAT_CACHE_CHILDREN: usize = crate::transcode::MAX_PRETRANSCODE_CLEANUP_ENTRIES;
+
+async fn quarantine_and_remove(candidate: &OrphanCandidate) -> bool {
+    let quarantine = format!(".plurx-delete-{}", uuid::Uuid::new_v4().simple());
+    if let Err(error) =
+        plurx_core::fs_secure::rename_child(&candidate.parent, &candidate.name, &quarantine).await
+    {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(dir = %candidate.path.display(), %error, "cache: could not quarantine directory");
+        }
+        return error.kind() == std::io::ErrorKind::NotFound;
+    }
+
+    let quarantined_path = candidate.parent.join(&quarantine);
+    let identity = plurx_core::fs_secure::directory_identity_nofollow(&quarantined_path).await;
+    if !matches!(&identity, Ok(found) if found.same_inode(candidate.identity)) {
+        let restored = plurx_core::fs_secure::rename_child_noreplace(
+            &candidate.parent,
+            &quarantine,
+            &candidate.name,
+        )
+        .await;
+        tracing::warn!(
+            dir = %candidate.path.display(),
+            ?identity,
+            ?restored,
+            "cache: quarantined directory identity changed; preserving bytes"
+        );
+        return false;
+    }
+
+    if candidate.max_depth > 0 {
+        let staging = match plurx_core::fs_secure::SecureDirectory::open(&quarantined_path).await {
+            Ok(staging) => staging,
+            Err(error) => {
+                let _ = plurx_core::fs_secure::rename_child_noreplace(
+                    &candidate.parent,
+                    &quarantine,
+                    &candidate.name,
+                )
+                .await;
+                tracing::warn!(dir = %candidate.path.display(), %error, "cache: could not bind quarantined staging tree");
+                return false;
+            }
+        };
+        // A crash may leave a generation-sized assembly alongside the maximum
+        // resumable parts tree. Remove those known children under the held
+        // staging capability before applying the independent parts bound.
+        for child in [
+            crate::transcode::ASSEMBLED_TEMP_DIR,
+            crate::transcode::ASSEMBLED_DIR,
+        ] {
+            match staging
+                .remove_child_tree(child, plurx_core::transcode::manifest::MAX_OBJECTS + 100, 2)
+                .await
+            {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let _ = plurx_core::fs_secure::rename_child_noreplace(
+                        &candidate.parent,
+                        &quarantine,
+                        &candidate.name,
+                    )
+                    .await;
+                    tracing::warn!(dir = %candidate.path.display(), child, %error, "cache: bounded assembly cleanup failed; preserving staging bytes");
+                    return false;
+                }
+            }
+        }
+    }
+
+    let removed = if candidate.max_depth == 0 {
+        plurx_core::fs_secure::remove_flat_directory_child(
+            &candidate.parent,
+            &quarantine,
+            MAX_FLAT_CACHE_CHILDREN,
+        )
+        .await
+    } else {
+        plurx_core::fs_secure::remove_bounded_directory_tree_child(
+            &candidate.parent,
+            &quarantine,
+            MAX_FLAT_CACHE_CHILDREN,
+            candidate.max_depth,
+        )
+        .await
+    };
+    match removed {
+        Ok(()) => true,
+        Err(error) => {
+            let restored = plurx_core::fs_secure::rename_child_noreplace(
+                &candidate.parent,
+                &quarantine,
+                &candidate.name,
+            )
+            .await;
+            tracing::warn!(
+                dir = %candidate.path.display(),
+                %error,
+                ?restored,
+                "cache: bounded quarantine removal failed; preserving bytes"
+            );
+            false
+        }
+    }
+}
+
+struct OwnershipSnapshot {
+    paths: HashSet<PathBuf>,
+    claimed_recipes: HashSet<String>,
+    queue_jobs: HashSet<String>,
+    complete: bool,
+}
+
+async fn ownership_snapshot(
+    store: &Arc<dyn Store>,
+    root: &Path,
+    node_id: &str,
+) -> Result<OwnershipSnapshot, plurx_core::error::StoreError> {
+    let inventory = store.cache_ownership_inventory(node_id).await?;
+    let queue_jobs = store
+        .pretranscode_staging_jobs(node_id)
+        .await?
+        .into_iter()
+        .collect();
+    let local_rows = inventory
+        .rows
+        .into_iter()
+        .filter(|entry| entry.storage_class == "local")
+        .collect::<Vec<_>>();
+    let mut paths = HashSet::new();
+    for entry in &local_rows {
+        if let Some(path) = validated_entry_dir(root, &entry.relative_dir).await {
+            paths.insert(path);
+        }
+    }
+    let claimed_recipes = local_rows
+        .into_iter()
+        .filter(|entry| !entry.complete)
+        .map(|entry| entry.recipe_hash)
+        .collect();
+    Ok(OwnershipSnapshot {
+        paths,
+        claimed_recipes,
+        queue_jobs,
+        complete: inventory.complete,
+    })
+}
+
+async fn delete_final_batch(
+    store: &Arc<dyn Store>,
+    root: &Path,
+    node_id: &str,
+    batch: &mut Vec<OrphanCandidate>,
+) -> (usize, usize) {
+    let relative_dirs = batch
+        .iter()
+        .filter_map(|candidate| candidate.path.strip_prefix(root).ok())
+        .filter_map(|relative| relative.to_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let rows = match store
+        .cache_candidate_owners(node_id, &relative_dirs, &[])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "cache: could not recheck final-directory ownership; keeping bytes");
+            let kept = batch.len();
+            batch.clear();
+            return (0, kept);
+        }
+    };
+    let mut owned_paths = HashSet::new();
+    for entry in rows {
+        if let Some(path) = validated_entry_dir(root, &entry.relative_dir).await {
+            owned_paths.insert(path);
+        }
+    }
+    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+        Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
+            let kept = batch.len();
+            batch.clear();
+            return (0, kept);
+        }
+    };
+    let mut removed = 0;
+    let mut kept = 0;
+    // Iterate by reference so every unique-key eviction guard in the batch
+    // remains alive until every same-recipe generation has been decided.
+    for candidate in batch.iter() {
+        let owned = owned_paths.contains(&candidate.path)
+            || final_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job));
+        if owned {
+            kept += 1;
+            continue;
+        }
+        if quarantine_and_remove(candidate).await {
+            removed += 1;
+            tracing::info!(dir = %candidate.path.display(), "cache: removed an unclaimed directory");
+        } else {
+            kept += 1;
+        }
+    }
+    batch.clear();
+    (removed, kept)
+}
+
+async fn delete_staging_batch(
+    store: &Arc<dyn Store>,
+    node_id: &str,
+    batch: &mut Vec<OrphanCandidate>,
+) -> (usize, usize) {
+    let recipes = batch
+        .iter()
+        .map(|candidate| staging_recipe(&candidate.name).to_owned())
+        .collect::<Vec<_>>();
+    let rows = match store.cache_candidate_owners(node_id, &[], &recipes).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "cache: could not recheck staging ownership; keeping bytes");
+            let kept = batch.len();
+            batch.clear();
+            return (0, kept);
+        }
+    };
+    let claimed_recipes = rows
+        .into_iter()
+        .filter(|entry| !entry.complete)
+        .map(|entry| entry.recipe_hash)
+        .collect::<HashSet<_>>();
+    let queue_jobs = match store.pretranscode_staging_jobs(node_id).await {
+        Ok(jobs) => jobs.into_iter().collect::<HashSet<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, "cache: could not recheck queue ownership; keeping bytes");
+            let kept = batch.len();
+            batch.clear();
+            return (0, kept);
+        }
+    };
+    let mut removed = 0;
+    let mut kept = 0;
+    // Same-recipe fenced staging directories share one canonical guard; keep
+    // it until the whole batch is complete.
+    for candidate in batch.iter() {
+        let owned = staging_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job))
+            || claimed_recipes.contains(staging_recipe(&candidate.name));
+        if owned {
+            kept += 1;
+            continue;
+        }
+        if quarantine_and_remove(candidate).await {
+            removed += 1;
+            tracing::info!(dir = %candidate.path.display(), "cache: removed staging for a recipe nothing claims");
+        } else {
+            kept += 1;
+        }
+    }
+    batch.clear();
+    (removed, kept)
+}
+
 const GB: i64 = 1024 * 1024 * 1024;
 
 /// What one sweep did, for the log and for tests.
@@ -260,13 +673,19 @@ pub struct Swept {
     pub stale: usize,
     /// Complete entries evicted to get under budget.
     pub evicted: usize,
+    /// Manifest-fenced locations invalidated before they could be offered.
+    pub corrupt: usize,
     /// Complete entries skipped because an active session is reading them.
     pub protected: usize,
     /// Entries already owned by another sweep in this process.
     pub in_flight: usize,
     /// Directories on disk that no row claimed.
     pub orphans: usize,
+    /// Bounded ownership snapshots taken after candidate eviction guards.
+    pub ownership_rechecks: usize,
     pub bytes_freed: i64,
+    /// Conservative manifest + media bytes admitted to the integrity scrub.
+    pub scrub_bytes: u64,
     /// What the cache occupies now, by the rows.
     pub bytes_after: i64,
 }
@@ -277,12 +696,28 @@ pub struct Swept {
 /// up one line later: a zero budget evicts everything on every sweep, which is
 /// what somebody who set `max_gb = 0` to stop the cache actually wants.
 pub async fn budget_bytes(store: &Arc<dyn Store>) -> Option<i64> {
-    let gb = match store.get_setting(keys::CACHE_MAX_GB).await {
-        Ok(Some(v)) => v.trim().parse::<i64>().ok().filter(|n| *n >= 0),
-        _ => None,
-    }
-    .unwrap_or(DEFAULT_MAX_GB);
-    (gb > 0).then(|| gb * GB)
+    budget_bytes_fallible(store)
+        .await
+        .unwrap_or(Some(DEFAULT_MAX_GB * GB))
+}
+
+pub async fn budget_bytes_fallible(
+    store: &Arc<dyn Store>,
+) -> Result<Option<i64>, plurx_core::error::StoreError> {
+    let gb = match store.get_setting(keys::CACHE_MAX_GB).await? {
+        Some(value) => value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| {
+                plurx_core::error::StoreError::Task(
+                    "cache budget setting is not a non-negative integer".to_owned(),
+                )
+            })?,
+        None => DEFAULT_MAX_GB,
+    };
+    Ok((gb > 0).then(|| gb.saturating_mul(GB)))
 }
 
 /// Run the whole sweep. Safe to call at any time; does nothing surprising when
@@ -299,8 +734,11 @@ pub async fn sweep_with_readers(
     readers: &ActiveCacheReaders,
     now: i64,
 ) -> Swept {
+    let Ok(_sweep) = readers.sweep.try_lock() else {
+        tracing::debug!(node_id, "cache: coalesced an overlapping local sweep");
+        return Swept::default();
+    };
     let mut out = Swept::default();
-    let mut removed_claims = HashSet::new();
 
     // 1. Crash leftovers, before the budget: their bytes are on the same disk.
     match store
@@ -321,7 +759,6 @@ pub async fn sweep_with_readers(
                     }
                 };
                 if forget(store, root, node_id, &entry).await {
-                    removed_claims.insert(entry.recipe_hash.clone());
                     out.stale += 1;
                     // Not added to `bytes_freed`: an incomplete row's `bytes`
                     // is whatever it was when it was claimed, which is zero.
@@ -332,7 +769,222 @@ pub async fn sweep_with_readers(
         Err(e) => tracing::warn!(error = %e, "cache: could not list stale claims"),
     }
 
-    // 2. Budget.
+    // 2. Authenticate a bounded rotating page of generations. Each location
+    // advances through a bounded object page as it rotates through the
+    // oldest-first durable cursor; requested objects are also verified on the
+    // serving path. Invalidating the exact row first makes a crash leave an
+    // unowned directory, never a durable hit for missing bytes.
+    let mut manifest_checks = Vec::new();
+    let mut scrub_remaining = MANIFEST_SCRUB_BYTES;
+    let scrub_started = std::time::Instant::now();
+    let mut scrubbed_objects = 0usize;
+    match store
+        .cache_manifest_candidates(node_id, MANIFEST_SCRUB_BATCH)
+        .await
+    {
+        Ok(candidates) => {
+            for entry in candidates {
+                let Some(expected_digest) = entry.manifest_digest.as_deref() else {
+                    continue;
+                };
+                // Playback itself refreshes last_used_at, so skipping the same
+                // recipe does not age a valid ready holder out. Unrelated
+                // playback does not suppress this location's cheap heartbeat.
+                if readers.has_reader(&entry.recipe_hash) {
+                    continue;
+                }
+                // A shared read excludes eviction but allows playback to
+                // start. Foreground readers are detected between objects,
+                // which bounds their worst-case wait to one HLS object.
+                let Some(_scrub_reader) = readers.begin_read(&entry.recipe_hash) else {
+                    out.in_flight += 1;
+                    continue;
+                };
+                let directory = validated_entry_dir(root, &entry.relative_dir).await;
+                let manifest_present = match directory.as_deref() {
+                    Some(directory) => {
+                        match plurx_core::fs_secure::open_read_nofollow(
+                            &directory.join(plurx_core::transcode::manifest::MANIFEST_FILE),
+                        )
+                        .await
+                        {
+                            Ok(file) => file.metadata().await.is_ok_and(|metadata| {
+                                metadata.is_file()
+                                    && metadata.len() > 0
+                                    && metadata.len()
+                                        <= plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
+                            }),
+                            Err(_) => false,
+                        }
+                    }
+                    None => false,
+                };
+                let deep_allowed = manifest_present
+                    && scrub_remaining > 0
+                    && scrubbed_objects < MANIFEST_SCRUB_MAX_OBJECTS
+                    && scrub_started.elapsed() < MANIFEST_SCRUB_MAX_WALL;
+                let manifest = if deep_allowed {
+                    match plurx_core::transcode::manifest::load_with_budget(
+                        directory.as_deref().expect("presence requires directory"),
+                        scrub_remaining,
+                    )
+                    .await
+                    {
+                        Ok(Some((manifest, charged_bytes))) => {
+                            debug_assert!(charged_bytes <= scrub_remaining);
+                            scrub_remaining -= charged_bytes;
+                            Some(manifest)
+                        }
+                        // The remaining deep-read budget is too small. The
+                        // descriptor-bound presence heartbeat still rotates
+                        // this holder; a later pass resumes its durable cursor.
+                        Ok(None) => None,
+                        Err(_) => {
+                            // A malformed manifest is corruption, not merely a
+                            // missed deep-scrub opportunity.
+                            let _ = store
+                                .invalidate_cache_entry(
+                                    &entry.recipe_hash,
+                                    node_id,
+                                    &entry.storage_class,
+                                    &entry.relative_dir,
+                                    Some(expected_digest),
+                                )
+                                .await;
+                            out.corrupt += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let mut valid = manifest_present
+                    && manifest
+                        .as_ref()
+                        .is_none_or(|manifest| manifest.manifest_digest == expected_digest);
+                let mut checked = 0usize;
+                let mut next_object_index = entry.scrub_object_index.max(0) as usize;
+                if let (Some(directory), Some(manifest)) = (directory.as_deref(), manifest.as_ref())
+                {
+                    if next_object_index >= manifest.objects.len() {
+                        next_object_index = 0;
+                    }
+                    for object in manifest
+                        .objects
+                        .iter()
+                        .cycle()
+                        .skip(next_object_index)
+                        .take(manifest.objects.len())
+                    {
+                        if readers.has_readers_besides(&entry.recipe_hash) {
+                            break;
+                        }
+                        if scrubbed_objects >= MANIFEST_SCRUB_MAX_OBJECTS
+                            || scrub_started.elapsed() >= MANIFEST_SCRUB_MAX_WALL
+                        {
+                            break;
+                        }
+                        let path = directory.join(&object.name);
+                        let metadata = match tokio::fs::symlink_metadata(&path).await {
+                            Ok(metadata)
+                                if metadata.file_type().is_file()
+                                    && !metadata.file_type().is_symlink()
+                                    && metadata.len() == object.bytes =>
+                            {
+                                metadata
+                            }
+                            _ => {
+                                valid = false;
+                                break;
+                            }
+                        };
+                        // Reserve one extra byte: the verifier performs one
+                        // EOF read to prove a same-prefix larger file is not
+                        // accepted, so even a concurrent replacement stays
+                        // within this physical I/O ceiling.
+                        let reserved = metadata.len().saturating_add(1);
+                        if !reserve_scrub_bytes(&mut scrub_remaining, reserved) {
+                            break;
+                        }
+                        match manifest.verify_object(directory, &object.name).await {
+                            Ok(true) => {
+                                checked += 1;
+                                scrubbed_objects += 1;
+                            }
+                            Ok(false) | Err(_) => {
+                                valid = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if valid {
+                    let next = if checked > 0 {
+                        let manifest = manifest.as_ref().expect("checked objects need manifest");
+                        let next = (next_object_index + checked) % manifest.objects.len();
+                        next as i64
+                    } else {
+                        entry.scrub_object_index.max(0)
+                    };
+                    manifest_checks.push(CacheManifestCheck {
+                        recipe_hash: entry.recipe_hash.clone(),
+                        node_id: node_id.to_owned(),
+                        storage_class: entry.storage_class.clone(),
+                        relative_dir: entry.relative_dir.clone(),
+                        manifest_digest: expected_digest.to_owned(),
+                        next_object_index: next,
+                        observed_at: now.saturating_add(i64::from(checked > 0)),
+                    });
+                    continue;
+                }
+                match store
+                    .invalidate_cache_entry(
+                        &entry.recipe_hash,
+                        node_id,
+                        &entry.storage_class,
+                        &entry.relative_dir,
+                        Some(expected_digest),
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        out.corrupt += 1;
+                        if directory.is_none() {
+                            tracing::warn!(
+                                recipe = %entry.recipe_hash,
+                                dir = %entry.relative_dir,
+                                "cache: invalidated an unsafe generation path without touching the filesystem"
+                            );
+                        }
+                        // Bytes become an orphan and are removed only by
+                        // the guarded, ownership-rechecking orphan pass.
+                    }
+                    Ok(false) => tracing::debug!(
+                        recipe = %entry.recipe_hash,
+                        "cache: corrupt manifest belonged to a superseded location"
+                    ),
+                    Err(error) => tracing::error!(
+                        recipe = %entry.recipe_hash,
+                        %error,
+                        "cache: could not invalidate a corrupt generation"
+                    ),
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "cache: could not list manifest scrub candidates")
+        }
+    }
+    out.scrub_bytes = MANIFEST_SCRUB_BYTES - scrub_remaining;
+    if let Err(error) = store.mark_cache_manifests_checked(&manifest_checks).await {
+        tracing::warn!(
+            checked = manifest_checks.len(),
+            %error,
+            "cache: could not durably advance the manifest scrub cursors"
+        );
+    }
+
+    // 3. Budget.
     let budget = budget_bytes(store).await;
     let mut used = store.cache_bytes(node_id).await.unwrap_or(0);
     let ceiling = budget.unwrap_or(0);
@@ -401,20 +1053,26 @@ pub async fn sweep_with_readers(
     }
     out.bytes_after = used;
 
-    // 3. Directories nothing claims.
-    let (orphans, protected, in_flight) =
-        sweep_orphan_dirs(store, root, node_id, readers, &removed_claims).await;
+    // 4. Directories nothing claims.
+    let (orphans, protected, in_flight, ownership_rechecks) =
+        sweep_orphan_dirs(store, root, node_id, readers).await;
     out.orphans = orphans;
     out.protected += protected;
     out.in_flight += in_flight;
-    if out.stale + out.evicted + out.protected + out.in_flight + out.orphans > 0 {
+    out.ownership_rechecks = ownership_rechecks;
+    if out.stale + out.evicted + out.corrupt + out.protected + out.in_flight + out.orphans > 0
+        || out.scrub_bytes > 0
+    {
         tracing::info!(
             stale = out.stale,
             evicted = out.evicted,
+            corrupt = out.corrupt,
             protected = out.protected,
             in_flight = out.in_flight,
             orphans = out.orphans,
+            ownership_rechecks = out.ownership_rechecks,
             freed = out.bytes_freed,
+            scrub_bytes = out.scrub_bytes,
             used = out.bytes_after,
             "cache: swept"
         );
@@ -442,7 +1100,7 @@ async fn forget(
     node_id: &str,
     entry: &CachedTranscode,
 ) -> bool {
-    let Some(dir) = entry_dir(root, &entry.relative_dir) else {
+    let Some(dir) = validated_entry_dir(root, &entry.relative_dir).await else {
         // A row whose path escapes the root cannot be trusted to name what to
         // delete. Drop the row and leave the bytes, wherever they are.
         tracing::warn!(
@@ -454,15 +1112,35 @@ async fn forget(
             .await
             .is_ok();
     };
-    if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            // The row stays. Dropping it would strand the bytes permanently:
-            // nothing else knows they exist, and the orphan sweep below only
-            // reaches directories directly under the root's two levels.
+    let identity = match plurx_core::fs_secure::directory_identity_nofollow(&dir).await {
+        Ok(identity) => Some(identity),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
             tracing::warn!(
-                recipe = %entry.recipe_hash, dir = %dir.display(), error = %e,
-                "cache: could not remove entry directory; keeping the row so it is retried"
+                recipe = %entry.recipe_hash, dir = %dir.display(), %error,
+                "cache: could not bind entry directory identity; keeping the row"
             );
+            return false;
+        }
+    };
+    if let Some(identity) = identity {
+        let Some(parent) = dir.parent() else {
+            return false;
+        };
+        let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let candidate = OrphanCandidate {
+            path: dir.clone(),
+            parent: parent.to_owned(),
+            name: name.to_owned(),
+            identity,
+            max_depth: 0,
+            _eviction: None,
+        };
+        if !quarantine_and_remove(&candidate).await {
+            // The row stays, so a restored directory remains reachable and a
+            // preserved quarantine remains visible to the orphan walker.
             return false;
         }
     }
@@ -482,22 +1160,50 @@ async fn forget(
 /// escapes it.
 ///
 /// The rows are ours, so this should never fire — which is the reason to check
-/// rather than to trust. What it guards is a `remove_dir_all`, and the distance
-/// between "a corrupt row" and "the media library" is one `..`.
-fn entry_dir(root: &Path, relative: &str) -> Option<PathBuf> {
+/// rather than to trust. It keeps later capability-relative quarantine work
+/// inside the cache root; the distance between "a corrupt row" and "the media
+/// library" is one `..`.
+pub(crate) fn entry_dir(root: &Path, relative: &str) -> Option<PathBuf> {
     let rel = Path::new(relative);
-    if rel.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir | std::path::Component::RootDir
-        )
-    }) {
-        return None;
-    }
-    if relative.trim().is_empty() {
+    if relative.trim().is_empty()
+        || !rel
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
         return None;
     }
     Some(root.join(rel))
+}
+
+pub(crate) async fn validated_entry_dir(root: &Path, relative: &str) -> Option<PathBuf> {
+    let path = entry_dir(root, relative)?;
+    validate_directory_chain(root, &path).await.then_some(path)
+}
+
+pub(crate) async fn validate_directory_chain(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let Ok(root_metadata) = tokio::fs::symlink_metadata(root).await else {
+        return false;
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return false;
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        let Ok(metadata) = tokio::fs::symlink_metadata(&current).await else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Delete cache directories no row claims.
@@ -517,176 +1223,221 @@ async fn sweep_orphan_dirs(
     root: &Path,
     node_id: &str,
     readers: &ActiveCacheReaders,
-    removed_claims: &HashSet<String>,
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, usize) {
     // The common empty-install case should not ask the store for ownership or
     // emit an uncertainty warning. A missing root cannot contain bytes.
     if tokio::fs::metadata(root).await.is_err() {
-        return (0, 0, 0);
+        return (0, 0, 0, 0);
     }
     // Everything a row names, as absolute paths. Both complete and claimed: a
     // producer's publish destination is claimed and must not be swept out from
     // under it.
-    let mut known: HashSet<PathBuf> = HashSet::new();
-    let mut claimed_recipes: HashSet<String> = HashSet::new();
     // Filesystem ownership is not eviction policy. The filtered LRU and stale
     // queries intentionally hide offline-owned rows; using either as this
     // keep-list turns that protection inside out and deletes the protected
     // directories as "orphans".
-    let rows = match store.all_cache_rows(node_id).await {
-        Ok(rows) => rows,
+    let snapshot = match ownership_snapshot(store, root, node_id).await {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             // Ownership uncertainty must fail closed. Treating a store error
             // as an empty keep-list would recursively delete valid media.
             tracing::warn!(%error, "cache: could not enumerate filesystem owners; skipping orphan sweep");
-            return (0, 0, 0);
+            return (0, 0, 0, 0);
         }
     };
-    let local_rows: Vec<_> = rows
-        .iter()
-        .filter(|entry| entry.storage_class == "local")
-        .collect();
-    let inventory_complete = !local_rows.is_empty();
-    if !inventory_complete {
-        // An empty inventory is indistinguishable from a backend that returned
-        // an incomplete ownership view. Deleting the whole cache tree on that
-        // answer is not cleanup; it is data loss. Fail closed and retry after
-        // a later pass has a positive ownership fact.
-        tracing::warn!("cache: filesystem owner inventory is empty; skipping orphan sweep");
+    let known = snapshot.paths;
+    let claimed_recipes = snapshot.claimed_recipes;
+    let queue_staging = snapshot.queue_jobs;
+    if !snapshot.complete {
+        tracing::warn!(
+            limit = 10_000,
+            "cache: broad ownership inventory exceeded its scan ceiling; using exact bounded rechecks for deletion candidates"
+        );
     }
-    for e in local_rows {
-        if let Some(dir) = entry_dir(root, &e.relative_dir) {
-            known.insert(dir);
-        }
-        if !e.complete {
-            claimed_recipes.insert(e.recipe_hash.clone());
-        }
-    }
-
-    let Ok(mut prefixes) = tokio::fs::read_dir(root).await else {
-        return (0, 0, 0); // no cache root yet just means nothing has been produced
-    };
-    let mut removed = 0usize;
+    let mut final_candidates = Vec::with_capacity(ORPHAN_DELETE_LIMIT * 3 / 4);
+    let mut staging_candidates = Vec::with_capacity(ORPHAN_DELETE_LIMIT / 4);
     let mut protected = 0usize;
     let mut in_flight = 0usize;
-    let mut staging: Option<PathBuf> = None;
-    while let Ok(Some(prefix)) = prefixes.next_entry().await {
-        let ppath = prefix.path();
-        if !prefix
-            .file_type()
-            .await
-            .map(|t| t.is_dir())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if prefix.file_name() == STAGING {
-            staging = Some(ppath);
-            continue;
-        }
-        let Ok(mut entries) = tokio::fs::read_dir(&ppath).await else {
-            continue;
+    // One guard per canonical recipe stays alive through *all* ownership
+    // recheck batches. Embedding it in the first candidate would release it
+    // when that candidate happened to fall in an earlier 128-row batch.
+    let mut held_evictions = HashMap::new();
+    let mut walker = readers.orphan_walker.lock().await;
+    if walker.root.as_deref() != Some(root) {
+        *walker = CacheOrphanWalker {
+            root: Some(root.to_owned()),
+            ..CacheOrphanWalker::default()
         };
-        let mut kept = 0usize;
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if known.contains(&path) {
-                kept += 1;
-                continue;
+    }
+
+    // Persist the open directory cursors across passes. A hostile cache tree
+    // therefore cannot force every sweep to restart at its first 10,000
+    // entries, while the independent staging cursor prevents one huge fanout
+    // prefix from starving crash-leftover cleanup.
+    let final_scan_limit = ORPHAN_SCAN_LIMIT * 4 / 5;
+    let final_delete_limit = ORPHAN_DELETE_LIMIT * 3 / 4;
+    let mut scanned = 0usize;
+    while scanned < final_scan_limit && final_candidates.len() < final_delete_limit {
+        if walker.final_entries.is_none() {
+            if walker.prefixes.is_none() {
+                walker.prefixes = tokio::fs::read_dir(root).await.ok();
             }
-            let recipe = entry.file_name().to_string_lossy().into_owned();
-            if !inventory_complete
-                && !readers.knows_recipe(&recipe)
-                && !removed_claims.contains(&recipe)
+            let Some(prefixes) = walker.prefixes.as_mut() else {
+                break;
+            };
+            let prefix = match prefixes.next_entry().await {
+                Ok(Some(prefix)) => prefix,
+                Ok(None) => {
+                    walker.prefixes = None;
+                    break;
+                }
+                Err(_) => {
+                    walker.prefixes = None;
+                    break;
+                }
+            };
+            scanned += 1;
+            if prefix.file_name() == STAGING
+                || !prefix
+                    .file_type()
+                    .await
+                    .map(|kind| kind.is_dir())
+                    .unwrap_or(false)
             {
-                kept += 1;
                 continue;
             }
-            let _eviction = match readers.begin_eviction(&recipe) {
-                Ok(guard) => guard,
+            let parent = prefix.path();
+            if let Ok(entries) = tokio::fs::read_dir(&parent).await {
+                walker.final_entries = Some((parent, entries));
+            }
+            continue;
+        }
+
+        let (parent, next) = {
+            let (parent, entries) = walker.final_entries.as_mut().expect("checked above");
+            (parent.clone(), entries.next_entry().await)
+        };
+        let entry = match next {
+            Ok(Some(entry)) => entry,
+            Ok(None) | Err(_) => {
+                walker.final_entries = None;
+                continue;
+            }
+        };
+        scanned += 1;
+        let path = entry.path();
+        if known.contains(&path) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if final_queue_job(&name).is_some_and(|job| queue_staging.contains(job)) {
+            continue;
+        }
+        let identity = match plurx_core::fs_secure::directory_identity_nofollow(&path).await {
+            Ok(identity) => identity,
+            Err(_) => continue,
+        };
+        let eviction_key = final_recipe(&name).unwrap_or(&name).to_owned();
+        if !held_evictions.contains_key(&eviction_key) {
+            match readers.begin_eviction(&eviction_key) {
+                Ok(guard) => {
+                    held_evictions.insert(eviction_key.clone(), guard);
+                }
                 Err(CacheBusy::Readers) => {
                     protected += 1;
-                    kept += 1;
                     continue;
                 }
                 Err(CacheBusy::Evicting) => {
                     in_flight += 1;
-                    kept += 1;
                     continue;
                 }
             };
-            match tokio::fs::remove_dir_all(&path).await {
-                Ok(()) => {
-                    removed += 1;
-                    tracing::info!(dir = %path.display(), "cache: removed an unclaimed directory");
-                }
-                Err(e) => {
-                    tracing::warn!(dir = %path.display(), error = %e, "cache: orphan sweep failed")
-                }
-            }
         }
-        // An empty prefix is not worth keeping, but it is also not worth
-        // forcing: `remove_dir` fails harmlessly if something appeared.
-        if kept == 0 {
-            let _ = tokio::fs::remove_dir(&ppath).await;
-        }
+        final_candidates.push(OrphanCandidate {
+            path,
+            parent,
+            name,
+            identity,
+            max_depth: 0,
+            _eviction: None,
+        });
     }
 
-    // The staging area, by its own rule: a directory here is a producer's
-    // work-in-progress, and what says it is still wanted is a claim on its
-    // recipe. One with no claim is what a killed process leaves — and, since
-    // the claim is what a later pass resumes from, one without a claim is also
-    // work nothing will ever pick up again.
-    if let Some(staging) = staging {
-        if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
-            let mut kept = 0usize;
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let recipe = staging_recipe(&name);
-                if claimed_recipes.contains(recipe) {
-                    kept += 1;
-                    continue;
-                }
-                if !inventory_complete
-                    && !readers.knows_recipe(recipe)
-                    && !removed_claims.contains(recipe)
-                {
-                    kept += 1;
-                    continue;
-                }
-                let _eviction = match readers.begin_eviction(recipe) {
-                    Ok(guard) => guard,
-                    Err(CacheBusy::Readers) => {
-                        protected += 1;
-                        kept += 1;
-                        continue;
-                    }
-                    Err(CacheBusy::Evicting) => {
-                        in_flight += 1;
-                        kept += 1;
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                match tokio::fs::remove_dir_all(&path).await {
-                    Ok(()) => {
-                        removed += 1;
-                        tracing::info!(
-                            dir = %path.display(),
-                            "cache: removed staging for a recipe nothing claims"
-                        );
-                    }
-                    Err(e) => tracing::warn!(
-                        dir = %path.display(), error = %e, "cache: staging sweep failed"
-                    ),
-                }
-            }
-            if kept == 0 {
-                let _ = tokio::fs::remove_dir(&staging).await;
-            }
+    let staging = root.join(STAGING);
+    let mut staging_scanned = 0usize;
+    while staging_scanned < ORPHAN_SCAN_LIMIT - final_scan_limit
+        && staging_candidates.len() < ORPHAN_DELETE_LIMIT - final_delete_limit
+    {
+        if walker.staging_entries.is_none() {
+            walker.staging_entries = tokio::fs::read_dir(&staging).await.ok();
         }
+        let Some(entries) = walker.staging_entries.as_mut() else {
+            break;
+        };
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) | Err(_) => {
+                walker.staging_entries = None;
+                break;
+            }
+        };
+        staging_scanned += 1;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if staging_queue_job(&name).is_some_and(|job| queue_staging.contains(job))
+            || claimed_recipes.contains(staging_recipe(&name))
+        {
+            continue;
+        }
+        let path = entry.path();
+        let identity = match plurx_core::fs_secure::directory_identity_nofollow(&path).await {
+            Ok(identity) => identity,
+            Err(_) => continue,
+        };
+        let eviction_key = staging_recipe(&name).to_owned();
+        if !held_evictions.contains_key(&eviction_key) {
+            match readers.begin_eviction(&eviction_key) {
+                Ok(guard) => {
+                    held_evictions.insert(eviction_key.clone(), guard);
+                }
+                Err(CacheBusy::Readers) => {
+                    protected += 1;
+                    continue;
+                }
+                Err(CacheBusy::Evicting) => {
+                    in_flight += 1;
+                    continue;
+                }
+            };
+        }
+        staging_candidates.push(OrphanCandidate {
+            path,
+            parent: staging.clone(),
+            name,
+            identity,
+            max_depth: 3,
+            _eviction: None,
+        });
     }
-    (removed, protected, in_flight)
+    drop(walker);
+
+    let mut removed = 0usize;
+    let mut ownership_rechecks = 0usize;
+    while !final_candidates.is_empty() {
+        let take = final_candidates.len().min(ORPHAN_RECHECK_BATCH);
+        let mut batch = final_candidates.drain(..take).collect::<Vec<_>>();
+        let (batch_removed, _) = delete_final_batch(store, root, node_id, &mut batch).await;
+        removed += batch_removed;
+        ownership_rechecks += 1;
+    }
+    while !staging_candidates.is_empty() {
+        let take = staging_candidates.len().min(ORPHAN_RECHECK_BATCH);
+        let mut batch = staging_candidates.drain(..take).collect::<Vec<_>>();
+        let (batch_removed, _) = delete_staging_batch(store, node_id, &mut batch).await;
+        removed += batch_removed;
+        ownership_rechecks += 1;
+    }
+    drop(held_evictions);
+    (removed, protected, in_flight, ownership_rechecks)
 }
 
 #[cfg(test)]
@@ -695,7 +1446,8 @@ mod tests {
     use plurx_core::cluster::{open_store, StoreHandle};
     use plurx_core::config::Config;
     use plurx_core::domain::{
-        ItemKind, LibraryKind, NewItem, NewLibrary, NewOfflinePackage, OfflineCreateOutcome,
+        ItemKind, LibraryKind, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+        OfflineCreateOutcome, PretranscodeRequirements, PretranscodeWorkerCapabilities,
         ProbeResult,
     };
     use plurx_core::store::{
@@ -710,6 +1462,34 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn manifest_scrub_reservations_never_exceed_the_physical_budget() {
+        let mut remaining = 10;
+        assert!(reserve_scrub_bytes(&mut remaining, 4));
+        assert_eq!(remaining, 6);
+        assert!(!reserve_scrub_bytes(&mut remaining, 7));
+        assert_eq!(remaining, 6, "a refused object consumed budget");
+        assert!(reserve_scrub_bytes(&mut remaining, 6));
+        assert_eq!(remaining, 0);
+        assert!(!reserve_scrub_bytes(&mut remaining, 1));
+        assert_eq!(
+            MANIFEST_SCRUB_BYTES,
+            plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+                + plurx_core::transcode::manifest::MAX_MANIFEST_BYTES
+                + 2
+        );
+        let mut maximum = MANIFEST_SCRUB_BYTES;
+        assert!(reserve_scrub_bytes(
+            &mut maximum,
+            plurx_core::transcode::manifest::MAX_MANIFEST_BYTES + 1
+        ));
+        assert!(reserve_scrub_bytes(
+            &mut maximum,
+            plurx_core::transcode::manifest::MAX_OBJECT_BYTES + 1
+        ));
+        assert_eq!(maximum, 0, "the largest valid row must make progress");
     }
 
     #[test]
@@ -738,6 +1518,17 @@ mod tests {
             .join()
             .expect("join active-entry reader")
             .expect("send");
+    }
+
+    #[test]
+    fn distributed_staging_names_retain_their_queue_job_identity() {
+        let job = "00000000-0000-4000-8000-000000000101";
+        let recipe = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        assert_eq!(staging_queue_job(&format!("{recipe}-j{job}")), Some(job));
+        assert_eq!(final_queue_job(&format!("{recipe}-j{job}-f42")), Some(job));
+        assert_eq!(staging_queue_job(&format!("abcdef-j{job}")), None);
+        assert_eq!(staging_queue_job("abcdef-jnot-a-uuid"), None);
+        assert_eq!(staging_queue_job("abcdef"), None);
     }
 
     const NODE: &str = "node-a";
@@ -803,11 +1594,97 @@ mod tests {
         dir
     }
 
+    async fn complete_fenced_location(
+        store: &Arc<dyn Store>,
+        file: i64,
+        job_id: &str,
+        recipe: &str,
+        relative: &str,
+        bytes: i64,
+        manifest_digest: &str,
+    ) {
+        let lease = match store
+            .acquire_lease(
+                &format!("cachekeep-scrub-{job_id}"),
+                "scheduler",
+                100,
+                2_000,
+            )
+            .await
+            .expect("candidate lease")
+        {
+            plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => lease,
+            other => panic!("candidate lease held: {other:?}"),
+        };
+        let requirements = serde_json::to_string(&PretranscodeRequirements {
+            version: PretranscodeRequirements::VERSION,
+            decoder: "h264".to_owned(),
+            acceptable_encoder_families: vec!["software".to_owned()],
+            output_contract: "hls-mpegts-v1".to_owned(),
+            tone_map: false,
+            output_grade: "sdr".to_owned(),
+            scratch_bytes: 1,
+        })
+        .expect("requirements");
+        assert!(store
+            .enqueue_pretranscode_job(
+                &NewPretranscodeJob {
+                    id: job_id.to_owned(),
+                    dedupe_key: format!("cachekeep-scrub-{job_id}"),
+                    file_id: file,
+                    source_size: 1,
+                    source_mtime: 1,
+                    target_height: 720,
+                    policy_generation: "scrub-v1".to_owned(),
+                    requirements_json: requirements,
+                    reason: "recent".to_owned(),
+                    priority: 100,
+                    not_before_ms: 110,
+                    created_at_ms: 110,
+                },
+                &lease,
+                &lease
+                    .publication_successor()
+                    .expect("publication successor"),
+            )
+            .await
+            .expect("enqueue scrub fixture"));
+        let capabilities = PretranscodeWorkerCapabilities {
+            version: PretranscodeRequirements::VERSION,
+            decoders: vec!["h264".to_owned()],
+            encoder_families: vec!["software".to_owned()],
+            max_target_height: 2_160,
+            output_contracts: vec!["hls-mpegts-v1".to_owned()],
+            tone_map: false,
+            output_grades: vec!["sdr".to_owned()],
+            scratch_bytes: 2,
+        };
+        let claimed = store
+            .claim_pretranscode_job(NODE, &capabilities, &[], 120, 1_000)
+            .await
+            .expect("claim scrub fixture")
+            .expect("scrub fixture job");
+        assert_eq!(claimed.id, job_id);
+        assert!(store
+            .complete_pretranscode_job(
+                &claimed,
+                recipe,
+                1,
+                relative,
+                bytes,
+                None,
+                manifest_digest,
+                130,
+            )
+            .await
+            .expect("complete scrub fixture"));
+    }
+
     fn root() -> tempfile::TempDir {
         tempfile::tempdir().expect("root")
     }
 
-    async fn preparing_package(store: &Arc<dyn Store>, file: i64, recipe: &str) -> String {
+    async fn preparing_package(store: &Arc<dyn Store>, file: i64, recipe: &str) -> (String, i64) {
         let user = store
             .create_user(&format!("user-{recipe}"), "hash", false)
             .await
@@ -851,7 +1728,7 @@ mod tests {
             .set_offline_package_recipe(&package.id, recipe)
             .await
             .expect("bind recipe"));
-        package.id
+        (package.id, user.id)
     }
 
     /// The budget is a ceiling and eviction stops the moment it is met — the
@@ -962,7 +1839,7 @@ mod tests {
     async fn a_published_offline_package_is_neither_evicted_nor_orphaned() {
         let (store, file) = store().await;
         let root = root();
-        let package_id = preparing_package(&store, file, "efready").await;
+        let (package_id, _user_id) = preparing_package(&store, file, "efready").await;
         let dir = entry(&store, root.path(), file, "efready", 100).await;
         assert!(store
             .mark_offline_package_ready(&package_id, NODE, "efready", 100, 90_000)
@@ -1112,7 +1989,7 @@ mod tests {
     async fn offline_preparation_keeps_its_staging_directory() {
         let (store, file) = store().await;
         let root = root();
-        let _package_id = preparing_package(&store, file, "ghoffline").await;
+        let (_package_id, _user_id) = preparing_package(&store, file, "ghoffline").await;
         store
             .claim_cache_entry("ghoffline", file, 1, NODE, "gh/ghoffline")
             .await
@@ -1153,6 +2030,515 @@ mod tests {
             !root.path().join(STAGING).exists(),
             "an emptied staging area goes with its last directory"
         );
+    }
+
+    #[tokio::test]
+    async fn queue_staging_survives_local_yield_and_is_reclaimed_after_remote_takeover() {
+        let (store, file) = store().await;
+        let root = root();
+        let lease = match store
+            .acquire_lease("candidate:pretranscode", "scheduler", 100, 2_000)
+            .await
+            .expect("candidate lease")
+        {
+            plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => lease,
+            other => panic!("candidate lease held: {other:?}"),
+        };
+        let requirements = serde_json::to_string(&PretranscodeRequirements {
+            version: PretranscodeRequirements::VERSION,
+            decoder: "h264".to_owned(),
+            acceptable_encoder_families: vec!["software".to_owned()],
+            output_contract: "hls-mpegts-v1".to_owned(),
+            tone_map: false,
+            output_grade: "sdr".to_owned(),
+            scratch_bytes: 1,
+        })
+        .expect("requirements");
+        let job_id = "00000000-0000-4000-8000-000000000201";
+        assert!(store
+            .enqueue_pretranscode_job(
+                &NewPretranscodeJob {
+                    id: job_id.to_owned(),
+                    dedupe_key: "cachekeep-queue-job".to_owned(),
+                    file_id: file,
+                    source_size: 1,
+                    source_mtime: 1,
+                    target_height: 720,
+                    policy_generation: "contract-v1".to_owned(),
+                    requirements_json: requirements,
+                    reason: "recent".to_owned(),
+                    priority: 100,
+                    not_before_ms: 100,
+                    created_at_ms: 100,
+                },
+                &lease,
+                &lease
+                    .publication_successor()
+                    .expect("publication successor"),
+            )
+            .await
+            .expect("enqueue"));
+        let capabilities = PretranscodeWorkerCapabilities {
+            version: PretranscodeRequirements::VERSION,
+            decoders: vec!["*".to_owned()],
+            encoder_families: vec!["software".to_owned()],
+            max_target_height: 2_160,
+            output_contracts: vec!["hls-mpegts-v1".to_owned()],
+            tone_map: true,
+            output_grades: vec!["sdr".to_owned()],
+            scratch_bytes: i64::MAX,
+        };
+        let first = store
+            .claim_pretranscode_job(NODE, &capabilities, &[], 120, 300)
+            .await
+            .expect("first claim")
+            .expect("first job");
+        let recipe = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let staging = root
+            .path()
+            .join(STAGING)
+            .join(format!("{recipe}-j{job_id}"));
+        tokio::fs::create_dir_all(staging.join("part-000"))
+            .await
+            .expect("staging");
+        tokio::fs::write(staging.join("part-000/seg00000.ts"), b"checkpoint")
+            .await
+            .expect("checkpoint");
+        assert!(store
+            .yield_pretranscode_job(&first, 130, 140)
+            .await
+            .expect("yield"));
+        sweep(&store, root.path(), NODE, unix_now()).await;
+        assert!(staging.exists(), "a yielded local checkpoint was swept");
+
+        let resumed = store
+            .claim_pretranscode_job(NODE, &capabilities, &[], 140, 300)
+            .await
+            .expect("local reclaim")
+            .expect("local job");
+        assert_eq!(resumed.id, job_id);
+        sweep(&store, root.path(), NODE, unix_now()).await;
+        assert!(staging.exists(), "a locally reclaimed checkpoint was swept");
+
+        let successor = store
+            .claim_pretranscode_job("node-b", &capabilities, &[], 301, 600)
+            .await
+            .expect("remote takeover")
+            .expect("remote job");
+        assert_eq!(successor.fence, resumed.fence + 1);
+        sweep(&store, root.path(), NODE, unix_now()).await;
+        assert!(
+            !staging.exists(),
+            "the predecessor's abandoned staging survived remote takeover"
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_scrub_yields_to_playback_and_resumes_durably_after_restart() {
+        let (store, file) = store().await;
+        let root = root();
+        let recipe = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let relative = format!("aa/{recipe}");
+        let directory = root.path().join(&relative);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("generation");
+        let mut names = vec!["index.m3u8".to_owned()];
+        tokio::fs::write(directory.join("index.m3u8"), b"#EXTM3U\n#EXT-X-ENDLIST\n")
+            .await
+            .expect("playlist");
+        for index in 0..16 {
+            let name = format!("seg{index:05}.ts");
+            tokio::fs::write(directory.join(&name), format!("segment-{index}"))
+                .await
+                .expect("segment");
+            names.push(name);
+        }
+        let manifest =
+            plurx_core::transcode::manifest::publish(&directory, "scrub-generation-1", &names)
+                .await
+                .expect("manifest");
+        complete_fenced_location(
+            &store,
+            file,
+            "00000000-0000-4000-8000-000000000401",
+            recipe,
+            &relative,
+            1_000,
+            &manifest.manifest_digest,
+        )
+        .await;
+        let (package_id, user_id) = preparing_package(&store, file, recipe).await;
+        assert!(store
+            .mark_offline_package_ready(&package_id, NODE, recipe, 1_000, 90_000)
+            .await
+            .expect("ready scrubbed package"));
+
+        let readers = ActiveCacheReaders::default();
+        let playback = readers.begin_read(recipe).expect("playback reader");
+        let skipped = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        assert_eq!(skipped.scrub_bytes, 0, "scrub competed with playback");
+        assert_eq!(
+            store
+                .cache_hit(recipe, NODE)
+                .await
+                .expect("cache hit")
+                .expect("location")
+                .scrub_object_index,
+            0
+        );
+        drop(playback);
+
+        let first = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        assert!(first.scrub_bytes <= MANIFEST_SCRUB_BYTES);
+        assert_eq!(
+            store
+                .cache_hit(recipe, NODE)
+                .await
+                .expect("cache hit")
+                .expect("location")
+                .scrub_object_index,
+            0,
+        );
+
+        // Requested-object verification is immediate; the next bounded
+        // background pass also catches corruption introduced after a complete
+        // small-generation rotation.
+        tokio::fs::write(directory.join("seg00011.ts"), b"corrupt after restart")
+            .await
+            .expect("corrupt later object");
+        let restarted_readers = ActiveCacheReaders::default();
+        let second =
+            sweep_with_readers(&store, root.path(), NODE, &restarted_readers, unix_now()).await;
+        assert_eq!(second.corrupt, 1);
+        assert!(second.scrub_bytes <= MANIFEST_SCRUB_BYTES);
+        assert!(store
+            .cache_hit(recipe, NODE)
+            .await
+            .expect("invalidated lookup")
+            .is_none());
+        let failed_package = store
+            .offline_package_for_user(&package_id, user_id)
+            .await
+            .expect("scrubbed package lookup")
+            .expect("scrubbed package");
+        assert_eq!(failed_package.state, "failed");
+        assert_eq!(failed_package.phase, "integrity");
+        assert_eq!(
+            failed_package.error_code.as_deref(),
+            Some("cache_integrity")
+        );
+        assert!(!directory.exists(), "corrupt generation bytes survived");
+    }
+
+    #[tokio::test]
+    async fn manifest_scrub_invalidates_unsafe_rows_without_leaving_the_cache_root() {
+        let (store, file) = store().await;
+        let sandbox = root();
+        let cache_root = sandbox.path().join("cache");
+        let outside = sandbox.path().join("outside");
+        tokio::fs::create_dir_all(&cache_root)
+            .await
+            .expect("cache root");
+        tokio::fs::create_dir_all(&outside).await.expect("outside");
+        tokio::fs::write(outside.join("media.mkv"), b"must survive")
+            .await
+            .expect("outside sentinel");
+        let recipes = [
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ];
+        complete_fenced_location(
+            &store,
+            file,
+            "00000000-0000-4000-8000-000000000402",
+            recipes[0],
+            "../outside",
+            1,
+            &"b".repeat(64),
+        )
+        .await;
+        complete_fenced_location(
+            &store,
+            file,
+            "00000000-0000-4000-8000-000000000403",
+            recipes[1],
+            &outside.to_string_lossy(),
+            1,
+            &"c".repeat(64),
+        )
+        .await;
+
+        let swept = sweep_with_readers(
+            &store,
+            &cache_root,
+            NODE,
+            &ActiveCacheReaders::default(),
+            unix_now(),
+        )
+        .await;
+        assert_eq!(swept.corrupt, 2);
+        assert!(outside.join("media.mkv").exists());
+        for recipe in recipes {
+            assert!(store
+                .cache_hit(recipe, NODE)
+                .await
+                .expect("unsafe row lookup")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_final_generation_is_protected_between_rename_and_fenced_completion() {
+        let (store, _file) = store().await;
+        let root = root();
+        let readers = ActiveCacheReaders::default();
+        let recipe = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let final_name = format!("{recipe}-j00000000-0000-4000-8000-000000000201-f1");
+        let prefix = root.path().join("bb");
+        tokio::fs::create_dir_all(&prefix).await.expect("prefix");
+        let staging = root.path().join("publication-staging");
+        tokio::fs::create_dir_all(&staging).await.expect("staging");
+        tokio::fs::write(staging.join("index.m3u8"), b"#EXTM3U\n#EXT-X-ENDLIST\n")
+            .await
+            .expect("playlist");
+        let final_dir = prefix.join(&final_name);
+        let renamed = Arc::new(tokio::sync::Barrier::new(2));
+        let completed = Arc::new(tokio::sync::Barrier::new(2));
+        let publisher = {
+            let readers = readers.clone();
+            let renamed = Arc::clone(&renamed);
+            let completed = Arc::clone(&completed);
+            let staging = staging.clone();
+            let final_dir = final_dir.clone();
+            tokio::spawn(async move {
+                let guard = readers
+                    .begin_publication(recipe, &final_name)
+                    .expect("publication ownership");
+                tokio::fs::rename(&staging, &final_dir)
+                    .await
+                    .expect("publish rename");
+                renamed.wait().await;
+                completed.wait().await;
+                drop(guard);
+            })
+        };
+
+        renamed.wait().await;
+        let during = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        assert_eq!(during.protected, 1);
+        assert!(
+            final_dir.exists(),
+            "orphan sweep deleted a renamed generation before its fenced transaction"
+        );
+
+        completed.wait().await;
+        publisher.await.expect("publisher task");
+        let restarted_readers = ActiveCacheReaders::default();
+        let after =
+            sweep_with_readers(&store, root.path(), NODE, &restarted_readers, unix_now()).await;
+        assert_eq!(after.orphans, 1);
+        assert!(
+            !final_dir.exists(),
+            "unreferenced generation should become reclaimable after publication ownership ends"
+        );
+    }
+
+    /// Budget eviction deletes bytes before forgetting its observed row. A
+    /// publisher must not enter that gap: the late unversioned forget would
+    /// otherwise erase the new location it just committed.
+    #[tokio::test]
+    async fn late_eviction_forget_and_queue_publication_are_mutually_exclusive() {
+        let (store, file) = store().await;
+        let root = root();
+        let recipe = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        entry(&store, root.path(), file, recipe, 16).await;
+        let old = store
+            .cache_hit(recipe, NODE)
+            .await
+            .expect("old lookup")
+            .expect("old location");
+        let readers = ActiveCacheReaders::default();
+        let bytes_deleted = Arc::new(tokio::sync::Barrier::new(2));
+        let allow_forget = Arc::new(tokio::sync::Barrier::new(2));
+        let evictor = {
+            let store = Arc::clone(&store);
+            let readers = readers.clone();
+            let root = root.path().to_path_buf();
+            let bytes_deleted = Arc::clone(&bytes_deleted);
+            let allow_forget = Arc::clone(&allow_forget);
+            tokio::spawn(async move {
+                let _eviction = readers
+                    .begin_eviction(recipe)
+                    .expect("eviction owns recipe");
+                tokio::fs::remove_dir_all(root.join(&old.relative_dir))
+                    .await
+                    .expect("delete old bytes");
+                bytes_deleted.wait().await;
+                allow_forget.wait().await;
+                store
+                    .forget_cache_entry(recipe, NODE, "local")
+                    .await
+                    .expect("forget old row");
+            })
+        };
+
+        bytes_deleted.wait().await;
+        let final_name = format!("{recipe}-j00000000-0000-4000-8000-000000000302-f1");
+        assert!(
+            readers.begin_publication(recipe, &final_name).is_none(),
+            "queue publication entered after deletion but before the eviction's late forget"
+        );
+        allow_forget.wait().await;
+        evictor.await.expect("evictor task");
+        assert!(
+            readers.begin_publication(recipe, &final_name).is_some(),
+            "publication should retry after the eviction has fully settled"
+        );
+    }
+
+    /// A sweep may read its inventory immediately before a queue publication
+    /// commits. The final-directory eviction guard prevents a newer publisher,
+    /// and this authoritative recheck protects the one that committed between
+    /// the old snapshot and deletion.
+    #[tokio::test]
+    async fn stale_inventory_rechecks_after_queue_publication_before_delete() {
+        let (store, file) = store().await;
+        let root = root();
+        let readers = ActiveCacheReaders::default();
+        let recipe = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let final_name = format!("{recipe}-j00000000-0000-4000-8000-000000000304-f1");
+        let relative = format!("ee/{final_name}");
+        let final_dir = root.path().join(&relative);
+        tokio::fs::create_dir_all(final_dir.parent().expect("fanout"))
+            .await
+            .expect("fanout");
+        assert!(store
+            .all_cache_rows(NODE)
+            .await
+            .expect("stale inventory snapshot")
+            .is_empty());
+
+        let committed = Arc::new(tokio::sync::Barrier::new(2));
+        let publisher = {
+            let store = Arc::clone(&store);
+            let readers = readers.clone();
+            let final_dir = final_dir.clone();
+            let final_name = final_name.clone();
+            let relative = relative.clone();
+            let committed = Arc::clone(&committed);
+            tokio::spawn(async move {
+                let guard = readers
+                    .begin_publication(recipe, &final_name)
+                    .expect("publication guard");
+                tokio::fs::create_dir_all(&final_dir)
+                    .await
+                    .expect("published directory");
+                tokio::fs::write(final_dir.join("index.m3u8"), b"#EXTM3U\n#EXT-X-ENDLIST\n")
+                    .await
+                    .expect("playlist");
+                assert!(store
+                    .claim_cache_entry(recipe, file, 1, NODE, &relative)
+                    .await
+                    .expect("claim location"));
+                store
+                    .complete_cache_entry(recipe, NODE, 16)
+                    .await
+                    .expect("complete location");
+                drop(guard);
+                committed.wait().await;
+            })
+        };
+
+        committed.wait().await;
+        let eviction = readers
+            .begin_eviction(&final_name)
+            .expect("stale sweep owns candidate after publisher exits");
+        let mut batch = vec![OrphanCandidate {
+            path: final_dir.clone(),
+            parent: final_dir.parent().expect("fanout").to_owned(),
+            name: final_name,
+            identity: plurx_core::fs_secure::directory_identity_nofollow(&final_dir)
+                .await
+                .expect("identity"),
+            max_depth: 0,
+            _eviction: Some(eviction),
+        }];
+        assert_eq!(
+            delete_final_batch(&store, root.path(), NODE, &mut batch).await,
+            (0, 1),
+            "stale inventory would delete a generation published after its snapshot"
+        );
+        assert!(final_dir.exists());
+        publisher.await.expect("publisher task");
+    }
+
+    #[tokio::test]
+    async fn stale_staging_inventory_rechecks_a_new_claim_before_delete() {
+        let (store, file) = store().await;
+        let root = root();
+        let recipe = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        let staging = staging_dir(root.path(), recipe);
+        tokio::fs::create_dir_all(&staging).await.expect("staging");
+        assert!(store
+            .all_cache_rows(NODE)
+            .await
+            .expect("stale inventory snapshot")
+            .is_empty());
+        let readers = ActiveCacheReaders::default();
+        let eviction = readers
+            .begin_eviction(recipe)
+            .expect("stale sweep owns staging candidate");
+        assert!(store
+            .claim_cache_entry(recipe, file, 1, NODE, "ff/final")
+            .await
+            .expect("new producer claim"));
+        let mut batch = vec![OrphanCandidate {
+            path: staging.clone(),
+            parent: staging.parent().expect("staging root").to_owned(),
+            name: recipe.to_owned(),
+            identity: plurx_core::fs_secure::directory_identity_nofollow(&staging)
+                .await
+                .expect("identity"),
+            max_depth: 3,
+            _eviction: Some(eviction),
+        }];
+        assert_eq!(
+            delete_staging_batch(&store, NODE, &mut batch).await,
+            (0, 1),
+            "stale staging inventory ignored a producer that claimed after its snapshot"
+        );
+        assert!(
+            readers.begin_staging(recipe).is_some(),
+            "staging ownership was not released after the safe recheck"
+        );
+        assert!(staging.exists());
+    }
+
+    #[tokio::test]
+    async fn orphan_rechecks_are_bounded_by_candidate_pages() {
+        let (store, _file) = store().await;
+        let root = root();
+        let recipe = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let prefix = root.path().join("aa");
+        tokio::fs::create_dir_all(&prefix).await.expect("fanout");
+        for fence in 1..=257 {
+            let name = format!("{recipe}-j{}-f{fence}", uuid::Uuid::new_v4());
+            tokio::fs::create_dir_all(prefix.join(name))
+                .await
+                .expect("queue orphan");
+        }
+
+        let readers = ActiveCacheReaders::default();
+        let first = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        assert_eq!(first.orphans, ORPHAN_DELETE_LIMIT * 3 / 4);
+        assert_eq!(
+            first.ownership_rechecks, 2,
+            "one pass must cap both deletion and ownership snapshots"
+        );
+        let second = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
+        assert_eq!(first.orphans + second.orphans, 257);
+        assert_eq!(second.ownership_rechecks, 1);
     }
 
     /// A crashed producer is cleaned up in one pass, not two: the claim ages
