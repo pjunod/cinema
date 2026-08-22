@@ -21,4 +21,4 @@ checks = [
   "rust-gate",
   "user-journey",
 ]
-reason = "The retained vendor and three-voter contracts exercise real SQLite snapshot build/install success and error exits, cancellation classification, concurrent immutable publications, and real compaction deltas. The API/rendering tests prove the local-only wait-free scrape boundary, exact fixed Prometheus labels derived from the exported bounds, and the absence of storage calls or dynamic identifiers."
+reason = "The retained vendor tests exercise real SQLite snapshot build/install success and error exits, cancellation classification, and concurrent immutable publications; the one-voter compaction growth gate proves real build deltas. The three-voter target compiles the integration surface, while API/rendering tests prove the local-only wait-free scrape boundary, exact fixed Prometheus labels derived from the exported bounds, and the absence of storage calls or dynamic identifiers."
