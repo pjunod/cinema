@@ -5206,11 +5206,10 @@ impl TranscodeManager {
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
 
-        // Claim before looking at either the row or the filesystem. An
-        // eviction already in progress turns this into an ordinary miss; a
-        // successful lookup carries the guard in the Session until every
-        // response using that session is gone.
-        let Some(cache_reader) = self.cache_readers.begin_read(&hash) else {
+        // Claim deletion safety before looking at either the row or the
+        // filesystem. A miss is not active playback; upgrade this generic
+        // guard only after the complete generation has been validated.
+        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
             tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
             return None;
         };
@@ -5322,6 +5321,8 @@ impl TranscodeManager {
                 .await;
             return None;
         }
+        let cache_reader = self.cache_readers.begin_playback(&hash)?;
+        drop(cache_lookup);
         let _ = self.store.touch_cache_entry(&hash, &cache.node_id).await;
 
         let session_id = uuid::Uuid::new_v4().to_string();

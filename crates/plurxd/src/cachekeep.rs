@@ -80,7 +80,7 @@ struct CacheOrphanWalker {
 
 #[derive(Clone, Copy)]
 enum CacheActivity {
-    Readers(usize),
+    Readers { count: usize, playback_count: usize },
     Evicting,
 }
 
@@ -93,6 +93,7 @@ pub(crate) enum CacheBusy {
 pub struct CacheReadGuard {
     readers: ActiveCacheReaders,
     recipe: String,
+    playback: bool,
 }
 
 /// Two-dimensional ownership for queue publication. Budget eviction keys by
@@ -122,29 +123,56 @@ impl ActiveCacheReaders {
         })
     }
 
-    /// Start serving one recipe, unless eviction already owns it.
+    /// Hold one recipe for an internal scrub, offline transfer, or queue
+    /// reuse, unless eviction already owns it. These are readers for deletion
+    /// safety but are not live playback sessions in operational metrics.
     pub fn begin_read(&self, recipe: &str) -> Option<CacheReadGuard> {
-        self.begin_guard(recipe)
+        self.begin_guard(recipe, false)
+    }
+
+    /// Hold a cached generation for one live playback session.
+    pub(crate) fn begin_playback(&self, recipe: &str) -> Option<CacheReadGuard> {
+        self.begin_guard(recipe, true)
     }
 
     /// Protect a lookup without claiming that a miss was ever a real recipe.
     pub(crate) fn begin_lookup(&self, recipe: &str) -> Option<CacheReadGuard> {
-        self.begin_guard(recipe)
+        self.begin_guard(recipe, false)
     }
 
-    fn begin_guard(&self, recipe: &str) -> Option<CacheReadGuard> {
+    fn begin_guard(&self, recipe: &str, playback: bool) -> Option<CacheReadGuard> {
         let mut states = self.lock_states();
         match states.get_mut(recipe) {
-            Some(CacheActivity::Readers(count)) => *count += 1,
+            Some(CacheActivity::Readers {
+                count,
+                playback_count,
+            }) => {
+                *count += 1;
+                if playback {
+                    if *playback_count == 0 {
+                        self.active_entries.fetch_add(1, Ordering::Relaxed);
+                    }
+                    *playback_count += 1;
+                }
+            }
             Some(CacheActivity::Evicting) => return None,
             None => {
-                states.insert(recipe.to_owned(), CacheActivity::Readers(1));
-                self.active_entries.fetch_add(1, Ordering::Relaxed);
+                states.insert(
+                    recipe.to_owned(),
+                    CacheActivity::Readers {
+                        count: 1,
+                        playback_count: usize::from(playback),
+                    },
+                );
+                if playback {
+                    self.active_entries.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         Some(CacheReadGuard {
             readers: self.clone(),
             recipe: recipe.to_owned(),
+            playback,
         })
     }
 
@@ -155,8 +183,8 @@ impl ActiveCacheReaders {
         recipe: &str,
         final_directory: &str,
     ) -> Option<CachePublicationGuard> {
-        let recipe = self.begin_guard(recipe)?;
-        let final_directory = self.begin_guard(final_directory)?;
+        let recipe = self.begin_guard(recipe, false)?;
+        let final_directory = self.begin_guard(final_directory, false)?;
         Some(CachePublicationGuard {
             _recipe: recipe,
             _final_directory: final_directory,
@@ -167,7 +195,7 @@ impl ActiveCacheReaders {
     /// producers key staging by canonical recipe; queue producers key it by
     /// job-stable directory name, matching the orphan walk below.
     pub(crate) fn begin_staging(&self, staging_directory: &str) -> Option<CacheReadGuard> {
-        self.begin_guard(staging_recipe(staging_directory))
+        self.begin_guard(staging_recipe(staging_directory), false)
     }
 
     /// Claim a recipe for removal. Active readers make eviction skip it; the
@@ -175,7 +203,7 @@ impl ActiveCacheReaders {
     pub(crate) fn begin_eviction(&self, recipe: &str) -> Result<CacheEvictionGuard, CacheBusy> {
         let mut states = self.lock_states();
         match states.get(recipe) {
-            Some(CacheActivity::Readers(_)) => return Err(CacheBusy::Readers),
+            Some(CacheActivity::Readers { .. }) => return Err(CacheBusy::Readers),
             Some(CacheActivity::Evicting) => return Err(CacheBusy::Evicting),
             None => {}
         }
@@ -201,14 +229,14 @@ impl ActiveCacheReaders {
     fn has_readers_besides(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
-            Some(CacheActivity::Readers(count)) if *count > 1
+            Some(CacheActivity::Readers { count, .. }) if *count > 1
         )
     }
 
     fn has_reader(&self, recipe: &str) -> bool {
         matches!(
             self.lock_states().get(recipe),
-            Some(CacheActivity::Readers(_))
+            Some(CacheActivity::Readers { .. })
         )
     }
 }
@@ -217,18 +245,28 @@ impl Drop for CacheReadGuard {
     fn drop(&mut self) {
         let mismatch = {
             let mut states = self.readers.lock_states();
-            match states.get_mut(&self.recipe) {
-                Some(CacheActivity::Readers(count)) if *count > 1 => {
+            let mut playback_became_inactive = false;
+            let action = match states.get_mut(&self.recipe) {
+                Some(CacheActivity::Readers {
+                    count,
+                    playback_count,
+                }) if *count > 0 && (!self.playback || *playback_count > 0) => {
                     *count -= 1;
-                    false
+                    if self.playback {
+                        *playback_count -= 1;
+                        playback_became_inactive = *playback_count == 0;
+                    }
+                    usize::from(*count == 0)
                 }
-                Some(CacheActivity::Readers(_)) => {
-                    states.remove(&self.recipe);
-                    self.readers.active_entries.fetch_sub(1, Ordering::Relaxed);
-                    false
-                }
-                Some(CacheActivity::Evicting) | None => true,
+                Some(CacheActivity::Readers { .. } | CacheActivity::Evicting) | None => 2,
+            };
+            if action == 1 {
+                states.remove(&self.recipe);
             }
+            if playback_became_inactive {
+                self.readers.active_entries.fetch_sub(1, Ordering::Relaxed);
+            }
+            action == 2
         };
         if mismatch {
             tracing::error!(
@@ -1504,7 +1542,9 @@ mod tests {
     #[test]
     fn active_entry_snapshot_does_not_wait_for_the_ownership_map() {
         let readers = ActiveCacheReaders::default();
-        let _reader = readers.begin_read("recipe").expect("reader claim");
+        let _reader = readers
+            .begin_playback("recipe")
+            .expect("playback reader claim");
         let states = readers.lock_states();
         let snapshot = readers.clone();
         let (sent, received) = std::sync::mpsc::sync_channel(1);
@@ -1525,17 +1565,38 @@ mod tests {
     #[test]
     fn transient_cache_guards_leave_no_historical_ownership_entries() {
         let readers = ActiveCacheReaders::default();
-        drop(readers.begin_lookup("miss").expect("lookup guard"));
-        drop(
-            readers
-                .begin_staging("recipe-j00000000-0000-4000-8000-000000000101")
-                .expect("staging guard"),
+        let lookup = readers.begin_lookup("miss").expect("lookup guard");
+        let staging = (0..32)
+            .map(|index| {
+                readers
+                    .begin_staging(&format!("recipe-{index:02}-f42"))
+                    .expect("staging guard")
+            })
+            .collect::<Vec<_>>();
+        let publication = readers
+            .begin_publication("recipe", "recipe-f42")
+            .expect("publication guard");
+        assert_eq!(
+            readers.active_entries(),
+            0,
+            "saturated staging/publication ownership is not active playback"
         );
-        drop(
-            readers
-                .begin_publication("recipe", "recipe-f42")
-                .expect("publication guard"),
-        );
+        let internal_reads = (0..32)
+            .map(|index| {
+                readers
+                    .begin_read(&format!("internal-{index:02}"))
+                    .expect("internal reader")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(readers.active_entries(), 0);
+        let playback = readers.begin_playback("recipe").expect("playback guard");
+        assert_eq!(readers.active_entries(), 1);
+        drop(playback);
+        assert_eq!(readers.active_entries(), 0);
+        drop(publication);
+        drop(internal_reads);
+        drop(staging);
+        drop(lookup);
         assert!(readers.lock_states().is_empty());
         assert_eq!(readers.active_entries(), 0);
     }
@@ -1919,7 +1980,7 @@ mod tests {
         let root = root();
         let dir = entry(&store, root.path(), file, "aawatching", 100).await;
         let readers = ActiveCacheReaders::default();
-        let reader = readers.begin_read("aawatching").expect("reader claim");
+        let reader = readers.begin_playback("aawatching").expect("reader claim");
         store
             .forget_cache_entry("aawatching", NODE, "local")
             .await
@@ -1944,8 +2005,8 @@ mod tests {
     #[test]
     fn every_reader_must_leave_before_eviction_can_claim_a_recipe() {
         let readers = ActiveCacheReaders::default();
-        let first = readers.begin_read("recipe").expect("first reader");
-        let second = readers.begin_read("recipe").expect("second reader");
+        let first = readers.begin_playback("recipe").expect("first reader");
+        let second = readers.begin_playback("recipe").expect("second reader");
         assert_eq!(readers.active_entries(), 1);
 
         drop(first);
@@ -2233,7 +2294,7 @@ mod tests {
             .expect("ready scrubbed package"));
 
         let readers = ActiveCacheReaders::default();
-        let playback = readers.begin_read(recipe).expect("playback reader");
+        let playback = readers.begin_playback(recipe).expect("playback reader");
         let skipped = sweep_with_readers(&store, root.path(), NODE, &readers, unix_now()).await;
         assert_eq!(skipped.scrub_bytes, 0, "scrub competed with playback");
         assert_eq!(
