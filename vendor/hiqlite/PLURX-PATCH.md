@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries six compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -30,8 +30,12 @@ Apache-2.0. Plurx carries six compatibility patches for clustered deployments:
   duration histograms through `Client::local_db_snapshot_metrics`. Explicit
   RAII start/finish hooks classify build/install success and every error or
   cancelled exit without polling storage or exposing paths and snapshot ids.
+- Snapshot build, install, and asynchronous cleanup share one file-ownership
+  boundary. Cleanup resolves the most recently completed build or peer install
+  when it runs and preserves the receiver-owned staging file, so a delayed
+  local cleanup cannot delete an in-flight or newly installed snapshot.
 
-Remove this vendor when an upstream Hiqlite release contains all six patches
+Remove this vendor when an upstream Hiqlite release contains all seven patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
 

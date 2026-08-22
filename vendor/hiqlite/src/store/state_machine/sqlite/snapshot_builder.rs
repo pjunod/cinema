@@ -6,7 +6,8 @@ use crate::{Node, NodeId};
 use openraft::{
     RaftSnapshotBuilder, Snapshot, SnapshotMeta, StorageError, StorageIOError, StoredMembership,
 };
-use tokio::sync::oneshot;
+use std::sync::Arc;
+use tokio::sync::{Mutex, oneshot};
 use tokio::{fs, task};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -19,12 +20,23 @@ pub struct SQLiteSnapshotBuilder {
     pub path_backups: String,
     pub path_snapshots: String,
     pub write_tx: flume::Sender<WriterRequest>,
+    pub(crate) snapshot_files: Arc<Mutex<SnapshotFileState>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SnapshotFileState {
+    pub(crate) current_id: Option<String>,
 }
 
 impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfigSqlite>, StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Build);
+        // Snapshot construction and installation both replace the current
+        // state-machine image. Serialize their file publication so cleanup
+        // always reads the operation that actually completed last.
+        let snapshot_files = self.snapshot_files.clone();
+        let mut snapshot_files_guard = snapshot_files.lock().await;
         // - build new snapshot id
         // - make sure target path exists
         // - send snapshot request to db writer
@@ -58,17 +70,6 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             source: StorageIOError::read_state_machine(&err),
         })?;
 
-        let path_snapshots = self.path_snapshots.clone();
-        #[cfg(feature = "backup")]
-        let path_backups = self.path_backups.clone();
-        // cleanup can easily happen in the background
-        task::spawn(snapshots_cleanup(
-            path_snapshots,
-            #[cfg(feature = "backup")]
-            path_backups,
-            snapshot_id,
-        ));
-
         let snapshot = Snapshot {
             meta: SnapshotMeta {
                 last_log_id: resp.meta.last_applied_log_id,
@@ -78,23 +79,35 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
             snapshot: Box::new(snapshot),
         };
 
+        snapshot_files_guard.current_id = Some(snapshot_id.to_string());
+        drop(snapshot_files_guard);
+        // Cleanup can happen in the background, but it resolves the current
+        // id under the same lock as later builds and installs instead of
+        // retaining this task's now-stale captured id.
+        task::spawn(snapshots_cleanup(
+            self.path_snapshots.clone(),
+            #[cfg(feature = "backup")]
+            self.path_backups.clone(),
+            snapshot_files,
+        ));
         timer.success();
         Ok(snapshot)
     }
 }
 
-async fn snapshots_cleanup(
+pub(crate) async fn snapshots_cleanup(
     path_snapshots: String,
     #[cfg(feature = "backup")] path_backups: String,
-    keep_id: Uuid,
+    snapshot_files: Arc<Mutex<SnapshotFileState>>,
 ) -> Result<(), StorageError<NodeId>> {
+    let snapshot_files = snapshot_files.lock().await;
+    let keep_id = snapshot_files.current_id.as_deref();
     let mut list = tokio::fs::read_dir(&path_snapshots)
         .await
         .map_err(|err| StorageError::IO {
             source: StorageIOError::read(&err),
         })?;
 
-    let keep_id = keep_id.to_string();
     let mut deletes = Vec::new();
     while let Ok(Some(entry)) = list.next_entry().await {
         let file_name = entry.file_name();
@@ -110,13 +123,11 @@ async fn snapshots_cleanup(
             continue;
         }
 
-        // `begin_receiving_snapshot` owns this fixed staging name. A local
-        // snapshot build may finish while a peer snapshot is being received;
-        // deleting that live staging file here races `install_snapshot` and
-        // turns a valid install into ENOENT. The receiver removes stale
-        // staging data before opening a new transfer, so cleanup must leave it
-        // alone.
-        if name != keep_id && name != "temp" {
+        // `begin_receiving_snapshot` owns `temp`; the shared current id owns
+        // whichever local build or peer install actually completed last. A
+        // cleanup task may run long after the build that spawned it, so its
+        // captured build id is not a safe retention decision.
+        if Some(name) != keep_id && name != "temp" {
             deletes.push(name.to_string());
         }
     }
@@ -143,19 +154,24 @@ mod snapshot_metrics_cleanup_contract {
     use super::*;
 
     #[tokio::test]
-    async fn snapshot_metrics_cleanup_preserves_an_inflight_install() {
+    async fn snapshot_metrics_cleanup_preserves_a_different_installed_id() {
         let root =
             std::env::temp_dir().join(format!("hiqlite-snapshot-cleanup-{}", Uuid::now_v7()));
         fs::create_dir_all(&root)
             .await
             .expect("create snapshot cleanup root");
-        let keep_id = Uuid::now_v7();
-        let keep_path = root.join(keep_id.to_string());
+        let local_build_id = Uuid::now_v7();
+        let installed_id = Uuid::now_v7();
+        let local_build_path = root.join(local_build_id.to_string());
+        let installed_path = root.join(installed_id.to_string());
         let receive_path = root.join("temp");
         let old_path = root.join(Uuid::now_v7().to_string());
-        fs::write(&keep_path, b"keep")
+        fs::write(&local_build_path, b"superseded local build")
             .await
-            .expect("write retained snapshot");
+            .expect("write local snapshot");
+        fs::write(&installed_path, b"installed peer snapshot")
+            .await
+            .expect("write installed snapshot");
         fs::write(&receive_path, b"receiving")
             .await
             .expect("write inflight install");
@@ -170,6 +186,9 @@ mod snapshot_metrics_cleanup_contract {
             .await
             .expect("create backup cleanup root");
 
+        let snapshot_files = Arc::new(Mutex::new(SnapshotFileState {
+            current_id: Some(installed_id.to_string()),
+        }));
         snapshots_cleanup(
             root.to_str().expect("UTF-8 snapshot cleanup root").to_owned(),
             #[cfg(feature = "backup")]
@@ -177,12 +196,13 @@ mod snapshot_metrics_cleanup_contract {
                 .to_str()
                 .expect("UTF-8 backup cleanup root")
                 .to_owned(),
-            keep_id,
+            snapshot_files,
         )
         .await
         .expect("clean old snapshots");
 
-        assert!(keep_path.exists());
+        assert!(!local_build_path.exists());
+        assert!(installed_path.exists());
         assert!(receive_path.exists());
         assert!(!old_path.exists());
         fs::remove_dir_all(root)

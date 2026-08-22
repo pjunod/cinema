@@ -6,7 +6,9 @@ use crate::query::rows::RowOwned;
 use crate::snapshot_metrics::{SnapshotOperation, SnapshotTimer};
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::store::state_machine::sqlite::param::Param;
-use crate::store::state_machine::sqlite::snapshot_builder::SQLiteSnapshotBuilder;
+use crate::store::state_machine::sqlite::snapshot_builder::{
+    SQLiteSnapshotBuilder, SnapshotFileState,
+};
 use crate::store::state_machine::sqlite::writer::WriterRequest::MetadataRead;
 use crate::store::state_machine::sqlite::writer::{
     self, MetaPersistRequest, SqlBatch, SqlTransaction, WriterRequest,
@@ -111,6 +113,7 @@ pub struct StateMachineSqlite {
     #[cfg(feature = "backup")]
     path_backups: String,
     path_lock_file: String,
+    snapshot_files: Arc<Mutex<SnapshotFileState>>,
 
     #[cfg(feature = "s3")]
     s3_config: Option<Arc<crate::s3::S3Config>>,
@@ -185,6 +188,7 @@ impl StateMachineSqlite {
             #[cfg(feature = "backup")]
             path_backups,
             path_lock_file,
+            snapshot_files: Arc::new(Mutex::new(SnapshotFileState::default())),
             #[cfg(feature = "s3")]
             s3_config,
             read_pool,
@@ -844,6 +848,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             path_backups: self.path_backups.clone(),
             path_snapshots: self.path_snapshots.clone(),
             write_tx: self.write_tx.clone(),
+            snapshot_files: self.snapshot_files.clone(),
         }
     }
 
@@ -869,6 +874,8 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         _snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Install);
+        let snapshot_files = self.snapshot_files.clone();
+        let mut snapshot_files_guard = snapshot_files.lock().await;
         let src = format!("{}/temp", self.path_snapshots);
         let dest = format!("{}/{}", self.path_snapshots, meta.snapshot_id);
         fs::copy(&src, &dest)
@@ -883,6 +890,14 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 
         self.update_state_machine_(dest).await?;
 
+        snapshot_files_guard.current_id = Some(meta.snapshot_id.clone());
+        drop(snapshot_files_guard);
+        task::spawn(crate::store::state_machine::sqlite::snapshot_builder::snapshots_cleanup(
+            self.path_snapshots.clone(),
+            #[cfg(feature = "backup")]
+            self.path_backups.clone(),
+            snapshot_files,
+        ));
         timer.success();
         Ok(())
     }
