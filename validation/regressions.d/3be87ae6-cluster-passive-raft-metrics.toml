@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3be87ae6"]
+points = ["cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained metrics and real three-voter contracts prove that local Raft term, leader, applied-index, freshness, error, and leader-change observations come only from the embedded OpenRaft watch, publish coherently without Store or management traffic, recover after election, and expose no node identity or address."

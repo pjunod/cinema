@@ -2209,6 +2209,7 @@ pub(crate) struct MetricsState {
     integration: Arc<IntegrationMetrics>,
     offline: Arc<crate::offline::OfflineMetrics>,
     store_metrics: StoreMetricsCache,
+    passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -2219,8 +2220,60 @@ impl FromRef<AppState> for MetricsState {
             integration: state.jobs.metrics_handle(),
             offline: state.offline.metrics_handle(),
             store_metrics: state.store_metrics.clone(),
+            passive_raft: state.replication.metrics_handle(),
         }
     }
+}
+
+fn render_passive_raft_metrics(
+    view: plurx_core::cluster::migration::status::PassiveRaftMetricsView,
+) -> String {
+    let mut out = format!(
+        "# HELP plurx_raft_metric_sample_valid Whether the named Raft sample is present and fresh.\n\
+         # TYPE plurx_raft_metric_sample_valid gauge\n\
+         plurx_raft_metric_sample_valid{{source=\"local\"}} {}\n\
+         # HELP plurx_raft_metric_sample_errors_total Rejected or closed samples from the named Raft source.\n\
+         # TYPE plurx_raft_metric_sample_errors_total counter\n\
+         plurx_raft_metric_sample_errors_total{{source=\"local\"}} {}\n\
+         # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
+         # TYPE plurx_raft_leader_changes_total counter\n\
+         plurx_raft_leader_changes_total {}\n",
+        u8::from(view.valid),
+        view.errors,
+        view.leader_changes,
+    );
+    if let Some(age) = view.age_seconds {
+        out.push_str(&format!(
+            "# HELP plurx_raft_metric_sample_age_seconds Age of the last successful sample from the named Raft source.\n\
+             # TYPE plurx_raft_metric_sample_age_seconds gauge\n\
+             plurx_raft_metric_sample_age_seconds{{source=\"local\"}} {age}\n"
+        ));
+    }
+    let Some(sample) = view.sample else {
+        return out;
+    };
+    out.push_str(&format!(
+        "# HELP plurx_raft_current_term Current term observed from the local Raft watch.\n\
+         # TYPE plurx_raft_current_term gauge\n\
+         plurx_raft_current_term {}\n\
+         # HELP plurx_raft_leader_known Whether the local Raft watch currently identifies a leader.\n\
+         # TYPE plurx_raft_leader_known gauge\n\
+         plurx_raft_leader_known {}\n\
+         # HELP plurx_raft_is_leader Whether this process is the leader in the observed term.\n\
+         # TYPE plurx_raft_is_leader gauge\n\
+         plurx_raft_is_leader {}\n",
+        sample.current_term,
+        u8::from(sample.leader_known),
+        u8::from(sample.is_leader),
+    ));
+    if let Some(index) = sample.last_applied_index {
+        out.push_str(&format!(
+            "# HELP plurx_raft_applied_index Last log index applied by this local state machine.\n\
+             # TYPE plurx_raft_applied_index gauge\n\
+             plurx_raft_applied_index {index}\n"
+        ));
+    }
+    out
 }
 
 fn render_store_metrics(view: StoreMetricsView) -> String {
@@ -2299,6 +2352,7 @@ pub(crate) async fn metrics(
     let uptime = state.started_at.elapsed().as_secs();
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
+    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
@@ -2337,7 +2391,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{process_metrics}{playback_metrics}",
+         {scans}{store_metrics}{raft_metrics}{process_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         playback_metrics = crate::telemetry::prometheus(),
@@ -2374,6 +2428,9 @@ mod tests {
         assert!(!compact.contains("AppState"));
         assert!(!compact.contains(".store."));
         assert!(!compact.contains("Store>"));
+        assert!(!compact.contains("Client"));
+        assert!(!compact.contains("ReplicationMonitor"));
+        assert!(!compact.contains("LocalDbRaft"));
 
         let substate = source
             .split_once("pub(crate) struct MetricsState")
@@ -2384,6 +2441,9 @@ mod tests {
             .0;
         assert!(!substate.contains("Manager"));
         assert!(!substate.contains("Arc<dyn Store>"));
+        assert!(!substate.contains("Client"));
+        assert!(!substate.contains("ReplicationMonitor"));
+        assert!(!substate.contains("LocalDbRaft"));
     }
 
     #[test]
@@ -2413,6 +2473,50 @@ mod tests {
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
+    }
+
+    #[test]
+    fn passive_raft_exposition_is_fixed_and_does_not_claim_a_watermark() {
+        use plurx_core::cluster::migration::status::{PassiveRaftMetricsView, PassiveRaftSample};
+
+        let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
+            local_source: true,
+            sample: Some(PassiveRaftSample {
+                current_term: 7,
+                last_applied_index: Some(42),
+                leader_known: true,
+                is_leader: true,
+            }),
+            age_seconds: Some(2),
+            valid: true,
+            errors: 3,
+            leader_changes: 4,
+        });
+
+        assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
+        assert!(rendered.contains("plurx_raft_metric_sample_age_seconds{source=\"local\"} 2"));
+        assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"local\"} 3"));
+        assert!(rendered.contains("plurx_raft_current_term 7"));
+        assert!(rendered.contains("plurx_raft_applied_index 42"));
+        assert!(rendered.contains("plurx_raft_leader_known 1"));
+        assert!(rendered.contains("plurx_raft_is_leader 1"));
+        assert!(rendered.contains("plurx_raft_leader_changes_total 4"));
+        assert!(!rendered.contains("plurx_raft_commit"));
+        assert!(!rendered.contains("plurx_raft_apply_lag"));
+        assert!(!rendered.contains("node_id"));
+        assert!(!rendered.contains("leader_id"));
+
+        let absent = render_passive_raft_metrics(PassiveRaftMetricsView {
+            local_source: false,
+            sample: None,
+            age_seconds: None,
+            valid: false,
+            errors: 0,
+            leader_changes: 0,
+        });
+        assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));
+        assert!(!absent.contains("plurx_raft_applied_index"));
     }
 
     fn beacon(event: &str, ms: i64) -> ClientLog {

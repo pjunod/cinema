@@ -3879,12 +3879,17 @@ pub mod status {
     //! M3; this module only turns the backend and Raft metrics the daemon already
     //! has into an honest answer about watch-state convergence.
 
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Serialize};
 
-    use hiqlite::Client;
+    use hiqlite::{Client, LocalDbRaftMetrics, LocalDbRaftSnapshot};
     use std::sync::{Arc, Mutex};
+
+    const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
+    const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
 
     /// The durable backend serving this daemon process.
     #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -3951,11 +3956,277 @@ pub mod status {
         pub peer_matched_indexes: Option<Vec<Option<u64>>>,
     }
 
+    /// One coherent local Raft sample. `last_applied_index` is intentionally
+    /// not described as a commit index: OpenRaft's local watch does not prove a
+    /// quorum watermark on a follower.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PassiveRaftSample {
+        pub current_term: u64,
+        pub last_applied_index: Option<u64>,
+        pub leader_known: bool,
+        pub is_leader: bool,
+    }
+
+    /// Store-free view consumed by the Prometheus handler.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PassiveRaftMetricsView {
+        pub local_source: bool,
+        pub sample: Option<PassiveRaftSample>,
+        pub age_seconds: Option<u64>,
+        pub valid: bool,
+        pub errors: u64,
+        pub leader_changes: u64,
+    }
+
+    #[derive(Default)]
+    struct PassiveRaftMetricsAtomics {
+        sequence: AtomicU64,
+        published: AtomicBool,
+        current_term: AtomicU64,
+        last_applied_present: AtomicBool,
+        last_applied_index: AtomicU64,
+        leader_known: AtomicBool,
+        is_leader: AtomicBool,
+        sampled_elapsed: AtomicU64,
+        errors: AtomicU64,
+        leader_changes: AtomicU64,
+        last_known_leader_present: AtomicBool,
+        last_known_leader: AtomicU64,
+        sampler_started: AtomicBool,
+    }
+
+    /// Narrow atomics-only handle for passive local Raft observability.
+    #[derive(Clone)]
+    pub struct PassiveRaftMetrics {
+        inner: Arc<PassiveRaftMetricsAtomics>,
+        started_at: Instant,
+        local_source: bool,
+    }
+
+    impl PassiveRaftMetrics {
+        fn new(local_source: bool) -> Self {
+            Self {
+                inner: Arc::new(PassiveRaftMetricsAtomics::default()),
+                started_at: Instant::now(),
+                local_source,
+            }
+        }
+
+        /// Read one coherent snapshot without locks, Store access, or IO.
+        #[must_use]
+        pub fn snapshot(&self) -> PassiveRaftMetricsView {
+            self.snapshot_at(self.started_at.elapsed().as_secs())
+        }
+
+        fn snapshot_at(&self, elapsed: u64) -> PassiveRaftMetricsView {
+            loop {
+                let before = self.inner.sequence.load(Ordering::Acquire);
+                if before & 1 != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let published = self.inner.published.load(Ordering::Relaxed);
+                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+                let current_term = self.inner.current_term.load(Ordering::Relaxed);
+                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
+                let last_applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
+                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
+                let is_leader = self.inner.is_leader.load(Ordering::Relaxed);
+                let errors = self.inner.errors.load(Ordering::Relaxed);
+                let leader_changes = self.inner.leader_changes.load(Ordering::Relaxed);
+                let after = self.inner.sequence.load(Ordering::Acquire);
+                if before == after {
+                    let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
+                    return PassiveRaftMetricsView {
+                        local_source: self.local_source,
+                        sample: published.then_some(PassiveRaftSample {
+                            current_term,
+                            last_applied_index: last_applied_present.then_some(last_applied_index),
+                            leader_known,
+                            is_leader,
+                        }),
+                        age_seconds,
+                        valid: age_seconds.is_some_and(|age| age <= PASSIVE_METRICS_FRESHNESS_SECS),
+                        errors,
+                        leader_changes,
+                    };
+                }
+            }
+        }
+
+        fn publish(&self, source: &LocalDbRaftSnapshot) -> bool {
+            self.publish_at(source, self.started_at.elapsed().as_secs())
+        }
+
+        fn publish_at(&self, source: &LocalDbRaftSnapshot, elapsed: u64) -> bool {
+            if !source.running {
+                self.record_error();
+                return false;
+            }
+            if self.inner.published.load(Ordering::Acquire) {
+                let prior_term = self.inner.current_term.load(Ordering::Relaxed);
+                let prior_applied = self
+                    .inner
+                    .last_applied_present
+                    .load(Ordering::Relaxed)
+                    .then(|| self.inner.last_applied_index.load(Ordering::Relaxed));
+                let regressed = source.current_term < prior_term
+                    || (prior_applied.is_some() && source.last_applied_index.is_none())
+                    || matches!(
+                        (prior_applied, source.last_applied_index),
+                        (Some(prior), Some(current)) if current < prior
+                    );
+                if regressed {
+                    self.record_error();
+                    return false;
+                }
+            }
+
+            let sequence = self.begin_write();
+            if let Some(leader) = source.current_leader {
+                if self
+                    .inner
+                    .last_known_leader_present
+                    .swap(true, Ordering::Relaxed)
+                {
+                    let previous = self.inner.last_known_leader.swap(leader, Ordering::Relaxed);
+                    if previous != leader {
+                        saturating_increment(&self.inner.leader_changes);
+                    }
+                } else {
+                    self.inner
+                        .last_known_leader
+                        .store(leader, Ordering::Relaxed);
+                }
+            }
+            self.inner
+                .current_term
+                .store(source.current_term, Ordering::Relaxed);
+            self.inner
+                .last_applied_present
+                .store(source.last_applied_index.is_some(), Ordering::Relaxed);
+            self.inner.last_applied_index.store(
+                source.last_applied_index.unwrap_or_default(),
+                Ordering::Relaxed,
+            );
+            self.inner
+                .leader_known
+                .store(source.current_leader.is_some(), Ordering::Relaxed);
+            self.inner.is_leader.store(
+                source.current_leader == Some(source.node_id),
+                Ordering::Relaxed,
+            );
+            self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
+            self.inner.published.store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            true
+        }
+
+        fn record_error(&self) {
+            let sequence = self.begin_write();
+            saturating_increment(&self.inner.errors);
+            self.end_write(sequence);
+        }
+
+        fn begin_write(&self) -> u64 {
+            loop {
+                let current = self.inner.sequence.load(Ordering::Acquire);
+                if current & 1 == 0
+                    && self
+                        .inner
+                        .sequence
+                        .compare_exchange(
+                            current,
+                            current.wrapping_add(1),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    return current;
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        fn end_write(&self, sequence: u64) {
+            self.inner
+                .sequence
+                .store(sequence.wrapping_add(2), Ordering::Release);
+        }
+    }
+
+    fn saturating_increment(value: &AtomicU64) {
+        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        });
+    }
+
+    #[async_trait::async_trait]
+    trait PassiveRaftSource: Send {
+        fn snapshot(&self) -> LocalDbRaftSnapshot;
+        async fn wait_for_change(&mut self) -> bool;
+    }
+
+    #[async_trait::async_trait]
+    impl PassiveRaftSource for LocalDbRaftMetrics {
+        fn snapshot(&self) -> LocalDbRaftSnapshot {
+            LocalDbRaftMetrics::snapshot(self)
+        }
+
+        async fn wait_for_change(&mut self) -> bool {
+            LocalDbRaftMetrics::wait_for_change(self).await
+        }
+    }
+
+    async fn run_passive_metrics_loop<S, F>(
+        mut source: S,
+        metrics: PassiveRaftMetrics,
+        shutdown: F,
+        refresh_period: Duration,
+    ) where
+        S: PassiveRaftSource,
+        F: Future<Output = ()> + Send,
+    {
+        let initial = source.snapshot();
+        if !metrics.publish(&initial) {
+            return;
+        }
+        let mut refresh = tokio::time::interval(refresh_period);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        refresh.tick().await;
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                changed = source.wait_for_change() => {
+                    if !changed {
+                        metrics.record_error();
+                        return;
+                    }
+                }
+                _ = refresh.tick() => {}
+            }
+            let sample = source.snapshot();
+            if !metrics.publish(&sample) {
+                tracing::warn!(
+                    current_term = sample.current_term,
+                    last_applied_index = sample.last_applied_index,
+                    "stopping passive metrics after an invalid local Raft observation"
+                );
+                return;
+            }
+        }
+    }
+
     /// Live status reader kept beside the selected store in daemon state.
     #[derive(Clone)]
     pub struct ReplicationMonitor {
         backend: ReplicationBackend,
         client: Option<Client>,
+        local_metrics: Option<LocalDbRaftMetrics>,
+        passive_metrics: PassiveRaftMetrics,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -3966,6 +4237,8 @@ pub mod status {
             Self {
                 backend: ReplicationBackend::Sqlite,
                 client: None,
+                local_metrics: None,
+                passive_metrics: PassiveRaftMetrics::new(false),
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -3973,11 +4246,48 @@ pub mod status {
         /// Monitor a local Hiqlite voter through the same client the Store uses.
         #[must_use]
         pub fn replicated(client: Client) -> Self {
+            let local_metrics = client.local_db_raft_metrics().ok();
+            let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some());
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
+                local_metrics,
+                passive_metrics,
                 previous: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// Store-free metrics handle suitable for unauthenticated scrapes.
+        #[must_use]
+        pub fn metrics_handle(&self) -> PassiveRaftMetrics {
+            self.passive_metrics.clone()
+        }
+
+        /// Keep the atomics-only metrics projection fresh from the local Raft
+        /// watch. Changes publish immediately; the periodic refresh keeps an
+        /// idle healthy cluster from looking stale.
+        pub async fn passive_metrics_loop<F>(self, shutdown: F)
+        where
+            F: Future<Output = ()> + Send,
+        {
+            let Some(watch) = self.local_metrics.clone() else {
+                return;
+            };
+            if self
+                .passive_metrics
+                .inner
+                .sampler_started
+                .swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
+            run_passive_metrics_loop(
+                watch,
+                self.passive_metrics,
+                shutdown,
+                PASSIVE_METRICS_REFRESH,
+            )
+            .await;
         }
 
         /// Read the current projection without changing membership or durable data.
@@ -4191,6 +4501,243 @@ pub mod status {
             }
         }
 
+        fn local_sample(
+            current_term: u64,
+            last_applied_index: Option<u64>,
+            current_leader: Option<u64>,
+        ) -> LocalDbRaftSnapshot {
+            LocalDbRaftSnapshot {
+                running: true,
+                node_id: 1,
+                current_term,
+                current_leader,
+                last_applied_term: Some(current_term),
+                last_applied_index,
+            }
+        }
+
+        #[test]
+        fn passive_metrics_refresh_idle_samples_and_expire_without_refresh() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            let stale = metrics.snapshot_at(41);
+            assert_eq!(stale.age_seconds, Some(31));
+            assert!(!stale.valid);
+
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 50));
+            let fresh = metrics.snapshot_at(51);
+            assert_eq!(fresh.age_seconds, Some(1));
+            assert!(fresh.valid);
+            assert_eq!(fresh.leader_changes, 0);
+        }
+
+        #[test]
+        fn passive_metrics_reject_regressions_and_preserve_the_last_sample() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(!metrics.publish_at(&local_sample(6, Some(41), Some(2)), 20));
+
+            let view = metrics.snapshot_at(21);
+            assert_eq!(view.errors, 1);
+            assert_eq!(view.age_seconds, Some(11));
+            assert_eq!(view.sample.expect("last good sample").current_term, 7);
+            assert_eq!(
+                view.sample.expect("last good sample").last_applied_index,
+                Some(42)
+            );
+            assert_eq!(view.leader_changes, 0, "a rejected sample is not observed");
+        }
+
+        #[test]
+        fn unhealthy_observation_stops_refreshing_the_last_good_sample() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            let mut unhealthy = local_sample(7, Some(42), Some(1));
+            unhealthy.running = false;
+            assert!(!metrics.publish_at(&unhealthy, 20));
+
+            let view = metrics.snapshot_at(26);
+            assert_eq!(view.errors, 1);
+            assert_eq!(view.age_seconds, Some(16));
+            assert!(!view.valid);
+            assert_eq!(view.sample.expect("retained sample").current_term, 7);
+        }
+
+        #[test]
+        fn transient_unknown_leader_does_not_double_count_the_same_identity() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_at(&local_sample(7, Some(42), None), 11));
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 12));
+            assert_eq!(metrics.snapshot_at(12).leader_changes, 0);
+
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 13));
+            let changed = metrics.snapshot_at(13);
+            assert_eq!(changed.leader_changes, 1);
+            assert!(!changed.sample.expect("sample").is_leader);
+        }
+
+        #[test]
+        fn passive_metric_counters_saturate() {
+            let metrics = PassiveRaftMetrics::new(true);
+            metrics.inner.errors.store(u64::MAX, Ordering::Relaxed);
+            metrics
+                .inner
+                .leader_changes
+                .store(u64::MAX, Ordering::Relaxed);
+            metrics.record_error();
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 11));
+            let view = metrics.snapshot_at(11);
+            assert_eq!(view.errors, u64::MAX);
+            assert_eq!(view.leader_changes, u64::MAX);
+        }
+
+        #[test]
+        fn passive_metrics_never_expose_a_torn_tuple() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(1, Some(10), Some(1)), 1));
+            let writer = metrics.clone();
+            let finished = Arc::new(AtomicBool::new(false));
+            let writer_finished = Arc::clone(&finished);
+            let handle = std::thread::spawn(move || {
+                for term in 2..=5_000 {
+                    let leader = if term % 2 == 0 { 2 } else { 1 };
+                    assert!(writer
+                        .publish_at(&local_sample(term, Some(term * 10), Some(leader)), term,));
+                }
+                writer_finished.store(true, Ordering::Release);
+            });
+
+            while !finished.load(Ordering::Acquire) {
+                let view = metrics.snapshot_at(5_000);
+                let sample = view.sample.expect("published sample");
+                assert_eq!(sample.last_applied_index, Some(sample.current_term * 10));
+                assert_eq!(sample.is_leader, !sample.current_term.is_multiple_of(2));
+                assert_eq!(view.leader_changes, sample.current_term.saturating_sub(1));
+            }
+            handle.join().expect("metrics writer");
+        }
+
+        struct FakePassiveSource {
+            receiver: tokio::sync::watch::Receiver<LocalDbRaftSnapshot>,
+            snapshots: Arc<AtomicU64>,
+        }
+
+        #[async_trait::async_trait]
+        impl PassiveRaftSource for FakePassiveSource {
+            fn snapshot(&self) -> LocalDbRaftSnapshot {
+                self.snapshots.fetch_add(1, Ordering::Relaxed);
+                self.receiver.borrow().clone()
+            }
+
+            async fn wait_for_change(&mut self) -> bool {
+                self.receiver.changed().await.is_ok()
+            }
+        }
+
+        #[tokio::test]
+        async fn idle_observer_republishes_and_stops_on_cancellation() {
+            let (_sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            let snapshots = Arc::new(AtomicU64::new(0));
+            let metrics = PassiveRaftMetrics::new(true);
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::clone(&snapshots),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::from_millis(1),
+            ));
+
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 3 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("idle observer periodic refresh");
+            assert!(metrics.snapshot().valid);
+            cancel.send(()).expect("cancel observer");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("observer cancellation timeout")
+                .expect("observer task");
+        }
+
+        #[tokio::test]
+        async fn watch_change_publishes_without_waiting_for_the_fallback_tick() {
+            let (sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            let snapshots = Arc::new(AtomicU64::new(0));
+            let metrics = PassiveRaftMetrics::new(true);
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::clone(&snapshots),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::from_secs(60),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("initial watch sample");
+
+            sender
+                .send(local_sample(8, Some(43), Some(2)))
+                .expect("publish watch change");
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("watch change must beat fallback tick");
+            let view = metrics.snapshot();
+            assert_eq!(view.sample.expect("changed sample").current_term, 8);
+            assert_eq!(view.leader_changes, 1);
+            cancel.send(()).expect("cancel observer");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("observer cancellation timeout")
+                .expect("observer task");
+        }
+
+        #[tokio::test]
+        async fn closed_watch_records_one_error_and_exits_without_spinning() {
+            let (sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            drop(sender);
+            let metrics = PassiveRaftMetrics::new(true);
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::new(AtomicU64::new(0)),
+                },
+                metrics.clone(),
+                std::future::pending(),
+                Duration::from_millis(1),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("closed watch must not spin")
+                .expect("observer task");
+            assert_eq!(metrics.snapshot().errors, 1);
+        }
+
         #[tokio::test]
         async fn sqlite_is_single_node_instead_of_misleadingly_synced() {
             let status = ReplicationMonitor::sqlite().status().await;
@@ -4199,6 +4746,24 @@ pub mod status {
             assert!(!status.clustered);
             assert_eq!(status.last_converged_at, None);
             assert!(status.explanation.contains("stored only on this server"));
+        }
+
+        #[tokio::test]
+        async fn remote_client_cannot_construct_the_local_raft_observer() {
+            let remote = Client::remote(
+                vec!["127.0.0.1:1".to_owned()],
+                false,
+                false,
+                "not-used".to_owned(),
+                true,
+                None,
+            )
+            .await
+            .expect("construct remote client without discovery");
+            match remote.local_db_raft_metrics() {
+                Ok(_) => panic!("remote client must not expose a local watch"),
+                Err(error) => assert!(error.to_string().contains("require a local node client")),
+            }
         }
 
         #[test]

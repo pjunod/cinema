@@ -1951,6 +1951,7 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
             bail!("voter {node_id} in-sync status omitted its convergence point: {status:?}");
         }
     }
+    prove_passive_raft_observer(&mut cluster).await?;
     prove_local_telemetry_sidecars(&mut cluster).await?;
 
     // Every voter exercises an immediate cache read after its acknowledged
@@ -2289,6 +2290,7 @@ pub enum Request {
     CatalogView,
     RebuildSearch,
     Metrics,
+    PassiveRaftMetrics,
     ReplicationStatus,
     Ping,
     ReadWithoutQuorum,
@@ -2336,6 +2338,16 @@ pub enum Response {
         voters: Vec<u64>,
         applied_index: Option<u64>,
         quorum_acknowledged: bool,
+    },
+    PassiveRaftMetrics {
+        valid: bool,
+        age_seconds: Option<u64>,
+        errors: u64,
+        leader_changes: u64,
+        current_term: Option<u64>,
+        applied_index: Option<u64>,
+        leader_known: Option<bool>,
+        is_leader: Option<bool>,
     },
     ReplicationStatus {
         status: ReplicationStatus,
@@ -2413,6 +2425,156 @@ pub async fn prove_local_telemetry_sidecars(cluster: &mut ClusterProcesses) -> R
         Response::TelemetryCount { count: 1 } => Ok(()),
         response => bail!("voter-1 telemetry did not survive reopen: {response:?}"),
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PassiveRaftObservation {
+    valid: bool,
+    age_seconds: Option<u64>,
+    errors: u64,
+    leader_changes: u64,
+    current_term: u64,
+    applied_index: u64,
+    leader_known: bool,
+    is_leader: bool,
+}
+
+async fn passive_raft_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<PassiveRaftObservation> {
+    match cluster
+        .request(node_id, Request::PassiveRaftMetrics)
+        .await?
+    {
+        Response::PassiveRaftMetrics {
+            valid,
+            age_seconds,
+            errors,
+            leader_changes,
+            current_term: Some(current_term),
+            applied_index: Some(applied_index),
+            leader_known: Some(leader_known),
+            is_leader: Some(is_leader),
+        } => Ok(PassiveRaftObservation {
+            valid,
+            age_seconds,
+            errors,
+            leader_changes,
+            current_term,
+            applied_index,
+            leader_known,
+            is_leader,
+        }),
+        response => bail!("voter {node_id} passive Raft sample was absent: {response:?}"),
+    }
+}
+
+/// Prove the production passive observer follows real three-voter apply and
+/// election events without a Store or management request on its sample path.
+async fn prove_passive_raft_observer(cluster: &mut ClusterProcesses) -> Result<()> {
+    let initial_deadline = Instant::now() + Duration::from_secs(10);
+    let initial = loop {
+        let mut samples = Vec::new();
+        let mut ready = true;
+        for node_id in 1..=3 {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            ready &= sample.valid && sample.leader_known && sample.errors == 0;
+            samples.push(sample);
+        }
+        if ready {
+            break samples;
+        }
+        if Instant::now() >= initial_deadline {
+            bail!("passive Raft observers did not publish fresh initial samples: {samples:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let leader = cluster.leader().await?;
+    cluster
+        .request(
+            leader,
+            Request::TopologyWrite {
+                ordinal: 9_001,
+                value: "passive-observer-proof".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let apply_deadline = Instant::now() + Duration::from_secs(10);
+    for node_id in 1..=3 {
+        let baseline = initial[(node_id - 1) as usize].applied_index;
+        loop {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            if sample.valid && sample.applied_index > baseline {
+                break;
+            }
+            if Instant::now() >= apply_deadline {
+                bail!(
+                    "voter {node_id} passive applied index did not advance beyond {baseline}: {sample:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    let before_election = [
+        passive_raft_observation(cluster, 1).await?,
+        passive_raft_observation(cluster, 2).await?,
+        passive_raft_observation(cluster, 3).await?,
+    ];
+    let election_target = (1..=3)
+        .find(|node_id| *node_id != leader)
+        .context("choose passive-observer election target")?;
+    cluster
+        .request(election_target, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let election_deadline = Instant::now() + Duration::from_secs(10);
+    let new_leader = loop {
+        let candidate = cluster.leader().await?;
+        if candidate != leader {
+            break candidate;
+        }
+        if Instant::now() >= election_deadline {
+            bail!("passive-observer election did not replace leader {leader}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let mut observed_local_leaders = 0;
+    let observation_deadline = Instant::now() + Duration::from_secs(10);
+    for node_id in 1..=3 {
+        let before = before_election[(node_id - 1) as usize];
+        loop {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            if sample.valid
+                && sample.leader_known
+                && sample.current_term > before.current_term
+                && sample.leader_changes > before.leader_changes
+            {
+                if sample.is_leader {
+                    observed_local_leaders += 1;
+                    if node_id != new_leader {
+                        bail!("voter {node_id} claimed leadership but leader is {new_leader}");
+                    }
+                }
+                if sample.age_seconds.is_none() || sample.errors != 0 {
+                    bail!("voter {node_id} published an invalid passive sample: {sample:?}");
+                }
+                break;
+            }
+            if Instant::now() >= observation_deadline {
+                bail!("voter {node_id} passive observer missed the live election: {sample:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    if observed_local_leaders != 1 {
+        bail!("passive observer reported {observed_local_leaders} local leaders after election");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3117,6 +3279,10 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         return Err(error);
     }
     let replication = ReplicationMonitor::replicated(client.clone());
+    let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
+    tokio::spawn(replication.clone().passive_metrics_loop(async move {
+        let _ = passive_shutdown_signal.await;
+    }));
 
     write_response(&Response::Ready {
         node_id: launch.node_id,
@@ -3157,6 +3323,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
             }
         }
     }
+    let _ = passive_shutdown.send(());
     Ok(())
 }
 
@@ -3855,6 +4022,19 @@ async fn handle_request(
                 quorum_acknowledged: metrics
                     .millis_since_quorum_ack
                     .is_some_and(|age| age <= 1_000),
+            })
+        }
+        Request::PassiveRaftMetrics => {
+            let view = replication.metrics_handle().snapshot();
+            Ok(Response::PassiveRaftMetrics {
+                valid: view.valid,
+                age_seconds: view.age_seconds,
+                errors: view.errors,
+                leader_changes: view.leader_changes,
+                current_term: view.sample.map(|sample| sample.current_term),
+                applied_index: view.sample.and_then(|sample| sample.last_applied_index),
+                leader_known: view.sample.map(|sample| sample.leader_known),
+                is_leader: view.sample.map(|sample| sample.is_leader),
             })
         }
         Request::ReplicationStatus => Ok(Response::ReplicationStatus {

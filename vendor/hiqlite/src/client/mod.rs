@@ -21,6 +21,8 @@ mod helpers;
 mod listen_notify;
 mod mgmt;
 #[cfg(feature = "sqlite")]
+pub use mgmt::{LocalDbRaftMetrics, LocalDbRaftSnapshot};
+#[cfg(feature = "sqlite")]
 mod migrate;
 #[cfg(feature = "sqlite")]
 mod query;

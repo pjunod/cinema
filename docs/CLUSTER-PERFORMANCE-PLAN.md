@@ -274,6 +274,9 @@ Add these families with fixed label vocabularies:
 | `plurx_auth_activity_writes_total` | counter | `kind`, `result` | auth coalescer: token/key touch submitted · suppressed · failed |
 | `plurx_raft_commit_index` | gauge | none | most recent quorum-confirmed leader watermark; meaningful only while its validity gauge is `1` |
 | `plurx_raft_applied_index` | gauge | none | OpenRaft local metrics watch: latest entry applied on this node |
+| `plurx_raft_current_term` | gauge | none | OpenRaft local metrics watch: term observed by this node |
+| `plurx_raft_leader_known` | gauge | none | OpenRaft local metrics watch: `1` while this node identifies a leader |
+| `plurx_raft_is_leader` | gauge | none | OpenRaft local metrics watch: `1` when the observed leader is this node |
 | `plurx_raft_apply_lag_entries` | gauge | none | saturating watermark commit minus local applied; meaningful only while both sources are valid |
 | `plurx_raft_leader_changes_total` | counter | none | OpenRaft metrics watch: process-observed leader identity changes |
 | `plurx_raft_snapshot_seconds` | histogram | `operation`, `outcome` | explicit `build` · `install` snapshot start-to-finish hooks, not monitor polling |
@@ -451,6 +454,20 @@ returning-write helpers classify nested statement failures as `error` and share
 the same `write` class. The local/management Raft health probe is excluded;
 readiness counts only its subsequent authority SQL read. The exposition reads
 only process-local saturating atomics.
+
+**P2c passive local Raft state:** the vendored Hiqlite boundary exposes a
+local-only watch wrapper that cannot fall back to its management HTTP API.
+`ReplicationMonitor` publishes the current term, local applied index,
+leader-known/local-leader state, and distinct known-leader changes into a
+coherent atomics-only sample. Watch changes publish immediately and a
+five-second refresh keeps an unchanged healthy cluster fresh. A closed watch,
+an unhealthy running state, or a regressed term or
+applied index increments the fixed `source="local"` error counter and preserves
+the preceding sample until it becomes invalid after 15 seconds. The local
+applied index is not a quorum-confirmed commit watermark; P2d remains the only
+slice allowed to add that claim and derive apply lag from it. The system status
+path remains separate from this narrow observer and retains its management
+fallback for maintenance callers.
 
 **Change:** Instrument `TimedClient` once so every replicated Store module uses
 the same bounded local-read · authority-read · write histograms and counters.
