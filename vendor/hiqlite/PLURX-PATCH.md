@@ -30,10 +30,12 @@ Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
   duration histograms through `Client::local_db_snapshot_metrics`. Explicit
   RAII start/finish hooks classify build/install success and every error or
   cancelled exit without polling storage or exposing paths and snapshot ids.
-- Snapshot build, install, and asynchronous cleanup share one file-ownership
-  boundary. Cleanup resolves the most recently completed build or peer install
-  when it runs and preserves the receiver-owned staging file, so a delayed
-  local cleanup cannot delete an in-flight or newly installed snapshot.
+- Snapshot build, install, read, and asynchronous cleanup share one
+  file-ownership boundary. Completed files use fsync plus atomic rename, and a
+  separately fsynced pointer publishes the exact current generation (including
+  an explicit empty state). Startup migrates legacy directories once; normal
+  reads and restart recovery never infer recency from UUID ordering, so delayed
+  cleanup and interrupted publication cannot replace or delete current state.
 
 Remove this vendor when an upstream Hiqlite release contains all seven patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
