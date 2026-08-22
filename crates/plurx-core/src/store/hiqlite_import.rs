@@ -1869,7 +1869,7 @@ mod tests {
         assert!(!names.contains(&"playback_events"));
         assert!(!names.contains(&"items_fts"));
         assert!(!names.contains(&"offline_lease_guards"));
-        assert_eq!(names.len(), 19, "review every imported durable table");
+        assert_eq!(names.len(), 20, "review every imported durable table");
     }
 
     #[test]

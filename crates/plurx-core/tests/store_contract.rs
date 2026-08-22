@@ -1401,6 +1401,12 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     .unwrap_or_else(|error| panic!("{backend}: insert file {ordinal}: {error}")),
             );
         }
+        // The concurrent claim below deliberately deletes one of files[0..=2].
+        // Reserve files[4] for fixtures that must remain readable afterward so
+        // their outcome does not depend on which worker wins which claim.
+        let stable_source_file = files[4];
+        let stable_source_size = 10_005;
+        let stable_source_mtime = 20_005;
 
         let requirements = serde_json::to_string(&PretranscodeRequirements {
             version: PretranscodeRequirements::VERSION,
@@ -1813,9 +1819,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             let starvation_job = NewPretranscodeJob {
                 id: uuid::Uuid::new_v4().to_string(),
                 dedupe_key: format!("claim-pagination-{ordinal}"),
-                file_id: files[1],
-                source_size: 10_002,
-                source_mtime: 20_002,
+                file_id: stable_source_file,
+                source_size: stable_source_size,
+                source_mtime: stable_source_mtime,
                 target_height: 720,
                 policy_generation: "pagination-v1".to_owned(),
                 requirements_json: if compatible_tail {
@@ -1855,7 +1861,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert!(store
             .claim_cache_entry(
                 legacy_recipe,
-                files[1],
+                stable_source_file,
                 1,
                 "node-legacy",
                 "contract/pretranscode/legacy",
@@ -1878,9 +1884,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         let legacy_job = NewPretranscodeJob {
             id: "00000000-0000-4000-8000-000000000106".to_owned(),
             dedupe_key: "pretranscode-legacy-cache-reuse".to_owned(),
-            file_id: files[1],
-            source_size: 10_002,
-            source_mtime: 20_002,
+            file_id: stable_source_file,
+            source_size: stable_source_size,
+            source_mtime: stable_source_mtime,
             target_height: 720,
             policy_generation: "legacy-upgrade-v1".to_owned(),
             requirements_json: requirements.clone(),

@@ -919,9 +919,9 @@ impl TranscodeCacheStore for HiqliteAuthStore {
             return Ok(0);
         }
         let sql = "UPDATE transcode_cache_locations
-                    SET last_seen_at = $6, scrub_object_index = $7
-                   WHERE recipe_hash = $1 AND node_id = $2 AND storage_class = $3
-                     AND relative_dir = $4 AND manifest_digest = $5 AND complete = 1";
+                    SET last_seen_at = $1, scrub_object_index = $2
+                   WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = $5
+                     AND relative_dir = $6 AND manifest_digest = $7 AND complete = 1";
         validate_sql(sql)?;
         let statements = checks
             .iter()
@@ -929,13 +929,13 @@ impl TranscodeCacheStore for HiqliteAuthStore {
                 (
                     sql.to_owned(),
                     params!(
+                        check.observed_at,
+                        check.next_object_index,
                         &check.recipe_hash,
                         &check.node_id,
                         &check.storage_class,
                         &check.relative_dir,
-                        &check.manifest_digest,
-                        check.observed_at,
-                        check.next_object_index
+                        &check.manifest_digest
                     ),
                 )
             })
