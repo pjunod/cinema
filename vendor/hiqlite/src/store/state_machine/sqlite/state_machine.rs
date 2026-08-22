@@ -7,8 +7,9 @@ use crate::snapshot_metrics::{SnapshotOperation, SnapshotTimer};
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::store::state_machine::sqlite::param::Param;
 use crate::store::state_machine::sqlite::snapshot_builder::{
-    SQLiteSnapshotBuilder, SnapshotFileState, SnapshotPointer, load_current_snapshot,
-    publish_current_snapshot, snapshots_cleanup, sync_directory, sync_file,
+    SQLiteSnapshotBuilder, SnapshotFileState, SnapshotPointer, clear_pending_snapshot,
+    load_current_snapshot, load_pending_snapshot, publish_current_snapshot,
+    publish_pending_snapshot, snapshots_cleanup, sync_directory, sync_file,
 };
 use crate::store::state_machine::sqlite::writer::WriterRequest::MetadataRead;
 use crate::store::state_machine::sqlite::writer::{
@@ -26,6 +27,7 @@ use rusqlite::{OpenFlags, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::clone::Clone;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -115,6 +117,7 @@ pub struct StateMachineSqlite {
     path_backups: String,
     path_lock_file: String,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
+    snapshot_recovery_pending: Arc<AtomicBool>,
 
     #[cfg(feature = "s3")]
     s3_config: Option<Arc<crate::s3::S3Config>>,
@@ -190,6 +193,7 @@ impl StateMachineSqlite {
             path_backups,
             path_lock_file,
             snapshot_files: Arc::new(Mutex::new(SnapshotFileState::default())),
+            snapshot_recovery_pending: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "s3")]
             s3_config,
             read_pool,
@@ -197,8 +201,12 @@ impl StateMachineSqlite {
         };
 
         slf.initialize_snapshot_pointer(db_exists).await?;
+        let recovered_pending = slf.recover_pending_snapshot().await?;
 
-        if !db_exists && let Some(snapshot) = slf.read_current_snapshot().await? {
+        if !db_exists
+            && !recovered_pending
+            && let Some(snapshot) = slf.read_current_snapshot().await?
+        {
             slf.update_state_machine_(snapshot.path).await?;
         }
 
@@ -540,19 +548,57 @@ impl StateMachineSqlite {
             SnapshotPointer::Empty => None,
             SnapshotPointer::Missing => {
                 let snapshot_id = if db_exists {
-                    self.read_authoritative_snapshot_id().await?
+                    match self.read_authoritative_snapshot_id().await? {
+                        Some(snapshot_id) => match self.read_snapshot_metadata(&snapshot_id).await {
+                            Ok(_) => Some(snapshot_id),
+                            Err(error) => {
+                                warn!(
+                                    "Ignoring invalid snapshot named by live database metadata: {error}"
+                                );
+                                self.find_legacy_current_snapshot_id(false).await?
+                            }
+                        },
+                        None => None,
+                    }
                 } else {
-                    self.find_legacy_current_snapshot_id().await?
+                    self.find_legacy_current_snapshot_id(true).await?
                 };
+                if let Some(snapshot_id) = &snapshot_id {
+                    self.read_snapshot_metadata(snapshot_id).await?;
+                }
                 publish_current_snapshot(&self.path_snapshots, snapshot_id.as_deref()).await?;
                 snapshot_id
             }
         };
         if let Some(snapshot_id) = &snapshot_id {
-            self.validate_snapshot_file(snapshot_id).await?;
+            self.read_snapshot_metadata(snapshot_id).await?;
         }
         snapshot_files_guard.current_id = snapshot_id;
         Ok(())
+    }
+
+    async fn recover_pending_snapshot(&mut self) -> StorageResult<bool> {
+        let snapshot_id = match load_pending_snapshot(&self.path_snapshots).await? {
+            SnapshotPointer::Missing => return Ok(false),
+            SnapshotPointer::Snapshot(snapshot_id) => snapshot_id,
+            SnapshotPointer::Empty => unreachable!("pending loader rejects empty pointers"),
+        };
+
+        self.snapshot_recovery_pending
+            .store(true, Ordering::Release);
+        let snapshot_files = self.snapshot_files.clone();
+        let mut snapshot_files_guard = snapshot_files.lock().await;
+        snapshot_files_guard.pending_id = Some(snapshot_id.clone());
+        self.read_snapshot_metadata(&snapshot_id).await?;
+        let path = format!("{}/{}", self.path_snapshots, snapshot_id);
+        self.update_state_machine_(path).await?;
+        publish_current_snapshot(&self.path_snapshots, Some(&snapshot_id)).await?;
+        snapshot_files_guard.current_id = Some(snapshot_id);
+        clear_pending_snapshot(&self.path_snapshots).await?;
+        snapshot_files_guard.pending_id = None;
+        self.snapshot_recovery_pending
+            .store(false, Ordering::Release);
+        Ok(true)
     }
 
     async fn read_authoritative_snapshot_id(&self) -> StorageResult<Option<String>> {
@@ -611,7 +657,10 @@ impl StateMachineSqlite {
         Ok(snapshot_id)
     }
 
-    async fn find_legacy_current_snapshot_id(&self) -> StorageResult<Option<String>> {
+    async fn find_legacy_current_snapshot_id(
+        &self,
+        require_valid_candidate: bool,
+    ) -> StorageResult<Option<String>> {
         let mut list = tokio::fs::read_dir(&self.path_snapshots)
             .await
             .map_err(|err| StorageError::IO {
@@ -667,9 +716,9 @@ impl StateMachineSqlite {
 
         match current {
             Some((_, id)) => Ok(Some(id.to_string())),
-            None => match first_candidate_error {
-                Some(error) => Err(error),
-                None => Ok(None),
+            None => match (require_valid_candidate, first_candidate_error) {
+                (true, Some(error)) => Err(error),
+                _ => Ok(None),
             },
         }
     }
@@ -700,19 +749,21 @@ impl StateMachineSqlite {
     ) -> StorageResult<StateMachineData> {
         self.validate_snapshot_file(snapshot_id).await?;
         let path_snapshot = format!("{}/{}", self.path_snapshots, snapshot_id);
-        let conn = Self::connect(
-            self.path_snapshots.clone(),
-            snapshot_id.to_owned(),
-            false,
-            2,
-        )
-        .await
-        .map_err(|error| StorageError::IO {
-            source: StorageIOError::read_state_machine(&error),
-        })?;
         let expected_id = snapshot_id.to_owned();
         let path_debug = path_snapshot.clone();
         let metadata = task::spawn_blocking(move || {
+            // Snapshot generations are immutable after fsync + rename. Inspect
+            // them through a genuinely read-only connection and do not run the
+            // live database's write-capable pragma setup on these files.
+            let conn = rusqlite::Connection::open_with_flags(
+                &path_debug,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| {
+                Error::Sqlite(
+                    format!("Error opening snapshot '{path_debug}' read-only: {error}").into(),
+                )
+            })?;
             let mut stmt = conn
                 .prepare("SELECT data FROM _metadata WHERE key = 'meta'")
                 .map_err(|error| {
@@ -789,6 +840,15 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
     async fn applied_state(
         &mut self,
     ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, Node>), StorageError<NodeId>> {
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "applied state unavailable until pending snapshot recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            });
+        }
         let (ack, rx) = oneshot::channel();
         self.write_tx
             .send_async(WriterRequest::MetadataRead(ack))
@@ -808,6 +868,15 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "state-machine apply refused until pending snapshot recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
         let entries = entries.into_iter();
 
         let (bound_lower, bound_upper) = entries.size_hint();
@@ -988,6 +1057,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             path_snapshots: self.path_snapshots.clone(),
             write_tx: self.write_tx.clone(),
             snapshot_files: self.snapshot_files.clone(),
+            snapshot_recovery_pending: self.snapshot_recovery_pending.clone(),
         }
     }
 
@@ -1013,8 +1083,26 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         _snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
         let timer = SnapshotTimer::start(SnapshotOperation::Install);
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "snapshot install refused until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
         let snapshot_files = self.snapshot_files.clone();
         let snapshot_files_guard = snapshot_files.clone().lock_owned().await;
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "snapshot install refused until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
         let snapshot_id = Uuid::parse_str(&meta.snapshot_id)
             .map_err(|error| StorageError::IO {
                 source: StorageIOError::write_state_machine(&error),
@@ -1056,10 +1144,28 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         // accepted the candidate.
         let write_tx = self.write_tx.clone();
         let path_snapshots = self.path_snapshots.clone();
+        let snapshot_recovery_pending = self.snapshot_recovery_pending.clone();
         #[cfg(feature = "backup")]
         let path_backups = self.path_backups.clone();
+        snapshot_recovery_pending.store(true, Ordering::Release);
         task::spawn(async move {
             let mut snapshot_files_guard = snapshot_files_guard;
+            if let Err(publish_error) =
+                publish_pending_snapshot(&path_snapshots, &snapshot_id).await
+            {
+                match load_pending_snapshot(&path_snapshots).await {
+                    Ok(SnapshotPointer::Snapshot(durable_id)) if durable_id == snapshot_id => {
+                        warn!(
+                            "Pending snapshot pointer rename completed before durability error; continuing guarded recovery: {publish_error}"
+                        );
+                    }
+                    _ => {
+                        snapshot_recovery_pending.store(false, Ordering::Release);
+                        return Err(publish_error);
+                    }
+                }
+            }
+            snapshot_files_guard.pending_id = Some(snapshot_id.clone());
             let (tx, rx) = oneshot::channel();
             write_tx
                 .send_async(WriterRequest::SnapshotApply((dest, tx)))
@@ -1069,6 +1175,9 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 .expect("snapshot writer to return an apply result")?;
             publish_current_snapshot(&path_snapshots, Some(&snapshot_id)).await?;
             snapshot_files_guard.current_id = Some(snapshot_id);
+            clear_pending_snapshot(&path_snapshots).await?;
+            snapshot_files_guard.pending_id = None;
+            snapshot_recovery_pending.store(false, Ordering::Release);
             drop(snapshot_files_guard);
             let _ = fs::remove_file(src).await;
             task::spawn(snapshots_cleanup(
@@ -1091,8 +1200,26 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfigSqlite>>, StorageError<NodeId>> {
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "current snapshot unavailable until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            });
+        }
         let snapshot_files = self.snapshot_files.clone();
         let mut snapshot_files_guard = snapshot_files.lock().await;
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "current snapshot unavailable until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            });
+        }
         match self
             .read_current_snapshot_locked(&mut snapshot_files_guard)
             .await?
@@ -1118,6 +1245,10 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 mod snapshot_metrics_contracts {
     use super::*;
     use crate::helpers::serialize;
+    use crate::store::state_machine::sqlite::snapshot_builder::{
+        CURRENT_PUBLICATION_RENAMED, FAIL_CURRENT_PUBLICATION_AFTER_RENAME,
+        RELEASE_CURRENT_PUBLICATION,
+    };
     use crate::LocalDbSnapshotMetrics;
     use openraft::{CommittedLeaderId, RaftSnapshotBuilder};
 
@@ -1288,6 +1419,9 @@ mod snapshot_metrics_contracts {
             100,
         )
         .await;
+        let installed_bytes_before = fs::read(snapshots.join(installed_id))
+            .await
+            .expect("read immutable installed snapshot before migration");
 
         let root = root.to_str().expect("UTF-8 legacy root").to_owned();
         let mut state = StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
@@ -1301,6 +1435,14 @@ mod snapshot_metrics_contracts {
         assert_eq!(current.meta.snapshot_id, installed_id);
         assert_eq!(current.meta.last_log_id.map(|id| id.index), Some(200));
         drop(current);
+        assert_eq!(
+            fs::read(format!("{}/{}", state.path_snapshots, installed_id))
+                .await
+                .expect("read immutable installed snapshot after migration"),
+            installed_bytes_before
+        );
+        assert!(!snapshots.join(format!("{installed_id}-wal")).exists());
+        assert!(!snapshots.join(format!("{installed_id}-shm")).exists());
         shutdown_state(&state).await;
         drop(state);
 
@@ -1376,5 +1518,130 @@ mod snapshot_metrics_contracts {
         fs::remove_dir_all(&root)
             .await
             .expect("remove live legacy root");
+    }
+
+    #[tokio::test]
+    async fn snapshot_metrics_legacy_failed_build_falls_back_before_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "hiqlite-snapshot-legacy-failed-build-{}",
+            Uuid::now_v7()
+        ));
+        let snapshots = root.join("state_machine/snapshots");
+        let database = root.join("state_machine/db");
+        fs::create_dir_all(&snapshots)
+            .await
+            .expect("create failed-build snapshot directory");
+        fs::create_dir_all(&database)
+            .await
+            .expect("create failed-build database directory");
+        let fallback_id = "018f0000-0000-7000-8000-000000000001";
+        let missing_failed_id = "019f0000-0000-7000-8000-000000000002";
+        write_snapshot_fixture(
+            snapshots.join(fallback_id).display().to_string(),
+            fallback_id,
+            100,
+        )
+        .await;
+        write_snapshot_fixture(
+            database.join("legacy.db").display().to_string(),
+            missing_failed_id,
+            200,
+        )
+        .await;
+
+        let root = root
+            .to_str()
+            .expect("UTF-8 failed-build root")
+            .to_owned();
+        let mut state = StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
+            .await
+            .expect("migrate failed legacy build");
+        assert_eq!(
+            load_current_snapshot(&state.path_snapshots)
+                .await
+                .expect("load failed-build fallback pointer"),
+            SnapshotPointer::Snapshot(fallback_id.to_owned())
+        );
+        let current = state
+            .get_current_snapshot()
+            .await
+            .expect("read failed-build fallback")
+            .expect("failed-build fallback exists");
+        assert_eq!(current.meta.snapshot_id, fallback_id);
+        drop(current);
+        shutdown_state(&state).await;
+        fs::remove_dir_all(&root)
+            .await
+            .expect("remove failed-build root");
+    }
+
+    #[tokio::test]
+    async fn snapshot_metrics_pending_generation_recovers_after_cancelled_promotion() {
+        let root = std::env::temp_dir().join(format!(
+            "hiqlite-snapshot-pending-recovery-{}",
+            Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).await.expect("create pending root");
+        let root = root.to_str().expect("UTF-8 pending root").to_owned();
+        let mut state = StateMachineSqlite::new(&root, "pending.db", 1, false, 16, 1, false)
+            .await
+            .expect("create pending state machine");
+        let candidate_id = "028f0000-0000-7000-8000-000000000001";
+        let receive_path = format!("{}/temp", state.path_snapshots);
+        write_snapshot_fixture(receive_path.clone(), candidate_id, 300).await;
+        let receive = fs::File::open(&receive_path)
+            .await
+            .expect("open pending candidate");
+        let candidate_meta = SnapshotMeta {
+            last_log_id: Some(LogId::new(CommittedLeaderId::new(3, 1), 300)),
+            last_membership: StoredMembership::default(),
+            snapshot_id: candidate_id.to_owned(),
+        };
+
+        let renamed = CURRENT_PUBLICATION_RENAMED.notified();
+        tokio::pin!(renamed);
+        FAIL_CURRENT_PUBLICATION_AFTER_RENAME.store(true, Ordering::Release);
+        let install = task::spawn(async move {
+            let result = state
+                .install_snapshot(&candidate_meta, Box::new(receive))
+                .await;
+            (state, result)
+        });
+        renamed.await;
+        install.abort();
+        RELEASE_CURRENT_PUBLICATION.notify_one();
+        assert!(install.await.expect_err("cancel install caller").is_cancelled());
+
+        let lock_path = format!("{root}/state_machine/lock");
+        time::timeout(Duration::from_secs(5), async {
+            while fs::metadata(&lock_path).await.is_ok() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached publication exits and writer releases lock");
+
+        let mut restarted =
+            StateMachineSqlite::new(&root, "pending.db", 1, false, 16, 1, false)
+                .await
+                .expect("recover durable pending generation");
+        let current = restarted
+            .get_current_snapshot()
+            .await
+            .expect("read recovered pending snapshot")
+            .expect("recovered pending snapshot exists");
+        assert_eq!(current.meta.snapshot_id, candidate_id);
+        assert_eq!(current.meta.last_log_id.map(|id| id.index), Some(300));
+        drop(current);
+        assert_eq!(
+            load_pending_snapshot(&restarted.path_snapshots)
+                .await
+                .expect("pending pointer cleared after recovery"),
+            SnapshotPointer::Missing
+        );
+        shutdown_state(&restarted).await;
+        fs::remove_dir_all(&root)
+            .await
+            .expect("remove pending recovery root");
     }
 }

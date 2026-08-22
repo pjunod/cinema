@@ -7,16 +7,28 @@ use crate::{Node, NodeId};
 use openraft::{
     RaftSnapshotBuilder, Snapshot, SnapshotMeta, StorageError, StorageIOError, StoredMembership,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::{fs, task};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 pub(crate) const CURRENT_SNAPSHOT_POINTER: &str = "current";
 const CURRENT_SNAPSHOT_POINTER_TEMP: &str = "current.temp";
+pub(crate) const PENDING_SNAPSHOT_POINTER: &str = "pending";
+const PENDING_SNAPSHOT_POINTER_TEMP: &str = "pending.temp";
 const NO_CURRENT_SNAPSHOT: &str = "none";
+
+#[cfg(test)]
+pub(crate) static FAIL_CURRENT_PUBLICATION_AFTER_RENAME: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static CURRENT_PUBLICATION_RENAMED: Notify = Notify::const_new();
+#[cfg(test)]
+pub(crate) static RELEASE_CURRENT_PUBLICATION: Notify = Notify::const_new();
 
 #[derive(Debug, Clone)]
 pub struct SQLiteSnapshotBuilder {
@@ -27,11 +39,13 @@ pub struct SQLiteSnapshotBuilder {
     pub path_snapshots: String,
     pub write_tx: flume::Sender<WriterRequest>,
     pub(crate) snapshot_files: Arc<Mutex<SnapshotFileState>>,
+    pub(crate) snapshot_recovery_pending: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SnapshotFileState {
     pub(crate) current_id: Option<String>,
+    pub(crate) pending_id: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -50,6 +64,15 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
         // always reads the operation that actually completed last.
         let snapshot_files = self.snapshot_files.clone();
         let mut snapshot_files_guard = snapshot_files.lock().await;
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "snapshot build refused while install recovery is pending",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
         // - build new snapshot id
         // - make sure target path exists
         // - send snapshot request to db writer
@@ -135,7 +158,21 @@ pub(crate) async fn snapshots_cleanup(
             });
         }
     };
+    let pending_id = match load_pending_snapshot(&path_snapshots).await? {
+        SnapshotPointer::Snapshot(snapshot_id) => Some(snapshot_id),
+        SnapshotPointer::Missing => None,
+        SnapshotPointer::Empty => {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "pending snapshot pointer cannot contain an empty generation",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            });
+        }
+    };
     snapshot_files.current_id.clone_from(&keep_id);
+    snapshot_files.pending_id.clone_from(&pending_id);
     let mut list = tokio::fs::read_dir(&path_snapshots)
         .await
         .map_err(|err| StorageError::IO {
@@ -171,9 +208,12 @@ pub(crate) async fn snapshots_cleanup(
         // after the build that spawned it, so process-local state is not a safe
         // retention decision.
         if Some(name) != keep_id.as_deref()
+            && Some(name) != pending_id.as_deref()
             && name != "temp"
             && name != CURRENT_SNAPSHOT_POINTER
             && name != CURRENT_SNAPSHOT_POINTER_TEMP
+            && name != PENDING_SNAPSHOT_POINTER
+            && name != PENDING_SNAPSHOT_POINTER_TEMP
         {
             deletes.push(name.to_string());
         }
@@ -199,7 +239,21 @@ pub(crate) async fn snapshots_cleanup(
 pub(crate) async fn load_current_snapshot(
     path_snapshots: &str,
 ) -> StorageResult<SnapshotPointer> {
-    let path = format!("{path_snapshots}/{CURRENT_SNAPSHOT_POINTER}");
+    load_snapshot_pointer(path_snapshots, CURRENT_SNAPSHOT_POINTER, true).await
+}
+
+pub(crate) async fn load_pending_snapshot(
+    path_snapshots: &str,
+) -> StorageResult<SnapshotPointer> {
+    load_snapshot_pointer(path_snapshots, PENDING_SNAPSHOT_POINTER, false).await
+}
+
+async fn load_snapshot_pointer(
+    path_snapshots: &str,
+    pointer_name: &str,
+    allow_empty: bool,
+) -> StorageResult<SnapshotPointer> {
+    let path = format!("{path_snapshots}/{pointer_name}");
     let value = match fs::read_to_string(&path).await {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -213,7 +267,16 @@ pub(crate) async fn load_current_snapshot(
     };
     let value = value.trim();
     if value == NO_CURRENT_SNAPSHOT {
-        return Ok(SnapshotPointer::Empty);
+        if allow_empty {
+            return Ok(SnapshotPointer::Empty);
+        }
+        let error = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{pointer_name} snapshot pointer cannot be empty"),
+        );
+        return Err(StorageError::IO {
+            source: StorageIOError::read_state_machine(&error),
+        });
     }
     let id = Uuid::parse_str(value).map_err(|error| StorageError::IO {
         source: StorageIOError::read_state_machine(&error),
@@ -225,6 +288,34 @@ pub(crate) async fn publish_current_snapshot(
     path_snapshots: &str,
     snapshot_id: Option<&str>,
 ) -> StorageResult<()> {
+    publish_snapshot_pointer(
+        path_snapshots,
+        CURRENT_SNAPSHOT_POINTER,
+        CURRENT_SNAPSHOT_POINTER_TEMP,
+        snapshot_id,
+    )
+    .await
+}
+
+pub(crate) async fn publish_pending_snapshot(
+    path_snapshots: &str,
+    snapshot_id: &str,
+) -> StorageResult<()> {
+    publish_snapshot_pointer(
+        path_snapshots,
+        PENDING_SNAPSHOT_POINTER,
+        PENDING_SNAPSHOT_POINTER_TEMP,
+        Some(snapshot_id),
+    )
+    .await
+}
+
+async fn publish_snapshot_pointer(
+    path_snapshots: &str,
+    pointer_name: &str,
+    pointer_temp_name: &str,
+    snapshot_id: Option<&str>,
+) -> StorageResult<()> {
     let value = match snapshot_id {
         Some(snapshot_id) => Uuid::parse_str(snapshot_id)
             .map_err(|error| StorageError::IO {
@@ -233,8 +324,8 @@ pub(crate) async fn publish_current_snapshot(
             .to_string(),
         None => NO_CURRENT_SNAPSHOT.to_owned(),
     };
-    let path_temp = format!("{path_snapshots}/{CURRENT_SNAPSHOT_POINTER_TEMP}");
-    let path = format!("{path_snapshots}/{CURRENT_SNAPSHOT_POINTER}");
+    let path_temp = format!("{path_snapshots}/{pointer_temp_name}");
+    let path = format!("{path_snapshots}/{pointer_name}");
     let mut file = fs::File::create(&path_temp)
         .await
         .map_err(|error| StorageError::IO {
@@ -259,6 +350,36 @@ pub(crate) async fn publish_current_snapshot(
         .map_err(|error| StorageError::IO {
             source: StorageIOError::write_state_machine(&error),
         })?;
+    #[cfg(test)]
+    if pointer_name == CURRENT_SNAPSHOT_POINTER
+        && FAIL_CURRENT_PUBLICATION_AFTER_RENAME.swap(false, Ordering::AcqRel)
+    {
+        CURRENT_PUBLICATION_RENAMED.notify_one();
+        RELEASE_CURRENT_PUBLICATION.notified().await;
+        let error = std::io::Error::other("injected current-pointer durability failure");
+        return Err(StorageError::IO {
+            source: StorageIOError::write_state_machine(&error),
+        });
+    }
+    sync_directory(path_snapshots).await
+}
+
+pub(crate) async fn clear_pending_snapshot(path_snapshots: &str) -> StorageResult<()> {
+    for name in [
+        PENDING_SNAPSHOT_POINTER,
+        PENDING_SNAPSHOT_POINTER_TEMP,
+    ] {
+        let path = format!("{path_snapshots}/{name}");
+        match fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StorageError::IO {
+                    source: StorageIOError::write_state_machine(&error),
+                });
+            }
+        }
+    }
     sync_directory(path_snapshots).await
 }
 
@@ -352,6 +473,7 @@ mod snapshot_metrics_cleanup_contract {
             // Emulate cancellation or directory-fsync failure after the
             // durable pointer rename but before the process-local assignment.
             current_id: Some(newer_orphan_id.to_string()),
+            pending_id: None,
         }));
         snapshots_cleanup(
             root.to_str().expect("UTF-8 snapshot cleanup root").to_owned(),

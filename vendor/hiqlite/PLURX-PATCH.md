@@ -33,9 +33,13 @@ Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
 - Snapshot build, install, read, and asynchronous cleanup share one
   file-ownership boundary. Completed files use fsync plus atomic rename, and a
   separately fsynced pointer publishes the exact current generation (including
-  an explicit empty state). Startup migrates legacy directories once; normal
-  reads and restart recovery never infer recency from UUID ordering, so delayed
-  cleanup and interrupted publication cannot replace or delete current state.
+  an explicit empty state). Install uses a durable pending-generation marker;
+  publication failures stop further state-machine work and startup completes
+  the pending recovery before serving. Read-only inspection leaves generations
+  immutable. Startup migrates legacy directories from live database metadata
+  or applied Raft order; normal reads and recovery never infer recency from UUID
+  ordering, so delayed cleanup and interrupted publication cannot replace or
+  delete current state.
 
 Remove this vendor when an upstream Hiqlite release contains all seven patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
