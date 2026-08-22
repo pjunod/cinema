@@ -513,9 +513,9 @@ durable target. The chosen read-pool value has a retained benchmark artifact.
 
 **Change:** Add an explicit non-voting learner/read-worker role only after P3's
 lag gate, P5's voter-grade storage eligibility, and `CLUSTERING-PLAN.md` M4's
-singleton-job fencing exist. M4 is also a prerequisite for P0c ordinary-load
-evidence, because otherwise every voter can multiply scheduler/provider work
-and contaminate the baseline. The role receives replication, serves
+remaining separate-process acceptance. That pause/takeover/partition proof is
+also a prerequisite for P0c ordinary-load evidence; without it, an undetected
+scheduler/provider duplication defect could contaminate the baseline. The role receives replication, serves
 readiness-gated local reads and explicitly eligible HTTP/media work, never
 becomes leader, and never contributes to quorum. Joining as a voter remains the
 default because silently changing an existing token's role would alter
