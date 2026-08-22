@@ -38,21 +38,21 @@ pub(super) fn atomic_renewal_statement(
     }
     Ok((
         "UPDATE job_leases
-            SET revision = $6, expires_at_ms = $7, updated_at_ms = $8
-          WHERE resource = $1 AND owner_node_id = $2
-            AND fence = $3 AND revision = $4 AND expires_at_ms = $5"
+            SET revision = $1, expires_at_ms = $2, updated_at_ms = $3
+          WHERE resource = $4 AND owner_node_id = $5
+            AND fence = $6 AND revision = $7 AND expires_at_ms = $8"
             .to_owned(),
         params!(
-            lease.resource.as_str(),
-            lease.owner_node_id.as_str(),
-            lease_i64("fence", lease.fence)?,
-            lease_i64("revision", lease.revision)?,
-            lease.expires_at_unix_ms,
             lease_i64("replacement revision", replacement.revision)?,
             replacement.expires_at_unix_ms,
             replacement
                 .expires_at_unix_ms
-                .saturating_sub(ATOMIC_PUBLICATION_TTL_MS)
+                .saturating_sub(ATOMIC_PUBLICATION_TTL_MS),
+            lease.resource.as_str(),
+            lease.owner_node_id.as_str(),
+            lease_i64("fence", lease.fence)?,
+            lease_i64("revision", lease.revision)?,
+            lease.expires_at_unix_ms
         ),
     ))
 }

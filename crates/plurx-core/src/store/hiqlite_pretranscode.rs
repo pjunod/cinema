@@ -243,39 +243,41 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         let revision = i64::try_from(lease.revision)
             .map_err(|error| StoreError::Database(format!("lease revision is invalid: {error}")))?;
         let observed_at_unix_ms = job.created_at_ms;
-        let lease_current = "EXISTS (
-            SELECT 1 FROM job_leases
-             WHERE resource = $1 AND owner_node_id = $2
-               AND fence = $3 AND revision = $4
-               AND expires_at_ms = $5)";
         let statements = vec![
             (
-                format!(
-                    "UPDATE pretranscode_jobs
+                "UPDATE pretranscode_jobs
                         SET state = 'cancelled', last_error_code = 'eligibility_expired',
-                            policy_generation = '', requirements_json = '{{}}',
+                            policy_generation = '', requirements_json = '{}',
                             owner_node_id = NULL, staging_node_id = NULL,
-                            lease_expires_ms = NULL, updated_at_ms = $6
-                      WHERE id IN (
+                            lease_expires_ms = NULL, updated_at_ms = $1
+                      WHERE EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $2 AND owner_node_id = $3
+                           AND fence = $4 AND revision = $5
+                           AND expires_at_ms = $6)
+                        AND id IN (
                         SELECT id FROM pretranscode_jobs
                          WHERE state = 'queued' AND updated_at_ms <= $7
-                         ORDER BY updated_at_ms, id LIMIT $8)
-                        AND {lease_current}"
-                ),
+                         ORDER BY updated_at_ms, id LIMIT $8)"
+                    .to_owned(),
                 params!(
+                    observed_at_unix_ms,
                     &lease.resource,
                     &lease.owner_node_id,
                     fence,
                     revision,
                     lease.expires_at_unix_ms,
-                    observed_at_unix_ms,
                     observed_at_unix_ms.saturating_sub(MAX_QUEUED_AGE_MS),
                     PRUNE_BATCH
                 ),
             ),
             (
-                format!(
-                    "DELETE FROM pretranscode_jobs WHERE id IN (
+                "DELETE FROM pretranscode_jobs WHERE EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $1 AND owner_node_id = $2
+                           AND fence = $3 AND revision = $4
+                           AND expires_at_ms = $5)
+                     AND id IN (
                         SELECT job.id FROM pretranscode_jobs job
                          WHERE job.state = 'ready' AND NOT EXISTS (
                              SELECT 1 FROM transcode_cache_locations location
@@ -283,9 +285,8 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                                 AND location.node_id = job.storage_id
                                 AND location.storage_class = 'local'
                                 AND location.complete = 1)
-                         ORDER BY job.updated_at_ms, job.id LIMIT $6)
-                     AND {lease_current}"
-                ),
+                         ORDER BY job.updated_at_ms, job.id LIMIT $6)"
+                    .to_owned(),
                 params!(
                     &lease.resource,
                     &lease.owner_node_id,
@@ -296,14 +297,17 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 ),
             ),
             (
-                format!(
-                    "DELETE FROM pretranscode_jobs WHERE id IN (
+                "DELETE FROM pretranscode_jobs WHERE EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $1 AND owner_node_id = $2
+                           AND fence = $3 AND revision = $4
+                           AND expires_at_ms = $5)
+                     AND id IN (
                         SELECT id FROM pretranscode_jobs
                          WHERE state = 'ready'
                          ORDER BY updated_at_ms DESC, id DESC
-                         LIMIT -1 OFFSET $6)
-                     AND {lease_current}"
-                ),
+                         LIMIT -1 OFFSET $6)"
+                    .to_owned(),
                 params!(
                     &lease.resource,
                     &lease.owner_node_id,
@@ -314,14 +318,17 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 ),
             ),
             (
-                format!(
-                    "DELETE FROM pretranscode_jobs WHERE id IN (
+                "DELETE FROM pretranscode_jobs WHERE EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $1 AND owner_node_id = $2
+                           AND fence = $3 AND revision = $4
+                           AND expires_at_ms = $5)
+                     AND id IN (
                         SELECT id FROM pretranscode_jobs
                          WHERE state IN ('failed', 'cancelled')
                          ORDER BY updated_at_ms DESC, id DESC
-                         LIMIT -1 OFFSET $6)
-                     AND {lease_current}"
-                ),
+                         LIMIT -1 OFFSET $6)"
+                    .to_owned(),
                 params!(
                     &lease.resource,
                     &lease.owner_node_id,
@@ -341,6 +348,14 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                         NULL, 0, NULL, 0, $11, $12, $12
                   WHERE EXISTS (SELECT 1 FROM files
                                  WHERE id = $3 AND size = $4 AND mtime = $5)
+                    AND EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $13 AND owner_node_id = $14
+                           AND fence = $15 AND revision = $16
+                           AND expires_at_ms = $17)
+                    AND (SELECT COUNT(*) FROM pretranscode_jobs
+                          WHERE state IN ('queued', 'running')) < $18
+                    AND (SELECT COUNT(*) FROM pretranscode_jobs) < $19
                     AND NOT EXISTS (
                         SELECT 1 FROM pretranscode_jobs
                          WHERE dedupe_key = $2
@@ -361,15 +376,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                          WHERE job.dedupe_key = $2 AND job.state = 'ready'
                            AND job.updated_at_ms > $12 - $21
                            AND MAX(location.last_seen_at, location.last_used_at)
-                               > ($12 / 1000) - $22)
-                    AND (SELECT COUNT(*) FROM pretranscode_jobs
-                          WHERE state IN ('queued', 'running')) < $18
-                    AND (SELECT COUNT(*) FROM pretranscode_jobs) < $19
-                    AND EXISTS (
-                        SELECT 1 FROM job_leases
-                         WHERE resource = $13 AND owner_node_id = $14
-                           AND fence = $15 AND revision = $16
-                           AND expires_at_ms = $17)"
+                               > ($12 / 1000) - $22)"
                     .to_owned(),
                 params!(
                     &job.id,
@@ -443,10 +450,10 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                   WHERE ((state = 'queued' AND not_before_ms <= $1)
                       OR (state = 'running' AND lease_expires_ms <= $1))
                     AND fence < 9223372036854775807
-                    AND ($3 = 0 OR priority < $4
-                      OR (priority = $4 AND created_at_ms > $5)
-                      OR (priority = $4 AND created_at_ms = $5 AND id > $6))
-                  ORDER BY priority DESC, created_at_ms, id LIMIT $2"
+                    AND ($2 = 0 OR priority < $3
+                      OR (priority = $3 AND created_at_ms > $4)
+                      OR (priority = $3 AND created_at_ms = $4 AND id > $5))
+                  ORDER BY priority DESC, created_at_ms, id LIMIT $6"
             );
             let candidates = self
                 .client()
@@ -454,11 +461,11 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     sql,
                     params!(
                         now_unix_ms,
-                        CLAIM_SCAN_LIMIT,
                         has_cursor,
                         cursor_priority,
                         cursor_created,
-                        cursor_id
+                        cursor_id,
+                        CLAIM_SCAN_LIMIT
                     ),
                 )
                 .await?;
@@ -478,13 +485,13 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                                 SET state = 'failed', last_error_code = 'invalid_requirements',
                                     policy_generation = '', requirements_json = '{}',
                                     owner_node_id = NULL, staging_node_id = NULL,
-                                    lease_expires_ms = NULL, updated_at_ms = $2
-                              WHERE id = $1 AND state = $3
+                                    lease_expires_ms = NULL, updated_at_ms = $1
+                              WHERE id = $2 AND state = $3
                                 AND COALESCE(owner_node_id, '') = $4 AND fence = $5
                                 AND COALESCE(lease_expires_ms, 0) = $6",
                                 params!(
-                                    &candidate.id,
                                     now_unix_ms,
+                                    &candidate.id,
                                     &candidate.state,
                                     &candidate.owner_node_id,
                                     candidate.fence,
@@ -508,10 +515,10 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 claim_cas_attempts += 1;
                 let update = format!(
                     "UPDATE pretranscode_jobs
-                    SET state = 'running', owner_node_id = $2, staging_node_id = $2,
+                    SET state = 'running', owner_node_id = $1, staging_node_id = $1,
                         fence = fence + 1,
-                        lease_expires_ms = $4, updated_at_ms = $3
-                  WHERE id = $1
+                        lease_expires_ms = $2, updated_at_ms = $3
+                  WHERE id = $4
                     AND ((state = 'queued' AND not_before_ms <= $3)
                       OR (state = 'running' AND lease_expires_ms <= $3))
                     AND fence < 9223372036854775807
@@ -521,7 +528,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     self.client()
                         .execute_returning_map::<_, JobRow>(
                             update,
-                            params!(&candidate.id, node_id, now_unix_ms, lease_expires_ms),
+                            params!(node_id, lease_expires_ms, now_unix_ms, &candidate.id),
                         )
                         .await?,
                 )?;
@@ -590,9 +597,9 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         }
         let sql = format!(
             "UPDATE pretranscode_jobs
-                SET lease_expires_ms = $5, updated_at_ms = $4
-              WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4
+                SET lease_expires_ms = $1, updated_at_ms = $2
+              WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                AND fence = $5 AND lease_expires_ms = $6 AND lease_expires_ms > $2
               RETURNING {JOB_COLS}"
         );
         Ok(collect_rows(
@@ -600,11 +607,11 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 .execute_returning_map::<_, JobRow>(
                     sql,
                     params!(
+                        lease_expires_ms,
+                        now_unix_ms,
                         &job.id,
                         &job.owner_node_id,
                         job.fence,
-                        now_unix_ms,
-                        lease_expires_ms,
                         job.lease_expires_ms
                     ),
                 )
@@ -625,34 +632,32 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         };
         self.atomic_pretranscode_settlement(vec![
             (
-                "UPDATE pretranscode_jobs SET lease_expires_ms = $7, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4"
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6 AND lease_expires_ms > $2"
                     .to_owned(),
                 params!(
+                    successor_expiry,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    not_before_ms.max(now_unix_ms),
-                    job.lease_expires_ms,
-                    successor_expiry
+                    job.lease_expires_ms
                 ),
             ),
             (
                 "UPDATE pretranscode_jobs
                     SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        not_before_ms = $5, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $7"
+                        not_before_ms = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6"
                     .to_owned(),
                 params!(
+                    not_before_ms.max(now_unix_ms),
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    not_before_ms.max(now_unix_ms),
-                    job.lease_expires_ms,
                     successor_expiry
                 ),
             ),
@@ -677,46 +682,42 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         };
         self.atomic_pretranscode_settlement(vec![
             (
-                "UPDATE pretranscode_jobs SET lease_expires_ms = $9, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $8 AND lease_expires_ms > $4"
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6 AND lease_expires_ms > $2"
                     .to_owned(),
                 params!(
+                    successor_expiry,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    not_before_ms.max(now_unix_ms),
-                    error_code,
-                    MAX_ATTEMPTS,
-                    job.lease_expires_ms,
-                    successor_expiry
+                    job.lease_expires_ms
                 ),
             ),
             (
                 "UPDATE pretranscode_jobs
-                    SET state = CASE WHEN attempts + 1 >= $7 THEN 'failed' ELSE 'queued' END,
+                    SET state = CASE WHEN attempts + 1 >= $1 THEN 'failed' ELSE 'queued' END,
                         owner_node_id = NULL, lease_expires_ms = NULL,
-                        staging_node_id = CASE WHEN attempts + 1 >= $7
+                        staging_node_id = CASE WHEN attempts + 1 >= $1
                                                THEN NULL ELSE staging_node_id END,
-                        policy_generation = CASE WHEN attempts + 1 >= $7
+                        policy_generation = CASE WHEN attempts + 1 >= $1
                                                  THEN '' ELSE policy_generation END,
-                        requirements_json = CASE WHEN attempts + 1 >= $7
+                        requirements_json = CASE WHEN attempts + 1 >= $1
                                                  THEN '{}' ELSE requirements_json END,
-                        attempts = attempts + 1, not_before_ms = $5,
-                        last_error_code = $6, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $9"
+                        attempts = attempts + 1, not_before_ms = $2,
+                        last_error_code = $3, updated_at_ms = $4
+                  WHERE id = $5 AND state = 'running' AND owner_node_id = $6
+                    AND fence = $7 AND lease_expires_ms = $8"
                     .to_owned(),
                 params!(
+                    MAX_ATTEMPTS,
+                    not_before_ms.max(now_unix_ms),
+                    error_code,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    not_before_ms.max(now_unix_ms),
-                    error_code,
-                    MAX_ATTEMPTS,
-                    job.lease_expires_ms,
                     successor_expiry
                 ),
             ),
@@ -740,18 +741,17 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         };
         self.atomic_pretranscode_settlement(vec![
             (
-                "UPDATE pretranscode_jobs SET lease_expires_ms = $7, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4"
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6 AND lease_expires_ms > $2"
                     .to_owned(),
                 params!(
+                    successor_expiry,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    error_code,
-                    job.lease_expires_ms,
-                    successor_expiry
+                    job.lease_expires_ms
                 ),
             ),
             (
@@ -759,17 +759,16 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
                         staging_node_id = NULL, policy_generation = '',
                         requirements_json = '{}',
-                        last_error_code = $5, updated_at_ms = $4
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $7"
+                        last_error_code = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6"
                     .to_owned(),
                 params!(
+                    error_code,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    now_unix_ms,
-                    error_code,
-                    job.lease_expires_ms,
                     successor_expiry
                 ),
             ),
@@ -801,18 +800,12 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         let Some(successor_expiry) = settlement_successor_expiry(job, now_unix_ms) else {
             return Ok(false);
         };
-        let current = "EXISTS (
-            SELECT 1 FROM pretranscode_jobs job JOIN files file ON file.id = job.file_id
-             WHERE job.id = $1 AND job.state = 'running' AND job.owner_node_id = $2
-               AND job.fence = $3 AND job.lease_expires_ms = $4
-               AND file.size = job.source_size AND file.mtime = job.source_mtime)"
-            .to_owned();
         let statements = vec![
             (
                 "UPDATE pretranscode_jobs
-                    SET lease_expires_ms = $6, updated_at_ms = $5
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $4 AND lease_expires_ms > $5
+                    SET lease_expires_ms = $1, updated_at_ms = $2
+                  WHERE id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms = $6 AND lease_expires_ms > $2
                     AND EXISTS (SELECT 1 FROM files
                                  WHERE id = pretranscode_jobs.file_id
                                    AND size = pretranscode_jobs.source_size
@@ -825,27 +818,27 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                                AND recipe_version = $8))
                     AND (NOT EXISTS (
                             SELECT 1 FROM transcode_cache_locations
-                             WHERE recipe_hash = $7 AND node_id = $2
+                             WHERE recipe_hash = $7 AND node_id = $4
                                AND storage_class = 'local')
                          OR EXISTS (
                             SELECT 1 FROM transcode_cache_locations
-                             WHERE recipe_hash = $7 AND node_id = $2
+                             WHERE recipe_hash = $7 AND node_id = $4
                                AND storage_class = 'local'
                                AND (complete = 0
+                                    OR (relative_dir = $9 AND bytes = $10 AND $11 IS NULL
+                                        AND (manifest_digest IS NULL OR manifest_digest = $12))
                                     OR (relative_dir = $9 AND bytes = $10
                                         AND manifest_digest = $12)
-                                    OR (relative_dir = $9 AND $11 IS NULL AND bytes = $10
-                                        AND (manifest_digest IS NULL OR manifest_digest = $12))
                                     OR (relative_dir = $9 AND $11 IS NOT NULL AND bytes = $11
                                         AND manifest_digest IS NULL AND $10 >= $11))))"
                     .to_owned(),
                 params!(
+                    successor_expiry,
+                    now_unix_ms,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
                     job.lease_expires_ms,
-                    now_unix_ms,
-                    successor_expiry,
                     recipe_hash,
                     recipe_version,
                     relative_dir,
@@ -855,57 +848,71 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 ),
             ),
             (
-                format!(
-                    "INSERT INTO transcode_cache_recipes
+                "INSERT INTO transcode_cache_recipes
                         (recipe_hash, file_id, recipe_version, created_at)
-                     SELECT $6, $7, $8, $9 WHERE {current}
+                     SELECT $1, $2, $3, $4 WHERE EXISTS (
+                       SELECT 1 FROM pretranscode_jobs job
+                       JOIN files file ON file.id = job.file_id
+                        WHERE job.id = $5 AND job.state = 'running'
+                          AND job.owner_node_id = $6 AND job.fence = $7
+                          AND job.lease_expires_ms = $8
+                          AND file.size = job.source_size AND file.mtime = job.source_mtime)
                      ON CONFLICT(recipe_hash) DO NOTHING"
-                ),
+                    .to_owned(),
                 params!(
-                    &job.id,
-                    &job.owner_node_id,
-                    job.fence,
-                    successor_expiry,
-                    now_unix_ms,
                     recipe_hash,
                     job.file_id,
                     recipe_version,
-                    now_unix_ms / 1000
-                ),
-            ),
-            (
-                format!(
-                    "UPDATE offline_packages
-                        SET actual_bytes = actual_bytes + ($8 - $9), updated_at = $10
-                      WHERE $9 IS NOT NULL AND state = 'ready'
-                        AND recipe_hash = $6 AND node_id = $2
-                        AND EXISTS (
-                            SELECT 1 FROM transcode_cache_locations location
-                             WHERE location.recipe_hash = $6 AND location.node_id = $2
-                               AND location.storage_class = 'local'
-                               AND location.relative_dir = $7 AND location.complete = 1
-                               AND location.bytes = $9 AND location.manifest_digest IS NULL)
-                        AND {current}"
-                ),
-                params!(
+                    now_unix_ms / 1000,
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    successor_expiry,
-                    now_unix_ms,
-                    recipe_hash,
-                    relative_dir,
-                    bytes,
-                    expected_previous_bytes,
-                    now_unix_ms / 1000
+                    successor_expiry
                 ),
             ),
             (
-                format!(
-                    "INSERT INTO transcode_cache_locations
+                "UPDATE offline_packages
+                        SET actual_bytes = actual_bytes + ($1 - $2), updated_at = $3
+                      WHERE $2 IS NOT NULL AND state = 'ready'
+                        AND recipe_hash = $4 AND node_id = $5
+                        AND EXISTS (
+                            SELECT 1 FROM transcode_cache_locations location
+                             WHERE location.recipe_hash = $4 AND location.node_id = $5
+                               AND location.storage_class = 'local'
+                               AND location.relative_dir = $6 AND location.complete = 1
+                               AND location.bytes = $2 AND location.manifest_digest IS NULL)
+                        AND EXISTS (
+                            SELECT 1 FROM pretranscode_jobs job
+                            JOIN files file ON file.id = job.file_id
+                             WHERE job.id = $7 AND job.state = 'running'
+                               AND job.owner_node_id = $5 AND job.fence = $8
+                               AND job.lease_expires_ms = $9
+                               AND file.size = job.source_size
+                               AND file.mtime = job.source_mtime)"
+                    .to_owned(),
+                params!(
+                    bytes,
+                    expected_previous_bytes,
+                    now_unix_ms / 1000,
+                    recipe_hash,
+                    &job.owner_node_id,
+                    relative_dir,
+                    &job.id,
+                    job.fence,
+                    successor_expiry
+                ),
+            ),
+            (
+                "INSERT INTO transcode_cache_locations
                         (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
                          manifest_digest, scrub_object_index, last_used_at, last_seen_at)
-                     SELECT $6, $2, 'local', $7, $8, 1, $10, 0, $9, $9 WHERE {current}
+                     SELECT $1, $2, 'local', $3, $4, 1, $5, 0, $6, $6 WHERE EXISTS (
+                       SELECT 1 FROM pretranscode_jobs job
+                       JOIN files file ON file.id = job.file_id
+                        WHERE job.id = $7 AND job.state = 'running'
+                          AND job.owner_node_id = $2 AND job.fence = $8
+                          AND job.lease_expires_ms = $9
+                          AND file.size = job.source_size AND file.mtime = job.source_mtime)
                      ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
                         relative_dir = excluded.relative_dir, bytes = excluded.bytes,
                         complete = 1, manifest_digest = excluded.manifest_digest,
@@ -913,58 +920,57 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                         last_seen_at = excluded.last_seen_at
                      WHERE transcode_cache_locations.complete = 0
                         OR (transcode_cache_locations.relative_dir = excluded.relative_dir
-                            AND (($11 IS NULL
+                            AND (($10 IS NULL
                                   AND transcode_cache_locations.bytes = excluded.bytes
                                   AND (transcode_cache_locations.manifest_digest IS NULL
                                     OR transcode_cache_locations.manifest_digest = excluded.manifest_digest))
-                              OR ($11 IS NOT NULL
-                                  AND transcode_cache_locations.bytes = $11
+                              OR ($10 IS NOT NULL
+                                  AND transcode_cache_locations.bytes = $10
                                   AND transcode_cache_locations.manifest_digest IS NULL
-                                  AND excluded.bytes >= $11)))"
-                ),
+                                  AND excluded.bytes >= $10)))"
+                    .to_owned(),
                 params!(
-                    &job.id,
-                    &job.owner_node_id,
-                    job.fence,
-                    successor_expiry,
-                    now_unix_ms,
                     recipe_hash,
+                    &job.owner_node_id,
                     relative_dir,
                     bytes,
+                    manifest_digest,
                     now_unix_ms / 1000,
-                    manifest_digest
-                    ,expected_previous_bytes
+                    &job.id,
+                    job.fence,
+                    successor_expiry,
+                    expected_previous_bytes
                 ),
             ),
             (
                 "UPDATE pretranscode_jobs
-                    SET state = 'ready', recipe_hash = $6, storage_id = $2,
-                        relative_dir = $7, manifest_digest = $8,
+                    SET state = 'ready', recipe_hash = $1, storage_id = $2,
+                        relative_dir = $3, manifest_digest = $4,
                         owner_node_id = NULL, staging_node_id = NULL,
                         lease_expires_ms = NULL, policy_generation = '',
                         requirements_json = '{}', updated_at_ms = $5
-                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $4
+                  WHERE id = $6 AND state = 'running' AND owner_node_id = $2
+                    AND fence = $7 AND lease_expires_ms = $8
                     AND EXISTS (SELECT 1 FROM files
                                  WHERE id = pretranscode_jobs.file_id
                                    AND size = pretranscode_jobs.source_size
                                    AND mtime = pretranscode_jobs.source_mtime)
                     AND EXISTS (
                         SELECT 1 FROM transcode_cache_locations location
-                         WHERE location.recipe_hash = $6 AND location.node_id = $2
+                         WHERE location.recipe_hash = $1 AND location.node_id = $2
                            AND location.storage_class = 'local' AND location.complete = 1
-                           AND location.relative_dir = $7 AND location.bytes = $9
-                           AND location.manifest_digest = $8)"
+                           AND location.relative_dir = $3 AND location.bytes = $9
+                           AND location.manifest_digest = $4)"
                     .to_owned(),
                 params!(
-                    &job.id,
-                    &job.owner_node_id,
-                    job.fence,
-                    successor_expiry,
-                    now_unix_ms,
                     recipe_hash,
+                    &job.owner_node_id,
                     relative_dir,
                     manifest_digest,
+                    now_unix_ms,
+                    &job.id,
+                    job.fence,
+                    successor_expiry,
                     bytes
                 ),
             ),

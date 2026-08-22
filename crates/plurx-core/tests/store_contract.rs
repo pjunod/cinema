@@ -4611,7 +4611,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 19);
+    assert_eq!(report.tables.len(), 20);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
