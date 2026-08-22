@@ -199,6 +199,18 @@ struct CountRow {
     count: i64,
 }
 
+struct ArtworkFilenameRow {
+    filename: String,
+}
+
+impl From<&mut Row<'_>> for ArtworkFilenameRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            filename: row.get("filename"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for CountRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -886,6 +898,83 @@ impl MediaStore for HiqliteAuthStore {
             .await
             .map_err(database_error)?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        if after_item_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid artwork inventory page".to_owned(),
+            ));
+        }
+        items(
+            self.client()
+                .query_consistent_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {i} FROM items i
+                         WHERE i.id > $1
+                           AND (i.poster_path IS NOT NULL OR i.backdrop_path IS NOT NULL)
+                         ORDER BY i.id LIMIT $2",
+                        i = item_cols("i")
+                    ),
+                    params!(after_item_id, limit),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT 1 AS count FROM items
+                  WHERE poster_path = $1 OR backdrop_path = $1
+                  LIMIT 1",
+                params!(filename),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .is_some())
+    }
+
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if filenames.len() > 256
+            || filenames
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 512)
+        {
+            return Err(StoreError::Task(
+                "invalid artwork reference batch".to_owned(),
+            ));
+        }
+        if filenames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(filenames).map_err(database_error)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<ArtworkFilenameRow, _>(
+                "SELECT poster_path AS filename FROM items
+                  WHERE poster_path IN (SELECT value FROM json_each($1))
+                 UNION
+                 SELECT backdrop_path AS filename FROM items
+                  WHERE backdrop_path IN (SELECT value FROM json_each($1))",
+                params!(encoded),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| row.filename)
+            .collect())
     }
 
     async fn list_top_items_in_genre(
@@ -1882,6 +1971,9 @@ impl MediaStore for HiqliteAuthStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = super::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let expected = self
             .client()
             .query_consistent_map::<RootFingerprintRow, _>(

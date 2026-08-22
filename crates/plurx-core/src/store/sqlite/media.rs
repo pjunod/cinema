@@ -335,16 +335,75 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        if after_item_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid artwork inventory page".to_owned(),
+            ));
+        }
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {i} FROM items i
+                 WHERE i.id > ?1
+                   AND (i.poster_path IS NOT NULL OR i.backdrop_path IS NOT NULL)
+                 ORDER BY i.id LIMIT ?2",
+                i = item_cols("i")
+            ))?;
+            let items = stmt
+                .query_map(params![after_item_id, limit], |row| item_from_row(row, 0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(items)
+        })
+        .await
+    }
+
     async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
         let filename = filename.to_owned();
-        self.with_conn(move |conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM items \
-                 WHERE poster_path = ?1 OR backdrop_path = ?1)",
-                params![filename],
+        self.with_read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM items
+                  WHERE poster_path = ?1 OR backdrop_path = ?1)",
+                [filename],
                 |row| row.get::<_, bool>(0),
-            )
-            .map_err(Into::into)
+            )?)
+        })
+        .await
+    }
+
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if filenames.len() > 256
+            || filenames
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 512)
+        {
+            return Err(StoreError::Task(
+                "invalid artwork reference batch".to_owned(),
+            ));
+        }
+        if filenames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(filenames)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT poster_path AS filename FROM items
+                  WHERE poster_path IN (SELECT value FROM json_each(?1))
+                 UNION
+                 SELECT backdrop_path AS filename FROM items
+                  WHERE backdrop_path IN (SELECT value FROM json_each(?1))",
+            )?;
+            let referenced = stmt
+                .query_map([encoded], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(referenced)
         })
         .await
     }
@@ -1494,6 +1553,9 @@ impl MediaStore for SqliteStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
         self.with_conn(move |conn| {

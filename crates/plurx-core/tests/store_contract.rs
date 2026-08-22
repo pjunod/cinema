@@ -36,10 +36,12 @@ use plurx_core::cluster::migration::{
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::config::Config;
 use plurx_core::domain::{
-    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CredentialGeneration, ItemEdit,
-    ItemKind, ItemSort, LibraryKind, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
-    NewOfflinePackage, OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent,
-    PlaybackEventQuery, ProbeResult, ReadingStateWrite, TraktAuth,
+    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheManifestCheck,
+    CredentialGeneration, ItemEdit, ItemKind, ItemSort, LibraryKind, MetadataPatch,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
+    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
+    TraktAuth,
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
@@ -48,8 +50,8 @@ use plurx_core::store::MetricsStore;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
-    PlaybackTelemetryStore, ReadingStore, SettingsStore, TraktStore, TranscodeCacheStore,
-    UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore,
+    TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 use plurx_core::store::{
     ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
@@ -220,10 +222,24 @@ const CACHE_METHODS: &[&str] = &[
     "complete_cache_entry",
     "touch_cache_entry",
     "cache_by_age",
+    "cache_manifest_candidates",
+    "mark_cache_manifests_checked",
     "stale_cache_claims",
     "all_cache_rows",
+    "invalidate_cache_entry",
     "forget_cache_entry",
     "cache_bytes",
+];
+const PRETRANSCODE_METHODS: &[&str] = &[
+    "pretranscode_job",
+    "enqueue_pretranscode_job",
+    "claim_pretranscode_job",
+    "pretranscode_staging_jobs",
+    "renew_pretranscode_job",
+    "yield_pretranscode_job",
+    "fail_pretranscode_job",
+    "cancel_pretranscode_job",
+    "complete_pretranscode_job",
 ];
 const OFFLINE_METHODS: &[&str] = &[
     "create_offline_package",
@@ -237,6 +253,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "set_offline_package_recipe",
     "update_offline_progress",
     "fail_offline_package",
+    "invalidate_ready_offline_package",
     "put_offline_lease",
     "offline_package_for_lease",
     "mark_offline_package_ready",
@@ -600,20 +617,33 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
         let first = acquired(
             store
-                .acquire_lease("scan:library:fenced", "node-a", 100, 200)
+                .acquire_lease(
+                    "scan:library:fenced",
+                    "node-a",
+                    clock,
+                    clock.saturating_add(90_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: acquire publication lease: {error}")),
             backend,
         );
+        let mut current = first.clone();
+        let replacement = publication_successor(&current);
         store
-            .put_setting_fenced("contract.fenced", "first", &first, 150)
+            .put_setting_fenced("contract.fenced", "first", &current, &replacement)
             .await
             .unwrap_or_else(|error| panic!("{backend}: valid publication: {error}"));
+        current = replacement;
         assert!(
             store
-                .put_setting_if_absent_fenced("contract.fenced.immutable", "first", &first, 150,)
+                .put_setting_if_absent_fenced("contract.fenced.immutable", "first", &current, 150,)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: immutable publication: {error}")),
             "{backend}: first immutable publication must win"
@@ -623,7 +653,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 .put_setting_if_absent_fenced(
                     "contract.fenced.immutable",
                     "replacement",
-                    &first,
+                    &current,
                     150,
                 )
                 .await
@@ -632,6 +662,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 }),
             "{backend}: immutable publication must retain its first value"
         );
+        let replacement = publication_successor(&current);
         let baseline_book = store
             .insert_item_fenced(
                 &NewItem {
@@ -643,11 +674,12 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     season_number: None,
                     episode_number: None,
                 },
-                &first,
-                151,
+                &current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: baseline fenced insert: {error}"));
+        current = replacement;
         let baseline_before_conditional = store
             .get_item(baseline_book)
             .await
@@ -666,7 +698,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                         source: BookMetadataSource::Epub,
                     },
                     None,
-                    &first,
+                    &current,
                     151,
                 )
                 .await
@@ -680,6 +712,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: reread conditional baseline: {error}"))
             .unwrap_or_else(|| panic!("{backend}: conditional baseline disappeared"));
+        let replacement = publication_successor(&current);
         let baseline_file = store
             .upsert_file_fenced(
                 baseline_book,
@@ -687,24 +720,28 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 42,
                 7,
                 &ProbeResult::default(),
-                &first,
-                152,
+                &current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: baseline fenced file: {error}"));
+        current = replacement;
+        let replacement = publication_successor(&current);
         assert_eq!(
             store
                 .ensure_library_root_fingerprint_fenced(
                     library.id,
                     "fenced-root",
                     true,
-                    &first,
-                    153,
+                    &current,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: baseline fenced root: {error}")),
             RootFingerprintStatus::Established
         );
+        current = replacement;
+        let replacement = publication_successor(&current);
         assert!(
             store
                 .claim_cache_entry_fenced(
@@ -713,19 +750,25 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     1,
                     "node-a",
                     "contract/fenced-cache/f1",
-                    &first,
-                    154,
+                    &current,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: baseline cache claim: {error}")),
             "{backend}: baseline cache claim must be new"
         );
+        current = replacement;
 
         let renewed = store
-            .renew_lease(&first, 160, 300)
+            .renew_lease(
+                &current,
+                clock.saturating_add(1),
+                current.expires_at_unix_ms.saturating_add(90_000),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew publication lease: {error}"))
             .unwrap_or_else(|| panic!("{backend}: publication lease must renew"));
+        let stale_replacement = publication_successor(&first);
         macro_rules! assert_stale {
             ($future:expr, $operation:literal) => {
                 assert!(
@@ -737,7 +780,12 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             };
         }
         assert_stale!(
-            store.put_setting_fenced("contract.fenced", "stale-revision", &first, 170),
+            store.put_setting_fenced(
+                "contract.fenced",
+                "stale-revision",
+                &first,
+                &stale_replacement,
+            ),
             "setting"
         );
         assert_stale!(
@@ -750,7 +798,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             "immutable setting"
         );
         assert_stale!(
-            store.mark_library_scanned_fenced(library.id, true, &first, 170),
+            store.mark_library_scanned_fenced(library.id, true, &first, &stale_replacement),
             "scan stamp"
         );
         assert_stale!(
@@ -765,7 +813,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     episode_number: None,
                 },
                 &first,
-                170,
+                &stale_replacement,
             ),
             "item insert"
         );
@@ -777,7 +825,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     ..MetadataPatch::default()
                 },
                 &first,
-                170,
+                &stale_replacement,
             ),
             "metadata"
         );
@@ -793,7 +841,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     source: BookMetadataSource::Curator,
                 },
                 &first,
-                170,
+                &stale_replacement,
             ),
             "book metadata"
         );
@@ -815,7 +863,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             "conditional book metadata"
         );
         assert_stale!(
-            store.set_nfo_seeded_fenced(baseline_book, &first, 170),
+            store.set_nfo_seeded_fenced(baseline_book, &first, &stale_replacement),
             "nfo stamp"
         );
         assert_stale!(
@@ -826,7 +874,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 99,
                 &ProbeResult::default(),
                 &first,
-                170,
+                &stale_replacement,
             ),
             "file upsert"
         );
@@ -836,7 +884,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "stale-root",
                 true,
                 &first,
-                170,
+                &stale_replacement,
             ),
             "root fingerprint"
         );
@@ -847,7 +895,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 &[baseline_file],
                 1,
                 &first,
-                170,
+                &stale_replacement,
             ),
             "reconcile"
         );
@@ -859,12 +907,17 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "contract/stale-cache/f1",
                 &first,
-                170,
+                &stale_replacement,
             ),
             "cache claim"
         );
         assert_stale!(
-            store.touch_cache_claim_fenced("contract-fenced-cache", "node-a", &first, 170,),
+            store.touch_cache_claim_fenced(
+                "contract-fenced-cache",
+                "node-a",
+                &first,
+                &stale_replacement,
+            ),
             "cache claim heartbeat"
         );
         assert_stale!(
@@ -874,7 +927,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "contract/fenced-cache/stale",
                 999,
                 &first,
-                170,
+                &stale_replacement,
             ),
             "cache completion"
         );
@@ -884,7 +937,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "local",
                 &first,
-                170,
+                &stale_replacement,
             ),
             "cache forget"
         );
@@ -952,11 +1005,18 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
 
         let successor = acquired(
             store
-                .acquire_lease("scan:library:fenced", "node-b", 300, 450)
+                .acquire_lease(
+                    "scan:library:fenced",
+                    "node-b",
+                    renewed.expires_at_unix_ms,
+                    renewed.expires_at_unix_ms.saturating_add(90_000),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor acquire: {error}")),
             backend,
         );
+        let mut successor_current = successor.clone();
+        let replacement = publication_successor(&successor_current);
         assert!(
             store
                 .claim_cache_entry_fenced(
@@ -965,13 +1025,15 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     1,
                     "node-a",
                     "contract/fenced-cache/f2",
-                    &successor,
-                    301,
+                    &successor_current,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor cache takeover: {error}")),
             "{backend}: successor must take over the incomplete generation"
         );
+        successor_current = replacement;
+        let stale_renewed_replacement = publication_successor(&renewed);
         assert!(matches!(
             store
                 .forget_cache_entry_fenced(
@@ -979,7 +1041,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     "node-a",
                     "local",
                     &renewed,
-                    302,
+                    &stale_renewed_replacement,
                 )
                 .await,
             Err(StoreError::FenceRejected { .. })
@@ -995,15 +1057,28 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
         );
         assert!(matches!(
             store
-                .put_setting_fenced("contract.fenced", "stale-owner", &renewed, 301)
+                .put_setting_fenced(
+                    "contract.fenced",
+                    "stale-owner",
+                    &renewed,
+                    &stale_renewed_replacement,
+                )
                 .await,
             Err(StoreError::FenceRejected { .. })
         ));
+        let replacement = publication_successor(&successor_current);
         store
-            .put_setting_fenced("contract.fenced", "successor", &successor, 320)
+            .put_setting_fenced(
+                "contract.fenced",
+                "successor",
+                &successor_current,
+                &replacement,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: successor publication: {error}"));
+        successor_current = replacement;
 
+        let replacement = publication_successor(&successor_current);
         let book = store
             .insert_item_fenced(
                 &NewItem {
@@ -1015,11 +1090,13 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     season_number: None,
                     episode_number: None,
                 },
-                &successor,
-                321,
+                &successor_current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced insert: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
             .apply_metadata_fenced(
                 book,
@@ -1027,11 +1104,13 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     overview: Some("published under lease".to_owned()),
                     ..MetadataPatch::default()
                 },
-                &successor,
-                322,
+                &successor_current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced metadata: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
             .apply_book_metadata_fenced(
                 book,
@@ -1043,15 +1122,19 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     poster_path: None,
                     source: BookMetadataSource::Curator,
                 },
-                &successor,
-                323,
+                &successor_current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced book metadata: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
-            .set_nfo_seeded_fenced(book, &successor, 324)
+            .set_nfo_seeded_fenced(book, &successor_current, &replacement)
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced nfo stamp: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
             .upsert_file_fenced(
                 book,
@@ -1059,35 +1142,50 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 42,
                 7,
                 &ProbeResult::default(),
-                &successor,
-                325,
+                &successor_current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced file upsert: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         assert_eq!(
             store
                 .ensure_library_root_fingerprint_fenced(
                     library.id,
                     "fenced-root",
                     true,
-                    &successor,
-                    326,
+                    &successor_current,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: fenced root: {error}")),
             RootFingerprintStatus::Matched
         );
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         assert!(matches!(
             store
-                .reconcile_library_fenced(library.id, "fenced-root", &[], 0, &successor, 327,)
+                .reconcile_library_fenced(
+                    library.id,
+                    "fenced-root",
+                    &[],
+                    0,
+                    &successor_current,
+                    &replacement,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: fenced reconcile: {error}")),
             ReconcileOutcome::Applied { .. }
         ));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
-            .mark_library_scanned_fenced(library.id, true, &successor, 328)
+            .mark_library_scanned_fenced(library.id, true, &successor_current, &replacement)
             .await
             .unwrap_or_else(|error| panic!("{backend}: fenced scan stamp: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         assert!(
             store
                 .claim_cache_entry_fenced(
@@ -1096,28 +1194,38 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     1,
                     "node-a",
                     "contract/fenced-cache/f2",
-                    &successor,
-                    329,
+                    &successor_current,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor cache claim: {error}")),
             "{backend}: successor must take over an incomplete generation"
         );
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
-            .touch_cache_claim_fenced("contract-fenced-cache", "node-a", &successor, 330)
+            .touch_cache_claim_fenced(
+                "contract-fenced-cache",
+                "node-a",
+                &successor_current,
+                &replacement,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: successor cache touch: {error}"));
+        successor_current = replacement;
+        let replacement = publication_successor(&successor_current);
         store
             .complete_cache_entry_fenced(
                 "contract-fenced-cache",
                 "node-a",
                 "contract/fenced-cache/f2",
                 4242,
-                &successor,
-                331,
+                &successor_current,
+                &replacement,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: successor cache completion: {error}"));
+        successor_current = replacement;
         let cache_hit = store
             .cache_hit("contract-fenced-cache", "node-a")
             .await
@@ -1125,8 +1233,15 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: successor cache completion not serveable"));
         assert_eq!(cache_hit.relative_dir, "contract/fenced-cache/f2");
         assert_eq!(cache_hit.bytes, 4242);
+        let replacement = publication_successor(&successor_current);
         store
-            .forget_cache_entry_fenced("contract-fenced-cache", "node-a", "local", &successor, 332)
+            .forget_cache_entry_fenced(
+                "contract-fenced-cache",
+                "node-a",
+                "local",
+                &successor_current,
+                &replacement,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: successor cache forget: {error}"));
         assert!(
@@ -1224,11 +1339,804 @@ async fn artwork_repair_publication_fails_closed_without_a_job_lease() {
     }
 }
 
+#[tokio::test]
+async fn distributed_pretranscode_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Pretranscode Contract Library".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/contract/pretranscode")],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+        let mut files = Vec::new();
+        for ordinal in 1..=3 {
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Queue Movie {ordinal}"),
+                    year: Some(2026),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: insert item {ordinal}: {error}"));
+            files.push(
+                store
+                    .upsert_file(
+                        item,
+                        &format!("/contract/pretranscode/movie-{ordinal}.mkv"),
+                        10_000 + ordinal,
+                        20_000 + ordinal,
+                        &ProbeResult::default(),
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: insert file {ordinal}: {error}")),
+            );
+        }
+
+        let requirements = serde_json::to_string(&PretranscodeRequirements {
+            version: PretranscodeRequirements::VERSION,
+            decoder: "h264".to_owned(),
+            acceptable_encoder_families: vec!["software".to_owned()],
+            output_contract: "hls-v1".to_owned(),
+            tone_map: false,
+            output_grade: "sdr".to_owned(),
+            scratch_bytes: 1_024,
+        })
+        .expect("serialize requirements");
+        let capable = PretranscodeWorkerCapabilities {
+            version: PretranscodeRequirements::VERSION,
+            decoders: vec!["h264".to_owned()],
+            encoder_families: vec!["software".to_owned()],
+            max_target_height: 2_160,
+            output_contracts: vec!["hls-v1".to_owned()],
+            tone_map: false,
+            output_grades: vec!["sdr".to_owned()],
+            scratch_bytes: 2_048,
+        };
+        let incompatible = PretranscodeWorkerCapabilities {
+            encoder_families: vec!["unsupported-hardware".to_owned()],
+            ..capable.clone()
+        };
+
+        let queue_clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let first_candidate_lease = acquired(
+            store
+                .acquire_lease(
+                    "pretranscode:candidates",
+                    "scheduler-a",
+                    queue_clock,
+                    queue_clock.saturating_add(90_000),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: acquire candidate lease: {error}")),
+            backend,
+        );
+        let mut candidate_lease = store
+            .renew_lease(
+                &first_candidate_lease,
+                queue_clock.saturating_add(1),
+                queue_clock.saturating_add(180_000),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew candidate lease: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: candidate lease did not renew"));
+        let make_job = |ordinal: usize, id: &str| NewPretranscodeJob {
+            id: id.to_owned(),
+            dedupe_key: format!("pretranscode-contract-{ordinal}"),
+            file_id: files[ordinal - 1],
+            source_size: 10_000 + ordinal as i64,
+            source_mtime: 20_000 + ordinal as i64,
+            target_height: 720,
+            policy_generation: "contract-v1".to_owned(),
+            requirements_json: requirements.clone(),
+            reason: "recent".to_owned(),
+            priority: 400 - ordinal as i64,
+            not_before_ms: 160,
+            created_at_ms: 160 + ordinal as i64,
+        };
+        let jobs = [
+            make_job(1, "00000000-0000-4000-8000-000000000101"),
+            make_job(2, "00000000-0000-4000-8000-000000000102"),
+            make_job(3, "00000000-0000-4000-8000-000000000103"),
+        ];
+        let stale_candidate_replacement = publication_successor(&first_candidate_lease);
+        assert!(matches!(
+            store
+                .enqueue_pretranscode_job(
+                    &jobs[0],
+                    &first_candidate_lease,
+                    &stale_candidate_replacement,
+                )
+                .await,
+            Err(StoreError::FenceRejected { .. })
+        ));
+        for job in &jobs {
+            assert!(
+                enqueue_with_successor(store.as_ref(), job, &mut candidate_lease)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: enqueue job: {error}")),
+                "{backend}: each distinct job must enqueue"
+            );
+        }
+        assert!(
+            !enqueue_with_successor(store.as_ref(), &jobs[0], &mut candidate_lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: dedupe enqueue: {error}")),
+            "{backend}: an active dedupe key must be unique"
+        );
+        assert!(
+            store
+                .claim_pretranscode_job("node-x", &incompatible, &[], 200, 500)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: incompatible claim: {error}"))
+                .is_none(),
+            "{backend}: an incompatible worker claimed a job"
+        );
+
+        let (claim_a, claim_b, claim_c) = tokio::join!(
+            store.claim_pretranscode_job("node-a", &capable, &[], 200, 500),
+            store.claim_pretranscode_job("node-b", &capable, &[], 200, 500),
+            store.claim_pretranscode_job("node-c", &capable, &[], 200, 500),
+        );
+        let claimed = [
+            ("node-a", claim_a),
+            ("node-b", claim_b),
+            ("node-c", claim_c),
+        ]
+        .into_iter()
+        .map(|(node, result)| {
+            result
+                .unwrap_or_else(|error| panic!("{backend}: claim for {node}: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: no job for {node}"))
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3,
+            "{backend}: workers must claim distinct rows"
+        );
+        for job in &claimed {
+            let staging = store
+                .pretranscode_staging_jobs(&job.owner_node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staging ownership: {error}"));
+            assert!(
+                staging.contains(&job.id),
+                "{backend}: claimed staging is unowned"
+            );
+        }
+        assert!(
+            store
+                .cache_hit("contract-recipe-a", "node-a")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: pre-publication cache lookup: {error}"))
+                .is_none(),
+            "{backend}: claiming must not expose a cache location"
+        );
+
+        let renewed_a = store
+            .renew_pretranscode_job(&claimed[0], 250, 700)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: worker claim did not renew"));
+        assert!(store
+            .complete_pretranscode_job(
+                &claimed[1],
+                "contract-recipe-b",
+                1,
+                "contract/pretranscode/b",
+                4_096,
+                None,
+                &"b".repeat(64),
+                260,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete second job: {error}")));
+        assert_eq!(
+            store
+                .delete_files(&[claimed[2].file_id])
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: delete claimed source: {error}")),
+            1,
+            "{backend}: source fixture should delete"
+        );
+        assert!(
+            !store
+                .complete_pretranscode_job(
+                    &claimed[2],
+                    "contract-recipe-c",
+                    1,
+                    "contract/pretranscode/c",
+                    4_096,
+                    None,
+                    &"c".repeat(64),
+                    270,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: deleted-source completion: {error}")),
+            "{backend}: deleted source work became ready"
+        );
+
+        let successor = store
+            .claim_pretranscode_job("node-d", &capable, &[], 701, 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: expired job was not restarted"));
+        assert_eq!(successor.id, renewed_a.id, "{backend}");
+        assert_eq!(successor.fence, renewed_a.fence + 1, "{backend}");
+        assert!(
+            !store
+                .pretranscode_staging_jobs("node-a")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: predecessor staging: {error}"))
+                .contains(&successor.id),
+            "{backend}: takeover left predecessor staging authoritative"
+        );
+        assert!(
+            store
+                .pretranscode_staging_jobs("node-d")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: successor staging: {error}"))
+                .contains(&successor.id),
+            "{backend}: takeover did not transfer staging identity"
+        );
+        assert!(
+            !store
+                .complete_pretranscode_job(
+                    &renewed_a,
+                    "contract-recipe-a",
+                    1,
+                    "contract/pretranscode/stale-a",
+                    8_192,
+                    None,
+                    &"a".repeat(64),
+                    702,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale completion: {error}")),
+            "{backend}: stale worker published after takeover"
+        );
+        assert!(
+            store
+                .cache_hit("contract-recipe-a", "node-a")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale cache lookup: {error}"))
+                .is_none(),
+            "{backend}: stale completion leaked a location"
+        );
+        assert!(
+            store
+                .complete_pretranscode_job(
+                    &successor,
+                    "contract-recipe-a",
+                    1,
+                    "contract/pretranscode/d",
+                    8_192,
+                    None,
+                    &"d".repeat(64),
+                    703,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: successor completion: {error}")),
+            "{backend}: current worker could not publish"
+        );
+        let ready = store
+            .cache_hit("contract-recipe-a", "node-d")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: atomic cache lookup: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ready job has no cache location"));
+        assert_eq!(ready.relative_dir, "contract/pretranscode/d", "{backend}");
+        assert_eq!(ready.bytes, 8_192, "{backend}");
+        assert_eq!(
+            ready.manifest_digest,
+            Some("d".repeat(64)),
+            "{backend}: fenced cache location lost its manifest authority"
+        );
+
+        store
+            .forget_cache_entry("contract-recipe-a", "node-d", "local")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: evict ready cache: {error}"));
+        let retry = NewPretranscodeJob {
+            id: "00000000-0000-4000-8000-000000000104".to_owned(),
+            dedupe_key: successor.dedupe_key.clone(),
+            file_id: successor.file_id,
+            source_size: successor.source_size,
+            source_mtime: successor.source_mtime,
+            target_height: successor.target_height,
+            policy_generation: successor.policy_generation.clone(),
+            requirements_json: successor.requirements_json.clone(),
+            reason: successor.reason.clone(),
+            priority: successor.priority,
+            not_before_ms: 704,
+            created_at_ms: 704,
+        };
+        assert!(
+            enqueue_with_successor(store.as_ref(), &retry, &mut candidate_lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-enqueue evicted job: {error}")),
+            "{backend}: eviction must make the generation eligible again"
+        );
+        let refused = store
+            .claim_pretranscode_job("node-e", &capable, &[], 705, 1_005)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
+        assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
+        assert!(store
+            .yield_pretranscode_job(&refused, 706, 706)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
+        assert!(
+            store
+                .claim_pretranscode_job(
+                    "node-e",
+                    &capable,
+                    std::slice::from_ref(&refused.id),
+                    706,
+                    1_006,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: local refusal claim: {error}"))
+                .is_none(),
+            "{backend}: a node immediately reclaimed the source it had refused"
+        );
+        let reclaimed = store
+            .claim_pretranscode_job("node-f", &capable, &[], 706, 1_006)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: local refusal blocked a mounted peer"));
+        assert_eq!(reclaimed.id, refused.id, "{backend}");
+        assert_eq!(
+            reclaimed.attempts, 0,
+            "{backend}: a node-local source refusal consumed the global failure budget"
+        );
+
+        let mut failing = reclaimed;
+        for attempt in 1..=5 {
+            let failed_at = 710 + attempt * 2;
+            assert!(
+                store
+                    .fail_pretranscode_job(&failing, "contract_failure", failed_at, failed_at)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: fail attempt {attempt}: {error}")),
+                "{backend}: current failure settlement was rejected"
+            );
+            if attempt < 5 {
+                failing = store
+                    .claim_pretranscode_job("node-e", &capable, &[], failed_at + 1, failed_at + 101)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{backend}: reclaim failed attempt {attempt}: {error}")
+                    })
+                    .unwrap_or_else(|| panic!("{backend}: failed row did not requeue"));
+                assert_eq!(failing.attempts, attempt, "{backend}");
+            }
+        }
+        let terminal_retry = NewPretranscodeJob {
+            id: "00000000-0000-4000-8000-000000000105".to_owned(),
+            created_at_ms: 730,
+            not_before_ms: 730,
+            ..retry
+        };
+        assert!(
+            !enqueue_with_successor(store.as_ref(), &terminal_retry, &mut candidate_lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: terminal dedupe enqueue: {error}")),
+            "{backend}: five failures must remain terminal for this dedupe generation"
+        );
+
+        let incompatible_requirements = serde_json::to_string(&PretranscodeRequirements {
+            acceptable_encoder_families: vec!["unsupported-hardware".to_owned()],
+            ..serde_json::from_str::<PretranscodeRequirements>(&requirements)
+                .expect("parse compatible requirements")
+        })
+        .expect("serialize incompatible requirements");
+        for ordinal in 0..=128_i64 {
+            let compatible_tail = ordinal == 128;
+            let starvation_job = NewPretranscodeJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: format!("claim-pagination-{ordinal}"),
+                file_id: files[1],
+                source_size: 10_002,
+                source_mtime: 20_002,
+                target_height: 720,
+                policy_generation: "pagination-v1".to_owned(),
+                requirements_json: if compatible_tail {
+                    requirements.clone()
+                } else {
+                    incompatible_requirements.clone()
+                },
+                reason: "recent".to_owned(),
+                priority: 10_000 - ordinal,
+                not_before_ms: 800,
+                created_at_ms: 800 + ordinal,
+            };
+            assert!(
+                enqueue_with_successor(store.as_ref(), &starvation_job, &mut candidate_lease)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: enqueue pagination row: {error}")),
+                "{backend}: pagination fixture row did not enqueue"
+            );
+        }
+        let paged_claim = store
+            .claim_pretranscode_job("node-pagination", &capable, &[], 950, 1_250)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: paged capability claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: compatible row after page one starved"));
+        assert_eq!(
+            paged_claim.dedupe_key, "claim-pagination-128",
+            "{backend}: claim did not preserve highest-compatible ordering across pages"
+        );
+
+        let legacy_recipe = "contract-legacy-cache-reuse";
+        assert!(store
+            .claim_cache_entry(
+                legacy_recipe,
+                files[1],
+                1,
+                "node-legacy",
+                "contract/pretranscode/legacy",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy cache claim: {error}")));
+        store
+            .complete_cache_entry(legacy_recipe, "node-legacy", 16_384)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy cache complete: {error}"));
+        assert_eq!(
+            store
+                .cache_hit(legacy_recipe, "node-legacy")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: legacy cache lookup: {error}"))
+                .and_then(|entry| entry.manifest_digest),
+            None,
+            "{backend}: fixture must exercise the explicit legacy manifest path"
+        );
+        let legacy_job = NewPretranscodeJob {
+            id: "00000000-0000-4000-8000-000000000106".to_owned(),
+            dedupe_key: "pretranscode-legacy-cache-reuse".to_owned(),
+            file_id: files[1],
+            source_size: 10_002,
+            source_mtime: 20_002,
+            target_height: 720,
+            policy_generation: "legacy-upgrade-v1".to_owned(),
+            requirements_json: requirements.clone(),
+            reason: "recent".to_owned(),
+            priority: 20_000,
+            not_before_ms: 960,
+            created_at_ms: 960,
+        };
+        assert!(
+            enqueue_with_successor(store.as_ref(), &legacy_job, &mut candidate_lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue legacy reuse: {error}"))
+        );
+        let legacy_claim = store
+            .claim_pretranscode_job("node-legacy", &capable, &[], 961, 1_261)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: legacy reuse was not claimable"));
+        let adopted_digest = "e".repeat(64);
+        assert!(store
+            .complete_pretranscode_job(
+                &legacy_claim,
+                legacy_recipe,
+                1,
+                "contract/pretranscode/legacy",
+                16_896,
+                Some(16_384),
+                &adopted_digest,
+                962,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
+        let adopted = store
+            .cache_hit(legacy_recipe, "node-legacy")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: bound legacy lookup: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: adopted legacy location disappeared"));
+        assert_eq!(
+            adopted.manifest_digest,
+            Some(adopted_digest.clone()),
+            "{backend}: exact legacy location did not adopt its first fenced manifest"
+        );
+        assert_eq!(
+            adopted.bytes, 16_896,
+            "{backend}: adopted manifest bytes were not charged to the cache budget"
+        );
+        let compact_ready = store
+            .pretranscode_job(&legacy_claim.id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect ready job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ready job disappeared"));
+        assert_eq!(compact_ready.state, "ready", "{backend}");
+        assert!(compact_ready.owner_node_id.is_empty(), "{backend}");
+        assert_eq!(compact_ready.lease_expires_ms, 0, "{backend}");
+        assert!(compact_ready.policy_generation.is_empty(), "{backend}");
+        assert_eq!(compact_ready.requirements_json, "{}", "{backend}");
+
+        let wrong_digest = "f".repeat(64);
+        let wrong_check = CacheManifestCheck {
+            recipe_hash: legacy_recipe.to_owned(),
+            node_id: "node-legacy".to_owned(),
+            storage_class: "local".to_owned(),
+            relative_dir: "contract/pretranscode/legacy".to_owned(),
+            manifest_digest: wrong_digest.clone(),
+            next_object_index: 8,
+            observed_at: 123,
+        };
+        assert_eq!(
+            store
+                .mark_cache_manifests_checked(std::slice::from_ref(&wrong_check))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale scrub cursor: {error}")),
+            0,
+            "{backend}: stale manifest identity advanced a replacement cursor"
+        );
+        let exact_check = CacheManifestCheck {
+            manifest_digest: adopted_digest.clone(),
+            ..wrong_check
+        };
+        assert_eq!(
+            store
+                .mark_cache_manifests_checked(std::slice::from_ref(&exact_check))
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: exact scrub cursor: {error}")),
+            1,
+            "{backend}: exact manifest cursor did not advance"
+        );
+        assert_eq!(
+            store
+                .cache_hit(legacy_recipe, "node-legacy")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: scrubbed cache lookup: {error}"))
+                .map(|entry| entry.scrub_object_index),
+            Some(8),
+            "{backend}: scrub cursor was not durable"
+        );
+        assert!(!store
+            .invalidate_cache_entry(
+                legacy_recipe,
+                "node-legacy",
+                "local",
+                "contract/pretranscode/replacement",
+                Some(&adopted_digest),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale relative invalidation: {error}")));
+        assert!(!store
+            .invalidate_cache_entry(
+                legacy_recipe,
+                "node-legacy",
+                "local",
+                "contract/pretranscode/legacy",
+                Some(&wrong_digest),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale digest invalidation: {error}")));
+        assert!(store
+            .cache_hit(legacy_recipe, "node-legacy")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cache after stale CAS: {error}"))
+            .is_some());
+        assert!(store
+            .invalidate_cache_entry(
+                legacy_recipe,
+                "node-legacy",
+                "local",
+                "contract/pretranscode/legacy",
+                Some(&adopted_digest),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact invalidation: {error}")));
+        assert!(store
+            .cache_hit(legacy_recipe, "node-legacy")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: invalidated cache lookup: {error}"))
+            .is_none());
+        let replacement_job = NewPretranscodeJob {
+            id: "00000000-0000-4000-8000-000000000107".to_owned(),
+            not_before_ms: 963,
+            created_at_ms: 963,
+            ..legacy_job
+        };
+        assert!(
+            enqueue_with_successor(store.as_ref(), &replacement_job, &mut candidate_lease,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue corrupt replacement: {error}"))
+        );
+    })
+    .await;
+}
+
 fn acquired(outcome: LeaseClaim, backend: &str) -> Lease {
     match outcome {
         LeaseClaim::Acquired(lease) => lease,
         held => panic!("{backend}: expected acquired lease, got {held:?}"),
     }
+}
+
+fn publication_successor(lease: &Lease) -> Lease {
+    lease
+        .publication_successor()
+        .expect("publication successor")
+}
+
+async fn enqueue_with_successor(
+    store: &dyn Store,
+    job: &NewPretranscodeJob,
+    lease: &mut Lease,
+) -> Result<bool, StoreError> {
+    let replacement = publication_successor(lease);
+    let result = store
+        .enqueue_pretranscode_job(job, lease, &replacement)
+        .await;
+    if result.is_ok() {
+        *lease = replacement;
+    }
+    result
+}
+
+async fn assert_distinct_pretranscode_claims_from_separate_handles(
+    stores: [Arc<dyn Store>; 3],
+    backend: &str,
+) {
+    let seed = &stores[0];
+    let library = seed
+        .create_library(&NewLibrary {
+            name: "Separate Queue Claim Library".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/contract/separate-pretranscode")],
+            anime: false,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+    let requirements = serde_json::to_string(&PretranscodeRequirements {
+        version: PretranscodeRequirements::VERSION,
+        decoder: "h264".to_owned(),
+        acceptable_encoder_families: vec!["software".to_owned()],
+        output_contract: "hls-v1".to_owned(),
+        tone_map: false,
+        output_grade: "sdr".to_owned(),
+        scratch_bytes: 1,
+    })
+    .expect("serialize requirements");
+    let queue_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("contract clock after epoch")
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let mut lease = acquired(
+        seed.acquire_lease(
+            "separate-queue-seed",
+            "scheduler",
+            queue_clock,
+            queue_clock.saturating_add(90_000),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: acquire seed lease: {error}")),
+        backend,
+    );
+    const ROUNDS: i64 = 8;
+    for ordinal in 1_i64..=ROUNDS * 3 {
+        let item = seed
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: format!("Separate Queue Movie {ordinal}"),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: insert item: {error}"));
+        let file_id = seed
+            .upsert_file(
+                item,
+                &format!("/contract/separate-pretranscode/{ordinal}.mkv"),
+                10_000 + ordinal,
+                20_000 + ordinal,
+                &ProbeResult::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: insert file: {error}"));
+        let job = NewPretranscodeJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            dedupe_key: format!("separate-queue-{ordinal}"),
+            file_id,
+            source_size: 10_000 + ordinal,
+            source_mtime: 20_000 + ordinal,
+            target_height: 720,
+            policy_generation: "separate-v1".to_owned(),
+            requirements_json: requirements.clone(),
+            reason: "recent".to_owned(),
+            priority: 100,
+            not_before_ms: 110,
+            created_at_ms: 110 + ordinal,
+        };
+        assert!(enqueue_with_successor(seed.as_ref(), &job, &mut lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
+    }
+    let capabilities = PretranscodeWorkerCapabilities {
+        version: PretranscodeRequirements::VERSION,
+        decoders: vec!["h264".to_owned()],
+        encoder_families: vec!["software".to_owned()],
+        max_target_height: 2_160,
+        output_contracts: vec!["hls-v1".to_owned()],
+        tone_map: false,
+        output_grades: vec!["sdr".to_owned()],
+        scratch_bytes: 2,
+    };
+    let mut ids = BTreeSet::new();
+    for round in 0..ROUNDS {
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+        let claim = |store: Arc<dyn Store>, node: String, start: Arc<tokio::sync::Barrier>| {
+            let capabilities = capabilities.clone();
+            async move {
+                start.wait().await;
+                store
+                    .claim_pretranscode_job(&node, &capabilities, &[], 200 + round, 500 + round)
+                    .await
+            }
+        };
+        let (a, b, c) = tokio::join!(
+            claim(
+                Arc::clone(&stores[0]),
+                format!("separate-a-{round}"),
+                Arc::clone(&start)
+            ),
+            claim(
+                Arc::clone(&stores[1]),
+                format!("separate-b-{round}"),
+                Arc::clone(&start)
+            ),
+            claim(Arc::clone(&stores[2]), format!("separate-c-{round}"), start),
+        );
+        for result in [a, b, c] {
+            let id = result
+                .unwrap_or_else(|error| panic!("{backend}: separate claim: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: separate claimant found no work"))
+                .id;
+            assert!(
+                ids.insert(id),
+                "{backend}: separate clients duplicated a claim"
+            );
+        }
+    }
+    assert_eq!(
+        ids.len(),
+        (ROUNDS * 3) as usize,
+        "{backend}: separate clients duplicated a claim"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn separate_sqlite_connections_claim_distinct_pretranscode_rows() {
+    let directory = tempfile::tempdir().expect("separate SQLite queue directory");
+    let path = directory.path().join("plurx.db");
+    let stores: [Arc<dyn Store>; 3] = [
+        Arc::new(SqliteStore::open(&path).expect("first SQLite queue store")),
+        Arc::new(SqliteStore::open(&path).expect("second SQLite queue store")),
+        Arc::new(SqliteStore::open(&path).expect("third SQLite queue store")),
+    ];
+    assert_distinct_pretranscode_claims_from_separate_handles(stores, "sqlite-separate").await;
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -1304,6 +2212,221 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
         "auth activity entry accounting requires one stable leader and term"
     );
     after.applied_index.saturating_sub(before.applied_index)
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = contract_cluster();
+    let store = open_contract_hiqlite_store().await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset manifest cursor state");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Manifest Cursor Contract".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![],
+            anime: false,
+        })
+        .await
+        .expect("manifest cursor library");
+    let item = store
+        .insert_item(&NewItem {
+            library_id: library.id,
+            kind: ItemKind::Movie,
+            parent_id: None,
+            title: "Manifest Cursor Movie".to_owned(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        })
+        .await
+        .expect("manifest cursor item");
+    let file = store
+        .upsert_file(
+            item,
+            "/contract/manifest-cursor/movie.mkv",
+            1,
+            1,
+            &ProbeResult::default(),
+        )
+        .await
+        .expect("manifest cursor file");
+    let queue_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("contract clock after epoch")
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let mut lease = acquired(
+        store
+            .acquire_lease(
+                "manifest-cursor-candidates",
+                "scheduler",
+                queue_clock,
+                queue_clock.saturating_add(90_000),
+            )
+            .await
+            .expect("manifest cursor lease"),
+        "hiqlite manifest cursor",
+    );
+    let requirements = serde_json::to_string(&PretranscodeRequirements {
+        version: PretranscodeRequirements::VERSION,
+        decoder: "h264".to_owned(),
+        acceptable_encoder_families: vec!["software".to_owned()],
+        output_contract: "hls-v1".to_owned(),
+        tone_map: false,
+        output_grade: "sdr".to_owned(),
+        scratch_bytes: 1,
+    })
+    .expect("manifest cursor requirements");
+    let capabilities = PretranscodeWorkerCapabilities {
+        version: PretranscodeRequirements::VERSION,
+        decoders: vec!["h264".to_owned()],
+        encoder_families: vec!["software".to_owned()],
+        max_target_height: 2_160,
+        output_contracts: vec!["hls-v1".to_owned()],
+        tone_map: false,
+        output_grades: vec!["sdr".to_owned()],
+        scratch_bytes: 2,
+    };
+    let fixtures = [
+        (
+            "00000000-0000-4000-8000-000000000501",
+            "manifest-cursor-a",
+            "ma/manifest-cursor-a",
+            "a".repeat(64),
+        ),
+        (
+            "00000000-0000-4000-8000-000000000502",
+            "manifest-cursor-b",
+            "mb/manifest-cursor-b",
+            "b".repeat(64),
+        ),
+    ];
+    for (ordinal, (job_id, recipe, relative, digest)) in fixtures.iter().enumerate() {
+        let fixture_job = NewPretranscodeJob {
+            id: (*job_id).to_owned(),
+            dedupe_key: format!("manifest-cursor-{ordinal}"),
+            file_id: file,
+            source_size: 1,
+            source_mtime: 1,
+            target_height: 720,
+            policy_generation: "cursor-v1".to_owned(),
+            requirements_json: requirements.clone(),
+            reason: "recent".to_owned(),
+            priority: 100,
+            not_before_ms: 110,
+            created_at_ms: 110 + ordinal as i64,
+        };
+        assert!(enqueue_with_successor(&store, &fixture_job, &mut lease)
+            .await
+            .expect("enqueue manifest cursor job"));
+        let claimed = store
+            .claim_pretranscode_job("manifest-node", &capabilities, &[], 120, 1_000)
+            .await
+            .expect("claim manifest cursor job")
+            .expect("manifest cursor job");
+        assert_eq!(claimed.id, *job_id);
+        assert!(store
+            .complete_pretranscode_job(&claimed, recipe, 1, relative, 100, None, digest, 130)
+            .await
+            .expect("complete manifest cursor job"));
+    }
+    let checks = fixtures
+        .iter()
+        .map(|(_, recipe, relative, digest)| CacheManifestCheck {
+            recipe_hash: (*recipe).to_owned(),
+            node_id: "manifest-node".to_owned(),
+            storage_class: "local".to_owned(),
+            relative_dir: (*relative).to_owned(),
+            manifest_digest: digest.clone(),
+            next_object_index: 8,
+            observed_at: 123,
+        })
+        .collect::<Vec<_>>();
+    let observer = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect manifest cursor observer");
+    let before = contract_applied_index(&observer).await;
+    assert_eq!(
+        store
+            .mark_cache_manifests_checked(&checks)
+            .await
+            .expect("advance manifest cursors"),
+        2
+    );
+    assert_eq!(
+        contract_applied_index(&observer)
+            .await
+            .saturating_sub(before),
+        1,
+        "one scrub page must be one consensus transaction"
+    );
+    for (_, recipe, _, _) in fixtures {
+        assert_eq!(
+            store
+                .cache_hit(recipe, "manifest-node")
+                .await
+                .expect("manifest cursor cache lookup")
+                .expect("manifest cursor location")
+                .scrub_object_index,
+            8
+        );
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = contract_cluster();
+    let mut opened = Vec::<Arc<dyn Store>>::new();
+    for ordinal in 0..3 {
+        let mut addresses = cluster.addresses.clone();
+        addresses.rotate_left(ordinal);
+        let client = Client::remote(
+            addresses,
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("connect queue client {ordinal}: {error}"));
+        let telemetry = cluster
+            ._root
+            .path()
+            .join(format!("separate-queue-{ordinal}-telemetry.db"));
+        let store = if ordinal == 0 {
+            let store = HiqliteAuthStore::bootstrap(client, CONTRACT_INSTANCE_ID, &telemetry)
+                .await
+                .expect("bootstrap separate queue store");
+            store
+                .validation_reset_contract_state()
+                .await
+                .expect("reset separate queue state");
+            store
+        } else {
+            HiqliteAuthStore::open(client, &telemetry)
+                .await
+                .unwrap_or_else(|error| panic!("open queue client {ordinal}: {error}"))
+        };
+        opened.push(Arc::new(store));
+    }
+    assert_eq!(opened.len(), 3, "three queue clients");
+    let stores = [opened.remove(0), opened.remove(0), opened.remove(0)];
+    assert_distinct_pretranscode_claims_from_separate_handles(stores, "hiqlite-separate").await;
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -1504,9 +2627,19 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         )
         .await
         .expect("create cache-takeover file");
+    let queue_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("contract clock after epoch")
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
     let departed = acquired(
         bootstrap
-            .acquire_lease("candidate:pretranscode", "departed-node", 100, 200)
+            .acquire_lease(
+                "candidate:pretranscode",
+                "departed-node",
+                queue_clock,
+                queue_clock.saturating_add(90_000),
+            )
             .await
             .expect("acquire departed cache producer lease"),
         "hiqlite cache takeover seed",
@@ -1521,6 +2654,8 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
     )
     .await
     .expect("connect cache transaction observer");
+    let mut departed_current = departed.clone();
+    let replacement = publication_successor(&departed_current);
     let before_claim = contract_applied_index(&observer).await;
     assert!(bootstrap
         .claim_cache_entry_fenced(
@@ -1529,11 +2664,12 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
             1,
             "cache-node",
             "ca/cache-takeover-recipe-f1",
-            &departed,
-            150,
+            &departed_current,
+            &replacement,
         )
         .await
         .expect("claim departed incomplete generation"));
+    departed_current = replacement;
     assert_eq!(
         contract_applied_index(&observer)
             .await
@@ -1541,6 +2677,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         1,
         "a fenced cache claim must be one consensus transaction"
     );
+    let replacement = publication_successor(&departed_current);
     assert!(bootstrap
         .claim_cache_entry_fenced(
             "cache-forget-transaction-recipe",
@@ -1548,22 +2685,25 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
             1,
             "cache-node",
             "ca/cache-forget-transaction-recipe-f1",
-            &departed,
-            151,
+            &departed_current,
+            &replacement,
         )
         .await
         .expect("claim cache generation for forget transaction contract"));
+    departed_current = replacement;
+    let replacement = publication_successor(&departed_current);
     let before_forget = contract_applied_index(&observer).await;
     bootstrap
         .forget_cache_entry_fenced(
             "cache-forget-transaction-recipe",
             "cache-node",
             "local",
-            &departed,
-            152,
+            &departed_current,
+            &replacement,
         )
         .await
         .expect("forget cache generation in one transaction");
+    departed_current = replacement;
     assert_eq!(
         contract_applied_index(&observer)
             .await
@@ -1608,6 +2748,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
     .expect("open successor claim store");
     let start = Arc::new(tokio::sync::Barrier::new(2));
     let cleanup_start = Arc::clone(&start);
+    let departed_replacement = publication_successor(&departed_current);
     let stale_cleanup = async {
         cleanup_start.wait().await;
         store_a
@@ -1615,8 +2756,8 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
                 "cache-takeover-recipe",
                 "cache-node",
                 "local",
-                &departed,
-                199,
+                &departed_current,
+                &departed_replacement,
             )
             .await
     };
@@ -1625,11 +2766,17 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         takeover_start.wait().await;
         let successor = acquired(
             store_b
-                .acquire_lease("candidate:pretranscode", "successor-node", 200, 400)
+                .acquire_lease(
+                    "candidate:pretranscode",
+                    "successor-node",
+                    departed_current.expires_at_unix_ms,
+                    departed_current.expires_at_unix_ms.saturating_add(90_000),
+                )
                 .await
                 .expect("acquire successor cache producer lease"),
             "hiqlite cache takeover successor",
         );
+        let replacement = publication_successor(&successor);
         store_b
             .claim_cache_entry_fenced(
                 "cache-takeover-recipe",
@@ -1638,7 +2785,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
                 "cache-node",
                 "ca/cache-takeover-recipe-f2",
                 &successor,
-                201,
+                &replacement,
             )
             .await
     };
@@ -2093,7 +3240,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v5_store_migrates_atomically_through_v8_on_daemon_open() {
+async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = contract_cluster();
     let client = Client::remote(
@@ -2122,6 +3269,35 @@ async fn replicated_v5_store_migrates_atomically_through_v8_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_active",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_staging",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_dedupe",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS pretranscode_jobs", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN manifest_digest",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE IF EXISTS job_leases", hiqlite::params!()),
             (
                 "DROP INDEX IF EXISTS idx_items_book_work",
@@ -2170,7 +3346,7 @@ async fn replicated_v5_store_migrates_atomically_through_v8_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v5 through v8 migration");
+        .expect("daemon v5 through v9 migration");
     assert_eq!(
         migrated
             .get_setting("migration.proof")
@@ -2221,7 +3397,7 @@ async fn replicated_v5_store_migrates_atomically_through_v8_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v6_store_migrates_atomically_to_v8_on_daemon_open() {
+async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = contract_cluster();
     let client = Client::remote(
@@ -2249,6 +3425,35 @@ async fn replicated_v6_store_migrates_atomically_to_v8_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_active",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_staging",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_dedupe",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS pretranscode_jobs", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN manifest_digest",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE IF EXISTS job_leases", hiqlite::params!()),
             (
                 "DROP INDEX IF EXISTS idx_items_book_work",
@@ -2292,7 +3497,7 @@ async fn replicated_v6_store_migrates_atomically_to_v8_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v6 to v8 migration");
+        .expect("daemon v6 to v9 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v6.proof")
@@ -2334,7 +3539,7 @@ async fn replicated_v6_store_migrates_atomically_to_v8_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v7_store_migrates_atomically_to_v8_on_daemon_open() {
+async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = contract_cluster();
     let client = Client::remote(
@@ -2366,6 +3571,35 @@ async fn replicated_v7_store_migrates_atomically_to_v8_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_active",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_staging",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_dedupe",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS pretranscode_jobs", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN manifest_digest",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE job_leases", hiqlite::params!()),
             (
                 "UPDATE cluster_meta SET schema_version = 7 WHERE singleton = 1",
@@ -2391,7 +3625,7 @@ async fn replicated_v7_store_migrates_atomically_to_v8_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v7 to v8 migration");
+        .expect("daemon v7 to v9 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v7.proof")
@@ -2414,6 +3648,142 @@ async fn replicated_v7_store_migrates_atomically_to_v8_on_daemon_open() {
             .query_consistent_map(sql, hiqlite::params!())
             .await
             .expect("inspect migrated v7 schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = contract_cluster();
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect v8 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v8-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v8 migration fixture");
+    current
+        .put_setting("migration.v8.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_active",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_staging",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_dedupe",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS pretranscode_jobs_due",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE IF EXISTS pretranscode_jobs", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN manifest_digest",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 8 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v8 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v8 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 8 is incompatible"),
+        "{strict_error}"
+    );
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v8 to v9 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v8.proof")
+            .await
+            .expect("read v8 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('pretranscode_jobs')",
+            24,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
+             WHERE name = 'manifest_digest'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
+             WHERE name = 'scrub_object_index'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('pretranscode_jobs_due', 'pretranscode_jobs_dedupe', \
+                          'pretranscode_jobs_staging', 'pretranscode_jobs_active')",
+            4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name = 'pretranscode_jobs_cancel_source'",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v9 schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -2649,9 +4019,36 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                  VALUES ('fixture-recipe', 30, 1, 123);
              INSERT INTO transcode_cache_locations
                  (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
-                  last_used_at, last_seen_at)
+                  manifest_digest, last_used_at, last_seen_at)
                  VALUES ('fixture-recipe', 'fixture-node', 'local', 'fixture-recipe',
-                         2048, 1, 124, 125);
+                         2048, 1,
+                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         124, 125);
+             INSERT INTO pretranscode_jobs
+                 (id, dedupe_key, file_id, source_size, source_mtime, target_height,
+                  policy_generation, requirements_json, reason, priority, state,
+                  owner_node_id, staging_node_id, fence, lease_expires_ms, attempts,
+                  not_before_ms, created_at_ms, updated_at_ms)
+                 VALUES
+                 ('00000000-0000-4000-8000-000000000201', 'fixture-queued', 30, 4096,
+                  115, 720, 'fixture-policy',
+                  '{\"version\":1,\"decoder\":\"h264\",\"acceptable_encoder_families\":[\"software\"],\"output_contract\":\"hls-v1\",\"tone_map\":false,\"output_grade\":\"sdr\",\"scratch_bytes\":1024}',
+                  'recent', 300, 'queued', NULL, NULL, 0, NULL, 0, 100, 126, 126),
+                 ('00000000-0000-4000-8000-000000000202', 'fixture-running', 30, 4096,
+                  115, 720, 'fixture-policy',
+                  '{\"version\":1,\"decoder\":\"h264\",\"acceptable_encoder_families\":[\"software\"],\"output_contract\":\"hls-v1\",\"tone_map\":false,\"output_grade\":\"sdr\",\"scratch_bytes\":1024}',
+                  'next_up', 400, 'running', 'departed-node', 'departed-node', 2, 500,
+                  1, 100, 127, 127),
+                 ('00000000-0000-4000-8000-000000000203', 'fixture-ready', 30, 4096,
+                  115, 720, 'fixture-policy',
+                  '{\"version\":1,\"decoder\":\"h264\",\"acceptable_encoder_families\":[\"software\"],\"output_contract\":\"hls-v1\",\"tone_map\":false,\"output_grade\":\"sdr\",\"scratch_bytes\":1024}',
+                  'in_progress', 500, 'ready', 'fixture-node', 'fixture-node', 3, NULL,
+                  1, 100, 128, 128);
+             UPDATE pretranscode_jobs
+                SET recipe_hash = 'fixture-recipe', storage_id = 'fixture-node',
+                    relative_dir = 'fixture-recipe',
+                    manifest_digest = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+              WHERE dedupe_key = 'fixture-ready';
              INSERT INTO offline_packages
                  (id, request_id, user_id, file_id, node_id, source_path, source_size,
                   source_mtime, effective_rate_control, target_height, subtitle_mode,
@@ -2907,6 +4304,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE network_priors;
              DROP TABLE reading_state;
              DROP TABLE job_leases;
+             DROP TRIGGER pretranscode_jobs_cancel_source;
+             DROP INDEX pretranscode_jobs_active;
+             DROP INDEX pretranscode_jobs_staging;
+             DROP INDEX pretranscode_jobs_dedupe;
+             DROP INDEX pretranscode_jobs_due;
+             DROP TABLE pretranscode_jobs;
+             ALTER TABLE transcode_cache_locations DROP COLUMN manifest_digest;
+             ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index;
              DROP INDEX idx_items_book_work;
              ALTER TABLE items DROP COLUMN book_metadata_source;
              ALTER TABLE items DROP COLUMN book_edition_id;
@@ -3119,6 +4524,49 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
     assert_eq!(reading.progression_millis, 250_000);
     assert_eq!(reading.file_size, 4_096);
     assert_eq!(reading.file_mtime, 115);
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|digest| digest.table == "pretranscode_jobs")
+            .expect("pretranscode queue digest")
+            .row_count,
+        3,
+        "queued, running, and ready generations must all enter parity"
+    );
+    let imported_cache = store
+        .cache_hit("fixture-recipe", "fixture-node")
+        .await
+        .expect("read imported cache location")
+        .expect("imported ready cache location");
+    assert_eq!(
+        imported_cache.manifest_digest.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "the authoritative generation digest must survive import"
+    );
+    assert_eq!(
+        imported_cache.scrub_object_index, 0,
+        "a fresh imported generation must start at the first scrub object"
+    );
+    let imported_capabilities = PretranscodeWorkerCapabilities {
+        version: PretranscodeRequirements::VERSION,
+        decoders: vec!["h264".to_owned()],
+        encoder_families: vec!["software".to_owned()],
+        max_target_height: 2_160,
+        output_contracts: vec!["hls-v1".to_owned()],
+        tone_map: false,
+        output_grades: vec!["sdr".to_owned()],
+        scratch_bytes: 2_048,
+    };
+    let imported_claim = store
+        .claim_pretranscode_job("import-worker", &imported_capabilities, &[], 1_000, 2_000)
+        .await
+        .expect("claim imported queue work")
+        .expect("an imported due job must remain runnable");
+    assert_eq!(
+        imported_claim.dedupe_key, "fixture-running",
+        "the expired higher-priority running generation should be reclaimed first"
+    );
     assert_eq!(
         store
             .offline_package_for_user("fixture-package", 7)
@@ -4300,6 +5748,7 @@ fn contract_inventory_matches_every_store_method() {
         API_KEY_METHODS,
         OUTBOX_METHODS,
         CACHE_METHODS,
+        PRETRANSCODE_METHODS,
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
@@ -4312,7 +5761,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 172, "review the Store method count");
+    assert_eq!(declared.len(), 176, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -6726,6 +8175,39 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .await
             .expect("lease lookup")
             .is_some());
+        assert!(!store
+            .invalidate_ready_offline_package(
+                &first.id,
+                "offline-node",
+                "wrong-recipe",
+                "cache_integrity",
+                "corrupt generation",
+            )
+            .await
+            .expect("stale ready invalidation"));
+        assert!(store
+            .invalidate_ready_offline_package(
+                &first.id,
+                "offline-node",
+                "offline-recipe",
+                "cache_integrity",
+                "corrupt generation",
+            )
+            .await
+            .expect("exact ready invalidation"));
+        let invalidated = store
+            .offline_package_for_user(&first.id, user_id)
+            .await
+            .expect("invalidated package lookup")
+            .expect("invalidated package");
+        assert_eq!(invalidated.state, "failed");
+        assert_eq!(invalidated.phase, "integrity");
+        assert_eq!(invalidated.error_code.as_deref(), Some("cache_integrity"));
+        assert!(store
+            .offline_package_for_lease("lease-hash", 1, 50_000)
+            .await
+            .expect("failed lease lookup")
+            .is_none());
 
         let failed = offline_request("package-2", "request-2", user_id, file_id);
         store

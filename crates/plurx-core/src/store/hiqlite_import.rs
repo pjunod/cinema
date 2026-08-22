@@ -589,6 +589,40 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "pretranscode_jobs",
+        columns: &[
+            "id",
+            "dedupe_key",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "target_height",
+            "policy_generation",
+            "requirements_json",
+            "reason",
+            "priority",
+            "state",
+            "owner_node_id",
+            "staging_node_id",
+            "fence",
+            "lease_expires_ms",
+            "attempts",
+            "not_before_ms",
+            "last_error_code",
+            "recipe_hash",
+            "storage_id",
+            "relative_dir",
+            "manifest_digest",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 24,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "transcode_cache_recipes",
         columns: &["recipe_hash", "file_id", "recipe_version", "created_at"],
         order_by: "recipe_hash",
@@ -606,6 +640,8 @@ const TABLES: &[TablePlan] = &[
             "relative_dir",
             "bytes",
             "complete",
+            "manifest_digest",
+            "scrub_object_index",
             "last_used_at",
             "last_seen_at",
         ],
@@ -1636,6 +1672,16 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 18
             {
                 "'vbr'".to_owned()
+            } else if table.name == "transcode_cache_locations"
+                && *column == "manifest_digest"
+                && schema_version < 24
+            {
+                "NULL".to_owned()
+            } else if table.name == "transcode_cache_locations"
+                && *column == "scrub_object_index"
+                && schema_version < 24
+            {
+                "0".to_owned()
             } else if qualify {
                 format!("source.{column}")
             } else {

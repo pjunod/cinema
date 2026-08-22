@@ -29,6 +29,29 @@ pub struct Lease {
     pub expires_at_unix_ms: i64,
 }
 
+impl Lease {
+    /// Build the monotone token installed by an atomic fenced publication.
+    /// The successor never shortens an existing authority window, including
+    /// when the wall clock moves backward between heartbeat and publication.
+    pub fn publication_successor(&self) -> Result<Self, StoreError> {
+        const PUBLICATION_TTL_MS: i64 = 90_000;
+        let now = unix_ms()?;
+        let minimum_expiry = self
+            .expires_at_unix_ms
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Task("publication lease expiry is exhausted".to_owned()))?;
+        Ok(Self {
+            resource: self.resource.clone(),
+            owner_node_id: self.owner_node_id.clone(),
+            fence: self.fence,
+            revision: self.revision.checked_add(1).ok_or_else(|| {
+                StoreError::Task("publication lease revision is exhausted".to_owned())
+            })?,
+            expires_at_unix_ms: now.saturating_add(PUBLICATION_TTL_MS).max(minimum_expiry),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaseClaim {
     Acquired(Lease),

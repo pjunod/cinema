@@ -32,17 +32,19 @@ use crate::domain::{
 use crate::error::StoreError;
 
 // v6 adds revision-bound ebook reading state; v7 adds first-class book facts;
-// v8 adds monotone cluster-work leases. Every additive step is applied through
+// v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
+// speculative-transcode queue. Every additive step is applied through
 // Raft before the daemon opens the
 // store. v5 remains a supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 8;
+pub const AUTH_SCHEMA_VERSION: i64 = 9;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
 const BOOK_SCHEMA_MIGRATION_SOURCE: i64 = READING_SCHEMA_VERSION;
 const LEASE_SCHEMA_MIGRATION_SOURCE: i64 = 7;
+const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 pub const AUTH_PROTOCOL_VERSION: i64 = 4;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -800,6 +802,7 @@ impl HiqliteAuthStore {
         }
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
+        super::hiqlite_pretranscode::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -881,7 +884,7 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::Current => return Ok(()),
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let results = self
+                    let attempt = self
                         .client()
                         .txn([
                             (
@@ -898,15 +901,13 @@ impl HiqliteAuthStore {
                                 params!(READING_SCHEMA_VERSION, now, AUTH_SCHEMA_MIGRATION_SOURCE),
                             ),
                         ])
+                        .await;
+                    self.settle_migration_attempt(AUTH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
-                    results
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(database_error)?;
                 }
                 SchemaMigrationAction::MigrateFrom(BOOK_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let results = self
+                    let attempt = self
                         .client()
                         .txn([
                             (super::hiqlite_catalog::BOOK_AUTHOR_SCHEMA, params!()),
@@ -924,29 +925,80 @@ impl HiqliteAuthStore {
                                 ),
                             ),
                         ])
+                        .await;
+                    self.settle_migration_attempt(BOOK_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
-                    results
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(database_error)?;
                 }
                 SchemaMigrationAction::MigrateFrom(LEASE_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let results = self
+                    let attempt = self
                         .client()
                         .txn([
                             (super::hiqlite_coordination::JOB_LEASES_SCHEMA, params!()),
                             (
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",
-                                params!(AUTH_SCHEMA_VERSION, now, LEASE_SCHEMA_MIGRATION_SOURCE),
+                                params!(
+                                    PRETRANSCODE_SCHEMA_MIGRATION_SOURCE,
+                                    now,
+                                    LEASE_SCHEMA_MIGRATION_SOURCE
+                                ),
                             ),
                         ])
+                        .await;
+                    self.settle_migration_attempt(LEASE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
-                    results
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(database_error)?;
+                }
+                SchemaMigrationAction::MigrateFrom(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_pretranscode::CACHE_MANIFEST_DIGEST_MIGRATION,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::CACHE_SCRUB_CURSOR_MIGRATION,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_JOBS_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_DUE_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_DEDUPE_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_STAGING_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_ACTIVE_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_pretranscode::PRETRANSCODE_SOURCE_TRIGGER,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    AUTH_SCHEMA_VERSION,
+                                    now,
+                                    PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -954,6 +1006,56 @@ impl HiqliteAuthStore {
                     )));
                 }
             }
+        }
+    }
+
+    /// A second voter can observe the same predecessor before the first
+    /// migration transaction commits. Additive DDL is not uniformly
+    /// idempotent (`ALTER TABLE ADD COLUMN` in particular), so the losing
+    /// coordinator may receive a statement error even though the cluster is
+    /// now current. Treat an error as commit/concurrency-unknown, reread the
+    /// replicated marker consistently, and suppress it only when another
+    /// transaction durably advanced beyond the exact predecessor we tried.
+    async fn settle_migration_attempt(
+        &self,
+        predecessor: i64,
+        attempt: Result<Vec<Result<usize, hiqlite::Error>>, StoreError>,
+    ) -> Result<(), StoreError> {
+        let failure = match attempt {
+            Ok(results) => results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .err()
+                .map(database_error),
+            Err(error) => Some(error),
+        };
+        let Some(failure) = failure else {
+            return Ok(());
+        };
+        let sql = "SELECT schema_version, protocol_min, protocol_max \
+                   FROM cluster_meta WHERE singleton = 1";
+        let rows = self
+            .client()
+            .query_consistent_map::<CompatibilityRow, _>(sql, params!())
+            .await?;
+        let version = rows
+            .first()
+            .filter(|_| rows.len() == 1)
+            .map(|row| row.schema_version)
+            .ok_or_else(|| {
+                StoreError::Migration(
+                    "cluster compatibility marker disappeared during migration".to_owned(),
+                )
+            })?;
+        if version != predecessor {
+            tracing::info!(
+                predecessor,
+                version,
+                "another voter completed the replicated schema migration"
+            );
+            Ok(())
+        } else {
+            Err(failure)
         }
     }
 
@@ -1014,6 +1116,7 @@ impl HiqliteAuthStore {
         self.telemetry.clear().await?;
         let statements = [
             "DELETE FROM job_leases",
+            "DELETE FROM pretranscode_jobs",
             "DELETE FROM offline_source_probes",
             "DELETE FROM offline_lease_guards",
             "DELETE FROM offline_package_leases",
@@ -1581,6 +1684,23 @@ impl UserStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError> {
+        if after_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task("invalid bounded user page".to_owned()));
+        }
+        let sql = "SELECT id, username, password_hash, is_admin, created_at \
+                   FROM users WHERE id > $1 ORDER BY id LIMIT $2";
+        validate_sql(sql)?;
+        Ok(timeout_store(
+            self.client()
+                .query_consistent_map::<UserRow, _>(sql, params!(after_id, limit)),
+        )
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect())
+    }
+
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self
             .execute("DELETE FROM users WHERE id = $1", params!(id))
@@ -1917,7 +2037,8 @@ fn schema_migration_action(
         version if version == supported.schema_version => Ok(SchemaMigrationAction::Current),
         AUTH_SCHEMA_MIGRATION_SOURCE
         | BOOK_SCHEMA_MIGRATION_SOURCE
-        | LEASE_SCHEMA_MIGRATION_SOURCE => {
+        | LEASE_SCHEMA_MIGRATION_SOURCE
+        | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -2651,9 +2772,9 @@ mod tests {
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 3,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 4,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains the v5→v6, v6→v7, and v7→v8 steps"
+            "this implementation contains every additive v5→v9 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -2686,8 +2807,16 @@ mod tests {
                 &[row(LEASE_SCHEMA_MIGRATION_SOURCE)],
                 ClusterCompatibility::CURRENT,
             )
-            .expect("immediate predecessor"),
+            .expect("lease-schema predecessor"),
             SchemaMigrationAction::MigrateFrom(LEASE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("immediate predecessor"),
+            SchemaMigrationAction::MigrateFrom(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

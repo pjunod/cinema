@@ -21,11 +21,11 @@ impl FencedPublicationStore for SqliteStore {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             put_setting(conn, &key, &value)
         })
         .await
@@ -89,9 +89,9 @@ impl FencedPublicationStore for SqliteStore {
         id: i64,
         refreshed: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE libraries
                  SET last_scan_at = unixepoch(),
@@ -108,10 +108,10 @@ impl FencedPublicationStore for SqliteStore {
         &self,
         item: &NewItem,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError> {
         let item = item.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             let sort_title = if item.kind == ItemKind::Folder {
                 item.title.to_lowercase()
             } else {
@@ -143,10 +143,10 @@ impl FencedPublicationStore for SqliteStore {
         item_id: i64,
         patch: &MetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let patch = patch.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_metadata(conn, item_id, &patch)
         })
         .await
@@ -173,10 +173,10 @@ impl FencedPublicationStore for SqliteStore {
         item_id: i64,
         patch: &BookMetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let patch = patch.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_book_metadata(conn, item_id, &patch)
         })
         .await
@@ -203,9 +203,9 @@ impl FencedPublicationStore for SqliteStore {
         &self,
         item_id: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE items SET nfo_seeded_at = unixepoch() WHERE id = ?1",
                 params![item_id],
@@ -223,11 +223,11 @@ impl FencedPublicationStore for SqliteStore {
         mtime: i64,
         probe: &ProbeResult,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError> {
         let path = path.to_owned();
         let probe = probe.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             upsert_file(conn, item_id, &path, size, mtime, &probe)
         })
         .await
@@ -239,10 +239,10 @@ impl FencedPublicationStore for SqliteStore {
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<RootFingerprintStatus, StoreError> {
         let fingerprint = fingerprint.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             ensure_library_root_fingerprint(conn, library_id, &fingerprint, allow_establish)
         })
         .await
@@ -255,11 +255,14 @@ impl FencedPublicationStore for SqliteStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             reconcile_library(conn, library_id, &root_fingerprint, &ids, prune_limit)
         })
         .await
@@ -273,12 +276,12 @@ impl FencedPublicationStore for SqliteStore {
         node_id: &str,
         relative_dir: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let relative_dir = relative_dir.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
                  VALUES (?1, ?2, ?3) ON CONFLICT(recipe_hash) DO NOTHING",
@@ -304,11 +307,11 @@ impl FencedPublicationStore for SqliteStore {
         recipe_hash: &str,
         node_id: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE transcode_cache_locations SET last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND complete = 0",
@@ -326,12 +329,12 @@ impl FencedPublicationStore for SqliteStore {
         relative_dir: &str,
         bytes: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let relative_dir = relative_dir.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE transcode_cache_locations
                  SET relative_dir = ?3, complete = 1, bytes = ?4,
@@ -350,12 +353,12 @@ impl FencedPublicationStore for SqliteStore {
         node_id: &str,
         storage_class: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let storage_class = storage_class.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "DELETE FROM transcode_cache_locations
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3",
