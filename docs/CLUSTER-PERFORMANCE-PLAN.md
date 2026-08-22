@@ -442,6 +442,16 @@ voters, the idle load is roughly one aggregate authority read per node per
 staggered interval rather than the prior draft's sixteen synchronized reads
 every fifteen seconds.
 
+**P2b Store primitives:** the single `TimedClient` boundary records fixed-label
+latency histograms and counts for `local_read`, `authority_read`, and `write`.
+Each class reports `ok`, `error`, and caller-`cancelled` outcomes. An RAII timer
+publishes cancellation when an in-flight future is dropped, while SQL rejected
+before I/O is not mislabeled as an attempted Store call. Transaction and
+returning-write helpers classify nested statement failures as `error` and share
+the same `write` class. The local/management Raft health probe is excluded;
+readiness counts only its subsequent authority SQL read. The exposition reads
+only process-local saturating atomics.
+
 **Change:** Instrument `TimedClient` once so every replicated Store module uses
 the same bounded local-read · authority-read · write histograms and counters.
 Extend the OpenRaft/Hiqlite metrics boundary with the explicit §5.1 sources:

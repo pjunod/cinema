@@ -4629,41 +4629,99 @@ async fn clustered_page_read_primitives_have_bounded_client_calls() {
     // Counter non-vacuity: prove each instrumented call family changes only
     // its own field, including one transaction as one attempted write call.
     store.validation_reset_operation_counts();
+    let metric_before = store.validation_successful_metric_counts();
     store
         .get_setting("page.setting.0")
         .await
         .expect("single read");
     let counts = store.validation_operation_counts();
+    let metric_after = store.validation_successful_metric_counts();
     assert_eq!(counts.consistent_query_calls, 1);
     assert_eq!(counts.non_consistent_query_calls, 0);
     assert_eq!(counts.write_calls, 0);
+    assert_eq!(
+        metric_after.consistent_query_calls,
+        metric_before.consistent_query_calls + 1
+    );
+    assert_eq!(
+        metric_after.non_consistent_query_calls,
+        metric_before.non_consistent_query_calls
+    );
+    assert_eq!(metric_after.write_calls, metric_before.write_calls);
 
     store.validation_reset_operation_counts();
+    let metric_before = store.validation_successful_metric_counts();
     store.validation_local_dump().await.expect("local dump");
     let counts = store.validation_operation_counts();
+    let metric_after = store.validation_successful_metric_counts();
     assert_eq!(counts.consistent_query_calls, 0);
     assert!(counts.non_consistent_query_calls > 0);
     assert_eq!(counts.write_calls, 0);
+    assert_eq!(
+        metric_after.consistent_query_calls,
+        metric_before.consistent_query_calls
+    );
+    assert_eq!(
+        metric_after.non_consistent_query_calls,
+        metric_before.non_consistent_query_calls + counts.non_consistent_query_calls
+    );
+    assert_eq!(metric_after.write_calls, metric_before.write_calls);
 
     store.validation_reset_operation_counts();
+    let metric_before = store.validation_successful_metric_counts();
     store
         .put_setting("page.counter.write", "one")
         .await
         .expect("single write");
     let counts = store.validation_operation_counts();
+    let metric_after = store.validation_successful_metric_counts();
     assert_eq!(counts.consistent_query_calls, 0);
     assert_eq!(counts.non_consistent_query_calls, 0);
     assert_eq!(counts.write_calls, 1);
+    assert_eq!(
+        metric_after.consistent_query_calls,
+        metric_before.consistent_query_calls
+    );
+    assert_eq!(
+        metric_after.non_consistent_query_calls,
+        metric_before.non_consistent_query_calls
+    );
+    assert_eq!(metric_after.write_calls, metric_before.write_calls + 1);
 
     store.validation_reset_operation_counts();
+    let metric_before = store.validation_successful_metric_counts();
     store
         .put_settings(&[("page.counter.left", "L"), ("page.counter.right", "R")])
         .await
         .expect("transaction write");
     let counts = store.validation_operation_counts();
+    let metric_after = store.validation_successful_metric_counts();
     assert_eq!(counts.consistent_query_calls, 0);
     assert_eq!(counts.non_consistent_query_calls, 0);
     assert_eq!(counts.write_calls, 1);
+    assert_eq!(
+        metric_after.consistent_query_calls,
+        metric_before.consistent_query_calls
+    );
+    assert_eq!(
+        metric_after.non_consistent_query_calls,
+        metric_before.non_consistent_query_calls
+    );
+    assert_eq!(metric_after.write_calls, metric_before.write_calls + 1);
+
+    store.validation_reset_operation_counts();
+    let success_before = store.validation_successful_metric_counts();
+    let failure_before = store.validation_failed_write_metric_count();
+    store
+        .validation_duplicate_instance_id_transaction()
+        .await
+        .expect_err("the seeded instance-id uniqueness constraint must reject a duplicate");
+    let counts = store.validation_operation_counts();
+    let success_after = store.validation_successful_metric_counts();
+    let failure_after = store.validation_failed_write_metric_count();
+    assert_eq!(counts.write_calls, 1);
+    assert_eq!(success_after.write_calls, success_before.write_calls);
+    assert_eq!(failure_after, failure_before + 1);
 }
 
 #[tokio::test]

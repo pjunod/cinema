@@ -2302,8 +2302,9 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}",
         state.offline.prometheus(),
+        plurx_core::store::prometheus_store_operations(),
     );
 
     // Integration counters (plan P6). Scans by what asked for them, and how
