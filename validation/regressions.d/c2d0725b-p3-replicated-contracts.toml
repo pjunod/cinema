@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c2d0725b", "cc507ff6"]
+commits = ["c2d0725b"]
 points = ["cluster.auth", "core.media", "persistence.upgrades"]
 checks = ["rust-gate", "cluster-auth"]
 reason = "The retained Rust and three-voter store contracts require Hiqlite manifest cursor updates to introduce numeric placeholders in parameter order, pin the complete twenty-table legacy import inventory, and keep pagination plus legacy-cache fixtures on a source that cannot be removed by concurrent claim assignment."
