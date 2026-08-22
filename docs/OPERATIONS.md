@@ -328,19 +328,38 @@ and its measured write cost is acceptable. Removing a fourth voter is always
 an operator decision through the safe membership API, never an automated
 "performance" action.
 
+`make cluster-check` now creates
+`target/validation/cluster-topology-semantic.json`. It starts fresh independent
+three- and four-process clusters, sends the same 64 quorum-acknowledged setting
+writes to each elected leader, and records raw microsecond samples, type-7
+p50/p95/p99 values, quorum size, physical Raft-entry count, and every voter's
+applied index. This is deterministic semantic CI evidence: resource fields are
+explicitly null and the artifact cannot support a hardware or absolute-latency
+claim. A counterbalanced semantic run can be requested with
+`cargo run -p plurx-cluster-check -- topology <output.json> 4,3`; P0c's named
+runner wraps the same schema with isolated load generation and real per-node
+resource counters.
+
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
 settings ship, `storage.data_dir` remains the compatibility root. On a fresh
 install, child mounts can isolate their workloads:
 
 | Path | Durability | Placement |
 |---|---|---|
-| `<data_dir>/hiqlite` plus `<data_dir>/node.id`, `<data_dir>/membership.json`, activation markers under `<data_dir>/hiqlite`, and `<data_dir>/credentials.key` by default | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/hiqlite` plus the data-root authority set described below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
 | `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
 | `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
 
 Create and mount every child before the first `plurxd` start; an empty fallback
-directory on the root filesystem is not a successful installation. Keep the
-credential key with the durable backup set. If
+directory on the root filesystem is not a successful installation. The
+data-root authority set is the entire `hiqlite/` tree (including its
+`activation.json`), `node.id`, `membership.json`, `secret_raft`, `secret_api`,
+`hiqlite-activated.json`, `hiqlite-readdress.json` when present, and the
+`migration/` directory when present. Preserve the retained `plurx.db` and
+`backups/` with that set for rollback and recovery; do not confuse the root
+`hiqlite-activated.json` lost-target fence with `hiqlite/activation.json`.
+Keep every secret and marker owner-only while copying. Keep the credential key
+with the same durable backup set. If
 `cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
 that exact owner-only file is authoritative and belongs in the same backup and
 move procedure. Each voter owns its own Hiqlite storage: sharing that directory
@@ -354,10 +373,11 @@ and verify the copied tree plus free space before restart. Restart and require
 readiness, membership catch-up, and the expected cache/artwork inventory before
 moving the next voter. On failure, stop the daemon, unmount the new device, and
 restart from the untouched original directory; delete neither copy until the
-cluster has completed a soak period. Move the data-root `node.id`,
-`membership.json`, configured credential-key file, and the entire `hiqlite`
-tree as one durable set if the authoritative device changes. Never move two
-voters concurrently.
+cluster has completed a soak period. If the authoritative device changes,
+copy the whole stopped data root first and mount `cache/`, `artwork/`, and
+`transcode/` separately only after the authority-set copy is verified. This
+include-first procedure automatically preserves new control files introduced
+by a later release. Never move two voters concurrently.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and

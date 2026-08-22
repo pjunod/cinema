@@ -301,8 +301,14 @@ result. At minimum:
 | snapshot | cross two 10,000-entry snapshot cycles | write tail latency · snapshot duration · retained bytes |
 
 P0 runs at least three paired repetitions of each scenario on the named
-cluster-performance runner and continues until the paired confidence interval
-or recorded variance is narrower than the acceptance budget. Every run records
+cluster-performance runner. The topology estimand is the paired four-voter ÷
+three-voter ratio for write p99, CPU seconds, storage-write bytes, and network
+transmit bytes. Runs alternate `3→4` and `4→3`; after three pairs, collection
+may stop only when every ratio's two-sided 95% Student-t confidence interval on
+the log scale has a half-width no greater than 5%. Collection stops after seven
+pairs even if that precision is not reached; such a result is recorded as
+`inconclusive` and cannot justify a tuning or latency claim. This pre-registered
+3–7-pair rule prevents optional stopping. Every run records
 the external load-generator host, its resource isolation, and sample count;
 the same pinned client placement is used for both topologies. P0 commits the
 median baseline plus every raw artifact under a versioned schema. It
@@ -333,11 +339,13 @@ slices:
 - **P0b — deterministic topology artifact:** a versioned report schema,
   percentile/unit tests, fresh independent three- and four-process semantic
   runs, and validation that both runs use identical logical work;
-- **P0c — named-runner evidence:** after M4 singleton-job fencing, fresh
+- **P0c — named-runner evidence:** after the remaining separate-process M4
+  takeover/partition proof, fresh
   independent clusters on the pinned four-machine runner, alternating run
   order, at least three paired runs continued until uncertainty is narrower
   than the acceptance budget, a pinned isolated load-generator placement,
-  per-node resource captures, medians, variance, and reviewed budgets;
+  per-node resource captures, medians, the pre-registered paired confidence
+  intervals above, and reviewed budgets;
 - **P2a — observer-safe metrics snapshots:** remove Store calls from the scrape
   path before Store instrumentation can observe itself;
 - **P2b — Store primitives:** RAII timing for `local_read`, `authority_read`,
@@ -371,11 +379,13 @@ Do not remove a live voter from automation. The operator selects the follower
 after confirming it owns no in-flight transfer and the existing removal API
 accepts the change.
 
-P0c is blocked on `CLUSTERING-PLAN.md` M4 singleton-job fencing. Until that
-exists, a limited diagnostic baseline may explicitly disable scheduler and
-provider background loops, but it cannot support an ordinary-load performance
-claim. The M4 proof adds a multi-voter scheduled/background workload with
-bounded physical provider calls and Raft commits.
+The M4 core landed in #505: generic lease-fenced publications and coordinated
+scan, provider, genre, and candidate schedulers now share one production
+boundary. P0c remains blocked only on M4's retained real-process proof: pause
+the owner, force takeover and a partition, then bound physical provider calls
+and Raft commits while rejecting the stale owner. Until that proof lands, a
+limited diagnostic baseline may explicitly disable scheduler/provider loops,
+but it cannot support an ordinary-load performance claim.
 
 **Acceptance:** CI's replicated-storage contract passes and validates that the
 artifact contains both voter counts, exact workload identity, quorum, commit
@@ -385,7 +395,7 @@ three-run results, median baseline, variance, and reviewed comparative budgets
 are committed in P0c before P2-P3 performance claims are accepted. P1 already
 landed as the separately bounded no-op-write removal in #493.
 
-### 6.2 P1 — suppress no-op auth activity writes (complete in #493)
+### 6.2 P1 — suppress no-op auth activity writes (implementation in #493; acceptance follow-up pending)
 
 **Landed change:** `HiqliteAuthStore::user_for_token` returns the durable
 `last_seen_at` beside the user and skips `execute` inside the 60-second window.
@@ -398,17 +408,18 @@ remain intact.
 The predicate is pinned as `last_activity < now - 60`: never-used is due, 59
 seconds and exactly 60 seconds are suppressed, 61 seconds is due, and a clock
 rollback suppresses the best-effort touch. Disabled, deleted, or otherwise
-unauthorized credentials never reserve or touch. Replicated-store budget tests
-compare the Raft log delta for sequential and simultaneous requests. One
-process may submit at most one touch per credential per window; `N` serving
+unauthorized credentials never reserve or touch. The implementation gives one
+process at most one submitted touch per credential per window; `N` serving
 processes may submit at most `N`, independent of request count.
 
-**Retained evidence:** `cluster.auth` and the HTTP auth matrix keep revocation
-immediate; 120 sequential requests inside one window produce no more than one
-physical activity entry after the initial due read. A synchronized 120-request
-burst distributed across three HTTP nodes produces no more than three entries
-and exactly one durable timestamp change. Those checks remain required after
-later Store instrumentation changes.
+**Retained evidence and remaining gate:** `cluster.auth` and the HTTP auth
+matrix keep revocation immediate; the merged replicated-store case proves 120
+sequential token authentications produce one physical activity entry. The
+follow-up must still retain a synchronized 120-request burst through three
+independent Store instances for both token and API-key paths, prove no more
+than three submitted entries and exactly one durable timestamp change, and
+prove failed touches release their reservations. Those checks remain required
+after later Store instrumentation changes.
 
 ### 6.3 P2 — instrument Store and Raft cost
 
@@ -597,18 +608,20 @@ documented discontinuity behavior.
 | 6 | non-voting learner/read worker | PR 3; PR 5 storage eligibility; clustering M4 singleton fencing | none |
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
 
-`CLUSTERING-PLAN.md` M4 is inserted before P0c and before any PR in this table
-claims ordinary-load performance. Code instrumentation may be prepared before
-the named-runner baseline, but P0c/P2f acceptance and tuning decisions remain
-blocked until the multi-voter singleton-work proof passes.
+`CLUSTERING-PLAN.md` M4's core implementation landed in #505. Its real-process
+pause/takeover/partition acceptance remains before P0c and before any PR in
+this table claims ordinary-load performance. Code instrumentation may be
+prepared before the named-runner baseline, but P0c/P2f acceptance and tuning
+decisions remain blocked until that remaining singleton-work proof passes.
 
 ### 7.2 Existing work and shared-file ownership
 
 Membership PRs #490 and #491 have landed. The adversarial follow-up PR #496
 owns their shared artwork/removal corrections in
 `crates/plurx-cluster-check/src/lib.rs`, `crates/plurx-core/tests/store_contract.rs`,
-`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. P0a/P0b rebase after #496
-before extending that harness or operations contract. P1 landed as #493. Later
+`docs/CLUSTERING-PLAN.md`, and `docs/OPERATIONS.md`. P0a/P0b are reconstructed
+from #496's reviewed head rather than replaying its superseded commits. P1's
+implementation landed as #493 and retains the follow-up gate above. Later
 milestones extend the merged M5/M6 contracts rather than copying them into a
 second harness or document.
 
