@@ -190,7 +190,7 @@ impl PretranscodeJobStore for SqliteStore {
                                AND NOT (
                                  last_error_code = 'policy_changed'
                                  OR (last_error_code = 'eligibility_expired'
-                                   AND updated_at_ms <= ?12 - ?15))))
+                                   AND updated_at_ms <= ?12 - ?15)))))
                     AND NOT EXISTS (
                         SELECT 1
                           FROM pretranscode_jobs job

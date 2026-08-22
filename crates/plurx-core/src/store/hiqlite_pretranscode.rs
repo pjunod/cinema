@@ -349,7 +349,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                                AND NOT (
                                  last_error_code = 'policy_changed'
                                  OR (last_error_code = 'eligibility_expired'
-                                   AND updated_at_ms <= $12 - $20))))
+                                   AND updated_at_ms <= $12 - $20)))))
                     AND NOT EXISTS (
                         SELECT 1
                           FROM pretranscode_jobs job

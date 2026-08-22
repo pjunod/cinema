@@ -1114,58 +1114,43 @@ impl HiqliteAuthStore {
     #[doc(hidden)]
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
-        let statements = [
-            "DELETE FROM job_leases",
-            "DELETE FROM pretranscode_jobs",
-            "DELETE FROM offline_source_probes",
-            "DELETE FROM offline_lease_guards",
-            "DELETE FROM offline_package_leases",
-            "DELETE FROM offline_packages",
-            "DELETE FROM transcode_cache_locations",
-            "DELETE FROM transcode_cache_recipes",
-            "DELETE FROM watched_outbox",
-            "DELETE FROM trakt_auth",
-            "DELETE FROM watch_state",
-            "DELETE FROM reading_state",
-            "DELETE FROM scan_reconcile_items",
-            "DELETE FROM scan_reconcile_guards",
-            "DELETE FROM library_roots",
-            "DELETE FROM files",
-            "DELETE FROM items",
-            "DELETE FROM libraries",
-            "DELETE FROM tokens",
-            "DELETE FROM api_keys",
-            "DELETE FROM users",
-            "DELETE FROM settings WHERE key <> $1 \
-               AND key NOT GLOB 'internal.cluster_job_owner_removed.*'",
+        let statements = vec![
+            ("DELETE FROM job_leases".to_owned(), params!()),
+            ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
+            ("DELETE FROM offline_source_probes".to_owned(), params!()),
+            ("DELETE FROM offline_lease_guards".to_owned(), params!()),
+            ("DELETE FROM offline_package_leases".to_owned(), params!()),
+            ("DELETE FROM offline_packages".to_owned(), params!()),
+            (
+                "DELETE FROM transcode_cache_locations".to_owned(),
+                params!(),
+            ),
+            ("DELETE FROM transcode_cache_recipes".to_owned(), params!()),
+            ("DELETE FROM watched_outbox".to_owned(), params!()),
+            ("DELETE FROM trakt_auth".to_owned(), params!()),
+            ("DELETE FROM watch_state".to_owned(), params!()),
+            ("DELETE FROM reading_state".to_owned(), params!()),
+            ("DELETE FROM scan_reconcile_items".to_owned(), params!()),
+            ("DELETE FROM scan_reconcile_guards".to_owned(), params!()),
+            ("DELETE FROM library_roots".to_owned(), params!()),
+            ("DELETE FROM files".to_owned(), params!()),
+            ("DELETE FROM items".to_owned(), params!()),
+            ("DELETE FROM libraries".to_owned(), params!()),
+            ("DELETE FROM tokens".to_owned(), params!()),
+            ("DELETE FROM api_keys".to_owned(), params!()),
+            ("DELETE FROM users".to_owned(), params!()),
+            (
+                "DELETE FROM settings WHERE key <> $1 \
+                   AND key NOT GLOB 'internal.cluster_job_owner_removed.*'"
+                    .to_owned(),
+                params!(keys::INSTANCE_ID),
+            ),
         ];
-        for sql in statements {
+        for (sql, _) in &statements {
             validate_sql(sql)?;
         }
         self.client()
-            .txn(vec![
-                (statements[0].to_owned(), params!()),
-                (statements[1].to_owned(), params!()),
-                (statements[2].to_owned(), params!()),
-                (statements[3].to_owned(), params!()),
-                (statements[4].to_owned(), params!()),
-                (statements[5].to_owned(), params!()),
-                (statements[6].to_owned(), params!()),
-                (statements[7].to_owned(), params!()),
-                (statements[8].to_owned(), params!()),
-                (statements[9].to_owned(), params!()),
-                (statements[10].to_owned(), params!()),
-                (statements[11].to_owned(), params!()),
-                (statements[12].to_owned(), params!()),
-                (statements[13].to_owned(), params!()),
-                (statements[14].to_owned(), params!()),
-                (statements[15].to_owned(), params!()),
-                (statements[16].to_owned(), params!()),
-                (statements[17].to_owned(), params!()),
-                (statements[18].to_owned(), params!()),
-                (statements[19].to_owned(), params!()),
-                (statements[20].to_owned(), params!(keys::INSTANCE_ID)),
-            ])
+            .txn(statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
