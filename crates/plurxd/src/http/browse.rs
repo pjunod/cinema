@@ -426,24 +426,43 @@ pub async fn hubs(
     State(state): State<AppState>,
     Query(q): Query<HubsQuery>,
 ) -> Result<Json<Hubs>, ApiError> {
-    let in_progress = state.store.continue_watching(user.id, 20).await?;
+    // Recently-added is independent of playback progress, so it can overlap
+    // the two progress-derived rails. Continue-watching and next-up both
+    // interpret the same progress state and retain their established ordering;
+    // the store does not expose a combined snapshot for those two queries.
+    let progress_rows = async {
+        let in_progress = state.store.continue_watching(user.id, 20).await?;
+        let next = state.store.next_up(user.id, 20).await?;
+        Ok::<_, ApiError>((in_progress, next))
+    };
+    let recent_rows = async {
+        state
+            .store
+            .recently_added(q.library_id, 20)
+            .await
+            .map_err(ApiError::from)
+    };
+    let ((in_progress, next), recent) = tokio::try_join!(progress_rows, recent_rows)?;
     let mut continue_watching: Vec<ItemDto> =
         in_progress.into_iter().map(in_progress_dto).collect();
 
     // Next-up episodes (unwatched tracks per show); no per-item watch state.
-    let next = state.store.next_up(user.id, 20).await?;
     let mut next_up: Vec<ItemDto> = next.into_iter().map(|r| recent_dto(r, None)).collect();
 
-    let recent = state.store.recently_added(q.library_id, 20).await?;
     let recent_items: Vec<Item> = recent.iter().map(|r| r.item.clone()).collect();
-    let watch = watch_lookup(&state, user.id, &recent_items).await?;
     // Folder cards say "12 items" here too, not just on the library grid.
     let folder_ids: Vec<i64> = recent_items
         .iter()
         .filter(|i| i.kind == ItemKind::Folder)
         .map(|i| i.id)
         .collect();
-    let counts = state.store.child_counts(&folder_ids).await?;
+    let (watch, counts) = tokio::try_join!(watch_lookup(&state, user.id, &recent_items), async {
+        state
+            .store
+            .child_counts(&folder_ids)
+            .await
+            .map_err(ApiError::from)
+    },)?;
     let mut recently_added: Vec<ItemDto> = recent
         .into_iter()
         .map(|r| {

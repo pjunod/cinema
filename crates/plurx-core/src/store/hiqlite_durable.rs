@@ -1173,6 +1173,9 @@ impl From<OfflineLeaseRow> for OfflineLease {
 struct OfflineActivityRow {
     package: OfflinePackageRow,
     lease_active: i64,
+    item_id: Option<i64>,
+    title: String,
+    user_name: String,
 }
 
 impl From<&mut Row<'_>> for OfflineActivityRow {
@@ -1180,6 +1183,9 @@ impl From<&mut Row<'_>> for OfflineActivityRow {
         Self {
             package: OfflinePackageRow::from(&mut *row),
             lease_active: row.get("lease_active"),
+            item_id: row.get("activity_item_id"),
+            title: row.get("activity_title"),
+            user_name: row.get("activity_user"),
         }
     }
 }
@@ -1507,8 +1513,15 @@ impl OfflinePackageStore for HiqliteAuthStore {
                 format!(
                     "SELECT {}, EXISTS (SELECT 1 FROM offline_package_leases l \
                          WHERE l.package_id = p.id AND l.expires_at > $1 \
-                           AND l.last_access_at >= $2) AS lease_active \
-                     FROM offline_packages p WHERE p.node_id = $3 AND ( \
+                           AND l.last_access_at >= $2) AS lease_active, \
+                         f.item_id AS activity_item_id, \
+                         COALESCE(i.title, 'Unavailable media') AS activity_title, \
+                         COALESCE(u.username, 'Unknown profile') AS activity_user \
+                     FROM offline_packages p \
+                     LEFT JOIN files f ON f.id = p.file_id \
+                     LEFT JOIN items i ON i.id = f.item_id \
+                     LEFT JOIN users u ON u.id = p.user_id \
+                     WHERE p.node_id = $3 AND ( \
                          p.state IN ('queued', 'preparing') OR EXISTS ( \
                            SELECT 1 FROM offline_package_leases l \
                            WHERE l.package_id = p.id AND l.expires_at > $1 \
@@ -1529,6 +1542,9 @@ impl OfflinePackageStore for HiqliteAuthStore {
             .map(|row| OfflineActivityPackage {
                 package: row.package.into(),
                 lease_active: row.lease_active != 0,
+                item_id: row.item_id,
+                title: row.title,
+                user_name: row.user_name,
             })
             .collect())
     }

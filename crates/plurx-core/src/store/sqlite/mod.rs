@@ -1094,6 +1094,24 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn settings_snapshot(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut settings = std::collections::BTreeMap::new();
+            for row in rows {
+                let (key, value) = row?;
+                settings.insert(key, value);
+            }
+            Ok(settings)
+        })
+        .await
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
