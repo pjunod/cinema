@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ab0b986b"]
+ignore = true
+reason = "This metadata-only commit records the retained Rust and three-voter evidence for the preceding lint integration change; it changes no runtime or validation behavior itself."
