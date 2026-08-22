@@ -282,16 +282,6 @@ pub async fn remove_artwork_reserved(
     .map_err(|error| std::io::Error::other(format!("artwork removal worker failed: {error}")))?
 }
 
-/// Copy an existing local image through the same cancellation-safe atomic
-/// publication path used for provider bytes.
-pub(crate) async fn copy_artwork_atomically(source: &Path, target: &Path) -> std::io::Result<()> {
-    let source = source.to_path_buf();
-    publish_artwork_with(target.to_path_buf(), move |temporary| {
-        std::fs::copy(source, temporary).map(|_| ())
-    })
-    .await
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct EnrichReport {
     pub matched: usize,

@@ -887,19 +887,6 @@ impl MediaStore for HiqliteAuthStore {
             .map_err(database_error)
     }
 
-    async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
-        let rows = self
-            .client()
-            .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM items \
-                 WHERE poster_path = $1 OR backdrop_path = $1",
-                params!(filename),
-            )
-            .await
-            .map_err(database_error)?;
-        Ok(rows.first().is_some_and(|row| row.count > 0))
-    }
-
     async fn items_with_artwork_page(
         &self,
         after_item_id: i64,

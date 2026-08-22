@@ -40,7 +40,7 @@ impl FencedPublicationStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_observed_fenced_conn(lease, observed_at_unix_ms, move |conn| {
             Ok(conn.execute(
                 "INSERT INTO settings (key, value, updated_at)
                  VALUES (?1, ?2, unixepoch()) ON CONFLICT(key) DO NOTHING",
@@ -62,7 +62,7 @@ impl FencedPublicationStore for SqliteStore {
         let key = key.to_owned();
         let value = value.to_owned();
         let repair_fence = repair_fence.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_observed_fenced_conn(lease, observed_at_unix_ms, move |conn| {
             Ok(conn.execute(
                 "INSERT INTO settings (key, value, updated_at)
                  SELECT ?1, ?2, unixepoch() WHERE ?3 = ?4 AND EXISTS (
@@ -162,7 +162,7 @@ impl FencedPublicationStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let patch = patch.clone();
         let repair_fence = repair_fence.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_observed_fenced_conn(lease, observed_at_unix_ms, move |conn| {
             apply_metadata_if_artwork_current(conn, item_id, &patch, &repair_fence)
         })
         .await
@@ -193,7 +193,7 @@ impl FencedPublicationStore for SqliteStore {
         let expected = expected.clone();
         let patch = patch.clone();
         let repair_fence = repair_fence.cloned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_observed_fenced_conn(lease, observed_at_unix_ms, move |conn| {
             apply_book_metadata_if_current(conn, &expected, &patch, repair_fence.as_ref())
         })
         .await

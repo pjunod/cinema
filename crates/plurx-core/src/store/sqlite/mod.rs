@@ -1095,6 +1095,58 @@ impl SqliteStore {
         .await
     }
 
+    /// Execute a conditional publication against an exact lease snapshot
+    /// without consuming the token. These compare-and-set mutations can
+    /// legitimately report `false`; the transaction still distinguishes that
+    /// result from a stale or expired singleton lease.
+    async fn with_observed_fenced_conn<T, F>(
+        &self,
+        lease: &Lease,
+        observed_at_unix_ms: i64,
+        f: F,
+    ) -> Result<T, StoreError>
+    where
+        F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let lease = lease.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let current: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM job_leases
+                     WHERE resource = ?1 AND owner_node_id = ?2
+                       AND fence = ?3 AND revision = ?4
+                       AND expires_at_ms = ?5 AND expires_at_ms > ?6
+                 )",
+                params![
+                    lease.resource,
+                    lease.owner_node_id,
+                    i64::try_from(lease.fence).map_err(|error| {
+                        StoreError::Database(format!("lease fence is out of range: {error}"))
+                    })?,
+                    i64::try_from(lease.revision).map_err(|error| {
+                        StoreError::Database(format!("lease revision is out of range: {error}"))
+                    })?,
+                    lease.expires_at_unix_ms,
+                    observed_at_unix_ms,
+                ],
+                |row| row.get(0),
+            )?;
+            if !current {
+                return Err(StoreError::FenceRejected {
+                    resource: lease.resource,
+                    owner_node_id: lease.owner_node_id,
+                    fence: lease.fence,
+                });
+            }
+            let value = f(&tx)?;
+            tx.commit()?;
+            Ok(value)
+        })
+        .await
+    }
+
     /// Like [`with_conn`](Self::with_conn), on a read connection when the
     /// store has them. Only for closures that read: the pool's connections
     /// are opened READ_ONLY, so a write through here fails loudly rather

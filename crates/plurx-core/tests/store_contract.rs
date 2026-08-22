@@ -147,7 +147,9 @@ const MEDIA_METHODS: &[&str] = &[
     "items_needing_artwork",
     "items_missing_artwork",
     "items_with_artwork",
+    "items_with_artwork_page",
     "artwork_filename_is_referenced",
+    "referenced_artwork_filenames",
     "items_missing_genres",
     "update_item_fields",
     "set_nfo_seeded",
@@ -5761,7 +5763,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 176, "review the Store method count");
+    assert_eq!(declared.len(), 190, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

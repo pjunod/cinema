@@ -40,6 +40,7 @@ pub async fn materialize_item_artwork(
     item_id: i64,
     expected: &[String],
 ) -> bool {
+    let publisher = PublicationStore::unfenced(store);
     let Ok(Some(mut item)) = store.get_item(item_id).await else {
         return false;
     };
@@ -54,7 +55,8 @@ pub async fn materialize_item_artwork(
             let Some(directory) = path.parent() else {
                 continue;
             };
-            if let Some(name) = adopt_folder_art(artwork_dir, item.id, directory).await {
+            if let Some(name) = adopt_folder_art(&publisher, artwork_dir, item.id, directory).await
+            {
                 if expected.contains(&name) {
                     return cached_file_is_complete(artwork_dir, &name).await;
                 }
@@ -82,7 +84,7 @@ pub async fn materialize_item_artwork(
     let Some(path) = first_file_path(store, item.id).await else {
         return false;
     };
-    if let Some(name) = adopt_local_art(artwork_dir, item.id, &path).await {
+    if let Some(name) = adopt_local_art(&publisher, artwork_dir, item.id, &path).await {
         if expected.contains(&name) {
             return cached_file_is_complete(artwork_dir, &name).await;
         }
@@ -93,6 +95,7 @@ pub async fn materialize_item_artwork(
         return false;
     }
     generate_thumb(
+        &publisher,
         artwork_dir,
         item.id,
         &path,
@@ -423,7 +426,7 @@ async fn generate_thumb_with(
                     tracing::warn!(item = item_id, %error, "publishing generated local artwork");
                     None
                 }
-        }
+            }
         }
         Err(e) => {
             tracing::warn!(path = %media.display(), error = %e, "spawning ffmpeg for a thumbnail");

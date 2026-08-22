@@ -185,25 +185,6 @@ impl HiqliteAuthStore {
             Ok(false)
         }
     }
-
-    async fn map_returning_fence<T>(
-        &self,
-        result: Result<T, StoreError>,
-        lease: &Lease,
-        observed_at_unix_ms: i64,
-    ) -> Result<T, StoreError> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => match self
-                .require_publication_fence(lease, observed_at_unix_ms)
-                .await
-            {
-                Err(StoreError::FenceRejected { .. }) => Err(fence_rejected(lease)),
-                Err(validation_error) => Err(validation_error),
-                Ok(()) => Err(error),
-            },
-        }
-    }
 }
 
 #[async_trait]

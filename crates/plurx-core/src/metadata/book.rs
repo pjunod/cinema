@@ -187,9 +187,14 @@ pub async fn materialize_item_cover(
             let Some(stream_index) = attached_picture_stream(&probe) else {
                 continue;
             };
-            let Ok(filename) =
-                extract_attached_picture(&publisher, artwork_dir, item.id, &file.path, stream_index)
-                    .await
+            let Ok(filename) = extract_attached_picture(
+                &publisher,
+                artwork_dir,
+                item.id,
+                &file.path,
+                stream_index,
+            )
+            .await
             else {
                 continue;
             };

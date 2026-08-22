@@ -3603,7 +3603,7 @@ async fn handle_request(
             )
             .context("cluster-check unix millisecond clock overflowed")?;
             let resource = format!("cluster-check:artwork-fence:{target_item_id}:{title}");
-            let lease = match store
+            let mut lease = match store
                 .acquire_lease(&resource, "cluster-check-artwork", now_ms, now_ms + 10_000)
                 .await?
             {
@@ -3653,6 +3653,7 @@ async fn handle_request(
                 .await?
                 .context("cluster-check artwork fence target disappeared")?;
             if stale_book_snapshot {
+                let replacement = lease.publication_successor()?;
                 store
                     .apply_metadata_fenced(
                         target_item_id,
@@ -3661,9 +3662,10 @@ async fn handle_request(
                             ..Default::default()
                         },
                         &lease,
-                        now_ms + 3,
+                        &replacement,
                     )
                     .await?;
+                lease = replacement;
             }
             let book = match store
                 .apply_book_metadata_if_current_fenced(
@@ -3808,13 +3810,13 @@ async fn handle_request(
                     .as_millis(),
             )
             .context("cluster-check unix millisecond clock overflowed")?;
+            let observed_at_ms = observed_at_ms.unwrap_or(now_ms);
+            if observed_at_ms >= lease.expires_at_unix_ms {
+                return Ok(Response::Flag { value: false });
+            }
+            let replacement = lease.publication_successor()?;
             match store_ref(store)?
-                .put_setting_fenced(
-                    key,
-                    "removed-owner-write",
-                    lease,
-                    observed_at_ms.unwrap_or(now_ms),
-                )
+                .put_setting_fenced(key, "removed-owner-write", lease, &replacement)
                 .await
             {
                 Ok(()) => Ok(Response::Flag { value: true }),
