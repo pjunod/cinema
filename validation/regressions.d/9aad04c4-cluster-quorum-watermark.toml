@@ -1,0 +1,14 @@
+version = 1
+
+[[coverage]]
+commits = ["9aad04c4"]
+points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades", "server.api"]
+checks = [
+  "api-wire",
+  "cluster-auth",
+  "database-upgrades",
+  "resource-bounds",
+  "rust-gate",
+  "user-journey",
+]
+reason = "The retained three-voter and rolling-compatibility fixtures prove the bounded quorum-backed watermark on leader and follower streams, invalidate its monotonic lease on every term or leader epoch transition and real quorum loss, omit lag when proof is stale, and preserve ordinary consistent queries against an emulated old handler. Exposition and concurrency contracts pin coherent fixed-label validity, age, error, commit-index, and apply-lag publication without Store work or node identity."

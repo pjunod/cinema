@@ -3885,11 +3885,14 @@ pub mod status {
 
     use serde::{Deserialize, Serialize};
 
-    use hiqlite::{Client, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+    use hiqlite::{Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
     use std::sync::{Arc, Mutex};
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
     const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
+    const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
+    const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
+    const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
 
     /// The durable backend serving this daemon process.
     #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -3967,6 +3970,13 @@ pub mod status {
         pub is_leader: bool,
     }
 
+    /// Privacy-safe projection of the latest quorum-confirmed commit proof.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct QuorumWatermarkSample {
+        pub committed_index: u64,
+        pub apply_lag_entries: Option<u64>,
+    }
+
     /// Store-free view consumed by the Prometheus handler.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PassiveRaftMetricsView {
@@ -3976,6 +3986,11 @@ pub mod status {
         pub valid: bool,
         pub errors: u64,
         pub leader_changes: u64,
+        pub watermark_source: bool,
+        pub watermark: Option<QuorumWatermarkSample>,
+        pub watermark_age_millis: Option<u64>,
+        pub watermark_valid: bool,
+        pub watermark_errors: u64,
     }
 
     #[derive(Default)]
@@ -3992,6 +4007,17 @@ pub mod status {
         leader_changes: AtomicU64,
         last_known_leader_present: AtomicBool,
         last_known_leader: AtomicU64,
+        current_leader_present: AtomicBool,
+        current_leader: AtomicU64,
+        local_observation_epoch: AtomicU64,
+        watermark_published: AtomicBool,
+        watermark_term: AtomicU64,
+        watermark_leader: AtomicU64,
+        watermark_committed_index: AtomicU64,
+        watermark_started_nanos: AtomicU64,
+        watermark_local_epoch: AtomicU64,
+        watermark_errors: AtomicU64,
+        watermark_invalidated: AtomicBool,
         sampler_started: AtomicBool,
     }
 
@@ -4001,6 +4027,7 @@ pub mod status {
         inner: Arc<PassiveRaftMetricsAtomics>,
         started_at: Instant,
         local_source: bool,
+        watermark_source: bool,
     }
 
     impl PassiveRaftMetrics {
@@ -4009,16 +4036,27 @@ pub mod status {
                 inner: Arc::new(PassiveRaftMetricsAtomics::default()),
                 started_at: Instant::now(),
                 local_source,
+                watermark_source: local_source,
             }
         }
 
         /// Read one coherent snapshot without locks, Store access, or IO.
         #[must_use]
         pub fn snapshot(&self) -> PassiveRaftMetricsView {
-            self.snapshot_at(self.started_at.elapsed().as_secs())
+            let elapsed = self.started_at.elapsed();
+            self.snapshot_at_times(elapsed.as_secs(), duration_nanos(elapsed))
         }
 
+        #[cfg(test)]
         fn snapshot_at(&self, elapsed: u64) -> PassiveRaftMetricsView {
+            self.snapshot_at_times(elapsed, elapsed.saturating_mul(1_000_000_000))
+        }
+
+        fn snapshot_at_times(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> PassiveRaftMetricsView {
             loop {
                 let before = self.inner.sequence.load(Ordering::Acquire);
                 if before & 1 != 0 {
@@ -4034,9 +4072,45 @@ pub mod status {
                 let is_leader = self.inner.is_leader.load(Ordering::Relaxed);
                 let errors = self.inner.errors.load(Ordering::Relaxed);
                 let leader_changes = self.inner.leader_changes.load(Ordering::Relaxed);
+                let current_leader_present =
+                    self.inner.current_leader_present.load(Ordering::Relaxed);
+                let current_leader = self.inner.current_leader.load(Ordering::Relaxed);
+                let local_observation_epoch =
+                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
+                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
+                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
+                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+                let watermark_committed_index =
+                    self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let watermark_started_nanos =
+                    self.inner.watermark_started_nanos.load(Ordering::Relaxed);
+                let watermark_local_epoch =
+                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+                let watermark_errors = self.inner.watermark_errors.load(Ordering::Relaxed);
+                let watermark_invalidated =
+                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
                 let after = self.inner.sequence.load(Ordering::Acquire);
                 if before == after {
-                    let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
+                    let age_seconds =
+                        published.then(|| elapsed_seconds.saturating_sub(sampled_elapsed));
+                    let local_valid =
+                        age_seconds.is_some_and(|age| age <= PASSIVE_METRICS_FRESHNESS_SECS);
+                    let watermark_age_nanos = watermark_published
+                        .then(|| elapsed_nanos.saturating_sub(watermark_started_nanos));
+                    let watermark_valid = self.watermark_source
+                        && watermark_age_nanos
+                            .is_some_and(|age| age < duration_nanos(QUORUM_WATERMARK_LEASE))
+                        && !watermark_invalidated
+                        && published
+                        && local_valid
+                        && last_applied_present
+                        && leader_known
+                        && current_leader_present
+                        && current_term == watermark_term
+                        && current_leader == watermark_leader
+                        && local_observation_epoch == watermark_local_epoch;
+                    let apply_lag_entries = (watermark_valid && last_applied_present)
+                        .then(|| watermark_committed_index.saturating_sub(last_applied_index));
                     return PassiveRaftMetricsView {
                         local_source: self.local_source,
                         sample: published.then_some(PassiveRaftSample {
@@ -4046,9 +4120,17 @@ pub mod status {
                             is_leader,
                         }),
                         age_seconds,
-                        valid: age_seconds.is_some_and(|age| age <= PASSIVE_METRICS_FRESHNESS_SECS),
+                        valid: local_valid,
                         errors,
                         leader_changes,
+                        watermark_source: self.watermark_source,
+                        watermark: watermark_published.then_some(QuorumWatermarkSample {
+                            committed_index: watermark_committed_index,
+                            apply_lag_entries,
+                        }),
+                        watermark_age_millis: watermark_age_nanos.map(|age| age / 1_000_000),
+                        watermark_valid,
+                        watermark_errors,
                     };
                 }
             }
@@ -4083,6 +4165,23 @@ pub mod status {
             }
 
             let sequence = self.begin_write();
+            let was_published = self.inner.published.load(Ordering::Relaxed);
+            let prior_leader = self
+                .inner
+                .current_leader_present
+                .load(Ordering::Relaxed)
+                .then(|| self.inner.current_leader.load(Ordering::Relaxed));
+            let observation_changed = !was_published
+                || source.current_term != self.inner.current_term.load(Ordering::Relaxed)
+                || source.current_leader != prior_leader;
+            if observation_changed {
+                saturating_increment(&self.inner.local_observation_epoch);
+            }
+            if observation_changed && self.inner.watermark_published.load(Ordering::Relaxed) {
+                self.inner
+                    .watermark_invalidated
+                    .store(true, Ordering::Relaxed);
+            }
             if let Some(leader) = source.current_leader {
                 if self
                     .inner
@@ -4102,6 +4201,12 @@ pub mod status {
             self.inner
                 .current_term
                 .store(source.current_term, Ordering::Relaxed);
+            self.inner
+                .current_leader_present
+                .store(source.current_leader.is_some(), Ordering::Relaxed);
+            self.inner
+                .current_leader
+                .store(source.current_leader.unwrap_or_default(), Ordering::Relaxed);
             self.inner
                 .last_applied_present
                 .store(source.last_applied_index.is_some(), Ordering::Relaxed);
@@ -4125,6 +4230,76 @@ pub mod status {
         fn record_error(&self) {
             let sequence = self.begin_write();
             saturating_increment(&self.inner.errors);
+            self.inner
+                .watermark_invalidated
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+        }
+
+        fn elapsed_nanos(&self) -> u64 {
+            duration_nanos(self.started_at.elapsed())
+        }
+
+        fn publish_watermark(&self, source: DbQuorumWatermark, started_nanos: u64) -> bool {
+            self.publish_watermark_at(source, started_nanos, self.elapsed_nanos())
+        }
+
+        fn publish_watermark_at(
+            &self,
+            source: DbQuorumWatermark,
+            started_nanos: u64,
+            elapsed_nanos: u64,
+        ) -> bool {
+            let sequence = self.begin_write();
+            let expired = elapsed_nanos.saturating_sub(started_nanos)
+                >= duration_nanos(QUORUM_WATERMARK_LEASE);
+            let local_matches = self.inner.published.load(Ordering::Relaxed)
+                && self.inner.leader_known.load(Ordering::Relaxed)
+                && self.inner.current_leader_present.load(Ordering::Relaxed)
+                && self.inner.current_term.load(Ordering::Relaxed) == source.term
+                && self.inner.current_leader.load(Ordering::Relaxed) == source.leader_id;
+            let prior_published = self.inner.watermark_published.load(Ordering::Relaxed);
+            let regressed = prior_published
+                && (source.term < self.inner.watermark_term.load(Ordering::Relaxed)
+                    || source.committed_index
+                        < self.inner.watermark_committed_index.load(Ordering::Relaxed)
+                    || (source.term == self.inner.watermark_term.load(Ordering::Relaxed)
+                        && source.leader_id
+                            != self.inner.watermark_leader.load(Ordering::Relaxed)));
+            if expired || !local_matches || regressed {
+                saturating_increment(&self.inner.watermark_errors);
+                self.end_write(sequence);
+                return false;
+            }
+            self.inner
+                .watermark_term
+                .store(source.term, Ordering::Relaxed);
+            self.inner
+                .watermark_leader
+                .store(source.leader_id, Ordering::Relaxed);
+            self.inner
+                .watermark_committed_index
+                .store(source.committed_index, Ordering::Relaxed);
+            self.inner
+                .watermark_started_nanos
+                .store(started_nanos, Ordering::Relaxed);
+            self.inner.watermark_local_epoch.store(
+                self.inner.local_observation_epoch.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.inner
+                .watermark_invalidated
+                .store(false, Ordering::Relaxed);
+            self.inner
+                .watermark_published
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            true
+        }
+
+        fn record_watermark_error(&self) {
+            let sequence = self.begin_write();
+            saturating_increment(&self.inner.watermark_errors);
             self.end_write(sequence);
         }
 
@@ -4162,6 +4337,10 @@ pub mod status {
         });
     }
 
+    fn duration_nanos(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
+
     #[async_trait::async_trait]
     trait PassiveRaftSource: Send {
         fn snapshot(&self) -> LocalDbRaftSnapshot;
@@ -4176,6 +4355,73 @@ pub mod status {
 
         async fn wait_for_change(&mut self) -> bool {
             LocalDbRaftMetrics::wait_for_change(self).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    trait QuorumWatermarkSource: Send + Sync {
+        async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error>;
+    }
+
+    #[async_trait::async_trait]
+    impl QuorumWatermarkSource for Client {
+        async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
+            self.db_quorum_watermark().await
+        }
+    }
+
+    async fn run_quorum_watermark_loop<S, F>(
+        source: S,
+        metrics: PassiveRaftMetrics,
+        shutdown: F,
+        initial_delay: Duration,
+        refresh_period: Duration,
+        request_timeout: Duration,
+    ) where
+        S: QuorumWatermarkSource,
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(shutdown);
+        if !initial_delay.is_zero() {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = tokio::time::sleep(initial_delay) => {}
+            }
+        }
+        let mut refresh = tokio::time::interval(refresh_period);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = refresh.tick() => {}
+            }
+            let started_nanos = metrics.elapsed_nanos();
+            let result = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = tokio::time::timeout(request_timeout, source.sample()) => result,
+            };
+            match result {
+                Ok(Ok(watermark)) => {
+                    if !metrics.publish_watermark(watermark, started_nanos) {
+                        tracing::warn!(
+                            term = watermark.term,
+                            committed_index = watermark.committed_index,
+                            "rejected quorum watermark that does not match local Raft state"
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    metrics.record_watermark_error();
+                    tracing::debug!(error = %error, "quorum watermark sample failed");
+                }
+                Err(_) => {
+                    metrics.record_watermark_error();
+                    tracing::debug!("quorum watermark sample timed out");
+                }
+            }
         }
     }
 
@@ -4273,6 +4519,9 @@ pub mod status {
             let Some(watch) = self.local_metrics.clone() else {
                 return;
             };
+            let Some(client) = self.client.clone() else {
+                return;
+            };
             if self
                 .passive_metrics
                 .inner
@@ -4281,13 +4530,29 @@ pub mod status {
             {
                 return;
             }
-            run_passive_metrics_loop(
+            let stagger_slot = watch.snapshot().node_id.saturating_sub(1) % 5;
+            let node_stagger = Duration::from_millis(stagger_slot.saturating_mul(75));
+            let local_loop = run_passive_metrics_loop(
                 watch,
-                self.passive_metrics,
-                shutdown,
+                self.passive_metrics.clone(),
+                std::future::pending(),
                 PASSIVE_METRICS_REFRESH,
-            )
-            .await;
+            );
+            let watermark_loop = run_quorum_watermark_loop(
+                client,
+                self.passive_metrics,
+                std::future::pending(),
+                node_stagger,
+                QUORUM_WATERMARK_REFRESH,
+                QUORUM_WATERMARK_TIMEOUT,
+            );
+            tokio::pin!(shutdown, local_loop, watermark_loop);
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {}
+                _ = &mut local_loop => {}
+                _ = &mut watermark_loop => {}
+            }
         }
 
         /// Read the current projection without changing membership or durable data.
@@ -4516,6 +4781,228 @@ pub mod status {
             }
         }
 
+        fn watermark(term: u64, leader_id: u64, committed_index: u64) -> DbQuorumWatermark {
+            DbQuorumWatermark {
+                term,
+                leader_id,
+                committed_index,
+            }
+        }
+
+        #[test]
+        fn quorum_watermark_deadline_is_anchored_before_the_request() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(40), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_000_000_000,
+                10_999_999_999,
+            ));
+            let before_deadline = metrics.snapshot_at_times(10, 10_999_999_999);
+            assert!(before_deadline.watermark_valid);
+            assert_eq!(
+                before_deadline
+                    .watermark
+                    .expect("watermark")
+                    .apply_lag_entries,
+                Some(2)
+            );
+
+            let at_deadline = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!at_deadline.watermark_valid);
+            assert_eq!(
+                at_deadline
+                    .watermark
+                    .expect("retained watermark")
+                    .apply_lag_entries,
+                None
+            );
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 43),
+                11_000_000_000,
+                12_000_000_000,
+            ));
+            assert_eq!(
+                metrics
+                    .snapshot_at_times(12, 12_000_000_000)
+                    .watermark_errors,
+                1
+            );
+        }
+
+        #[test]
+        fn watermark_lease_path_has_no_wall_clock_dependency() {
+            let source = include_str!("migration.rs");
+            let snapshot_path = source
+                .split_once("pub fn snapshot(&self) -> PassiveRaftMetricsView")
+                .expect("snapshot path")
+                .1
+                .split_once("fn publish(&self")
+                .expect("end snapshot path")
+                .0;
+            let publication_path = source
+                .split_once("fn elapsed_nanos(&self)")
+                .expect("watermark publication path")
+                .1
+                .split_once("fn record_watermark_error")
+                .expect("end watermark publication path")
+                .0;
+            let sampler_path = source
+                .split_once("async fn run_quorum_watermark_loop")
+                .expect("watermark sampler path")
+                .1
+                .split_once("async fn run_passive_metrics_loop")
+                .expect("end watermark sampler path")
+                .0;
+
+            for (name, path) in [
+                ("snapshot", snapshot_path),
+                ("publication", publication_path),
+                ("sampler", sampler_path),
+            ] {
+                for forbidden in ["SystemTime", "UNIX_EPOCH", "Utc::", "unix_"] {
+                    assert!(
+                        !path.contains(forbidden),
+                        "{name} path introduced wall-clock dependency {forbidden}"
+                    );
+                }
+            }
+            assert!(snapshot_path.contains("started_at.elapsed()"));
+            assert!(publication_path.contains("started_at.elapsed()"));
+            assert!(sampler_path.contains("metrics.elapsed_nanos()"));
+        }
+
+        #[test]
+        fn every_term_or_leader_transition_invalidates_the_old_generation() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 10_200_000_000)
+                    .watermark_valid
+            );
+
+            assert!(metrics.publish_at(&local_sample(7, Some(42), None), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_300_000_000)
+                    .watermark_valid
+            );
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_400_000_000)
+                    .watermark_valid,
+                "Some -> None -> same leader must not resurrect the old proof"
+            );
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 10_600_000_000)
+                    .watermark_valid
+            );
+
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_700_000_000)
+                    .watermark_valid
+            );
+            assert!(
+                !metrics.publish_watermark_at(watermark(7, 1, 44), 10_700_000_000, 10_800_000_000,),
+                "a delayed old-term response must not revalidate"
+            );
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 44),
+                10_800_000_000,
+                10_900_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 11_000_000_000)
+                    .watermark_valid
+            );
+        }
+
+        #[test]
+        fn watermark_failures_do_not_extend_or_regress_the_last_proof() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            metrics.record_watermark_error();
+            let retained = metrics.snapshot_at_times(10, 10_900_000_000);
+            assert!(retained.watermark_valid);
+            assert_eq!(retained.watermark_errors, 1);
+            assert_eq!(retained.watermark_age_millis, Some(900));
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 44),
+                10_900_000_000,
+                10_950_000_000,
+            ));
+            let expired = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!expired.watermark_valid);
+            assert_eq!(expired.watermark.expect("retained").committed_index, 45);
+            assert_eq!(expired.watermark_errors, 2);
+        }
+
+        #[test]
+        fn watermark_counter_saturates() {
+            let metrics = PassiveRaftMetrics::new(true);
+            metrics
+                .inner
+                .watermark_errors
+                .store(u64::MAX, Ordering::Relaxed);
+            metrics.record_watermark_error();
+            assert_eq!(metrics.snapshot().watermark_errors, u64::MAX);
+        }
+
+        #[test]
+        fn watermark_lease_is_shorter_than_the_vendor_election_floor() {
+            let config = hiqlite::NodeConfig::default_raft_config(1_000);
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < u128::from(config.election_timeout_min),
+                "an isolated former leader must lose its proof before a new election can finish"
+            );
+        }
+
+        #[test]
+        fn watermark_vendor_boundary_is_bounded_and_rolling_safe() {
+            let management = include_str!("../../../../vendor/hiqlite/src/client/mgmt.rs");
+            let api = include_str!("../../../../vendor/hiqlite/src/network/api.rs");
+            let stream = include_str!("../../../../vendor/hiqlite/src/client/stream.rs");
+            assert!(management.contains("DB_QUORUM_WATERMARK_MARKER"));
+            assert!(management.contains("query_remote_req"));
+            assert!(management.contains("ensure_linearizable"));
+            assert!(management.contains("Duration::from_secs(1)"));
+            assert!(api.contains("ApiStreamRequestPayload::QueryConsistent"));
+            assert!(api.contains("db_quorum_watermark_local"));
+            assert!(!api.contains("ApiStreamRequestPayload::QuorumWatermark"));
+            assert!(!stream.contains("ClientStreamReq::QuorumWatermark"));
+
+            let connection = rusqlite::Connection::open_in_memory().expect("SQLite");
+            let old_server_result =
+                connection.prepare("/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL");
+            assert!(
+                old_server_result.is_err(),
+                "an old leader must reject the reserved marker as harmless invalid SQL"
+            );
+        }
+
         #[test]
         fn passive_metrics_refresh_idle_samples_and_expire_without_refresh() {
             let metrics = PassiveRaftMetrics::new(true);
@@ -4619,9 +5106,59 @@ pub mod status {
             handle.join().expect("metrics writer");
         }
 
+        #[test]
+        fn combined_local_and_watermark_view_never_exposes_a_torn_valid_lag() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(1, Some(10), Some(1))));
+            let started = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(1, 1, 15), started));
+            let writer = metrics.clone();
+            let finished = Arc::new(AtomicBool::new(false));
+            let writer_finished = Arc::clone(&finished);
+            let handle = std::thread::spawn(move || {
+                for term in 2..=5_000 {
+                    let leader = if term % 2 == 0 { 2 } else { 1 };
+                    assert!(writer.publish(&local_sample(term, Some(term * 10), Some(leader))));
+                    let started = writer.elapsed_nanos();
+                    assert!(
+                        writer.publish_watermark(watermark(term, leader, term * 10 + 5), started,)
+                    );
+                }
+                writer_finished.store(true, Ordering::Release);
+            });
+
+            while !finished.load(Ordering::Acquire) {
+                let view = metrics.snapshot();
+                if view.watermark_valid {
+                    assert_eq!(
+                        view.watermark.expect("valid watermark").apply_lag_entries,
+                        Some(5)
+                    );
+                } else if let Some(watermark) = view.watermark {
+                    assert_eq!(watermark.apply_lag_entries, None);
+                }
+            }
+            handle.join().expect("metrics writer");
+        }
+
         struct FakePassiveSource {
             receiver: tokio::sync::watch::Receiver<LocalDbRaftSnapshot>,
             snapshots: Arc<AtomicU64>,
+        }
+
+        struct FakeWatermarkSource {
+            sample: DbQuorumWatermark,
+            delay: Duration,
+            calls: Arc<AtomicU64>,
+        }
+
+        #[async_trait::async_trait]
+        impl QuorumWatermarkSource for FakeWatermarkSource {
+            async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(self.delay).await;
+                Ok(self.sample)
+            }
         }
 
         #[async_trait::async_trait]
@@ -4736,6 +5273,76 @@ pub mod status {
                 .expect("closed watch must not spin")
                 .expect("observer task");
             assert_eq!(metrics.snapshot().errors, 1);
+        }
+
+        #[tokio::test]
+        async fn watermark_sampler_cancellation_publishes_neither_value_nor_error() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(42), Some(1))));
+            let calls = Arc::new(AtomicU64::new(0));
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_quorum_watermark_loop(
+                FakeWatermarkSource {
+                    sample: watermark(7, 1, 42),
+                    delay: Duration::from_secs(60),
+                    calls: Arc::clone(&calls),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::ZERO,
+                Duration::from_millis(1),
+                Duration::from_secs(120),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while calls.load(Ordering::Relaxed) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sampler request started");
+            cancel.send(()).expect("cancel sampler");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("sampler cancellation timeout")
+                .expect("sampler task");
+            let view = metrics.snapshot();
+            assert_eq!(view.watermark, None);
+            assert_eq!(view.watermark_errors, 0);
+        }
+
+        #[tokio::test]
+        async fn watermark_sampler_timeout_keeps_the_source_absent() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(42), Some(1))));
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_quorum_watermark_loop(
+                FakeWatermarkSource {
+                    sample: watermark(7, 1, 42),
+                    delay: Duration::from_secs(60),
+                    calls: Arc::new(AtomicU64::new(0)),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::ZERO,
+                Duration::from_millis(50),
+                Duration::from_millis(1),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while metrics.snapshot().watermark_errors == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sampler timeout recorded");
+            cancel.send(()).expect("cancel sampler");
+            task.await.expect("sampler task");
+            let view = metrics.snapshot();
+            assert_eq!(view.watermark, None);
+            assert!(view.watermark_errors >= 1);
         }
 
         #[tokio::test]

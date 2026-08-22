@@ -2232,46 +2232,75 @@ fn render_passive_raft_metrics(
         "# HELP plurx_raft_metric_sample_valid Whether the named Raft sample is present and fresh.\n\
          # TYPE plurx_raft_metric_sample_valid gauge\n\
          plurx_raft_metric_sample_valid{{source=\"local\"}} {}\n\
+         plurx_raft_metric_sample_valid{{source=\"watermark\"}} {}\n\
          # HELP plurx_raft_metric_sample_errors_total Rejected or closed samples from the named Raft source.\n\
          # TYPE plurx_raft_metric_sample_errors_total counter\n\
          plurx_raft_metric_sample_errors_total{{source=\"local\"}} {}\n\
+         plurx_raft_metric_sample_errors_total{{source=\"watermark\"}} {}\n\
          # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
          # TYPE plurx_raft_leader_changes_total counter\n\
          plurx_raft_leader_changes_total {}\n",
         u8::from(view.valid),
+        u8::from(view.watermark_valid),
         view.errors,
+        view.watermark_errors,
         view.leader_changes,
     );
-    if let Some(age) = view.age_seconds {
-        out.push_str(&format!(
+    if view.age_seconds.is_some() || view.watermark_age_millis.is_some() {
+        out.push_str(
             "# HELP plurx_raft_metric_sample_age_seconds Age of the last successful sample from the named Raft source.\n\
-             # TYPE plurx_raft_metric_sample_age_seconds gauge\n\
-             plurx_raft_metric_sample_age_seconds{{source=\"local\"}} {age}\n"
-        ));
+             # TYPE plurx_raft_metric_sample_age_seconds gauge\n",
+        );
+        if let Some(age) = view.age_seconds {
+            out.push_str(&format!(
+                "plurx_raft_metric_sample_age_seconds{{source=\"local\"}} {age}\n"
+            ));
+        }
+        if let Some(age_millis) = view.watermark_age_millis {
+            out.push_str(&format!(
+                "plurx_raft_metric_sample_age_seconds{{source=\"watermark\"}} {}.{:03}\n",
+                age_millis / 1_000,
+                age_millis % 1_000,
+            ));
+        }
     }
-    let Some(sample) = view.sample else {
-        return out;
-    };
-    out.push_str(&format!(
-        "# HELP plurx_raft_current_term Current term observed from the local Raft watch.\n\
-         # TYPE plurx_raft_current_term gauge\n\
-         plurx_raft_current_term {}\n\
-         # HELP plurx_raft_leader_known Whether the local Raft watch currently identifies a leader.\n\
-         # TYPE plurx_raft_leader_known gauge\n\
-         plurx_raft_leader_known {}\n\
-         # HELP plurx_raft_is_leader Whether this process is the leader in the observed term.\n\
-         # TYPE plurx_raft_is_leader gauge\n\
-         plurx_raft_is_leader {}\n",
-        sample.current_term,
-        u8::from(sample.leader_known),
-        u8::from(sample.is_leader),
-    ));
-    if let Some(index) = sample.last_applied_index {
+    if let Some(sample) = view.sample {
         out.push_str(&format!(
-            "# HELP plurx_raft_applied_index Last log index applied by this local state machine.\n\
-             # TYPE plurx_raft_applied_index gauge\n\
-             plurx_raft_applied_index {index}\n"
+            "# HELP plurx_raft_current_term Current term observed from the local Raft watch.\n\
+             # TYPE plurx_raft_current_term gauge\n\
+             plurx_raft_current_term {}\n\
+             # HELP plurx_raft_leader_known Whether the local Raft watch currently identifies a leader.\n\
+             # TYPE plurx_raft_leader_known gauge\n\
+             plurx_raft_leader_known {}\n\
+             # HELP plurx_raft_is_leader Whether this process is the leader in the observed term.\n\
+             # TYPE plurx_raft_is_leader gauge\n\
+             plurx_raft_is_leader {}\n",
+            sample.current_term,
+            u8::from(sample.leader_known),
+            u8::from(sample.is_leader),
         ));
+        if let Some(index) = sample.last_applied_index {
+            out.push_str(&format!(
+                "# HELP plurx_raft_applied_index Last log index applied by this local state machine.\n\
+                 # TYPE plurx_raft_applied_index gauge\n\
+                 plurx_raft_applied_index {index}\n"
+            ));
+        }
+    }
+    if let Some(watermark) = view.watermark {
+        out.push_str(&format!(
+            "# HELP plurx_raft_commit_index Most recent quorum-confirmed database commit watermark.\n\
+             # TYPE plurx_raft_commit_index gauge\n\
+             plurx_raft_commit_index {}\n",
+            watermark.committed_index,
+        ));
+        if let Some(lag) = watermark.apply_lag_entries {
+            out.push_str(&format!(
+                "# HELP plurx_raft_apply_lag_entries Quorum watermark minus the local applied index.\n\
+                 # TYPE plurx_raft_apply_lag_entries gauge\n\
+                 plurx_raft_apply_lag_entries {lag}\n"
+            ));
+        }
     }
     out
 }
@@ -2476,8 +2505,10 @@ mod tests {
     }
 
     #[test]
-    fn passive_raft_exposition_is_fixed_and_does_not_claim_a_watermark() {
-        use plurx_core::cluster::migration::status::{PassiveRaftMetricsView, PassiveRaftSample};
+    fn raft_exposition_is_fixed_and_privacy_safe() {
+        use plurx_core::cluster::migration::status::{
+            PassiveRaftMetricsView, PassiveRaftSample, QuorumWatermarkSample,
+        };
 
         let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
             local_source: true,
@@ -2491,6 +2522,14 @@ mod tests {
             valid: true,
             errors: 3,
             leader_changes: 4,
+            watermark_source: true,
+            watermark: Some(QuorumWatermarkSample {
+                committed_index: 45,
+                apply_lag_entries: Some(3),
+            }),
+            watermark_age_millis: Some(250),
+            watermark_valid: true,
+            watermark_errors: 5,
         });
 
         assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
@@ -2501,10 +2540,45 @@ mod tests {
         assert!(rendered.contains("plurx_raft_leader_known 1"));
         assert!(rendered.contains("plurx_raft_is_leader 1"));
         assert!(rendered.contains("plurx_raft_leader_changes_total 4"));
-        assert!(!rendered.contains("plurx_raft_commit"));
-        assert!(!rendered.contains("plurx_raft_apply_lag"));
+        assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 1"));
+        assert!(
+            rendered.contains("plurx_raft_metric_sample_age_seconds{source=\"watermark\"} 0.250")
+        );
+        assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
+        assert!(rendered.contains("plurx_raft_commit_index 45"));
+        assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
         assert!(!rendered.contains("node_id"));
         assert!(!rendered.contains("leader_id"));
+
+        let stale = render_passive_raft_metrics(PassiveRaftMetricsView {
+            watermark_valid: false,
+            watermark_age_millis: Some(1_001),
+            watermark: Some(QuorumWatermarkSample {
+                committed_index: 45,
+                apply_lag_entries: None,
+            }),
+            ..PassiveRaftMetricsView {
+                local_source: true,
+                sample: Some(PassiveRaftSample {
+                    current_term: 7,
+                    last_applied_index: Some(42),
+                    leader_known: true,
+                    is_leader: false,
+                }),
+                age_seconds: Some(1),
+                valid: true,
+                errors: 0,
+                leader_changes: 0,
+                watermark_source: true,
+                watermark: None,
+                watermark_age_millis: None,
+                watermark_valid: false,
+                watermark_errors: 1,
+            }
+        });
+        assert!(stale.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
+        assert!(stale.contains("plurx_raft_commit_index 45"));
+        assert!(!stale.contains("plurx_raft_apply_lag_entries"));
 
         let absent = render_passive_raft_metrics(PassiveRaftMetricsView {
             local_source: false,
@@ -2513,10 +2587,18 @@ mod tests {
             valid: false,
             errors: 0,
             leader_changes: 0,
+            watermark_source: false,
+            watermark: None,
+            watermark_age_millis: None,
+            watermark_valid: false,
+            watermark_errors: 0,
         });
         assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
         assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));
         assert!(!absent.contains("plurx_raft_applied_index"));
+        assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
+        assert!(!absent.contains("plurx_raft_commit_index"));
+        assert!(!absent.contains("plurx_raft_apply_lag_entries"));
     }
 
     fn beacon(event: &str, ms: i64) -> ClientLog {
