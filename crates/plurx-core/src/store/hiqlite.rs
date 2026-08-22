@@ -2533,8 +2533,9 @@ mod tests {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect::<String>();
+        let forbidden_nested_timeout = ["timeout_store(", "self.client()"].concat();
         assert!(
-            !own_source.contains("timeout_store(self.client()"),
+            !own_source.contains(&forbidden_nested_timeout),
             "TimedClient owns the only operation timeout; an equal outer timeout races its terminal metric classification"
         );
     }
