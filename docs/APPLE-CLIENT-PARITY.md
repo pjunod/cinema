@@ -12,79 +12,16 @@ Vision investigation are recorded in
 > Status (2026-08-22): source is v0.2.7, Apple build 78. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
-> landed. Build 78 keeps the ten-foot tvOS dashboard as Standard and adds the
-> shared Mini and full Debug playback-info modes on iOS and tvOS. Build 77
-> carries the explicit delivered-SDR acknowledgement required
-> for a forced bitmap-subtitle session over an HDR source while refusing an
-> unplanned HDR downgrade. Build 75 adds online PDFKit reading on iPhone/iPad with
-> exact-revision temporary bytes, page resume, local search, and protected-
-> document refusal. Build 74 consumes the server-owned ebook format/action registry and
-> keeps external formats out of the built-in and offline readers. Build 73
-> preserves the full tab shell when offline downloads open first, so reconnect
-> and Settings remain reachable. Build 72 displays bounded book author metadata and only exact
-> work-linked editions. Build 71 scopes newest pending offline reading state to the exact
-> item/file/revision edition. Build 70 adds profile-scoped, atomically published offline EPUBs,
-> token-free local reading, and newest-locator reconnect replay on iPhone/iPad.
-> Build 69 adds in-app online EPUB reading on iPhone/iPad through an
-> isolated same-origin WebView with memory-only authentication, shared locator
-> resume, and no tvOS reader action. Build 68 adds revision-bound ebook
-> reading-state wire models and authenticated API routes. Build 67 adopts the
-> bound same-session stall reopen: a sustained
-> stall on a growing session names its exact `previous_session_id` with
-> `reopen_reason: "stall"` so the server answers one rung down, every create
-> states `quality_auto`, and the ladder-floor retry budget the server
-> deliberately does not implement lives here (§ Quality row). Build 66 adds
-> unattended physical-device bandwidth acceptance with exact runway evidence.
-> Build 65 keeps the delivery watchdog honest about a player that is still
-> making progress. Build 64 corrects build 63's delivery watchdog, which fired on
-> healthy buffered playback and interrupted a 2160p session roughly every two
-> minutes; the film clock and buffered runway are now required to corroborate
-> the server's delivery meter. Build 63 hardens stall recovery against the tvOS freeze observed
-> on 2160p copy-HLS: a shared no-progress clock immune to
-> `timeControlStatus` flapping, a bounded unestablished leash instead of a
-> disarmed detector, a server-truth delivery watchdog on the status poll,
-> and a rolling automatic-reopen budget that ends storms at the visible
-> failure screen. Build 62 lists the audio and subtitle tracks a file
-> actually has on the detail screen and lets a viewer choose both before
-> pressing Play (§6).
-> Build 60 requires a concrete selected PGS track before treating the
-> overlay as active. Its physical non-PGS baseline reached active PiP and
-> returned or stopped cleanly on iPhone Air (iOS 26.6) and iPad Pro 13-inch
-> (M4, iPadOS 26.6); the separate PGS refusal remains unverified on hardware.
-> Build 59 keeps every supported-but-unavailable iOS PiP state tappable
-> long enough to explain it, including a detached AVKit controller and the in-
-> app-only PGS overlay. The not-ready explanation clears after five seconds so
-> it cannot pin the player banner or iOS system chrome. Build 58
-> distinguishes a recognized `pgs-v1` Overlay from the
-> Burn-in fallback in the subtitle menu and ships the decidable physical-iPad
-> run in
-> [APPLE-PGS-OVERLAY-ACCEPTANCE.md](APPLE-PGS-OVERLAY-ACCEPTANCE.md).
-> Build 57 requires Select to engage tvOS progress scrubbing, leaving
-> left/right free to cross the transport row without a seek. Build 56 restores
-> bidirectional tvOS focus between show/season header actions and their non-empty
-> child shelves. Build 53 gives season episode artwork a direct Play action
-> while the copy remains Details on iPhone/iPad; tvOS keeps one lifted card
-> whose Select action plays. Build 52 preserves completed offline asset
-> locations across the
-> equivalent `/private/var` and `/var` container spellings returned by the
-> system. Build 51 divides long final audio tails into bounded HLS segments,
-> completes repeated boundaries in the final 5% at their actual media position,
-> and gives genuinely early repeats a telemetered **Try Again** / **Close**
-> failure instead of another automatic reopen. Build 49 adds first-class
-> audiobook details and playback through the
-> shared audio player and progress path. Source and simulator coverage verifies
-> audio-container direct-play routing, resume/Start over selection, global
-> progress, and missing-part advancement; physical-device acceptance remains
-> pending. The native scrubber remains local to the current audiobook part and
-> audiobook offline packages are not yet supported. Build 46 also emits the
-> Performance II N0 TTFF beacon at the first
-> advancing online frame, including the live HLS session id when one exists and
-> separating cold starts from resumes; passing real-device ingest remains
-> unclaimed. The default-off `pgs-v1` overlay client
-> is staged but is not a release claim until the server gate and physical
-> matrix pass. Copied Dolby
-> Vision was resolved on the physical Apple TV 2026-08-03; the historical
-> `-12927` investigation is superseded by
+> landed.
+>
+> Per-build release notes live in
+> [`apple-builds/`](apple-builds/README.md). Builds through 78 are archived in
+> [`history-through-build-78.md`](apple-builds/history-through-build-78.md).
+>
+> The default-off `pgs-v1` overlay client is staged but is not a release claim
+> until the server gate and physical matrix pass. Copied Dolby Vision was
+> resolved on the physical Apple TV 2026-08-03; the historical `-12927`
+> investigation is superseded by
 > [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md)'s
 > resolved status. Repository evidence still says build 70 has not reached
 > TestFlight and the deployment ledger still ends at server `787eaa6`, so

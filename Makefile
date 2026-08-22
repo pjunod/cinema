@@ -320,6 +320,10 @@ hooks: ## Install the functionality-point pre-commit validator
 
 ## ---- apple clients -----------------------------------------------------
 
+.PHONY: apple-build-bump
+apple-build-bump: ## Claim the next Apple build number across every generated surface
+	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
+
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
 # `test-without-building` — the third full Swift compile per run was pure

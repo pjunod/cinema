@@ -144,7 +144,11 @@ test_anchor = "testEarlyEndGetsOneReopenButCannotLoopAtTheSamePosition"
 [[fixes]]
 id = "apple.build-49-documentation-alignment"
 commits = ["c52c38b7"]
-source = "clients/apple/README.md"
+# Issue #509 moved every per-build sentence out of the Apple README's status
+# blockquote into docs/apple-builds/, because that shared insertion point is
+# what made two concurrent Apple branches conflict. The build 49 prose this
+# commit aligned is preserved verbatim in the archive; only its home moved.
+source = "docs/apple-builds/history-through-build-78.md"
 source_anchor = "build `49`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"

@@ -574,12 +574,16 @@ depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichm
 [[points]]
 id = "mobile.versioning"
 title = "Mobile release versioning"
-contract = "Shipped Apple and Android changes advance their store build counters, and both marketing versions track the workspace release."
+contract = "Shipped Apple and Android changes advance their store build counters, both marketing versions track the workspace release, and every copy of the Apple build number is generated from project.yml rather than written by hand."
 paths = [
   "Cargo.toml",
+  "clients/apple/README.md",
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
   "clients/apple/project.yml",
+  "docs/APPLE-CLIENT-PARITY.md",
+  "docs/STATUS.html",
+  "docs/apple-builds/**",
   "clients/android/app/src/main/**",
   "clients/android/app/build.gradle.kts",
   "clients/android/app/proguard-rules.pro",
@@ -588,7 +592,7 @@ paths = [
   "clients/android/gradle/libs.versions.toml",
   "clients/android/settings.gradle.kts",
 ]
-checks = ["mobile-version"]
+checks = ["mobile-version", "operations-contract"]
 
 [[points]]
 id = "apple.client"

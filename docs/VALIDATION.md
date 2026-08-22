@@ -640,6 +640,53 @@ the opposite gap, and out of scope here; adding that coverage would mean
 adopting the same marker for the historical Android mentions the page already
 carries.
 
+### Who owns the Apple build number
+
+The number is claimed once, in `clients/apple/project.yml`. Every other copy is
+**generated** from it by `make apple-build-bump`
+(`validation/apple_build.py`), and `tests/operations/test_apple_build_claims.py`
+re-renders the tree to prove no copy was hand-edited. The generated copies are
+exactly the ones the sweep above already reads:
+
+| Surface | Occurrence |
+| --- | --- |
+| `clients/apple/project.yml` | `CURRENT_PROJECT_VERSION` — the only load-bearing claim |
+| `clients/apple/README.md` | the anchored `> Status:` line |
+| `docs/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
+| `docs/STATUS.html` | the viewers tile and the `👤 Paul` TestFlight upload item |
+
+Per-build narrative is **not** one of them. It lives in `docs/apple-builds/`,
+one file per change, named after the issue rather than the build. Before issue
+#509 that narrative sat at a shared insertion point in the two `> Status:`
+blockquotes and in a growing parenthetical on the `👤 Paul` item, so any two
+concurrent Apple branches conflicted on all three and re-conflicted every time
+`main` moved — while the number itself merged clean, because both branches
+wrote the same next value, into a tree where that value was already taken.
+Builds through 78 are archived verbatim in
+`docs/apple-builds/history-through-build-78.md`.
+
+The relocation is enforced, not merely documented: neither anchored `> Status`
+blockquote may contain a `Build <n> …` sentence. The ban stops at the
+blockquote. Body prose may still narrate a past build — `APPLE-CLIENT-PARITY.md`
+explains under its own headings how a behaviour came to be — because those
+sentences never accumulate at a shared offset, and banning them would push
+authors to reword true prose, which is the same failure `data-build-history`
+exists to prevent on `STATUS.html`.
+
+Nothing above is relaxed. `validation/mobile_versions.py` still requires the
+counter to increase past the **merge target** whenever Apple release inputs
+change, and the claim still has to agree across all four documents. What changed
+is that re-claiming after the base moves is `git merge origin/main` followed by
+`make apple-build-bump` — a sync Git resolves by itself plus one mechanical
+commit — instead of three prose merges and six hand-edited mentions that had
+already merged clean and wrong. The order matters: claiming before the sync
+leaves the branch two above the base while `main` holds one above it, on the
+same line.
+
+The four `👤 device` acceptance items in `STATUS.html` deliberately no longer
+name a build. They are forward-looking instructions rather than evidence, so
+"on the current Apple build" is both truer and one fewer copy to drift.
+
 ## Add a functionality point — define the behavior before its command
 
 Start with the promise and the code capable of violating it. Then attach the
