@@ -256,7 +256,11 @@ async fn exercise_topology(
         raw_commit_latency_us,
         applied_indexes,
         max_apply_lag_entries,
-        controller_host: "github-hosted-ephemeral".to_owned(),
+        controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            "github-hosted-ephemeral".to_owned()
+        } else {
+            "local-semantic-run".to_owned()
+        },
         load_generator_host: "controller-process".to_owned(),
         resources: voters
             .into_iter()
@@ -357,13 +361,8 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
     if artifact.started_at_unix_ms > artifact.finished_at_unix_ms {
         bail!("topology artifact finished before it started");
     }
-    if artifact.workload.operations == 0
-        || artifact.workload.concurrency == 0
-        || artifact.workload.value_bytes == 0
-        || artifact.workload.latency_unit != "microseconds"
-        || artifact.workload.index_unit != "raft_entries"
-    {
-        bail!("topology artifact workload is empty or uses undeclared units");
+    if artifact.workload != TopologyWorkload::semantic() {
+        bail!("topology artifact does not use the version-one pinned workload");
     }
     if artifact.workload.sha256()? != artifact.workload_sha256 {
         bail!("topology artifact workload hash does not match its declaration");
@@ -523,7 +522,7 @@ mod tests {
     use super::*;
 
     fn fixture_run(voter_count: u64, workload_sha256: &str) -> TopologyRun {
-        let raw_commit_latency_us = vec![10, 20, 30, 40];
+        let raw_commit_latency_us = (1..=TOPOLOGY_WRITE_OPERATIONS).collect::<Vec<_>>();
         TopologyRun {
             voter_count,
             quorum: voter_count / 2 + 1,
@@ -534,8 +533,8 @@ mod tests {
             finished_at_unix_ms: 1_002,
             errors: 0,
             applied_index_before: 100,
-            applied_index_after: 104,
-            physical_commit_entries: 4,
+            applied_index_after: 100 + TOPOLOGY_WRITE_OPERATIONS,
+            physical_commit_entries: TOPOLOGY_WRITE_OPERATIONS,
             commit_latency_p50_us: percentile_type7(&raw_commit_latency_us, 0.50).unwrap(),
             commit_latency_p95_us: percentile_type7(&raw_commit_latency_us, 0.95).unwrap(),
             commit_latency_p99_us: percentile_type7(&raw_commit_latency_us, 0.99).unwrap(),
@@ -543,7 +542,7 @@ mod tests {
             applied_indexes: (1..=voter_count)
                 .map(|node_id| NodeAppliedIndex {
                     node_id,
-                    applied_index: 104,
+                    applied_index: 100 + TOPOLOGY_WRITE_OPERATIONS,
                 })
                 .collect(),
             max_apply_lag_entries: 0,
@@ -568,10 +567,7 @@ mod tests {
     }
 
     fn fixture() -> ClusterTopologyArtifact {
-        let workload = TopologyWorkload {
-            operations: 4,
-            ..TopologyWorkload::semantic()
-        };
+        let workload = TopologyWorkload::semantic();
         let workload_sha256 = workload.sha256().unwrap();
         ClusterTopologyArtifact {
             schema_version: TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
