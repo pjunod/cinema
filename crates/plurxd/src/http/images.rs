@@ -304,6 +304,12 @@ async fn read_bounded_local_artwork(
     .flatten()
 }
 
+async fn valid_materialized_artwork(artwork_dir: &FsPath, filename: &str) -> bool {
+    read_bounded_local_artwork(artwork_dir.join(filename))
+        .await
+        .is_some_and(|(bytes, _)| artwork_bytes_match_name(filename, &bytes))
+}
+
 async fn quarantine_corrupt_artwork(
     artwork_dir: &FsPath,
     filename: &str,
@@ -1228,12 +1234,8 @@ async fn materialize_once(
                 }
                 let materialized =
                     futures_util::future::join_all(filenames.into_iter().map(|filename| {
-                        let path = state.artwork_dir.join(&filename);
-                        async move {
-                            tokio::fs::metadata(path)
-                                .await
-                                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-                        }
+                        let artwork_dir = state.artwork_dir.clone();
+                        async move { valid_materialized_artwork(&artwork_dir, &filename).await }
                     }))
                     .await
                     .into_iter()
@@ -1739,6 +1741,24 @@ mod tests {
         retain_recent_artwork_repairs(&mut repair_after, after_grace);
         let due = due_artwork_repairs(missing(), &mut repair_after, after_grace);
         assert_eq!(due.get(&item_id), Some(&vec!["77-poster.jpg".to_owned()]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_repair_validation_rejects_symlinks_and_oversized_outputs() {
+        let directory = tempfile::tempdir().expect("artwork directory");
+        let outside = tempfile::NamedTempFile::new().expect("outside artwork");
+        std::fs::write(outside.path(), b"outside bytes").expect("outside bytes");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("symlink.jpg"))
+            .expect("symlink output");
+        assert!(!valid_materialized_artwork(directory.path(), "symlink.jpg").await);
+
+        let oversized = std::fs::File::create(directory.path().join("oversized.jpg"))
+            .expect("oversized output");
+        oversized
+            .set_len(MAX_ARTWORK_BYTES + 1)
+            .expect("extend sparse artwork");
+        assert!(!valid_materialized_artwork(directory.path(), "oversized.jpg").await);
     }
 
     #[test]

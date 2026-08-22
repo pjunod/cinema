@@ -17,7 +17,11 @@ pub const MANIFEST_FILE: &str = "generation-manifest.json";
 const CHECKPOINT_FILE: &str = ".generation-manifest.checkpoint.json";
 const FORMAT_VERSION: u16 = 1;
 pub const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-pub const MAX_OBJECTS: usize = 100_000;
+/// Maximum inventory guaranteed to serialize under [`MAX_MANIFEST_BYTES`]
+/// even when every safe object name occupies its full 128-byte allowance and
+/// every JSON character needs its permitted escaping. This also bounds the
+/// final descriptor-relative fingerprint pass before publication.
+pub const MAX_OBJECTS: usize = 8_192;
 /// One HLS object may consume at most this much publication, verification, or
 /// scrub I/O. The cap prevents a corrupt manifest from turning a bounded
 /// integrity pass into an unbounded disk read.
@@ -194,6 +198,14 @@ fn safe_object_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
         && name != "."
         && name != ".."
+}
+
+fn safe_generation_id(generation_id: &str) -> bool {
+    !generation_id.is_empty()
+        && generation_id.len() <= 256
+        && generation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
 }
 
 async fn open_read_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
@@ -835,8 +847,7 @@ pub async fn publish_controlled_directory<F>(
 where
     F: FnMut() -> bool,
 {
-    if generation_id.is_empty()
-        || generation_id.len() > 256
+    if !safe_generation_id(generation_id)
         || ordered_names.is_empty()
         || ordered_names.len() > MAX_OBJECTS
         || ordered_names.iter().any(|name| !safe_object_name(name))
@@ -953,8 +964,7 @@ fn parse_manifest(encoded: &[u8]) -> Result<GenerationManifest, String> {
     let manifest: GenerationManifest = serde_json::from_slice(encoded)
         .map_err(|error| format!("parsing generation manifest: {error}"))?;
     if manifest.format_version != FORMAT_VERSION
-        || manifest.generation_id.is_empty()
-        || manifest.generation_id.len() > 256
+        || !safe_generation_id(&manifest.generation_id)
         || manifest.object_count != manifest.objects.len()
         || manifest.objects.is_empty()
         || manifest.objects.len() > MAX_OBJECTS
@@ -1586,8 +1596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_appends_across_retries_past_the_former_capacity() {
-        const FORMER_CHECKPOINT_BYTES: u64 = MAX_MANIFEST_BYTES * 2;
+    async fn checkpoint_appends_every_permitted_record_across_retries() {
         const BATCH_RECORDS: usize = 1_024;
 
         let directory = tempfile::tempdir().expect("generation directory");
@@ -1598,18 +1607,15 @@ mod tests {
             .await
             .expect("seed checkpoint");
         let record = maximum_sized_checkpoint_record();
-        let encoded_record_bytes =
-            serde_json::to_vec(&record).expect("serialize record").len() as u64 + 1;
-        let required_records = FORMER_CHECKPOINT_BYTES / encoded_record_bytes + 1;
         let batch = vec![record; BATCH_RECORDS];
         let mut appended = 0_u64;
-        while appended < required_records {
+        while appended < MAX_OBJECTS as u64 {
             // Reopen the directory capability to model a new bounded worker
             // invocation resuming from the durable prefix.
             let retry = crate::fs_secure::SecureDirectory::open(directory.path())
                 .await
                 .expect("retry capability");
-            let remaining = (required_records - appended).min(BATCH_RECORDS as u64) as usize;
+            let remaining = (MAX_OBJECTS as u64 - appended).min(BATCH_RECORDS as u64) as usize;
             assert!(
                 append_checkpoint_directory(&retry, "generation-large", &batch[..remaining])
                     .await
@@ -1621,8 +1627,48 @@ mod tests {
             .child_metadata(CHECKPOINT_FILE)
             .await
             .expect("checkpoint metadata");
-        assert!(checkpoint.identity.size > FORMER_CHECKPOINT_BYTES);
         assert!(checkpoint.identity.size <= MAX_CHECKPOINT_BYTES);
+    }
+
+    #[test]
+    fn maximum_permitted_inventory_fits_the_manifest_byte_contract() {
+        let objects = (0..MAX_OBJECTS)
+            .map(|index| GenerationObject {
+                // Quotes are permitted safe-name characters and exercise the
+                // maximum two-byte JSON escape expansion for all remaining
+                // name bytes.
+                name: format!("{index:08}-{}", "\"".repeat(119)),
+                bytes: MAX_OBJECT_BYTES,
+                sha256: "f".repeat(64),
+            })
+            .collect::<Vec<_>>();
+        assert!(objects.iter().all(|object| safe_object_name(&object.name)));
+        let generation_id = "g".repeat(256);
+        let manifest = GenerationManifest {
+            format_version: FORMAT_VERSION,
+            generation_id: generation_id.clone(),
+            object_count: objects.len(),
+            manifest_digest: body_digest(&generation_id, &objects).expect("manifest digest"),
+            objects,
+        };
+        let encoded = serde_json::to_vec(&manifest).expect("serialize maximum manifest");
+        assert!(encoded.len() as u64 <= MAX_MANIFEST_BYTES);
+    }
+
+    #[tokio::test]
+    async fn generation_id_rejects_json_expansion_outside_the_header_contract() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
+            .await
+            .expect("segment");
+        let error = publish(
+            directory.path(),
+            &"\"".repeat(256),
+            &["seg00000.ts".to_owned()],
+        )
+        .await
+        .expect_err("unsafe generation id");
+        assert!(error.contains("invalid generation manifest identity"));
     }
 
     #[tokio::test]
