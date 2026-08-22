@@ -272,23 +272,37 @@ def branch_fragments(root: Path, merge_target: str) -> tuple[str, ...]:
 
 
 def target_build(root: Path, merge_target: str) -> int:
-    """The highest build the merge target claims, or 0 when it is unreadable.
+    """The highest build the merge target claims.
 
-    An unreadable target is not a failure here: `make apple-build-bump` runs on
-    a fresh clone with no fetched remote, and the counter it produces is checked
-    against the real target by `validation/mobile_versions.py` regardless.
+    An unreadable target is a hard failure, not a zero. Claiming is idempotent,
+    so a target that silently read as 0 would leave every branch already "ahead"
+    and turn the whole tool into a no-op that reports success — the one outcome
+    worse than refusing to run, because the branch then merges carrying a number
+    `main` has already used.
     """
     try:
         contents = _git(root, "show", f"{merge_target}:{PROJECT}")
-    except AppleBuildError:
-        return 0
+    except AppleBuildError as exc:
+        raise AppleBuildError(
+            f"cannot read {PROJECT} at merge target {merge_target!r}: {exc}. "
+            "Fetch it (`git fetch origin`) or name another with --merge-target."
+        ) from exc
     matches = re.findall(r'^\s*CURRENT_PROJECT_VERSION: "([1-9]\d*)"\s*$',
                          contents, re.MULTILINE)
-    return max((int(value) for value in matches), default=0)
+    if not matches:
+        raise AppleBuildError(
+            f"{merge_target}:{PROJECT} declares no CURRENT_PROJECT_VERSION"
+        )
+    return max(int(value) for value in matches)
 
 
 def bump(root: Path = REPO_ROOT, *, merge_target: str = "origin/main",
          build: int | None = None) -> tuple[int, tuple[str, ...]]:
+    # Resolved first, and unconditionally: it is both the number to beat and the
+    # ref `branch_fragments` diffs against, so an unreadable one has to stop the
+    # run here with an answerable message rather than surface as a raw git error
+    # or, worse, as a silent no-op.
+    target = target_build(root, merge_target)
     fragments = branch_fragments(root, merge_target)
     if build is None:
         # Claiming is idempotent. A branch already above the merge target holds
@@ -296,7 +310,6 @@ def bump(root: Path = REPO_ROOT, *, merge_target: str = "origin/main",
         # counter; re-running is the documented response to `main` moving, and
         # it must not punish anyone who runs it twice.
         held = current_build(root)
-        target = target_build(root, merge_target)
         build = held if held > target else target + 1
     changed = render(lambda path: _read(root, path), build, fragments)
     for path, contents in sorted(changed.items()):

@@ -329,6 +329,22 @@ class SequentialMergeCase(unittest.TestCase):
         self.assertEqual(second, base + 1)
         self.assertEqual(changed_again, ())
 
+    def test_an_unreadable_merge_target_refuses_rather_than_no_ops(self) -> None:
+        """The dangerous outcome is a silent success, not a refusal.
+
+        Claiming is idempotent, so a merge target that read as "no claim at all"
+        would leave every branch already ahead of it and turn the tool into a
+        no-op that prints success — and the branch would then merge carrying a
+        number `main` has already used.
+        """
+        self._git_ok("checkout", "-q", "-b", "apple-a", "main")
+
+        with self.assertRaises(AppleBuildError) as raised:
+            bump(self.root, merge_target="origin/nonexistent")
+
+        self.assertIn("merge target", str(raised.exception))
+        self.assertIn("--merge-target", str(raised.exception))
+
     def test_narrative_at_a_shared_insertion_point_still_conflicts(self) -> None:
         """The contrast case: relocating the narrative is what removes the conflict.
 
