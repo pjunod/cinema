@@ -1269,7 +1269,7 @@ mod snapshot_metrics_contracts {
     }
 
     #[tokio::test]
-    async fn legacy_pointer_migration_uses_applied_index_and_survives_auto_heal() {
+    async fn snapshot_metrics_legacy_pointer_uses_applied_index_and_survives_auto_heal() {
         let root = std::env::temp_dir().join(format!(
             "hiqlite-snapshot-legacy-recovery-{}",
             Uuid::now_v7()
@@ -1326,7 +1326,7 @@ mod snapshot_metrics_contracts {
     }
 
     #[tokio::test]
-    async fn legacy_pointer_migration_prefers_live_database_metadata() {
+    async fn snapshot_metrics_legacy_pointer_prefers_live_database_metadata() {
         let root = std::env::temp_dir().join(format!(
             "hiqlite-snapshot-legacy-live-db-{}",
             Uuid::now_v7()
