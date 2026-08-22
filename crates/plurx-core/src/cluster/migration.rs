@@ -3885,9 +3885,12 @@ pub mod status {
 
     use serde::{Deserialize, Serialize};
 
+    pub use hiqlite::{
+        DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,
+    };
     use hiqlite::{
-        Client, DbQuorumWatermark, DbSnapshotMetricsSnapshot, LocalDbRaftMetrics,
-        LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+        Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+        LocalDbSnapshotMetrics,
     };
     use std::sync::{Arc, Mutex};
 

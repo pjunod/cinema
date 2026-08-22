@@ -8,6 +8,11 @@ use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use plurx_core::auth;
+use plurx_core::cluster::migration::status::{
+    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotMetricsSnapshot,
+};
+#[cfg(test)]
+use plurx_core::cluster::migration::status::DbSnapshotHistogram;
 use plurx_core::domain::{PlaybackEvent, PlaybackEventQuery};
 use plurx_core::metadata::genres::GenreBackfillReport;
 use plurx_core::store::{keys, Store};
@@ -2308,7 +2313,7 @@ fn render_passive_raft_metrics(
     out
 }
 
-fn render_snapshot_metrics(out: &mut String, snapshot: hiqlite::DbSnapshotMetricsSnapshot) {
+fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
     out.push_str(
         "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
          # TYPE plurx_raft_snapshot_seconds histogram\n",
@@ -2319,7 +2324,7 @@ fn render_snapshot_metrics(out: &mut String, snapshot: hiqlite::DbSnapshotMetric
         ("install", "ok", snapshot.install_ok),
         ("install", "error", snapshot.install_error),
     ] {
-        for (bound_nanos, count) in hiqlite::DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS
+        for (bound_nanos, count) in DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS
             .iter()
             .zip(histogram.cumulative_buckets)
         {
@@ -2489,7 +2494,7 @@ mod tests {
 
     #[test]
     fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
-        let labels = hiqlite::DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.map(prometheus_seconds_label);
+        let labels = DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.map(prometheus_seconds_label);
         assert_eq!(
             labels,
             [
@@ -2569,7 +2574,7 @@ mod tests {
         use plurx_core::cluster::migration::status::{
             PassiveRaftMetricsView, PassiveRaftSample, QuorumWatermarkSample,
         };
-        let zero_snapshot_histogram = hiqlite::DbSnapshotHistogram {
+        let zero_snapshot_histogram = DbSnapshotHistogram {
             count: 0,
             sum_nanos: 0,
             cumulative_buckets: [0; 16],
@@ -2595,8 +2600,8 @@ mod tests {
             watermark_age_millis: Some(250),
             watermark_valid: true,
             watermark_errors: 5,
-            snapshot_metrics: Some(hiqlite::DbSnapshotMetricsSnapshot {
-                build_ok: hiqlite::DbSnapshotHistogram {
+            snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
+                build_ok: DbSnapshotHistogram {
                     count: 2,
                     sum_nanos: 1_250_000_000,
                     cumulative_buckets: [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2],
