@@ -329,20 +329,45 @@ an operator decision through the safe membership API, never an automated
 "performance" action.
 
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
-settings ship, `storage.data_dir` remains the compatibility root, but child
-mounts can isolate their workloads:
+settings ship, `storage.data_dir` remains the compatibility root. On a fresh
+install, child mounts can isolate their workloads:
 
 | Path | Durability | Placement |
 |---|---|---|
-| `<data_dir>/hiqlite` plus the `node.id`, `membership.json`, activation markers, and credential keys at the data-root level | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/hiqlite` plus `<data_dir>/node.id`, `<data_dir>/membership.json`, activation markers under `<data_dir>/hiqlite`, and `<data_dir>/credentials.key` by default | authoritative voter state | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
 | `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
 | `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
 
-Create and mount every child before starting `plurxd`; an empty fallback
-directory on the root filesystem is not a successful migration. Keep the
-credential key with the durable backup set. Each voter owns its own Hiqlite
-storage: sharing that directory between machines defeats Raft's independent
-failure model.
+Create and mount every child before the first `plurxd` start; an empty fallback
+directory on the root filesystem is not a successful installation. Keep the
+credential key with the durable backup set. If
+`cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
+that exact owner-only file is authoritative and belongs in the same backup and
+move procedure. Each voter owns its own Hiqlite storage: sharing that directory
+between machines defeats Raft's independent failure model.
+
+Do not mount over a populated child directory: that merely hides its data. To
+move an existing cluster, work one non-leader voter at a time. Eject it from
+the load balancer, stop `plurxd`, copy the child contents to the intended device
+while preserving ownership, modes, timestamps, and links, mount the device,
+and verify the copied tree plus free space before restart. Restart and require
+readiness, membership catch-up, and the expected cache/artwork inventory before
+moving the next voter. On failure, stop the daemon, unmount the new device, and
+restart from the untouched original directory; delete neither copy until the
+cluster has completed a soak period. Move the data-root `node.id`,
+`membership.json`, configured credential-key file, and the entire `hiqlite`
+tree as one durable set if the authoritative device changes. Never move two
+voters concurrently.
+
+**Synchronize clocks before cluster work.** All voters and the external load
+generator must run NTP/chrony (or an equivalent disciplined source), and
+monitor offset continuously. Membership reachability and artwork repair proofs
+currently compare Unix timestamps from different nodes. Treat an absolute
+offset above 250 ms, loss of synchronization, or an offset outside the bound
+recorded in the benchmark artifact as a go/no-go failure for membership changes,
+failure drills, or performance runs. Bounded-replica freshness uses a local
+monotonic deadline, but clock synchronization remains an operational
+prerequisite for the existing cross-node protocols and comparable evidence.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
