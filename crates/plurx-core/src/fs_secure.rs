@@ -453,6 +453,50 @@ impl SecureDirectory {
         .map_err(io::Error::other)?
     }
 
+    /// Append bytes to an existing regular child and durably flush them while
+    /// enforcing a total-file ceiling from the same opened descriptor. A
+    /// torn final write remains detectable by record-oriented callers, while
+    /// successful progress never requires rewriting the existing prefix.
+    pub async fn append_bounded_child(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> io::Result<bool> {
+        if max_bytes == 0 || bytes.len() as u64 > max_bytes {
+            return Err(invalid_path("invalid bounded append ceiling"));
+        }
+        let directory = Arc::clone(&self.file);
+        let name = name.to_owned();
+        let bytes = bytes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let name = child_name(&name)?;
+            let mut file = File::from(openat_owned(
+                directory.as_raw_fd(),
+                &name,
+                libc::O_WRONLY
+                    | libc::O_APPEND
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )?);
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Err(io::Error::other(
+                    "bounded append child is not a regular file",
+                ));
+            }
+            if metadata.len().saturating_add(bytes.len() as u64) > max_bytes {
+                return Ok(false);
+            }
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(true)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub async fn unlink_child(&self, name: &str) -> io::Result<()> {
         let directory = Arc::clone(&self.file);
         let name = name.to_owned();

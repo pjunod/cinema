@@ -1371,7 +1371,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
         let mut files = Vec::new();
-        for ordinal in 1..=3 {
+        for ordinal in 1..=5 {
             let item = store
                 .insert_item(&NewItem {
                     library_id: library.id,
@@ -2009,6 +2009,66 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: invalidated cache lookup: {error}"))
             .is_none());
+
+        let conflicting_recipe = "contract-recipe-identity-collision";
+        assert!(store
+            .claim_cache_entry(
+                conflicting_recipe,
+                files[3],
+                1,
+                "recipe-owner",
+                "contract/pretranscode/recipe-owner",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed conflicting recipe: {error}")));
+        let collision_job = make_job(5, "00000000-0000-4000-8000-000000000108");
+        assert!(
+            enqueue_with_successor(store.as_ref(), &collision_job, &mut candidate_lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: enqueue collision job: {error}"))
+        );
+        let collision_claim = store
+            .claim_pretranscode_job(
+                "node-collision",
+                &capable,
+                &[],
+                queue_time(963),
+                queue_time(1_263),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim collision job: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: collision job was not claimable"));
+        assert_eq!(collision_claim.id, collision_job.id, "{backend}");
+        assert!(
+            !store
+                .complete_pretranscode_job(
+                    &collision_claim,
+                    conflicting_recipe,
+                    1,
+                    "contract/pretranscode/collision",
+                    4_096,
+                    None,
+                    &"9".repeat(64),
+                    queue_time(964),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: conflicting completion: {error}")),
+            "{backend}: completion rebound a recipe hash owned by a different file"
+        );
+        assert!(store
+            .cache_hit(conflicting_recipe, "node-collision")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: collision cache lookup: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .pretranscode_job(&collision_claim.id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: collision job lookup: {error}"))
+                .map(|job| job.state),
+            Some("running".to_owned()),
+            "{backend}: rejected recipe identity still settled the queue job"
+        );
         let replacement_job = NewPretranscodeJob {
             id: "00000000-0000-4000-8000-000000000107".to_owned(),
             not_before_ms: 963,

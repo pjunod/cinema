@@ -606,6 +606,21 @@ impl PretranscodeJobStore for SqliteStore {
                     now_unix_ms / 1000
                 ],
             )?;
+            let recipe_matches = tx
+                .query_row(
+                    "SELECT 1 FROM transcode_cache_recipes
+                      WHERE recipe_hash = ?1 AND file_id = ?2 AND recipe_version = ?3",
+                    params![recipe_hash, job.file_id, recipe_version],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if recipe_matches.is_none() {
+                // A hash is immutable recipe identity, not merely a unique
+                // lookup key. Never attach this job's bytes or ready state to
+                // a recipe row owned by another file/schema generation.
+                tx.commit()?;
+                return Ok(false);
+            }
             if let Some(previous_bytes) = expected_previous_bytes {
                 tx.execute(
                     "UPDATE offline_packages

@@ -3081,7 +3081,37 @@ pub(crate) fn validated_vod_part(text: &str) -> Option<crate::produce::Part> {
     {
         return None;
     }
-    let part = crate::produce::Part::from_playlist(text);
+    let mut segments = Vec::new();
+    let mut durations_ms = Vec::new();
+    let mut pending_duration = None;
+    for line in &remaining[..remaining.len().saturating_sub(1)] {
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            if pending_duration.is_some() {
+                return None;
+            }
+            pending_duration = Some(
+                rest.split(',')
+                    .next()?
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|duration| duration.is_finite() && *duration >= 0.0)
+                    .map(|seconds| (seconds * 1000.0).round() as i64)?,
+            );
+        } else if line.starts_with('#') {
+            continue;
+        } else {
+            durations_ms.push(pending_duration.take()?);
+            segments.push((*line).to_owned());
+        }
+    }
+    if pending_duration.is_some() {
+        return None;
+    }
+    let part = crate::produce::Part {
+        segments,
+        durations_ms,
+    };
     if part.is_empty()
         || part.segments.len() != part.durations_ms.len()
         || part.segments.len() >= plurx_core::transcode::manifest::MAX_OBJECTS
@@ -3740,6 +3770,7 @@ async fn read_validated_part(
         }
         let metadata = part_dir.child_metadata(name).await.ok()?;
         if !metadata.is_file
+            || metadata.identity.size == 0
             || metadata.identity.size > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
         {
             return None;
@@ -3804,6 +3835,7 @@ async fn assembled_publication(
         }
         let metadata = directory.child_metadata(name).await.ok()?;
         if !metadata.is_file
+            || metadata.identity.size == 0
             || metadata.identity.size > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
         {
             return None;
@@ -11961,6 +11993,52 @@ mod tests {
         let junk = "#EXTM3U\nseg00007.ts\n#EXTINF:abc,\nseg00008.ts\n#EXTINF:2.0,\n";
         assert!(parse_playlist(junk).is_empty());
         assert!(parse_playlist("").is_empty());
+    }
+
+    #[test]
+    fn retained_vod_validation_rejects_every_unpaired_playlist_uri() {
+        let valid = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n";
+        assert!(validated_vod_part(valid).is_some());
+        assert!(validated_vod_part(
+            "#EXTM3U\nstray.ts\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:1.0,\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:1.0,\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn resumable_and_assembled_publications_reject_empty_segments() {
+        let directory = tempfile::tempdir().expect("generation");
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n",
+        )
+        .await
+        .expect("playlist");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"")
+            .await
+            .expect("empty segment");
+        let capability = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("generation capability");
+
+        assert!(
+            read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+                .await
+                .is_none(),
+            "an empty resumable segment must not become a checkpoint"
+        );
+        assert!(
+            assembled_publication(&capability, 1).await.is_none(),
+            "an empty assembled segment must not become a published generation"
+        );
     }
 
     /// A live EVENT playlist needs both more than one segment and enough media

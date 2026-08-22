@@ -32,24 +32,20 @@ static RESPONSE_SMALL_BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::
 static RESPONSE_MEDIUM_BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 static RESPONSE_LARGE_BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 const CHECKPOINT_INTERVAL: usize = 32;
-const MAX_CHECKPOINT_BYTES: u64 = MAX_MANIFEST_BYTES * 2;
+/// A checkpoint record is bounded independently of input: object names are at
+/// most 128 bytes, both digests are fixed at 64 hex bytes, and every numeric
+/// fingerprint field has a fixed-width integer representation. Keep a
+/// deliberately conservative per-record allowance so every permitted object
+/// can be checkpointed; reaching the ceiling must never make a yieldable
+/// publication livelock on an unpersistable suffix.
+const MAX_CHECKPOINT_RECORD_BYTES: u64 = 768;
+const MAX_CHECKPOINT_HEADER_BYTES: u64 = 1_024;
+const MAX_CHECKPOINT_BYTES: u64 =
+    MAX_CHECKPOINT_HEADER_BYTES + MAX_CHECKPOINT_RECORD_BYTES * MAX_OBJECTS as u64;
 
-fn checkpoint_batch_after(persisted: usize) -> usize {
-    persisted
-        .saturating_add(1)
-        .checked_next_power_of_two()
-        .unwrap_or(MAX_OBJECTS)
-        .max(CHECKPOINT_INTERVAL)
-}
-
-fn checkpoint_should_persist(
-    persisted: usize,
-    completed: usize,
-    batch: usize,
-    yielding: bool,
-) -> bool {
+fn checkpoint_should_persist(persisted: usize, completed: usize, yielding: bool) -> bool {
     completed > persisted
-        && (completed.saturating_sub(persisted) >= batch || (yielding && persisted == 0))
+        && (yielding || completed.saturating_sub(persisted) >= CHECKPOINT_INTERVAL)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -566,54 +562,22 @@ where
 /// never make an otherwise valid final manifest fail.
 async fn append_checkpoint(
     root: &Path,
-    generation_id: &str,
+    _generation_id: &str,
     objects: &[CheckpointObject],
 ) -> Result<bool, String> {
-    let path = root.join(CHECKPOINT_FILE);
     let mut encoded = Vec::new();
     for object in objects {
         serde_json::to_writer(&mut encoded, object)
             .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
         encoded.push(b'\n');
     }
-    let mut existing = match open_read_nofollow(&path).await {
-        Ok(mut file) => {
-            let metadata = file
-                .metadata()
-                .await
-                .map_err(|error| format!("reading generation checkpoint metadata: {error}"))?;
-            if !metadata.is_file() || metadata.len() > MAX_CHECKPOINT_BYTES {
-                return Err("generation checkpoint is not a bounded regular file".to_owned());
-            }
-            let mut existing = Vec::with_capacity(metadata.len() as usize);
-            (&mut file)
-                .take(metadata.len().saturating_add(1))
-                .read_to_end(&mut existing)
-                .await
-                .map_err(|error| format!("reading generation checkpoint: {error}"))?;
-            if existing.len() as u64 != metadata.len() {
-                return Err("generation checkpoint changed while reading".to_owned());
-            }
-            existing
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let header = CheckpointHeader {
-                format_version: FORMAT_VERSION,
-                generation_id: generation_id.to_owned(),
-            };
-            let mut initial = serde_json::to_vec(&header)
-                .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-            initial.push(b'\n');
-            initial
-        }
-        Err(error) => return Err(format!("opening generation checkpoint: {error}")),
-    };
-    if (existing.len() as u64).saturating_add(encoded.len() as u64) > MAX_CHECKPOINT_BYTES {
-        return Ok(false);
-    }
-    existing.extend_from_slice(&encoded);
-    atomic_write(&path, &existing).await?;
-    Ok(true)
+    let directory = crate::fs_secure::SecureDirectory::open(root)
+        .await
+        .map_err(|error| format!("opening generation directory: {error}"))?;
+    directory
+        .append_bounded_child(CHECKPOINT_FILE, &encoded, MAX_CHECKPOINT_BYTES)
+        .await
+        .map_err(|error| format!("appending generation checkpoint: {error}"))
 }
 
 async fn replace_checkpoint(
@@ -706,12 +670,9 @@ where
         }
     }
     let mut persisted = completed.len();
-    let mut checkpoint_batch = checkpoint_batch_after(persisted);
     for name in ordered_names.iter().skip(completed.len()) {
         if should_yield() {
-            if checkpoint_enabled
-                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-            {
+            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
                 if let Err(error) =
                     append_checkpoint(root, generation_id, &completed[persisted..]).await
                 {
@@ -723,9 +684,7 @@ where
         let Some((object, fingerprint)) =
             object_digest_controlled(&root.join(name), &mut should_yield).await?
         else {
-            if checkpoint_enabled
-                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-            {
+            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
                 if let Err(error) =
                     append_checkpoint(root, generation_id, &completed[persisted..]).await
                 {
@@ -735,14 +694,9 @@ where
             return Ok(None);
         };
         completed.push(CheckpointObject::new(object, fingerprint)?);
-        if checkpoint_enabled
-            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, false)
-        {
+        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), false) {
             match append_checkpoint(root, generation_id, &completed[persisted..]).await {
-                Ok(true) => {
-                    persisted = completed.len();
-                    checkpoint_batch = checkpoint_batch.saturating_mul(2).min(MAX_OBJECTS);
-                }
+                Ok(true) => persisted = completed.len(),
                 Ok(false) => checkpoint_enabled = false,
                 Err(error) => {
                     tracing::warn!(%error, "generation digest checkpoint disabled");
@@ -752,9 +706,7 @@ where
         }
     }
     if should_yield() {
-        if checkpoint_enabled
-            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-        {
+        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
             if let Err(error) =
                 append_checkpoint(root, generation_id, &completed[persisted..]).await
             {
@@ -923,38 +875,18 @@ async fn replace_checkpoint_directory(
 
 async fn append_checkpoint_directory(
     root: &crate::fs_secure::SecureDirectory,
-    generation_id: &str,
+    _generation_id: &str,
     objects: &[CheckpointObject],
 ) -> Result<bool, String> {
-    let mut existing = match root
-        .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let header = CheckpointHeader {
-                format_version: FORMAT_VERSION,
-                generation_id: generation_id.to_owned(),
-            };
-            let mut bytes = serde_json::to_vec(&header)
-                .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-            bytes.push(b'\n');
-            bytes
-        }
-        Err(error) => return Err(format!("reading generation checkpoint: {error}")),
-    };
+    let mut encoded = Vec::new();
     for object in objects {
-        serde_json::to_writer(&mut existing, object)
+        serde_json::to_writer(&mut encoded, object)
             .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-        existing.push(b'\n');
+        encoded.push(b'\n');
     }
-    if existing.len() as u64 > MAX_CHECKPOINT_BYTES {
-        return Ok(false);
-    }
-    root.atomic_write_child(CHECKPOINT_FILE, &existing)
+    root.append_bounded_child(CHECKPOINT_FILE, &encoded, MAX_CHECKPOINT_BYTES)
         .await
-        .map_err(|error| format!("publishing generation checkpoint: {error}"))?;
-    Ok(true)
+        .map_err(|error| format!("appending generation checkpoint: {error}"))
 }
 
 async fn object_digest_directory<F>(
@@ -1063,12 +995,9 @@ where
         }
     }
     let mut persisted = completed.len();
-    let mut checkpoint_batch = checkpoint_batch_after(persisted);
     for name in ordered_names.iter().skip(completed.len()) {
         if should_yield() {
-            if checkpoint_enabled
-                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-            {
+            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
                 if let Err(error) =
                     append_checkpoint_directory(root, generation_id, &completed[persisted..]).await
                 {
@@ -1080,9 +1009,7 @@ where
         let Some((object, fingerprint)) =
             object_digest_directory(root, name, &mut should_yield).await?
         else {
-            if checkpoint_enabled
-                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-            {
+            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
                 if let Err(error) =
                     append_checkpoint_directory(root, generation_id, &completed[persisted..]).await
                 {
@@ -1092,14 +1019,9 @@ where
             return Ok(None);
         };
         completed.push(CheckpointObject::new(object, fingerprint)?);
-        if checkpoint_enabled
-            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, false)
-        {
+        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), false) {
             match append_checkpoint_directory(root, generation_id, &completed[persisted..]).await {
-                Ok(true) => {
-                    persisted = completed.len();
-                    checkpoint_batch = checkpoint_batch.saturating_mul(2).min(MAX_OBJECTS);
-                }
+                Ok(true) => persisted = completed.len(),
                 Ok(false) => checkpoint_enabled = false,
                 Err(error) => {
                     tracing::warn!(%error, "generation digest checkpoint disabled");
@@ -1109,9 +1031,7 @@ where
         }
     }
     if should_yield() {
-        if checkpoint_enabled
-            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
-        {
+        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
             let _ = append_checkpoint_directory(root, generation_id, &completed[persisted..]).await;
         }
         return Ok(None);
@@ -1714,44 +1634,109 @@ mod tests {
     }
 
     #[test]
-    fn geometric_checkpoint_rewrites_are_linear_in_final_manifest_size() {
+    fn append_only_checkpoints_advance_under_repeated_small_yield_budgets() {
+        const PER_PASS_BUDGET: usize = 1_000;
         let mut persisted = 0usize;
-        let mut batch = checkpoint_batch_after(persisted);
-        let mut rewritten_objects = 0usize;
+        let mut appended_objects = 0usize;
+        let mut passes = 0usize;
 
-        // Model the exact cost of the current replace-on-checkpoint format:
-        // every checkpoint writes all previously persisted records plus the
-        // new batch. Geometric batches keep their aggregate below a constant
-        // multiple of the final object count instead of the former O(n^2).
-        for completed in 1..=MAX_OBJECTS {
-            if checkpoint_should_persist(persisted, completed, batch, false) {
-                rewritten_objects = rewritten_objects.saturating_add(completed);
+        // Each retry starts from the durable prefix, just like the real
+        // loader. A yield budget smaller than any previous geometric batch
+        // must still make durable forward progress rather than livelock.
+        while persisted < MAX_OBJECTS {
+            passes += 1;
+            let completed = persisted.saturating_add(PER_PASS_BUDGET).min(MAX_OBJECTS);
+            if checkpoint_should_persist(persisted, completed, true) {
+                appended_objects = appended_objects.saturating_add(completed - persisted);
                 persisted = completed;
-                batch = batch.saturating_mul(2).min(MAX_OBJECTS);
             }
+            assert!(passes <= MAX_OBJECTS / PER_PASS_BUDGET + 1);
         }
-        assert!(
-            rewritten_objects <= MAX_OBJECTS.saturating_mul(2),
-            "checkpoint rewrites {rewritten_objects} object records for {MAX_OBJECTS} objects"
-        );
+        assert_eq!(persisted, MAX_OBJECTS);
+        assert_eq!(appended_objects, MAX_OBJECTS);
+    }
 
-        // The first cooperative yield remains useful below the base interval,
-        // while repeated one-object yields after resumption cannot force one
-        // full-file rewrite per object.
-        let mut persisted = 0usize;
-        let mut batch = checkpoint_batch_after(persisted);
-        let mut rewritten_objects = 0usize;
-        for completed in 1..=MAX_OBJECTS {
-            if checkpoint_should_persist(persisted, completed, batch, true) {
-                rewritten_objects = rewritten_objects.saturating_add(completed);
-                persisted = completed;
-                batch = batch.saturating_mul(2).min(MAX_OBJECTS);
-            }
-        }
+    fn maximum_sized_checkpoint_record() -> CheckpointObject {
+        CheckpointObject::new(
+            GenerationObject {
+                name: "x".repeat(128),
+                bytes: u64::MAX,
+                sha256: "f".repeat(64),
+            },
+            FileFingerprint {
+                bytes: u64::MAX,
+                modified_secs: u64::MAX,
+                modified_nanos: u32::MAX,
+                #[cfg(unix)]
+                device: u64::MAX,
+                #[cfg(unix)]
+                inode: u64::MAX,
+                #[cfg(unix)]
+                changed_secs: i64::MIN,
+                #[cfg(unix)]
+                changed_nanos: i64::MIN,
+            },
+        )
+        .expect("bounded checkpoint record")
+    }
+
+    #[test]
+    fn checkpoint_capacity_covers_every_permitted_object_record() {
+        let record = maximum_sized_checkpoint_record();
+        let record_bytes = serde_json::to_vec(&record).expect("serialize record").len() as u64 + 1;
+        let header_bytes = serde_json::to_vec(&CheckpointHeader {
+            format_version: FORMAT_VERSION,
+            generation_id: "g".repeat(256),
+        })
+        .expect("serialize header")
+        .len() as u64
+            + 1;
+        assert!(record_bytes <= MAX_CHECKPOINT_RECORD_BYTES);
+        assert!(header_bytes <= MAX_CHECKPOINT_HEADER_BYTES);
         assert!(
-            rewritten_objects <= MAX_OBJECTS.saturating_mul(3),
-            "yield checkpoints rewrote {rewritten_objects} object records"
+            header_bytes.saturating_add(record_bytes.saturating_mul(MAX_OBJECTS as u64))
+                <= MAX_CHECKPOINT_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_appends_across_retries_past_the_former_capacity() {
+        const FORMER_CHECKPOINT_BYTES: u64 = MAX_MANIFEST_BYTES * 2;
+        const BATCH_RECORDS: usize = 1_024;
+
+        let directory = tempfile::tempdir().expect("generation directory");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        replace_checkpoint_directory(&capability, "generation-large", &[])
+            .await
+            .expect("seed checkpoint");
+        let record = maximum_sized_checkpoint_record();
+        let encoded_record_bytes =
+            serde_json::to_vec(&record).expect("serialize record").len() as u64 + 1;
+        let required_records = FORMER_CHECKPOINT_BYTES / encoded_record_bytes + 1;
+        let batch = vec![record; BATCH_RECORDS];
+        let mut appended = 0_u64;
+        while appended < required_records {
+            // Reopen the directory capability to model a new bounded worker
+            // invocation resuming from the durable prefix.
+            let retry = crate::fs_secure::SecureDirectory::open(directory.path())
+                .await
+                .expect("retry capability");
+            let remaining = (required_records - appended).min(BATCH_RECORDS as u64) as usize;
+            assert!(
+                append_checkpoint_directory(&retry, "generation-large", &batch[..remaining])
+                    .await
+                    .expect("append checkpoint batch")
+            );
+            appended += remaining as u64;
+        }
+        let checkpoint = capability
+            .child_metadata(CHECKPOINT_FILE)
+            .await
+            .expect("checkpoint metadata");
+        assert!(checkpoint.identity.size > FORMER_CHECKPOINT_BYTES);
+        assert!(checkpoint.identity.size <= MAX_CHECKPOINT_BYTES);
     }
 
     #[tokio::test]

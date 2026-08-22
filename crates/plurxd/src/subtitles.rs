@@ -430,8 +430,11 @@ where
     // under its cache name: publishing it would commit the daemon to re-reading
     // it for every segment request until the cache is trimmed.
     let size = tokio::fs::metadata(tmp).await.map(|m| m.len()).unwrap_or(0);
-    if size > limits.max_sidecar_bytes {
+    if size == 0 || size > limits.max_sidecar_bytes {
         let _ = tokio::fs::remove_file(tmp).await;
+        if size == 0 {
+            return Err("subtitle extraction produced an empty sidecar".to_owned());
+        }
         return Err(format!(
             "subtitle sidecar is {size} bytes, above the {} byte cap",
             limits.max_sidecar_bytes
@@ -797,6 +800,41 @@ mod tests {
             !negative_memos().lock().await.contains_key(&key),
             "a published sidecar invalidates the memo"
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_sidecar_is_rejected_and_negative_memoized() {
+        let dir = tempfile::tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let limits = ExtractionLimits {
+            negative_ttl: Duration::from_secs(60),
+            ..ExtractionLimits::default()
+        };
+
+        let runs_for_first = Arc::clone(&runs);
+        let why = ensure_vtt_bounded(dir.path(), &file, 0, limits, move |tmp, _, _| async move {
+            runs_for_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::fs::write(tmp, b"")
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect_err("an empty sidecar is not publishable");
+        assert!(why.contains("empty"), "the error identifies empty output");
+        assert!(!cached.exists(), "empty output must not be published");
+
+        let runs_for_repeat = Arc::clone(&runs);
+        let repeated =
+            ensure_vtt_bounded(dir.path(), &file, 0, limits, move |_, _, _| async move {
+                runs_for_repeat.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+        assert!(repeated.is_err(), "the negative memo suppresses a rescan");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        forget_failure(&cached).await;
     }
 
     /// P2-4: the sidecar is re-read whole for every segment request, so a
