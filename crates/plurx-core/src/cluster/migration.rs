@@ -4047,6 +4047,7 @@ pub mod status {
             self.snapshot_at_times(elapsed.as_secs(), duration_nanos(elapsed))
         }
 
+        #[cfg(test)]
         fn snapshot_at(&self, elapsed: u64) -> PassiveRaftMetricsView {
             self.snapshot_at_times(elapsed, elapsed.saturating_mul(1_000_000_000))
         }
