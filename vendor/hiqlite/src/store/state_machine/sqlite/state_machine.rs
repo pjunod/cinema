@@ -1063,6 +1063,26 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
 
     #[tracing::instrument(level = "trace", skip(self))]
     async fn begin_receiving_snapshot(&mut self) -> Result<Box<fs::File>, StorageError<NodeId>> {
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "snapshot receive refused until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
+        let snapshot_files = self.snapshot_files.clone();
+        let _snapshot_files_guard = snapshot_files.lock().await;
+        if self.snapshot_recovery_pending.load(Ordering::Acquire) {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "snapshot receive refused until pending recovery completes",
+            );
+            return Err(StorageError::IO {
+                source: StorageIOError::write_state_machine(&error),
+            });
+        }
         let path = format!("{}/temp", self.path_snapshots);
 
         // clean up possible existing old data
@@ -1136,6 +1156,7 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 source: StorageIOError::read_state_machine(&error),
             });
         }
+        drop(_snapshot);
 
         // Once the durable snapshot file exists, finish validating, applying,
         // and publishing it even if OpenRaft cancels the caller's future. The
@@ -1176,10 +1197,10 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             publish_current_snapshot(&path_snapshots, Some(&snapshot_id)).await?;
             snapshot_files_guard.current_id = Some(snapshot_id);
             clear_pending_snapshot(&path_snapshots).await?;
+            let _ = fs::remove_file(src).await;
             snapshot_files_guard.pending_id = None;
             snapshot_recovery_pending.store(false, Ordering::Release);
             drop(snapshot_files_guard);
-            let _ = fs::remove_file(src).await;
             task::spawn(snapshots_cleanup(
                 path_snapshots,
                 #[cfg(feature = "backup")]
@@ -1246,11 +1267,12 @@ mod snapshot_metrics_contracts {
     use super::*;
     use crate::helpers::serialize;
     use crate::store::state_machine::sqlite::snapshot_builder::{
-        CURRENT_PUBLICATION_RENAMED, FAIL_CURRENT_PUBLICATION_AFTER_RENAME,
-        RELEASE_CURRENT_PUBLICATION,
+        CURRENT_PUBLICATION_RENAMED, RELEASE_CURRENT_PUBLICATION,
+        inject_current_publication_failure,
     };
     use crate::LocalDbSnapshotMetrics;
     use openraft::{CommittedLeaderId, RaftSnapshotBuilder};
+    use tokio::io::AsyncWriteExt;
 
     async fn write_snapshot_fixture(path: String, snapshot_id: &str, applied_index: u64) {
         let snapshot_id = snapshot_id.to_owned();
@@ -1597,10 +1619,11 @@ mod snapshot_metrics_contracts {
             last_membership: StoredMembership::default(),
             snapshot_id: candidate_id.to_owned(),
         };
+        let mut receiving_state = state.clone();
 
         let renamed = CURRENT_PUBLICATION_RENAMED.notified();
         tokio::pin!(renamed);
-        FAIL_CURRENT_PUBLICATION_AFTER_RENAME.store(true, Ordering::Release);
+        inject_current_publication_failure(&state.path_snapshots);
         let install = task::spawn(async move {
             let result = state
                 .install_snapshot(&candidate_meta, Box::new(receive))
@@ -1608,6 +1631,11 @@ mod snapshot_metrics_contracts {
             (state, result)
         });
         renamed.await;
+        assert!(
+            receiving_state.begin_receiving_snapshot().await.is_err(),
+            "replacement receive must fail closed during pending recovery"
+        );
+        drop(receiving_state);
         install.abort();
         RELEASE_CURRENT_PUBLICATION.notify_one();
         assert!(install.await.expect_err("cancel install caller").is_cancelled());
@@ -1638,6 +1666,25 @@ mod snapshot_metrics_contracts {
                 .await
                 .expect("pending pointer cleared after recovery"),
             SnapshotPointer::Missing
+        );
+        let mut replacement = restarted
+            .begin_receiving_snapshot()
+            .await
+            .expect("begin replacement receive after recovery");
+        replacement
+            .write_all(b"replacement snapshot bytes")
+            .await
+            .expect("write replacement receive bytes");
+        replacement
+            .sync_all()
+            .await
+            .expect("sync replacement receive bytes");
+        drop(replacement);
+        assert_eq!(
+            fs::read(format!("{}/temp", restarted.path_snapshots))
+                .await
+                .expect("read replacement receive after recovery"),
+            b"replacement snapshot bytes"
         );
         shutdown_state(&restarted).await;
         fs::remove_dir_all(&root)

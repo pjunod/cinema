@@ -24,11 +24,19 @@ const PENDING_SNAPSHOT_POINTER_TEMP: &str = "pending.temp";
 const NO_CURRENT_SNAPSHOT: &str = "none";
 
 #[cfg(test)]
-pub(crate) static FAIL_CURRENT_PUBLICATION_AFTER_RENAME: AtomicBool = AtomicBool::new(false);
+static FAIL_CURRENT_PUBLICATION_AFTER_RENAME: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
 #[cfg(test)]
 pub(crate) static CURRENT_PUBLICATION_RENAMED: Notify = Notify::const_new();
 #[cfg(test)]
 pub(crate) static RELEASE_CURRENT_PUBLICATION: Notify = Notify::const_new();
+
+#[cfg(test)]
+pub(crate) fn inject_current_publication_failure(path_snapshots: &str) {
+    *FAIL_CURRENT_PUBLICATION_AFTER_RENAME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path_snapshots.to_owned());
+}
 
 #[derive(Debug, Clone)]
 pub struct SQLiteSnapshotBuilder {
@@ -351,9 +359,19 @@ async fn publish_snapshot_pointer(
             source: StorageIOError::write_state_machine(&error),
         })?;
     #[cfg(test)]
-    if pointer_name == CURRENT_SNAPSHOT_POINTER
-        && FAIL_CURRENT_PUBLICATION_AFTER_RENAME.swap(false, Ordering::AcqRel)
-    {
+    let fail_current_publication = pointer_name == CURRENT_SNAPSHOT_POINTER && {
+        let mut target = FAIL_CURRENT_PUBLICATION_AFTER_RENAME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if target.as_deref() == Some(path_snapshots) {
+            target.take();
+            true
+        } else {
+            false
+        }
+    };
+    #[cfg(test)]
+    if fail_current_publication {
         CURRENT_PUBLICATION_RENAMED.notify_one();
         RELEASE_CURRENT_PUBLICATION.notified().await;
         let error = std::io::Error::other("injected current-pointer durability failure");
