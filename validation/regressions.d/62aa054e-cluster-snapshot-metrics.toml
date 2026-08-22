@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["62aa054e", "7d00f646", "3caf7ea6", "7286221b", "5b8a6235", "3b1cb76e"]
+commits = ["62aa054e", "7d00f646", "3caf7ea6", "7286221b", "5b8a6235", "3b1cb76e", "7bcd22ab"]
 points = [
   "cluster.auth",
   "cluster.page-reads",
@@ -21,4 +21,4 @@ checks = [
   "rust-gate",
   "user-journey",
 ]
-reason = "The retained vendor tests exercise real SQLite snapshot build/install success and error exits, cancellation classification, concurrent immutable metrics publications, exact-pointer reads before and after state-machine restart, and cleanup of a deliberately newer interrupted snapshot while preserving the installed generation and receiver staging file; the one-voter compaction growth gate proves real build deltas. The three-voter target compiles the integration surface, while API/rendering tests prove the local-only wait-free scrape boundary, exact fixed Prometheus labels derived from the exported bounds, and the absence of storage calls or dynamic identifiers."
+reason = "The retained vendor tests exercise real SQLite snapshot build/install success and rejected-candidate exits, cancellation classification, concurrent immutable metrics publications, exact-pointer reads before and after forced auto-heal, cleanup when process memory lags a deliberately older durable pointer, and pointer-less legacy recovery by authoritative live metadata or greatest applied Raft index rather than UUID order; the one-voter compaction growth gate proves real build deltas. The three-voter target compiles the integration surface, while API/rendering tests prove the local-only wait-free scrape boundary, exact fixed Prometheus labels derived from the exported bounds, and the absence of storage calls or dynamic identifiers."
