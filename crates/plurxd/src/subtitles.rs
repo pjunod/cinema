@@ -207,12 +207,25 @@ enum Flight {
 /// cache is read again, under the lock, before anyone is allowed to own the
 /// work. (A failed extraction leaves neither, and the next request correctly
 /// retries it.)
-async fn enlist(cached: &Path) -> Flight {
+async fn valid_sidecar(cached: &Path, max_bytes: u64) -> bool {
+    let cached = cached.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&cached).ok()?;
+        let metadata = file.metadata().ok()?;
+        (metadata.is_file() && metadata.len() > 0 && metadata.len() <= max_bytes).then_some(())
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+async fn enlist(cached: &Path, max_bytes: u64) -> Flight {
     let mut active = extractions().lock().await;
     if let Some(flight) = active.get(cached) {
         return Flight::Join(Arc::clone(flight));
     }
-    if tokio::fs::metadata(cached).await.is_ok() {
+    if valid_sidecar(cached, max_bytes).await {
         return Flight::Published;
     }
     // Disk beats the memo: a published sidecar is the truth about a key, and
@@ -245,7 +258,7 @@ pub async fn ensure_vtt(dir: &Path, file: &MediaFile, index: i64) -> Result<Path
 /// lets later segments pick up the finished captions.
 pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
     let cached = vtt_path(dir, file, index);
-    if tokio::fs::metadata(&cached).await.is_ok() {
+    if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
         return;
     }
     if !warmups().lock().await.insert(cached.clone()) {
@@ -290,14 +303,14 @@ where
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
     let cached = vtt_path(dir, file, index);
-    if tokio::fs::metadata(&cached).await.is_ok() {
+    if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
         return Ok(cached);
     }
 
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("creating subtitle cache: {e}"))?;
-    let (flight, owner) = match enlist(&cached).await {
+    let (flight, owner) = match enlist(&cached, limits.max_sidecar_bytes).await {
         Flight::Published => return Ok(cached),
         // An in-flight extraction outranks the memo; a remembered failure
         // outranks starting the scan over again.
@@ -428,7 +441,7 @@ where
         Ok(()) => {}
         // Two racing misses produce identical bytes. If the peer published
         // first, its file is the answer and this temp is disposable.
-        Err(_) if tokio::fs::metadata(&cached).await.is_ok() => {
+        Err(_) if valid_sidecar(cached, limits.max_sidecar_bytes).await => {
             let _ = tokio::fs::remove_file(&tmp).await;
         }
         Err(e) => {
@@ -580,6 +593,68 @@ mod tests {
                 "a completed extraction must not remain unpublished"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_invalid_sidecar_repair_cannot_remove_the_replacement() {
+        let dir = tempfile::tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        tokio::fs::write(&cached, vec![b'x'; 65])
+            .await
+            .expect("oversized stale sidecar");
+        let limits = ExtractionLimits {
+            max_sidecar_bytes: 64,
+            ..ExtractionLimits::default()
+        };
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let first = {
+            let dir = dir.path().to_owned();
+            let file = file.clone();
+            let runs = Arc::clone(&runs);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                ensure_vtt_bounded(&dir, &file, 0, limits, move |tmp, _, _| async move {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    let _permit = release.acquire().await.expect("release repair");
+                    tokio::fs::write(tmp, b"WEBVTT\n")
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+            })
+        };
+        started_rx.await.expect("repair started");
+        let second = {
+            let dir = dir.path().to_owned();
+            let file = file.clone();
+            let runs = Arc::clone(&runs);
+            tokio::spawn(async move {
+                ensure_vtt_bounded(&dir, &file, 0, limits, move |_, _, _| async move {
+                    runs.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                    Err("concurrent repair must join the owner".to_owned())
+                })
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        release.add_permits(1);
+        assert_eq!(
+            first.await.expect("first waiter").expect("first repair"),
+            cached
+        );
+        assert_eq!(
+            second.await.expect("second waiter").expect("joined repair"),
+            cached
+        );
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            tokio::fs::read(&cached).await.expect("published sidecar"),
+            b"WEBVTT\n"
+        );
     }
 
     /// Real time, deliberately: the bounds under test are injected small, so
@@ -785,7 +860,7 @@ mod tests {
             "no flight is registered for a retired extraction"
         );
         assert!(
-            matches!(enlist(&cached).await, Flight::Published),
+            matches!(enlist(&cached, MAX_SIDECAR_BYTES).await, Flight::Published),
             "a published sidecar must never be re-owned"
         );
         assert!(
@@ -796,8 +871,14 @@ mod tests {
         // The other two arms still work: an unpublished key is owned once and
         // joined thereafter.
         let missing = vtt_path(dir.path(), &file, 1);
-        assert!(matches!(enlist(&missing).await, Flight::Own(_)));
-        assert!(matches!(enlist(&missing).await, Flight::Join(_)));
+        assert!(matches!(
+            enlist(&missing, MAX_SIDECAR_BYTES).await,
+            Flight::Own(_)
+        ));
+        assert!(matches!(
+            enlist(&missing, MAX_SIDECAR_BYTES).await,
+            Flight::Join(_)
+        ));
         extractions().lock().await.remove(&missing);
     }
 }

@@ -3616,6 +3616,7 @@ async fn handle_request(
                     .await?
                     .context("cluster-check artwork publication lease was not renewable")?;
             }
+            let replacement = lease.publication_successor()?;
             let setting = match store
                 .put_setting_if_absent_if_artwork_repair_current_fenced(
                     &format!("cluster-check.artwork-fence.{target_item_id}.{title}"),
@@ -3623,14 +3624,18 @@ async fn handle_request(
                     target_item_id,
                     fence,
                     &lease,
-                    now_ms + 2,
+                    &replacement,
                 )
                 .await
             {
-                Ok(setting) => setting,
+                Ok(setting) => {
+                    lease = replacement;
+                    setting
+                }
                 Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
                 Err(error) => return Err(error.into()),
             };
+            let replacement = lease.publication_successor()?;
             let metadata = match store
                 .apply_metadata_if_artwork_repair_current_fenced(
                     target_item_id,
@@ -3640,11 +3645,14 @@ async fn handle_request(
                     },
                     fence,
                     &lease,
-                    now_ms + 2,
+                    &replacement,
                 )
                 .await
             {
-                Ok(metadata) => metadata,
+                Ok(metadata) => {
+                    lease = replacement;
+                    metadata
+                }
                 Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
                 Err(error) => return Err(error.into()),
             };
@@ -3667,6 +3675,7 @@ async fn handle_request(
                     .await?;
                 lease = replacement;
             }
+            let replacement = lease.publication_successor()?;
             let book = match store
                 .apply_book_metadata_if_current_fenced(
                     &expected,
@@ -3677,10 +3686,11 @@ async fn handle_request(
                         edition_id: Some(format!("{title} edition")),
                         poster_path: None,
                         source: BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     Some(fence),
                     &lease,
-                    now_ms + 4,
+                    &replacement,
                 )
                 .await
             {

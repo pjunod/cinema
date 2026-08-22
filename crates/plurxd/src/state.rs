@@ -2040,7 +2040,9 @@ impl JobManager {
                 );
                 continue;
             }
-            let poster_path = if let Some((cover, reservation, url)) = prepared_cover.take() {
+            let (poster_path, required_origin) = if let Some((cover, reservation, url)) =
+                prepared_cover.take()
+            {
                 let filename = cover.filename().to_owned();
                 if let Err(error) =
                     metadata::book::publish_curator_cover(&self.artwork_dir, cover, reservation)
@@ -2066,9 +2068,9 @@ impl JobManager {
                     tracing::warn!(item = item.id, %error, "persisting Curator cover origin");
                     continue;
                 }
-                Some(filename)
+                (Some(filename), Some((key, origin)))
             } else {
-                None
+                (None, None)
             };
             let patch = BookMetadataPatch {
                 title: hints.title.clone(),
@@ -2077,6 +2079,7 @@ impl JobManager {
                 edition_id: Some(hints.edition_id.clone()),
                 poster_path,
                 source: BookMetadataSource::Curator,
+                required_origin,
             };
             match publisher
                 .apply_book_metadata_if_current(&item, &patch, None)

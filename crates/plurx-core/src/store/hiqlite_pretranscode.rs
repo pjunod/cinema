@@ -33,6 +33,7 @@ const HOLDER_FRESH_SECS: i64 = 48 * 60 * 60;
 // every locally unreadable active row, so one readable lower-priority row can
 // never be starved by refusal rotation.
 const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize + 12;
+const TERMINAL_SETTLEMENT_LEASE_MS: i64 = 30_000;
 
 pub(super) const PRETRANSCODE_JOBS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS pretranscode_jobs (
     id                TEXT PRIMARY KEY,
@@ -181,6 +182,38 @@ fn collect_rows(
         .collect::<Result<Vec<_>, _>>()
         .map(|rows| rows.into_iter().map(|row| row.0).collect())
         .map_err(database_error)
+}
+
+fn settlement_successor_expiry(job: &PretranscodeJob, now_unix_ms: i64) -> Option<i64> {
+    (now_unix_ms < job.lease_expires_ms).then(|| {
+        now_unix_ms
+            .saturating_add(TERMINAL_SETTLEMENT_LEASE_MS)
+            .max(job.lease_expires_ms.saturating_add(1))
+    })
+}
+
+impl HiqliteAuthStore {
+    async fn atomic_pretranscode_settlement(
+        &self,
+        statements: Vec<(String, hiqlite::Params)>,
+    ) -> Result<bool, StoreError> {
+        let results = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let renewed = results.first().copied().unwrap_or_default();
+        let settled = results.last().copied().unwrap_or_default();
+        match (renewed, settled) {
+            (1, 1) => Ok(true),
+            (0, 0) if results.iter().all(|rows| *rows == 0) => Ok(false),
+            _ => Err(StoreError::Database(
+                "pretranscode terminal transaction did not atomically renew and settle".to_owned(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -587,29 +620,44 @@ impl PretranscodeJobStore for HiqliteAuthStore {
         now_unix_ms: i64,
         not_before_ms: i64,
     ) -> Result<bool, StoreError> {
-        // The leader orders this exact-token predicate and mutation as one
-        // Raft entry. The daemon captures `now_unix_ms` while holding its local
-        // token lock, so either a successor claim is ordered first and this
-        // rejects, or this fresh settlement is ordered first and wins.
-        Ok(self
-            .client()
-            .execute(
-                "UPDATE pretranscode_jobs
-                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        not_before_ms = $5, updated_at_ms = $4
+        let Some(successor_expiry) = settlement_successor_expiry(job, now_unix_ms) else {
+            return Ok(false);
+        };
+        self.atomic_pretranscode_settlement(vec![
+            (
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $7, updated_at_ms = $4
                   WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4",
+                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4"
+                    .to_owned(),
                 params!(
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
                     now_unix_ms,
                     not_before_ms.max(now_unix_ms),
-                    job.lease_expires_ms
+                    job.lease_expires_ms,
+                    successor_expiry
                 ),
-            )
-            .await?
-            == 1)
+            ),
+            (
+                "UPDATE pretranscode_jobs
+                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        not_before_ms = $5, updated_at_ms = $4
+                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
+                    AND fence = $3 AND lease_expires_ms = $7"
+                    .to_owned(),
+                params!(
+                    &job.id,
+                    &job.owner_node_id,
+                    job.fence,
+                    now_unix_ms,
+                    not_before_ms.max(now_unix_ms),
+                    job.lease_expires_ms,
+                    successor_expiry
+                ),
+            ),
+        ])
+        .await
     }
 
     async fn fail_pretranscode_job(
@@ -624,9 +672,28 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 "invalid speculative-transcode error code".to_owned(),
             ));
         }
-        Ok(self
-            .client()
-            .execute(
+        let Some(successor_expiry) = settlement_successor_expiry(job, now_unix_ms) else {
+            return Ok(false);
+        };
+        self.atomic_pretranscode_settlement(vec![
+            (
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $9, updated_at_ms = $4
+                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
+                    AND fence = $3 AND lease_expires_ms = $8 AND lease_expires_ms > $4"
+                    .to_owned(),
+                params!(
+                    &job.id,
+                    &job.owner_node_id,
+                    job.fence,
+                    now_unix_ms,
+                    not_before_ms.max(now_unix_ms),
+                    error_code,
+                    MAX_ATTEMPTS,
+                    job.lease_expires_ms,
+                    successor_expiry
+                ),
+            ),
+            (
                 "UPDATE pretranscode_jobs
                     SET state = CASE WHEN attempts + 1 >= $7 THEN 'failed' ELSE 'queued' END,
                         owner_node_id = NULL, lease_expires_ms = NULL,
@@ -639,7 +706,8 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                         attempts = attempts + 1, not_before_ms = $5,
                         last_error_code = $6, updated_at_ms = $4
                   WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $8 AND lease_expires_ms > $4",
+                    AND fence = $3 AND lease_expires_ms = $9"
+                    .to_owned(),
                 params!(
                     &job.id,
                     &job.owner_node_id,
@@ -648,11 +716,12 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     not_before_ms.max(now_unix_ms),
                     error_code,
                     MAX_ATTEMPTS,
-                    job.lease_expires_ms
+                    job.lease_expires_ms,
+                    successor_expiry
                 ),
-            )
-            .await?
-            == 1)
+            ),
+        ])
+        .await
     }
 
     async fn cancel_pretranscode_job(
@@ -666,27 +735,46 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 "invalid speculative-transcode cancellation code".to_owned(),
             ));
         }
-        Ok(self
-            .client()
-            .execute(
-                "UPDATE pretranscode_jobs
-                    SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
-                        staging_node_id = NULL, policy_generation = '',
-                        requirements_json = '{}',
-                        last_error_code = $5, updated_at_ms = $4
+        let Some(successor_expiry) = settlement_successor_expiry(job, now_unix_ms) else {
+            return Ok(false);
+        };
+        self.atomic_pretranscode_settlement(vec![
+            (
+                "UPDATE pretranscode_jobs SET lease_expires_ms = $7, updated_at_ms = $4
                   WHERE id = $1 AND state = 'running' AND owner_node_id = $2
-                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4",
+                    AND fence = $3 AND lease_expires_ms = $6 AND lease_expires_ms > $4"
+                    .to_owned(),
                 params!(
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
                     now_unix_ms,
                     error_code,
-                    job.lease_expires_ms
+                    job.lease_expires_ms,
+                    successor_expiry
                 ),
-            )
-            .await?
-            == 1)
+            ),
+            (
+                "UPDATE pretranscode_jobs
+                    SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                        staging_node_id = NULL, policy_generation = '',
+                        requirements_json = '{}',
+                        last_error_code = $5, updated_at_ms = $4
+                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
+                    AND fence = $3 AND lease_expires_ms = $7"
+                    .to_owned(),
+                params!(
+                    &job.id,
+                    &job.owner_node_id,
+                    job.fence,
+                    now_unix_ms,
+                    error_code,
+                    job.lease_expires_ms,
+                    successor_expiry
+                ),
+            ),
+        ])
+        .await
     }
 
     async fn complete_pretranscode_job(
@@ -710,14 +798,62 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 "invalid speculative-transcode completion".to_owned(),
             ));
         }
+        let Some(successor_expiry) = settlement_successor_expiry(job, now_unix_ms) else {
+            return Ok(false);
+        };
         let current = "EXISTS (
             SELECT 1 FROM pretranscode_jobs job JOIN files file ON file.id = job.file_id
              WHERE job.id = $1 AND job.state = 'running' AND job.owner_node_id = $2
                AND job.fence = $3 AND job.lease_expires_ms = $4
-               AND job.lease_expires_ms > $5
                AND file.size = job.source_size AND file.mtime = job.source_mtime)"
             .to_owned();
         let statements = vec![
+            (
+                "UPDATE pretranscode_jobs
+                    SET lease_expires_ms = $6, updated_at_ms = $5
+                  WHERE id = $1 AND state = 'running' AND owner_node_id = $2
+                    AND fence = $3 AND lease_expires_ms = $4 AND lease_expires_ms > $5
+                    AND EXISTS (SELECT 1 FROM files
+                                 WHERE id = pretranscode_jobs.file_id
+                                   AND size = pretranscode_jobs.source_size
+                                   AND mtime = pretranscode_jobs.source_mtime)
+                    AND (NOT EXISTS (
+                            SELECT 1 FROM transcode_cache_recipes WHERE recipe_hash = $7)
+                         OR EXISTS (
+                            SELECT 1 FROM transcode_cache_recipes
+                             WHERE recipe_hash = $7 AND file_id = pretranscode_jobs.file_id
+                               AND recipe_version = $8))
+                    AND (NOT EXISTS (
+                            SELECT 1 FROM transcode_cache_locations
+                             WHERE recipe_hash = $7 AND node_id = $2
+                               AND storage_class = 'local')
+                         OR EXISTS (
+                            SELECT 1 FROM transcode_cache_locations
+                             WHERE recipe_hash = $7 AND node_id = $2
+                               AND storage_class = 'local'
+                               AND (complete = 0
+                                    OR (relative_dir = $9 AND bytes = $10
+                                        AND manifest_digest = $12)
+                                    OR (relative_dir = $9 AND $11 IS NULL AND bytes = $10
+                                        AND (manifest_digest IS NULL OR manifest_digest = $12))
+                                    OR (relative_dir = $9 AND $11 IS NOT NULL AND bytes = $11
+                                        AND manifest_digest IS NULL AND $10 >= $11))))"
+                    .to_owned(),
+                params!(
+                    &job.id,
+                    &job.owner_node_id,
+                    job.fence,
+                    job.lease_expires_ms,
+                    now_unix_ms,
+                    successor_expiry,
+                    recipe_hash,
+                    recipe_version,
+                    relative_dir,
+                    bytes,
+                    expected_previous_bytes,
+                    manifest_digest
+                ),
+            ),
             (
                 format!(
                     "INSERT INTO transcode_cache_recipes
@@ -729,7 +865,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    job.lease_expires_ms,
+                    successor_expiry,
                     now_unix_ms,
                     recipe_hash,
                     job.file_id,
@@ -755,7 +891,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    job.lease_expires_ms,
+                    successor_expiry,
                     now_unix_ms,
                     recipe_hash,
                     relative_dir,
@@ -790,7 +926,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    job.lease_expires_ms,
+                    successor_expiry,
                     now_unix_ms,
                     recipe_hash,
                     relative_dir,
@@ -809,7 +945,6 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                         requirements_json = '{}', updated_at_ms = $5
                   WHERE id = $1 AND state = 'running' AND owner_node_id = $2
                     AND fence = $3 AND lease_expires_ms = $4
-                    AND lease_expires_ms > $5
                     AND EXISTS (SELECT 1 FROM files
                                  WHERE id = pretranscode_jobs.file_id
                                    AND size = pretranscode_jobs.source_size
@@ -825,7 +960,7 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                     &job.id,
                     &job.owner_node_id,
                     job.fence,
-                    job.lease_expires_ms,
+                    successor_expiry,
                     now_unix_ms,
                     recipe_hash,
                     relative_dir,
@@ -834,20 +969,6 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                 ),
             ),
         ];
-        let results = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        let completed = results.get(3).copied().unwrap_or_default();
-        if completed == 0 && results.iter().take(3).any(|rows| *rows > 0) {
-            return Err(StoreError::Database(
-                "pretranscode publication changed cache state without settling its fence"
-                    .to_owned(),
-            ));
-        }
-        Ok(completed == 1)
+        self.atomic_pretranscode_settlement(statements).await
     }
 }

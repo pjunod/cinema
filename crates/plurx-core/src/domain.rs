@@ -290,6 +290,11 @@ pub struct BookMetadataPatch {
     pub edition_id: Option<String>,
     pub poster_path: Option<String>,
     pub source: BookMetadataSource,
+    /// Exact immutable Curator origin row that must still exist when a
+    /// conditional item update commits. Orphan pruning may remove the row
+    /// between origin publication and this CAS; requiring it here turns that
+    /// interleaving into a retry instead of a cover with no repair authority.
+    pub required_origin: Option<(String, String)>,
 }
 
 /// The outcome of one artwork download.

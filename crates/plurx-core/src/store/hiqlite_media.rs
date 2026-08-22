@@ -1294,7 +1294,15 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15";
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17))";
+        let (origin_key, origin_value) = patch
+            .required_origin
+            .as_ref()
+            .map_or((None, None), |(key, value)| {
+                (Some(key.as_str()), Some(value.as_str()))
+            });
         let changed = if let Some(fence) = repair_fence {
             self.execute(
                 "UPDATE items SET \
@@ -1312,10 +1320,13 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15 AND $16 = $9 \
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17)) \
+                   AND $18 = $9 \
                    AND EXISTS (SELECT 1 FROM cluster_artwork_repairs \
-                     WHERE item_id = $16 AND owner_node_id = $17 AND leader_term = $18 \
-                       AND generation = $19)",
+                     WHERE item_id = $18 AND owner_node_id = $19 AND leader_term = $20 \
+                       AND generation = $21)",
                 params!(
                     patch.title.as_deref(),
                     sort_title,
@@ -1332,6 +1343,8 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
                     expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value,
                     fence.item_id,
                     fence.owner_node_id.as_str(),
                     fence.leader_term,
@@ -1357,7 +1370,9 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_work_id.as_deref(),
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
-                    expected.poster_path.as_deref()
+                    expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value
                 ),
             )
             .await?

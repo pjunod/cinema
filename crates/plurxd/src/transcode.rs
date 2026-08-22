@@ -3192,8 +3192,10 @@ async fn bind_pretranscode_staging(
     Ok(replacement)
 }
 
+#[derive(Clone)]
 pub struct BoundPretranscodeSource {
     snapshot: LocalSourceSnapshot,
+    path: std::path::PathBuf,
     handle: Arc<std::fs::File>,
 }
 
@@ -3244,8 +3246,9 @@ pub async fn pretranscode_source_snapshot(
             break;
         }
         let path = path?;
+        let open_path = path.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            plurx_core::fs_secure::open_read_nofollow_blocking(&open_path)
         })
         .await
         .ok()?
@@ -3257,16 +3260,30 @@ pub async fn pretranscode_source_snapshot(
             && snapshot.modified_secs == file.mtime)
             .then_some(BoundPretranscodeSource {
                 snapshot,
+                path,
                 handle: Arc::new(handle),
             })
     }
 }
 
-fn bound_source_snapshot(handle: Option<&std::fs::File>) -> Option<LocalSourceSnapshot> {
-    handle
-        .and_then(|handle| handle.metadata().ok())
+fn bound_source_snapshot(source: Option<&BoundPretranscodeSource>) -> Option<LocalSourceSnapshot> {
+    let source = source?;
+    let handle_snapshot = source
+        .handle
+        .metadata()
+        .ok()
         .filter(|metadata| metadata.is_file())
-        .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))
+        .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+    if handle_snapshot != source.snapshot {
+        return None;
+    }
+    let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source.path).ok()?;
+    let current_snapshot = current
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+    (current_snapshot == source.snapshot).then_some(current_snapshot)
 }
 
 /// Renewal-safe view of a distributed queue claim.
@@ -3530,7 +3547,7 @@ struct PortableProduction<'a> {
     pretranscode_fence: Option<PretranscodeFence>,
     expected_policy_generation: Option<String>,
     expected_source_snapshot: Option<LocalSourceSnapshot>,
-    bound_source: Option<Arc<std::fs::File>>,
+    bound_source: Option<Arc<BoundPretranscodeSource>>,
 }
 
 /// Everything an earlier pass already encoded, in order.
@@ -5376,14 +5393,14 @@ impl TranscodeManager {
         source: BoundPretranscodeSource,
         fence: PretranscodeFence,
     ) -> Result<PretranscodeProduceOutcome, String> {
-        let BoundPretranscodeSource { snapshot, handle } = source;
+        let snapshot = source.snapshot;
         self.produce_attempt(
             file,
             target_height,
             deadline,
             cancelled,
             Some(snapshot),
-            Some(handle),
+            Some(Arc::new(source)),
             None,
             Some(fence),
         )
@@ -5398,7 +5415,7 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: &tokio_util::sync::CancellationToken,
         expected_source_snapshot: Option<LocalSourceSnapshot>,
-        bound_source: Option<Arc<std::fs::File>>,
+        bound_source: Option<Arc<BoundPretranscodeSource>>,
         publication_fence: Option<PublicationFence>,
         pretranscode_fence: Option<PretranscodeFence>,
     ) -> Result<PretranscodeProduceOutcome, String> {
@@ -6324,7 +6341,7 @@ impl TranscodeManager {
                 use std::os::fd::AsRawFd;
                 descriptor_file = file.clone();
                 descriptor_file.path = std::path::PathBuf::from("/dev/fd/3");
-                (&descriptor_file, Some(source.as_raw_fd()))
+                (&descriptor_file, Some(source.handle.as_raw_fd()))
             } else {
                 (file, None)
             };
@@ -10245,6 +10262,48 @@ mod tests {
             .await
             .is_some(),
             "the longest explicitly configured root authorizes its canonical relocation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bound_source_rejects_same_size_same_mtime_path_replacement() {
+        let root = tempfile::tempdir().expect("library root");
+        let source = root.path().join("movie.mkv");
+        tokio::fs::write(&source, b"original media")
+            .await
+            .expect("source bytes");
+        let metadata = std::fs::metadata(&source).expect("source metadata");
+        let modified = metadata.modified().expect("source modified time");
+        let mut file = profile5_file();
+        file.path = source.clone();
+        file.size = metadata.len() as i64;
+        file.mtime = LocalSourceSnapshot::from_metadata(&metadata).modified_secs;
+        let bound = pretranscode_source_snapshot(&file, &[root.path().to_path_buf()])
+            .await
+            .expect("bound source");
+
+        let replacement = root.path().join("replacement.mkv");
+        std::fs::write(&replacement, b"replaced media").expect("replacement bytes");
+        let replacement_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle");
+        replacement_file
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .expect("preserve mtime");
+        std::fs::rename(&replacement, &source).expect("replace pathname");
+
+        let replacement_metadata = std::fs::metadata(&source).expect("replacement metadata");
+        assert_eq!(replacement_metadata.len(), metadata.len());
+        assert_eq!(
+            LocalSourceSnapshot::from_metadata(&replacement_metadata).modified_secs,
+            file.mtime
+        );
+        assert_eq!(
+            bound_source_snapshot(Some(&bound)),
+            None,
+            "the old descriptor cannot authorize bytes at a replaced pathname"
         );
     }
 

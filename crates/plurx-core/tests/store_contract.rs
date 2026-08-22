@@ -94,6 +94,7 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting",
     "put_setting_if_absent",
     "put_setting_if_absent_if_artwork_repair_current",
+    "prune_unreferenced_book_cover_origins",
     "put_settings",
     "instance_id",
 ];
@@ -643,20 +644,28 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: valid publication: {error}"));
         current = replacement;
+        let replacement = publication_successor(&current);
         assert!(
             store
-                .put_setting_if_absent_fenced("contract.fenced.immutable", "first", &current, 150,)
+                .put_setting_if_absent_fenced(
+                    "contract.fenced.immutable",
+                    "first",
+                    &current,
+                    &replacement,
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: immutable publication: {error}")),
             "{backend}: first immutable publication must win"
         );
+        current = replacement;
+        let replacement = publication_successor(&current);
         assert!(
             !store
                 .put_setting_if_absent_fenced(
                     "contract.fenced.immutable",
                     "replacement",
                     &current,
-                    150,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -664,6 +673,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 }),
             "{backend}: immutable publication must retain its first value"
         );
+        current = replacement;
         let replacement = publication_successor(&current);
         let baseline_book = store
             .insert_item_fenced(
@@ -687,6 +697,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: read conditional baseline: {error}"))
             .unwrap_or_else(|| panic!("{backend}: conditional baseline disappeared"));
+        let replacement = publication_successor(&current);
         assert!(
             store
                 .apply_book_metadata_if_current_fenced(
@@ -698,10 +709,11 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                         edition_id: None,
                         poster_path: None,
                         source: BookMetadataSource::Epub,
+                        required_origin: None,
                     },
                     None,
                     &current,
-                    151,
+                    &replacement,
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -709,6 +721,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 }),
             "{backend}: current snapshot and lease must publish"
         );
+        current = replacement;
         let baseline_after_conditional = store
             .get_item(baseline_book)
             .await
@@ -795,7 +808,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "contract.fenced.stale-immutable",
                 "stale-revision",
                 &first,
-                170,
+                &stale_replacement,
             ),
             "immutable setting"
         );
@@ -841,6 +854,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     edition_id: None,
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 &first,
                 &stale_replacement,
@@ -857,10 +871,11 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     edition_id: None,
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 None,
                 &first,
-                170,
+                &stale_replacement,
             ),
             "conditional book metadata"
         );
@@ -1123,6 +1138,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                     edition_id: Some("edition:fenced".to_owned()),
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 &successor_current,
                 &replacement,
@@ -1329,6 +1345,7 @@ async fn artwork_repair_publication_fails_closed_without_a_job_lease() {
                     edition_id: None,
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 Some(&repair_fence),
             )
@@ -1411,6 +1428,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .expect("contract clock after epoch")
             .as_millis()
             .min(i64::MAX as u128) as i64;
+        let queue_time = |tick: i64| queue_clock.saturating_add(tick.saturating_mul(1_000));
         let first_candidate_lease = acquired(
             store
                 .acquire_lease(
@@ -1478,7 +1496,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
         assert!(
             store
-                .claim_pretranscode_job("node-x", &incompatible, &[], 200, 500)
+                .claim_pretranscode_job(
+                    "node-x",
+                    &incompatible,
+                    &[],
+                    queue_time(200),
+                    queue_time(500),
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: incompatible claim: {error}"))
                 .is_none(),
@@ -1486,9 +1510,9 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let (claim_a, claim_b, claim_c) = tokio::join!(
-            store.claim_pretranscode_job("node-a", &capable, &[], 200, 500),
-            store.claim_pretranscode_job("node-b", &capable, &[], 200, 500),
-            store.claim_pretranscode_job("node-c", &capable, &[], 200, 500),
+            store.claim_pretranscode_job("node-a", &capable, &[], queue_time(200), queue_time(500)),
+            store.claim_pretranscode_job("node-b", &capable, &[], queue_time(200), queue_time(500)),
+            store.claim_pretranscode_job("node-c", &capable, &[], queue_time(200), queue_time(500)),
         );
         let claimed = [
             ("node-a", claim_a),
@@ -1531,7 +1555,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let renewed_a = store
-            .renew_pretranscode_job(&claimed[0], 250, 700)
+            .renew_pretranscode_job(&claimed[0], queue_time(250), queue_time(700))
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew worker: {error}"))
             .unwrap_or_else(|| panic!("{backend}: worker claim did not renew"));
@@ -1544,10 +1568,26 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 4_096,
                 None,
                 &"b".repeat(64),
-                260,
+                queue_time(260),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: complete second job: {error}")));
+        assert!(
+            !store
+                .complete_pretranscode_job(
+                    &claimed[1],
+                    "contract-recipe-b",
+                    1,
+                    "contract/pretranscode/b",
+                    4_096,
+                    None,
+                    &"b".repeat(64),
+                    queue_time(261),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay completion: {error}")),
+            "{backend}: a terminal queue token replayed successfully"
+        );
         assert_eq!(
             store
                 .delete_files(&[claimed[2].file_id])
@@ -1566,7 +1606,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     4_096,
                     None,
                     &"c".repeat(64),
-                    270,
+                    queue_time(270),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: deleted-source completion: {error}")),
@@ -1574,7 +1614,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         );
 
         let successor = store
-            .claim_pretranscode_job("node-d", &capable, &[], 701, 1_000)
+            .claim_pretranscode_job("node-d", &capable, &[], queue_time(701), queue_time(1_000))
             .await
             .unwrap_or_else(|error| panic!("{backend}: expired takeover: {error}"))
             .unwrap_or_else(|| panic!("{backend}: expired job was not restarted"));
@@ -1606,7 +1646,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"a".repeat(64),
-                    702,
+                    queue_time(702),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale completion: {error}")),
@@ -1630,7 +1670,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     8_192,
                     None,
                     &"d".repeat(64),
-                    703,
+                    queue_time(703),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: successor completion: {error}")),
@@ -1674,13 +1714,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: eviction must make the generation eligible again"
         );
         let refused = store
-            .claim_pretranscode_job("node-e", &capable, &[], 705, 1_005)
+            .claim_pretranscode_job("node-e", &capable, &[], queue_time(705), queue_time(1_005))
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim re-enqueued job: {error}"))
             .unwrap_or_else(|| panic!("{backend}: re-enqueued job was not claimable"));
         assert_eq!(refused.dedupe_key, retry.dedupe_key, "{backend}");
         assert!(store
-            .yield_pretranscode_job(&refused, 706, 706)
+            .yield_pretranscode_job(&refused, queue_time(706), queue_time(706))
             .await
             .unwrap_or_else(|error| panic!("{backend}: unreadable-node yield: {error}")));
         assert!(
@@ -1689,8 +1729,8 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                     "node-e",
                     &capable,
                     std::slice::from_ref(&refused.id),
-                    706,
-                    1_006,
+                    queue_time(706),
+                    queue_time(1_006),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: local refusal claim: {error}"))
@@ -1698,7 +1738,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             "{backend}: a node immediately reclaimed the source it had refused"
         );
         let reclaimed = store
-            .claim_pretranscode_job("node-f", &capable, &[], 706, 1_006)
+            .claim_pretranscode_job("node-f", &capable, &[], queue_time(706), queue_time(1_006))
             .await
             .unwrap_or_else(|error| panic!("{backend}: mounted peer claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: local refusal blocked a mounted peer"));
@@ -1710,7 +1750,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
 
         let mut failing = reclaimed;
         for attempt in 1..=5 {
-            let failed_at = 710 + attempt * 2;
+            let failed_at = queue_time(710 + attempt * 2);
             assert!(
                 store
                     .fail_pretranscode_job(&failing, "contract_failure", failed_at, failed_at)
@@ -1720,7 +1760,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             );
             if attempt < 5 {
                 failing = store
-                    .claim_pretranscode_job("node-e", &capable, &[], failed_at + 1, failed_at + 101)
+                    .claim_pretranscode_job(
+                        "node-e",
+                        &capable,
+                        &[],
+                        failed_at + 1_000,
+                        failed_at + 101_000,
+                    )
                     .await
                     .unwrap_or_else(|error| {
                         panic!("{backend}: reclaim failed attempt {attempt}: {error}")
@@ -1776,7 +1822,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             );
         }
         let paged_claim = store
-            .claim_pretranscode_job("node-pagination", &capable, &[], 950, 1_250)
+            .claim_pretranscode_job(
+                "node-pagination",
+                &capable,
+                &[],
+                queue_time(950),
+                queue_time(1_250),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: paged capability claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: compatible row after page one starved"));
@@ -1829,7 +1881,13 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: enqueue legacy reuse: {error}"))
         );
         let legacy_claim = store
-            .claim_pretranscode_job("node-legacy", &capable, &[], 961, 1_261)
+            .claim_pretranscode_job(
+                "node-legacy",
+                &capable,
+                &[],
+                queue_time(961),
+                queue_time(1_261),
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim legacy reuse: {error}"))
             .unwrap_or_else(|| panic!("{backend}: legacy reuse was not claimable"));
@@ -1843,7 +1901,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 16_896,
                 Some(16_384),
                 &adopted_digest,
-                962,
+                queue_time(962),
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: bind legacy manifest: {error}")));
@@ -1961,6 +2019,113 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             enqueue_with_successor(store.as_ref(), &replacement_job, &mut candidate_lease,)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: enqueue corrupt replacement: {error}"))
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn curator_origin_pruning_is_bounded_and_reference_safe() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Curator Origin Retention".to_owned(),
+                kind: LibraryKind::Books,
+                paths: vec![PathBuf::from("/contract/curator-origin")],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create library: {error}"));
+        let item_id = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Book,
+                parent_id: None,
+                title: "Origin Retention".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: insert item: {error}"));
+        let filename = format!("{item_id}-poster-{}.jpg", "a".repeat(64));
+        let origin = serde_json::json!({
+            "edition_id": "curator:item:retention:ebook",
+            "url": "https://covers.openlibrary.org/b/id/1-L.jpg",
+            "filename": filename,
+        })
+        .to_string();
+        for suffix in ["first", "second"] {
+            assert!(store
+                .put_setting_if_absent(
+                    &format!("internal.book_cover_origin.{item_id}.{suffix}"),
+                    &origin,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: insert origin: {error}")));
+        }
+        let expected = store
+            .get_item(item_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read origin item: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: origin item disappeared"));
+        assert_eq!(
+            store
+                .prune_unreferenced_book_cover_origins(&filename)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: interleaved prune: {error}")),
+            2
+        );
+        let origin_key = format!("internal.book_cover_origin.{item_id}.first");
+        let guarded_patch = BookMetadataPatch {
+            title: None,
+            author: None,
+            work_id: Some("curator:work:retention".to_owned()),
+            edition_id: Some("curator:item:retention:ebook".to_owned()),
+            poster_path: Some(filename.clone()),
+            source: BookMetadataSource::Curator,
+            required_origin: Some((origin_key.clone(), origin.clone())),
+        };
+        assert!(
+            !store
+                .apply_book_metadata_if_current(&expected, &guarded_patch, None)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: pruned-origin CAS: {error}")),
+            "{backend}: item publication committed after its exact origin was pruned"
+        );
+        assert!(store
+            .put_setting_if_absent(&origin_key, &origin)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: restore origin: {error}")));
+        assert!(store
+            .apply_book_metadata_if_current(&expected, &guarded_patch, None)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: guarded origin CAS: {error}")));
+        assert_eq!(
+            store
+                .prune_unreferenced_book_cover_origins(&filename)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: protected prune: {error}")),
+            0,
+            "{backend}: a referenced generation lost its repair origins"
+        );
+        store
+            .apply_metadata(
+                item_id,
+                &MetadataPatch {
+                    poster_path: Some(format!("{item_id}-poster-{}.jpg", "b".repeat(64))),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: supersede generation: {error}"));
+        assert_eq!(
+            store
+                .prune_unreferenced_book_cover_origins(&filename)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: orphan prune: {error}")),
+            1,
+            "{backend}: obsolete immutable origins grew without a bound"
         );
     })
     .await;
@@ -5763,7 +5928,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 190, "review the Store method count");
+    assert_eq!(declared.len(), 191, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -6571,6 +6736,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: Some("urn:isbn:package".into()),
                     poster_path: Some("books/epub-cover.jpg".into()),
                     source: BookMetadataSource::Epub,
+                    required_origin: None,
                 },
             )
             .await
@@ -6585,6 +6751,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: Some("curator:edition:ebook".into()),
                     poster_path: Some("curator-cover.jpg".into()),
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -6599,6 +6766,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: Some("urn:isbn:late".into()),
                     poster_path: Some("books/late-cover.jpg".into()),
                     source: BookMetadataSource::Epub,
+                    required_origin: None,
                 },
             )
             .await
@@ -6613,6 +6781,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: Some("curator:edition:audiobook".into()),
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -6645,6 +6814,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: None,
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -6660,6 +6830,7 @@ async fn media_contract_runs_through_dyn_store() {
                         edition_id: enriched.book_edition_id.clone(),
                         poster_path: enriched.poster_path.clone(),
                         source: BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     None,
                 )
@@ -6693,6 +6864,7 @@ async fn media_contract_runs_through_dyn_store() {
                     edition_id: None,
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await

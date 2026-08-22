@@ -357,6 +357,13 @@ pub trait SettingsStore: Send + Sync + 'static {
         expected_item_id: i64,
         fence: &ArtworkRepairFence,
     ) -> Result<bool, StoreError>;
+    /// Remove immutable Curator origin records for one artwork generation,
+    /// but only when no catalogue row references that filename in the same
+    /// transaction. This bounds replicated history after orphan collection.
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError>;
     /// Atomically publish a related group of settings.
     ///
     /// Callers use this when one key activates the meaning of another. A
@@ -1634,7 +1641,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn put_setting_if_absent_if_artwork_repair_current_fenced(
@@ -1644,7 +1651,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         expected_item_id: i64,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError>;
     async fn mark_library_scanned_fenced(
         &self,
@@ -1673,7 +1680,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         patch: &MetadataPatch,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError>;
     async fn apply_book_metadata_fenced(
         &self,
@@ -1689,7 +1696,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         patch: &BookMetadataPatch,
         repair_fence: Option<&ArtworkRepairFence>,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError>;
     async fn set_nfo_seeded_fenced(
         &self,

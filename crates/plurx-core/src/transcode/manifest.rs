@@ -34,6 +34,24 @@ static RESPONSE_LARGE_BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::
 const CHECKPOINT_INTERVAL: usize = 32;
 const MAX_CHECKPOINT_BYTES: u64 = MAX_MANIFEST_BYTES * 2;
 
+fn checkpoint_batch_after(persisted: usize) -> usize {
+    persisted
+        .saturating_add(1)
+        .checked_next_power_of_two()
+        .unwrap_or(MAX_OBJECTS)
+        .max(CHECKPOINT_INTERVAL)
+}
+
+fn checkpoint_should_persist(
+    persisted: usize,
+    completed: usize,
+    batch: usize,
+    yielding: bool,
+) -> bool {
+    completed > persisted
+        && (completed.saturating_sub(persisted) >= batch || (yielding && persisted == 0))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct GenerationObject {
     pub name: String,
@@ -87,6 +105,51 @@ struct FileFingerprint {
 struct CheckpointObject {
     object: GenerationObject,
     fingerprint: FileFingerprint,
+    record_digest: String,
+}
+
+#[derive(Serialize)]
+struct CheckpointRecordBody<'a> {
+    object: &'a GenerationObject,
+    fingerprint: &'a FileFingerprint,
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn checkpoint_record_digest(
+    object: &GenerationObject,
+    fingerprint: &FileFingerprint,
+) -> Result<String, String> {
+    let encoded = serde_json::to_vec(&CheckpointRecordBody {
+        object,
+        fingerprint,
+    })
+    .map_err(|error| format!("serializing generation checkpoint authority: {error}"))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+impl CheckpointObject {
+    fn new(object: GenerationObject, fingerprint: FileFingerprint) -> Result<Self, String> {
+        let record_digest = checkpoint_record_digest(&object, &fingerprint)?;
+        Ok(Self {
+            object,
+            fingerprint,
+            record_digest,
+        })
+    }
+
+    fn authority_is_valid(&self) -> bool {
+        self.object.bytes == self.fingerprint.bytes
+            && canonical_sha256(&self.object.sha256)
+            && canonical_sha256(&self.record_digest)
+            && checkpoint_record_digest(&self.object, &self.fingerprint)
+                .is_ok_and(|actual| actual == self.record_digest)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -467,12 +530,7 @@ where
         }
         if completed.object.name != ordered_names[index]
             || completed.object.bytes > MAX_OBJECT_BYTES
-            || completed.object.sha256.len() != 64
-            || !completed
-                .object
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
+            || !completed.authority_is_valid()
         {
             return CheckpointLoad::Ready {
                 objects: Vec::new(),
@@ -648,9 +706,12 @@ where
         }
     }
     let mut persisted = completed.len();
+    let mut checkpoint_batch = checkpoint_batch_after(persisted);
     for name in ordered_names.iter().skip(completed.len()) {
         if should_yield() {
-            if checkpoint_enabled && persisted < completed.len() {
+            if checkpoint_enabled
+                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+            {
                 if let Err(error) =
                     append_checkpoint(root, generation_id, &completed[persisted..]).await
                 {
@@ -662,7 +723,9 @@ where
         let Some((object, fingerprint)) =
             object_digest_controlled(&root.join(name), &mut should_yield).await?
         else {
-            if checkpoint_enabled && persisted < completed.len() {
+            if checkpoint_enabled
+                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+            {
                 if let Err(error) =
                     append_checkpoint(root, generation_id, &completed[persisted..]).await
                 {
@@ -671,13 +734,15 @@ where
             }
             return Ok(None);
         };
-        completed.push(CheckpointObject {
-            object,
-            fingerprint,
-        });
-        if checkpoint_enabled && completed.len() - persisted >= CHECKPOINT_INTERVAL {
+        completed.push(CheckpointObject::new(object, fingerprint)?);
+        if checkpoint_enabled
+            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, false)
+        {
             match append_checkpoint(root, generation_id, &completed[persisted..]).await {
-                Ok(true) => persisted = completed.len(),
+                Ok(true) => {
+                    persisted = completed.len();
+                    checkpoint_batch = checkpoint_batch.saturating_mul(2).min(MAX_OBJECTS);
+                }
                 Ok(false) => checkpoint_enabled = false,
                 Err(error) => {
                     tracing::warn!(%error, "generation digest checkpoint disabled");
@@ -687,7 +752,9 @@ where
         }
     }
     if should_yield() {
-        if checkpoint_enabled && persisted < completed.len() {
+        if checkpoint_enabled
+            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+        {
             if let Err(error) =
                 append_checkpoint(root, generation_id, &completed[persisted..]).await
             {
@@ -796,12 +863,7 @@ where
         if index >= ordered_names.len()
             || completed.object.name != ordered_names[index]
             || completed.object.bytes > MAX_OBJECT_BYTES
-            || completed.object.sha256.len() != 64
-            || !completed
-                .object
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
+            || !completed.authority_is_valid()
         {
             return CheckpointLoad::Ready {
                 objects: Vec::new(),
@@ -1001,9 +1063,12 @@ where
         }
     }
     let mut persisted = completed.len();
+    let mut checkpoint_batch = checkpoint_batch_after(persisted);
     for name in ordered_names.iter().skip(completed.len()) {
         if should_yield() {
-            if checkpoint_enabled && persisted < completed.len() {
+            if checkpoint_enabled
+                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+            {
                 if let Err(error) =
                     append_checkpoint_directory(root, generation_id, &completed[persisted..]).await
                 {
@@ -1015,7 +1080,9 @@ where
         let Some((object, fingerprint)) =
             object_digest_directory(root, name, &mut should_yield).await?
         else {
-            if checkpoint_enabled && persisted < completed.len() {
+            if checkpoint_enabled
+                && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+            {
                 if let Err(error) =
                     append_checkpoint_directory(root, generation_id, &completed[persisted..]).await
                 {
@@ -1024,13 +1091,15 @@ where
             }
             return Ok(None);
         };
-        completed.push(CheckpointObject {
-            object,
-            fingerprint,
-        });
-        if checkpoint_enabled && completed.len() - persisted >= CHECKPOINT_INTERVAL {
+        completed.push(CheckpointObject::new(object, fingerprint)?);
+        if checkpoint_enabled
+            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, false)
+        {
             match append_checkpoint_directory(root, generation_id, &completed[persisted..]).await {
-                Ok(true) => persisted = completed.len(),
+                Ok(true) => {
+                    persisted = completed.len();
+                    checkpoint_batch = checkpoint_batch.saturating_mul(2).min(MAX_OBJECTS);
+                }
                 Ok(false) => checkpoint_enabled = false,
                 Err(error) => {
                     tracing::warn!(%error, "generation digest checkpoint disabled");
@@ -1040,7 +1109,9 @@ where
         }
     }
     if should_yield() {
-        if checkpoint_enabled && persisted < completed.len() {
+        if checkpoint_enabled
+            && checkpoint_should_persist(persisted, completed.len(), checkpoint_batch, true)
+        {
             let _ = append_checkpoint_directory(root, generation_id, &completed[persisted..]).await;
         }
         return Ok(None);
@@ -1092,8 +1163,7 @@ fn parse_manifest(encoded: &[u8]) -> Result<GenerationManifest, String> {
             !safe_object_name(&object.name)
                 || object.bytes > MAX_OBJECT_BYTES
                 || (object.name == "index.m3u8" && object.bytes > MAX_MANIFEST_BYTES)
-                || object.sha256.len() != 64
-                || !object.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !canonical_sha256(&object.sha256)
         })
         || manifest
             .objects
@@ -1106,11 +1176,7 @@ fn parse_manifest(encoded: &[u8]) -> Result<GenerationManifest, String> {
             .collect::<BTreeSet<_>>()
             .len()
             != manifest.objects.len()
-        || manifest.manifest_digest.len() != 64
-        || !manifest
-            .manifest_digest
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || !canonical_sha256(&manifest.manifest_digest)
         || body_digest(&manifest.generation_id, &manifest.objects)? != manifest.manifest_digest
     {
         return Err("generation manifest failed validation".to_owned());
@@ -1563,6 +1629,129 @@ mod tests {
         .await
         .expect_err("oversized generation object")
         .contains("exceeds"));
+    }
+
+    async fn checkpoint_corruption_is_rehashed(mutate_bytes: bool) {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let names = (0..3)
+            .map(|index| format!("seg{index:05}.ts"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            tokio::fs::write(directory.path().join(name), name.as_bytes())
+                .await
+                .expect("segment");
+        }
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let mut calls = 0usize;
+        assert!(
+            publish_controlled_directory(&capability, "generation-corrupt", &names, || {
+                calls += 1;
+                calls >= 7
+            })
+            .await
+            .expect("checkpointed publication")
+            .is_none()
+        );
+        let encoded = capability
+            .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
+            .await
+            .expect("checkpoint");
+        let mut records = encoded
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_vec())
+            .collect::<Vec<_>>();
+        let mut record = serde_json::from_slice::<serde_json::Value>(&records[1])
+            .expect("parse checkpoint record");
+        if mutate_bytes {
+            let bytes = record["object"]["bytes"].as_u64().expect("object bytes");
+            record["object"]["bytes"] = serde_json::Value::from(bytes + 1);
+        } else {
+            let uppercase = record["object"]["sha256"]
+                .as_str()
+                .expect("object digest")
+                .to_ascii_uppercase();
+            record["object"]["sha256"] = serde_json::Value::from(uppercase);
+        }
+        records[1] = serde_json::to_vec(&record).expect("serialize corrupt record");
+        let mut corrupt = Vec::new();
+        for record in records {
+            corrupt.extend_from_slice(&record);
+            corrupt.push(b'\n');
+        }
+        capability
+            .atomic_write_child(CHECKPOINT_FILE, &corrupt)
+            .await
+            .expect("publish corrupt checkpoint");
+
+        let manifest =
+            publish_controlled_directory(&capability, "generation-corrupt", &names, || false)
+                .await
+                .expect("resume publication")
+                .expect("manifest");
+        for name in &names {
+            let bytes = tokio::fs::read(directory.path().join(name))
+                .await
+                .expect("object bytes");
+            assert!(manifest.verify_bytes(name, &bytes));
+        }
+        assert!(manifest
+            .objects
+            .iter()
+            .all(|object| canonical_sha256(&object.sha256)));
+    }
+
+    #[tokio::test]
+    async fn parseable_checkpoint_digest_corruption_is_rehashed() {
+        checkpoint_corruption_is_rehashed(false).await;
+    }
+
+    #[tokio::test]
+    async fn parseable_checkpoint_byte_count_corruption_is_rehashed() {
+        checkpoint_corruption_is_rehashed(true).await;
+    }
+
+    #[test]
+    fn geometric_checkpoint_rewrites_are_linear_in_final_manifest_size() {
+        let mut persisted = 0usize;
+        let mut batch = checkpoint_batch_after(persisted);
+        let mut rewritten_objects = 0usize;
+
+        // Model the exact cost of the current replace-on-checkpoint format:
+        // every checkpoint writes all previously persisted records plus the
+        // new batch. Geometric batches keep their aggregate below a constant
+        // multiple of the final object count instead of the former O(n^2).
+        for completed in 1..=MAX_OBJECTS {
+            if checkpoint_should_persist(persisted, completed, batch, false) {
+                rewritten_objects = rewritten_objects.saturating_add(completed);
+                persisted = completed;
+                batch = batch.saturating_mul(2).min(MAX_OBJECTS);
+            }
+        }
+        assert!(
+            rewritten_objects <= MAX_OBJECTS.saturating_mul(2),
+            "checkpoint rewrites {rewritten_objects} object records for {MAX_OBJECTS} objects"
+        );
+
+        // The first cooperative yield remains useful below the base interval,
+        // while repeated one-object yields after resumption cannot force one
+        // full-file rewrite per object.
+        let mut persisted = 0usize;
+        let mut batch = checkpoint_batch_after(persisted);
+        let mut rewritten_objects = 0usize;
+        for completed in 1..=MAX_OBJECTS {
+            if checkpoint_should_persist(persisted, completed, batch, true) {
+                rewritten_objects = rewritten_objects.saturating_add(completed);
+                persisted = completed;
+                batch = batch.saturating_mul(2).min(MAX_OBJECTS);
+            }
+        }
+        assert!(
+            rewritten_objects <= MAX_OBJECTS.saturating_mul(3),
+            "yield checkpoints rewrote {rewritten_objects} object records"
+        );
     }
 
     #[tokio::test]

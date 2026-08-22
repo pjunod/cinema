@@ -1592,6 +1592,22 @@ impl SettingsStore for HiqliteAuthStore {
             == 1)
     }
 
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError> {
+        self.execute(
+            "DELETE FROM settings
+              WHERE substr(key, 1, 27) = 'internal.book_cover_origin.'
+                AND json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,
+                                 '$.filename') = $1
+                AND NOT EXISTS (
+                    SELECT 1 FROM items WHERE poster_path = $1 OR backdrop_path = $1)",
+            params!(filename),
+        )
+        .await
+    }
+
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError> {
         let now = self.now()?;
         let sql = "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \

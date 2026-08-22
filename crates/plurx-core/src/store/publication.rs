@@ -231,11 +231,14 @@ impl<'a> PublicationStore<'a> {
         if self.fence.is_none() {
             return self.store.put_setting_if_absent(key, value).await;
         }
-        let token = self.token().await?;
-        let lease = token.as_ref().ok_or_else(|| self.invalidated())?;
-        self.store
-            .put_setting_if_absent_fenced(key, value, lease, unix_ms()?)
-            .await
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .put_setting_if_absent_fenced(key, value, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
     }
 
     pub async fn put_setting_if_absent_if_artwork_repair_current(
@@ -250,18 +253,21 @@ impl<'a> PublicationStore<'a> {
                 "artwork repair publication requires a singleton job lease".to_owned(),
             ));
         }
-        let token = self.token().await?;
-        let lease = token.as_ref().ok_or_else(|| self.invalidated())?;
-        self.store
-            .put_setting_if_absent_if_artwork_repair_current_fenced(
-                key,
-                value,
-                expected_item_id,
-                repair_fence,
-                lease,
-                unix_ms()?,
-            )
-            .await
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .put_setting_if_absent_if_artwork_repair_current_fenced(
+                        key,
+                        value,
+                        expected_item_id,
+                        repair_fence,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
     }
 
     pub async fn mark_library_scanned(&self, id: i64, refreshed: bool) -> Result<(), StoreError> {
@@ -321,17 +327,20 @@ impl<'a> PublicationStore<'a> {
                 "artwork repair publication requires a singleton job lease".to_owned(),
             ));
         }
-        let token = self.token().await?;
-        let lease = token.as_ref().ok_or_else(|| self.invalidated())?;
-        self.store
-            .apply_metadata_if_artwork_repair_current_fenced(
-                item_id,
-                patch,
-                repair_fence,
-                lease,
-                unix_ms()?,
-            )
-            .await
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .apply_metadata_if_artwork_repair_current_fenced(
+                        item_id,
+                        patch,
+                        repair_fence,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
     }
 
     pub async fn apply_book_metadata(
@@ -369,11 +378,20 @@ impl<'a> PublicationStore<'a> {
                 .apply_book_metadata_if_current(expected, patch, repair_fence)
                 .await;
         }
-        let token = self.token().await?;
-        let lease = token.as_ref().ok_or_else(|| self.invalidated())?;
-        self.store
-            .apply_book_metadata_if_current_fenced(expected, patch, repair_fence, lease, unix_ms()?)
-            .await
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .apply_book_metadata_if_current_fenced(
+                        expected,
+                        patch,
+                        repair_fence,
+                        &lease,
+                        &replacement,
+                    )
+                    .await
+            })
+        })
+        .await
     }
 
     pub async fn set_nfo_seeded(&self, item_id: i64) -> Result<(), StoreError> {

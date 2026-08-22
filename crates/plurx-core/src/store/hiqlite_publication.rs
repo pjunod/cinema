@@ -22,18 +22,6 @@ use crate::store::{
 
 const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
 
-struct CurrentRow {
-    current: i64,
-}
-
-impl From<&mut Row<'_>> for CurrentRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            current: row.get("current"),
-        }
-    }
-}
-
 pub(super) fn atomic_renewal_statement(
     lease: &Lease,
     replacement: &Lease,
@@ -141,50 +129,6 @@ impl HiqliteAuthStore {
         require_atomic_renewal(&results, lease)?;
         Ok(results)
     }
-
-    async fn require_publication_fence(
-        &self,
-        lease: &Lease,
-        observed_at_unix_ms: i64,
-    ) -> Result<(), StoreError> {
-        let rows = self
-            .client()
-            .query_consistent_map::<CurrentRow, _>(
-                "SELECT EXISTS(SELECT 1 FROM job_leases
-                   WHERE resource = $1 AND owner_node_id = $2
-                     AND fence = $3 AND revision = $4
-                     AND expires_at_ms = $5 AND expires_at_ms > $6) AS current",
-                params!(
-                    lease.resource.as_str(),
-                    lease.owner_node_id.as_str(),
-                    lease_i64("fence", lease.fence)?,
-                    lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
-                ),
-            )
-            .await?;
-        if rows.first().is_some_and(|row| row.current == 1) {
-            Ok(())
-        } else {
-            Err(fence_rejected(lease))
-        }
-    }
-
-    async fn bool_if_current(
-        &self,
-        changed: usize,
-        lease: &Lease,
-        observed_at_unix_ms: i64,
-    ) -> Result<bool, StoreError> {
-        if changed > 0 {
-            Ok(true)
-        } else {
-            self.require_publication_fence(lease, observed_at_unix_ms)
-                .await?;
-            Ok(false)
-        }
-    }
 }
 
 #[async_trait]
@@ -229,32 +173,34 @@ impl FencedPublicationStore for HiqliteAuthStore {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
-        let changed = self
-            .execute(
-                "INSERT INTO settings (key, value, updated_at)
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "INSERT INTO settings (key, value, updated_at)
                  SELECT $1, $2, $3 WHERE EXISTS (
                    SELECT 1 FROM job_leases WHERE resource = $4 AND owner_node_id = $5
-                     AND fence = $6 AND revision = $7 AND expires_at_ms = $8
-                     AND expires_at_ms > $9)
-                 ON CONFLICT(key) DO NOTHING",
-                params!(
-                    key,
-                    value,
-                    now,
-                    lease.resource.as_str(),
-                    lease.owner_node_id.as_str(),
-                    lease_i64("fence", lease.fence)?,
-                    lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
-                ),
+                     AND fence = $6 AND revision = $7 AND expires_at_ms = $8)
+                 ON CONFLICT(key) DO NOTHING"
+                        .to_owned(),
+                    params!(
+                        key,
+                        value,
+                        now,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
             )
             .await?;
-        self.bool_if_current(changed, lease, observed_at_unix_ms)
-            .await
+        Ok(results.first().copied() == Some(1))
     }
 
     async fn put_setting_if_absent_if_artwork_repair_current_fenced(
@@ -264,40 +210,42 @@ impl FencedPublicationStore for HiqliteAuthStore {
         expected_item_id: i64,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
-        let changed = self
-            .execute(
-                "INSERT INTO settings (key, value, updated_at)
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "INSERT INTO settings (key, value, updated_at)
                  SELECT $1, $2, $3 WHERE $4 = $5 AND EXISTS (
                    SELECT 1 FROM cluster_artwork_repairs
                    WHERE item_id = $5 AND owner_node_id = $6 AND leader_term = $7
                      AND generation = $8) AND EXISTS (
                    SELECT 1 FROM job_leases WHERE resource = $9 AND owner_node_id = $10
-                     AND fence = $11 AND revision = $12 AND expires_at_ms = $13
-                     AND expires_at_ms > $14)
-                 ON CONFLICT(key) DO NOTHING",
-                params!(
-                    key,
-                    value,
-                    now,
-                    expected_item_id,
-                    repair_fence.item_id,
-                    repair_fence.owner_node_id.as_str(),
-                    repair_fence.leader_term,
-                    repair_fence.generation,
-                    lease.resource.as_str(),
-                    lease.owner_node_id.as_str(),
-                    lease_i64("fence", lease.fence)?,
-                    lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
-                ),
+                     AND fence = $11 AND revision = $12 AND expires_at_ms = $13)
+                 ON CONFLICT(key) DO NOTHING"
+                        .to_owned(),
+                    params!(
+                        key,
+                        value,
+                        now,
+                        expected_item_id,
+                        repair_fence.item_id,
+                        repair_fence.owner_node_id.as_str(),
+                        repair_fence.leader_term,
+                        repair_fence.generation,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
             )
             .await?;
-        self.bool_if_current(changed, lease, observed_at_unix_ms)
-            .await
+        Ok(results.first().copied() == Some(1))
     }
 
     async fn mark_library_scanned_fenced(
@@ -472,7 +420,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         patch: &MetadataPatch,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let sort_title = patch.title.as_deref().map(sort_title_for);
         let tags = patch
@@ -492,9 +440,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
             _ => None,
         };
         let now = self.now()?;
-        let changed = self
-            .execute(
-                "UPDATE items SET
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE items SET
                    title = COALESCE($1, title), sort_title = COALESCE($2, sort_title),
                    year = COALESCE($3, year), overview = COALESCE($4, overview),
                    tmdb_id = COALESCE($5, tmdb_id), imdb_id = COALESCE($6, imdb_id),
@@ -512,42 +463,41 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    WHERE item_id = $19 AND owner_node_id = $20 AND leader_term = $21
                      AND generation = $22) AND EXISTS (
                    SELECT 1 FROM job_leases WHERE resource = $23 AND owner_node_id = $24
-                     AND fence = $25 AND revision = $26 AND expires_at_ms = $27
-                     AND expires_at_ms > $28)",
-                params!(
-                    patch.title.as_deref(),
-                    sort_title,
-                    patch.year,
-                    patch.overview.as_deref(),
-                    patch.tmdb_id,
-                    patch.imdb_id.as_deref(),
-                    patch.air_date.as_deref(),
-                    patch.runtime_ms,
-                    patch.poster_path.as_deref(),
-                    patch.backdrop_path.as_deref(),
-                    patch.recorded_at.as_deref(),
-                    tags,
-                    genres,
-                    patch.artwork.is_some(),
-                    artwork_error,
-                    patch.enriched,
-                    now,
-                    item_id,
-                    repair_fence.item_id,
-                    repair_fence.owner_node_id.as_str(),
-                    repair_fence.leader_term,
-                    repair_fence.generation,
-                    lease.resource.as_str(),
-                    lease.owner_node_id.as_str(),
-                    lease_i64("fence", lease.fence)?,
-                    lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
-                ),
+                     AND fence = $25 AND revision = $26 AND expires_at_ms = $27)"
+                        .to_owned(),
+                    params!(
+                        patch.title.as_deref(),
+                        sort_title,
+                        patch.year,
+                        patch.overview.as_deref(),
+                        patch.tmdb_id,
+                        patch.imdb_id.as_deref(),
+                        patch.air_date.as_deref(),
+                        patch.runtime_ms,
+                        patch.poster_path.as_deref(),
+                        patch.backdrop_path.as_deref(),
+                        patch.recorded_at.as_deref(),
+                        tags,
+                        genres,
+                        patch.artwork.is_some(),
+                        artwork_error,
+                        patch.enriched,
+                        now,
+                        item_id,
+                        repair_fence.item_id,
+                        repair_fence.owner_node_id.as_str(),
+                        repair_fence.leader_term,
+                        repair_fence.generation,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
             )
             .await?;
-        self.bool_if_current(changed, lease, observed_at_unix_ms)
-            .await
+        Ok(results.first().copied() == Some(1))
     }
 
     async fn apply_book_metadata_fenced(
@@ -624,13 +574,19 @@ impl FencedPublicationStore for HiqliteAuthStore {
         patch: &BookMetadataPatch,
         repair_fence: Option<&ArtworkRepairFence>,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let sort_title = patch.title.as_deref().map(sort_title_for);
         let source = patch.source.as_str();
         let now = self.now()?;
-        let changed = if let Some(repair_fence) = repair_fence {
-            self.execute(
+        let (origin_key, origin_value) = patch
+            .required_origin
+            .as_ref()
+            .map_or((None, None), |(key, value)| {
+                (Some(key.as_str()), Some(value.as_str()))
+            });
+        let statement = if let Some(repair_fence) = repair_fence {
+            (
                 "UPDATE items SET
                    title = COALESCE($1, title), sort_title = COALESCE($2, sort_title),
                    author = COALESCE($3, author), book_work_id = COALESCE($4, book_work_id),
@@ -640,13 +596,15 @@ impl FencedPublicationStore for HiqliteAuthStore {
                  WHERE id = $9 AND kind IN ('book', 'audiobook')
                    AND title = $10 AND author IS $11 AND book_work_id IS $12
                    AND book_metadata_source IS $13 AND book_edition_id IS $14
-                   AND poster_path IS $15 AND $16 = $9 AND EXISTS (
+                   AND poster_path IS $15 AND ($16 IS NULL OR EXISTS (
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17))
+                   AND $18 = $9 AND EXISTS (
                      SELECT 1 FROM cluster_artwork_repairs
-                     WHERE item_id = $16 AND owner_node_id = $17 AND leader_term = $18
-                       AND generation = $19) AND EXISTS (
-                     SELECT 1 FROM job_leases WHERE resource = $20 AND owner_node_id = $21
-                       AND fence = $22 AND revision = $23 AND expires_at_ms = $24
-                       AND expires_at_ms > $25)",
+                     WHERE item_id = $18 AND owner_node_id = $19 AND leader_term = $20
+                       AND generation = $21) AND EXISTS (
+                     SELECT 1 FROM job_leases WHERE resource = $22 AND owner_node_id = $23
+                       AND fence = $24 AND revision = $25 AND expires_at_ms = $26)"
+                    .to_owned(),
                 params!(
                     patch.title.as_deref(),
                     sort_title,
@@ -663,6 +621,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
                     expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value,
                     repair_fence.item_id,
                     repair_fence.owner_node_id.as_str(),
                     repair_fence.leader_term,
@@ -671,13 +631,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     lease.owner_node_id.as_str(),
                     lease_i64("fence", lease.fence)?,
                     lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
+                    lease.expires_at_unix_ms
                 ),
             )
-            .await?
         } else {
-            self.execute(
+            (
                 "UPDATE items SET
                    title = COALESCE($1, title), sort_title = COALESCE($2, sort_title),
                    author = COALESCE($3, author), book_work_id = COALESCE($4, book_work_id),
@@ -687,10 +645,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
                  WHERE id = $9 AND kind IN ('book', 'audiobook')
                    AND title = $10 AND author IS $11 AND book_work_id IS $12
                    AND book_metadata_source IS $13 AND book_edition_id IS $14
-                   AND poster_path IS $15 AND EXISTS (
-                     SELECT 1 FROM job_leases WHERE resource = $16 AND owner_node_id = $17
-                       AND fence = $18 AND revision = $19 AND expires_at_ms = $20
-                       AND expires_at_ms > $21)",
+                   AND poster_path IS $15 AND ($16 IS NULL OR EXISTS (
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17))
+                   AND EXISTS (
+                     SELECT 1 FROM job_leases WHERE resource = $18 AND owner_node_id = $19
+                       AND fence = $20 AND revision = $21 AND expires_at_ms = $22)"
+                    .to_owned(),
                 params!(
                     patch.title.as_deref(),
                     sort_title,
@@ -707,18 +667,20 @@ impl FencedPublicationStore for HiqliteAuthStore {
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
                     expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value,
                     lease.resource.as_str(),
                     lease.owner_node_id.as_str(),
                     lease_i64("fence", lease.fence)?,
                     lease_i64("revision", lease.revision)?,
-                    lease.expires_at_unix_ms,
-                    observed_at_unix_ms
+                    lease.expires_at_unix_ms
                 ),
             )
-            .await?
         };
-        self.bool_if_current(changed, lease, observed_at_unix_ms)
-            .await
+        let results = self
+            .atomic_publication(lease, replacement, vec![statement])
+            .await?;
+        Ok(results.first().copied() == Some(1))
     }
 
     async fn set_nfo_seeded_fenced(

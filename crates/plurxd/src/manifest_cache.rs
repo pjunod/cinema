@@ -36,7 +36,7 @@ fn cache() -> &'static Mutex<Cache> {
     CACHE.get_or_init(|| Mutex::new(Cache::default()))
 }
 
-fn decoded_weight(manifest: &GenerationManifest) -> usize {
+pub(crate) fn decoded_weight(manifest: &GenerationManifest) -> usize {
     manifest.objects.iter().fold(
         std::mem::size_of::<GenerationManifest>()
             .saturating_add(manifest.generation_id.len())

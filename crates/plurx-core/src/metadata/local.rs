@@ -55,7 +55,8 @@ pub async fn materialize_item_artwork(
             let Some(directory) = path.parent() else {
                 continue;
             };
-            if let Some(name) = adopt_folder_art(&publisher, artwork_dir, item.id, directory).await
+            if let Some(name) =
+                adopt_folder_art(&publisher, artwork_dir, item.id, directory, Some(expected)).await
             {
                 if expected.contains(&name) {
                     return cached_file_is_complete(artwork_dir, &name).await;
@@ -84,7 +85,9 @@ pub async fn materialize_item_artwork(
     let Some(path) = first_file_path(store, item.id).await else {
         return false;
     };
-    if let Some(name) = adopt_local_art(&publisher, artwork_dir, item.id, &path).await {
+    if let Some(name) =
+        adopt_local_art(&publisher, artwork_dir, item.id, &path, Some(expected)).await
+    {
         if expected.contains(&name) {
             return cached_file_is_complete(artwork_dir, &name).await;
         }
@@ -101,6 +104,7 @@ pub async fn materialize_item_artwork(
         &path,
         item.kind,
         duration(store, item.id).await,
+        Some(expected),
     )
     .await
     .is_some_and(|name| expected.contains(&name))
@@ -185,7 +189,7 @@ pub async fn enrich_home_library_with_publication(
                 let Some(path) = first_file_path(store.raw(), item.id).await else {
                     continue;
                 };
-                match adopt_local_art(store, artwork_dir, item.id, &path).await {
+                match adopt_local_art(store, artwork_dir, item.id, &path, None).await {
                     Some(name) => {
                         report.adopted += 1;
                         Some(name)
@@ -198,6 +202,7 @@ pub async fn enrich_home_library_with_publication(
                             &path,
                             item.kind,
                             duration(store.raw(), item.id).await,
+                            None,
                         )
                         .await
                         {
@@ -269,6 +274,7 @@ async fn adopt_local_art(
     artwork_dir: &Path,
     item_id: i64,
     media: &Path,
+    expected: Option<&[String]>,
 ) -> Option<String> {
     let stem = media.file_stem()?.to_string_lossy().into_owned();
     let dir = media.parent()?;
@@ -276,7 +282,7 @@ async fn adopt_local_art(
         for ext in ["jpg", "jpeg", "png"] {
             let candidate = dir.join(format!("{stem}{suffix}.{ext}"));
             if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate).await;
+                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
             }
         }
     }
@@ -289,12 +295,13 @@ async fn adopt_folder_art(
     artwork_dir: &Path,
     item_id: i64,
     dir: &Path,
+    expected: Option<&[String]>,
 ) -> Option<String> {
     for name in ["poster", "folder"] {
         for ext in ["jpg", "jpeg", "png"] {
             let candidate = dir.join(format!("{name}.{ext}"));
             if candidate.is_file() {
-                return copy_into_cache(store, artwork_dir, item_id, &candidate).await;
+                return copy_into_cache(store, artwork_dir, item_id, &candidate, expected).await;
             }
         }
     }
@@ -306,6 +313,7 @@ async fn copy_into_cache(
     artwork_dir: &Path,
     item_id: i64,
     source: &Path,
+    expected: Option<&[String]>,
 ) -> Option<String> {
     let ext = source
         .extension()
@@ -313,10 +321,15 @@ async fn copy_into_cache(
         .unwrap_or("jpg")
         .to_lowercase();
     let bytes = read_local_art(source).await?;
-    let filename = store
-        .scoped_artwork_filename(&format!("{item_id}-poster.{ext}"), &bytes)
-        .await
-        .ok()?;
+    let legacy_filename = format!("{item_id}-poster.{ext}");
+    let filename = if let Some(expected) = expected {
+        super::matching_materialized_artwork_filename(&legacy_filename, &bytes, expected)?
+    } else {
+        store
+            .scoped_artwork_filename(&legacy_filename, &bytes)
+            .await
+            .ok()?
+    };
     match crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await {
         Ok(()) => Some(filename),
         Err(e) => {
@@ -341,29 +354,46 @@ async fn generate_thumb(
     media: &Path,
     kind: ItemKind,
     duration_ms: Option<i64>,
+    expected: Option<&[String]>,
 ) -> Option<String> {
     let ffmpeg = ffmpeg_bin();
     generate_thumb_with(
         Some(store),
         OsStr::new(&ffmpeg),
-        artwork_dir,
-        item_id,
-        media,
-        kind,
-        duration_ms,
+        ThumbnailRequest {
+            artwork_dir,
+            item_id,
+            media,
+            kind,
+            duration_ms,
+            expected,
+        },
     )
     .await
+}
+
+struct ThumbnailRequest<'a> {
+    artwork_dir: &'a Path,
+    item_id: i64,
+    media: &'a Path,
+    kind: ItemKind,
+    duration_ms: Option<i64>,
+    expected: Option<&'a [String]>,
 }
 
 async fn generate_thumb_with(
     store: Option<&PublicationStore<'_>>,
     ffmpeg: &OsStr,
-    artwork_dir: &Path,
-    item_id: i64,
-    media: &Path,
-    kind: ItemKind,
-    duration_ms: Option<i64>,
+    request: ThumbnailRequest<'_>,
 ) -> Option<String> {
+    let ThumbnailRequest {
+        artwork_dir,
+        item_id,
+        media,
+        kind,
+        duration_ms,
+        expected,
+    } = request;
     let mut cmd = tokio::process::Command::new(ffmpeg);
     cmd.arg("-nostdin").args(["-v", "error"]);
     if kind == ItemKind::Video {
@@ -405,18 +435,26 @@ async fn generate_thumb_with(
                 tracing::warn!(path = %media.display(), %status, "thumbnail generation failed");
                 return None;
             }
-            let filename = match store {
-                Some(store) => match store
-                    .scoped_artwork_filename(&format!("{item_id}-poster.jpg"), &bytes)
-                    .await
-                {
-                    Ok(filename) => filename,
-                    Err(error) => {
-                        tracing::warn!(item = item_id, %error, "fencing generated local artwork");
-                        return None;
+            let legacy_filename = format!("{item_id}-poster.jpg");
+            let filename = match (store, expected) {
+                (Some(_), Some(expected)) => super::matching_materialized_artwork_filename(
+                    &legacy_filename,
+                    &bytes,
+                    expected,
+                )?,
+                (Some(store), None) => {
+                    match store
+                        .scoped_artwork_filename(&legacy_filename, &bytes)
+                        .await
+                    {
+                        Ok(filename) => filename,
+                        Err(error) => {
+                            tracing::warn!(item = item_id, %error, "fencing generated local artwork");
+                            return None;
+                        }
                     }
-                },
-                None => format!("{item_id}-poster.jpg"),
+                }
+                (None, _) => format!("{item_id}-poster.jpg"),
             };
             let published =
                 crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await;
@@ -465,7 +503,8 @@ async fn folder_poster(
     for child in &children {
         if let Some(path) = first_file_path(store.raw(), child.id).await {
             if let Some(dir) = path.parent() {
-                if let Some(name) = adopt_folder_art(store, artwork_dir, folder_id, dir).await {
+                if let Some(name) = adopt_folder_art(store, artwork_dir, folder_id, dir, None).await
+                {
                     return Some(name);
                 }
             }
@@ -728,11 +767,14 @@ mod tests {
             generate_thumb_with(
                 None,
                 task_script.as_os_str(),
-                &task_artwork,
-                7,
-                &task_media,
-                ItemKind::Video,
-                Some(10_000),
+                ThumbnailRequest {
+                    artwork_dir: &task_artwork,
+                    item_id: 7,
+                    media: &task_media,
+                    kind: ItemKind::Video,
+                    duration_ms: Some(10_000),
+                    expected: None,
+                },
             )
             .await
         });

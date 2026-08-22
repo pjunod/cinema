@@ -676,16 +676,86 @@ struct PackageLocation {
 #[derive(Clone)]
 struct OfflineGenerationSnapshot {
     cached: CachedTranscode,
-    manifest: Option<std::sync::Weak<plurx_core::transcode::manifest::GenerationManifest>>,
+    manifest: Option<std::sync::Arc<plurx_core::transcode::manifest::GenerationManifest>>,
+    manifest_decoded_bytes: usize,
     validated_at: Instant,
 }
 
 const OFFLINE_GENERATION_CACHE_ENTRIES: usize = 32;
+const OFFLINE_GENERATION_CACHE_DECODED_BYTES: usize = 32 * 1024 * 1024;
 
-fn offline_generation_cache() -> &'static StdMutex<VecDeque<(String, OfflineGenerationSnapshot)>> {
-    static CACHE: OnceLock<StdMutex<VecDeque<(String, OfflineGenerationSnapshot)>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| StdMutex::new(VecDeque::new()))
+#[derive(Default)]
+struct OfflineGenerationCache {
+    entries: VecDeque<(String, OfflineGenerationSnapshot)>,
+    decoded_bytes: usize,
+}
+
+impl OfflineGenerationCache {
+    fn get(&mut self, key: &str) -> Option<OfflineGenerationSnapshot> {
+        let position = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == key)?;
+        let entry = self.entries.remove(position)?;
+        if entry.1.validated_at.elapsed() > Duration::from_secs(60) {
+            self.decoded_bytes = self
+                .decoded_bytes
+                .saturating_sub(entry.1.manifest_decoded_bytes);
+            return None;
+        }
+        let snapshot = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(snapshot)
+    }
+
+    fn remember(&mut self, key: String, snapshot: OfflineGenerationSnapshot) {
+        self.remember_with_limits(
+            key,
+            snapshot,
+            OFFLINE_GENERATION_CACHE_ENTRIES,
+            OFFLINE_GENERATION_CACHE_DECODED_BYTES,
+        );
+    }
+
+    fn remember_with_limits(
+        &mut self,
+        key: String,
+        snapshot: OfflineGenerationSnapshot,
+        max_entries: usize,
+        max_decoded_bytes: usize,
+    ) {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == &key)
+        {
+            if let Some(removed) = self.entries.remove(position) {
+                self.decoded_bytes = self
+                    .decoded_bytes
+                    .saturating_sub(removed.1.manifest_decoded_bytes);
+            }
+        }
+        if snapshot.manifest_decoded_bytes > max_decoded_bytes {
+            return;
+        }
+        self.decoded_bytes = self
+            .decoded_bytes
+            .saturating_add(snapshot.manifest_decoded_bytes);
+        self.entries.push_back((key, snapshot));
+        while self.entries.len() > max_entries || self.decoded_bytes > max_decoded_bytes {
+            let Some(evicted) = self.entries.pop_front() else {
+                break;
+            };
+            self.decoded_bytes = self
+                .decoded_bytes
+                .saturating_sub(evicted.1.manifest_decoded_bytes);
+        }
+    }
+}
+
+fn offline_generation_cache() -> &'static StdMutex<OfflineGenerationCache> {
+    static CACHE: OnceLock<StdMutex<OfflineGenerationCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(OfflineGenerationCache::default()))
 }
 
 fn offline_generation_key(state: &AppState, package: &OfflinePackage, recipe: &str) -> String {
@@ -702,27 +772,14 @@ fn cached_offline_generation(key: &str) -> Option<OfflineGenerationSnapshot> {
     let mut cache = offline_generation_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let position = cache.iter().position(|(candidate, _)| candidate == key)?;
-    let entry = cache.remove(position)?;
-    if entry.1.validated_at.elapsed() > Duration::from_secs(60) {
-        return None;
-    }
-    let snapshot = entry.1.clone();
-    cache.push_back(entry);
-    Some(snapshot)
+    cache.get(key)
 }
 
 fn remember_offline_generation(key: String, snapshot: OfflineGenerationSnapshot) {
     let mut cache = offline_generation_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(position) = cache.iter().position(|(candidate, _)| candidate == &key) {
-        cache.remove(position);
-    }
-    cache.push_back((key, snapshot));
-    while cache.len() > OFFLINE_GENERATION_CACHE_ENTRIES {
-        cache.pop_front();
-    }
+    cache.remember(key, snapshot);
 }
 
 fn forget_offline_generation(cache_root: &Path, node_id: &str, cached: &CachedTranscode) {
@@ -730,13 +787,18 @@ fn forget_offline_generation(cache_root: &Path, node_id: &str, cached: &CachedTr
     let mut cache = offline_generation_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.retain(|(key, snapshot)| {
+    cache.entries.retain(|(key, snapshot)| {
         !(key.starts_with(&format!("{root}\0{node_id}\0"))
             && snapshot.cached.recipe_hash == cached.recipe_hash
             && snapshot.cached.storage_class == cached.storage_class
             && snapshot.cached.relative_dir == cached.relative_dir
             && snapshot.cached.manifest_digest == cached.manifest_digest)
     });
+    cache.decoded_bytes = cache
+        .entries
+        .iter()
+        .map(|(_, snapshot)| snapshot.manifest_decoded_bytes)
+        .fold(0usize, usize::saturating_add);
 }
 
 async fn invalidate_package_location(
@@ -824,24 +886,16 @@ async fn package_dir(
         })?;
     let generation_key = offline_generation_key(state, package, recipe);
     if let Some(snapshot) = cached_offline_generation(&generation_key) {
-        let manifest = snapshot
-            .manifest
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade);
-        if snapshot.manifest.is_none() || manifest.is_some() {
-            if let Some(dir) = crate::cachekeep::validated_entry_dir(
-                &state.cache_dir,
-                &snapshot.cached.relative_dir,
-            )
-            .await
-            {
-                return Ok(PackageLocation {
-                    dir,
-                    _cache_reader: cache_reader,
-                    cached: snapshot.cached,
-                    manifest,
-                });
-            }
+        if let Some(dir) =
+            crate::cachekeep::validated_entry_dir(&state.cache_dir, &snapshot.cached.relative_dir)
+                .await
+        {
+            return Ok(PackageLocation {
+                dir,
+                _cache_reader: cache_reader,
+                cached: snapshot.cached,
+                manifest: snapshot.manifest,
+            });
         }
         forget_offline_generation(&state.cache_dir, &state.node_id, &snapshot.cached);
     }
@@ -914,7 +968,10 @@ async fn package_dir(
         generation_key,
         OfflineGenerationSnapshot {
             cached: cached.clone(),
-            manifest: manifest.as_ref().map(std::sync::Arc::downgrade),
+            manifest: manifest.clone(),
+            manifest_decoded_bytes: manifest
+                .as_deref()
+                .map_or(0, crate::manifest_cache::decoded_weight),
             validated_at: Instant::now(),
         },
     );
@@ -1171,96 +1228,68 @@ pub async fn subtitle(
         package.source_mtime,
     );
     const MAX_OFFLINE_VTT_BYTES: u64 = 8 * 1024 * 1024;
-    let bytes = match plurx_core::fs_secure::read_bounded_regular(&sidecar, MAX_OFFLINE_VTT_BYTES)
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(initial_error) => {
-            // An invalid cache hit (including a symlink, FIFO, oversized file,
-            // or same-descriptor mutation) must not be handed back to
-            // `ensure_vtt`, whose fast path only checks metadata. Remove only
-            // the final child through the held parent capability first.
-            if initial_error.kind() != std::io::ErrorKind::NotFound {
-                let Some(parent) = sidecar.parent() else {
-                    return Err(ApiError::Internal(
-                        "subtitle cache path has no parent".to_owned(),
+    let bytes =
+        match plurx_core::fs_secure::read_bounded_regular(&sidecar, MAX_OFFLINE_VTT_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(initial_error) => {
+                let _ = initial_error;
+                // `ensure_vtt` securely revalidates the cache entry while holding
+                // its per-key flight registry. Invalid files are replaced by the
+                // single extraction owner, so concurrent repairs never unlink a
+                // valid generation another request has just published.
+                // Subtitle cache retention is independent from the offline pin.
+                // Recreate a pruned sidecar only when the file row still names the
+                // exact bytes snapshotted by this package.
+                let file = state
+                    .store
+                    .get_file(package.file_id)
+                    .await?
+                    .ok_or_else(|| {
+                        typed(
+                            StatusCode::GONE,
+                            "source_changed",
+                            "The source for this offline subtitle is no longer available.",
+                        )
+                    })?;
+                let source_matches = file.path.to_string_lossy() == package.source_path
+                    && file.size == package.source_size
+                    && file.mtime == package.source_mtime
+                    && file.subtitle_streams.iter().any(|stream| {
+                        stream.index == index && is_native_text_subtitle(&stream.codec)
+                    });
+                if !source_matches {
+                    return Err(typed(
+                        StatusCode::GONE,
+                        "source_changed",
+                        "The source for this offline subtitle has changed.",
                     ));
-                };
-                let Some(name) = sidecar.file_name().and_then(|name| name.to_str()) else {
-                    return Err(ApiError::Internal(
-                        "subtitle cache filename is invalid".to_owned(),
-                    ));
-                };
-                if let Err(error) = plurx_core::fs_secure::unlink_child(parent, name).await {
-                    if error.kind() != std::io::ErrorKind::NotFound {
+                }
+                let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
+                    .await
+                    .map_err(|message| {
                         tracing::warn!(
                             package_id = %package.id,
                             subtitle_index = index,
-                            %error,
-                            "offline subtitle rejected an unsafe sidecar but could not remove it"
+                            error = %message,
+                            "offline subtitle recovery failed"
                         );
-                        return Err(typed(
+                        typed(
                             StatusCode::GONE,
                             "subtitle_unavailable",
                             "The offline subtitle could not be restored.",
-                        ));
-                    }
-                }
+                        )
+                    })?;
+                plurx_core::fs_secure::read_bounded_regular(&recovered, MAX_OFFLINE_VTT_BYTES)
+                    .await
+                    .map_err(|_| {
+                        typed(
+                            StatusCode::GONE,
+                            "subtitle_unavailable",
+                            "The offline subtitle could not be restored.",
+                        )
+                    })?
             }
-            // Subtitle cache retention is independent from the offline pin.
-            // Recreate a pruned sidecar only when the file row still names the
-            // exact bytes snapshotted by this package.
-            let file = state
-                .store
-                .get_file(package.file_id)
-                .await?
-                .ok_or_else(|| {
-                    typed(
-                        StatusCode::GONE,
-                        "source_changed",
-                        "The source for this offline subtitle is no longer available.",
-                    )
-                })?;
-            let source_matches = file.path.to_string_lossy() == package.source_path
-                && file.size == package.source_size
-                && file.mtime == package.source_mtime
-                && file
-                    .subtitle_streams
-                    .iter()
-                    .any(|stream| stream.index == index && is_native_text_subtitle(&stream.codec));
-            if !source_matches {
-                return Err(typed(
-                    StatusCode::GONE,
-                    "source_changed",
-                    "The source for this offline subtitle has changed.",
-                ));
-            }
-            let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
-                .await
-                .map_err(|message| {
-                    tracing::warn!(
-                        package_id = %package.id,
-                        subtitle_index = index,
-                        error = %message,
-                        "offline subtitle recovery failed"
-                    );
-                    typed(
-                        StatusCode::GONE,
-                        "subtitle_unavailable",
-                        "The offline subtitle could not be restored.",
-                    )
-                })?;
-            plurx_core::fs_secure::read_bounded_regular(&recovered, MAX_OFFLINE_VTT_BYTES)
-                .await
-                .map_err(|_| {
-                    typed(
-                        StatusCode::GONE,
-                        "subtitle_unavailable",
-                        "The offline subtitle could not be restored.",
-                    )
-                })?
-        }
-    };
+        };
     Ok(hls_response(
         &state,
         &package,
@@ -1283,6 +1312,61 @@ mod tests {
     use plurx_core::transcode::EffectiveRateControl;
     use serde_json::Value;
     use std::sync::Arc;
+
+    #[test]
+    fn offline_generation_cache_bounds_many_large_decoded_manifests() {
+        let mut cache = OfflineGenerationCache::default();
+        let mut one_manifest_weight = 0usize;
+        for generation in 0..64 {
+            let objects = (0..128)
+                .map(|object| plurx_core::transcode::manifest::GenerationObject {
+                    name: format!(
+                        "generation-{generation:03}-object-{object:05}-{}.ts",
+                        "x".repeat(1024)
+                    ),
+                    bytes: 1,
+                    sha256: "a".repeat(64),
+                })
+                .collect::<Vec<_>>();
+            let manifest = Arc::new(plurx_core::transcode::manifest::GenerationManifest {
+                format_version: 1,
+                generation_id: format!("generation-{generation}"),
+                object_count: objects.len(),
+                objects,
+                manifest_digest: "b".repeat(64),
+            });
+            let weight = crate::manifest_cache::decoded_weight(&manifest);
+            one_manifest_weight = weight;
+            cache.remember_with_limits(
+                format!("generation-{generation}"),
+                OfflineGenerationSnapshot {
+                    cached: CachedTranscode {
+                        recipe_hash: format!("recipe-{generation}"),
+                        file_id: generation,
+                        storage_class: "local".to_owned(),
+                        relative_dir: format!("generation-{generation}"),
+                        bytes: 1,
+                        complete: true,
+                        manifest_digest: Some("b".repeat(64)),
+                        scrub_object_index: 0,
+                        last_used_at: 0,
+                    },
+                    manifest: Some(manifest),
+                    manifest_decoded_bytes: weight,
+                    validated_at: Instant::now(),
+                },
+                64,
+                weight.saturating_mul(4),
+            );
+        }
+
+        assert_eq!(cache.entries.len(), 4);
+        assert!(cache.decoded_bytes <= one_manifest_weight.saturating_mul(4));
+        assert_eq!(
+            cache.entries.front().map(|(key, _)| key.as_str()),
+            Some("generation-60")
+        );
+    }
 
     struct Fixture {
         state: AppState,

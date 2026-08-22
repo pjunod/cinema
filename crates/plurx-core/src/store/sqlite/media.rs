@@ -796,14 +796,22 @@ impl MediaStore for SqliteStore {
                    AND book_work_id IS ?11
                    AND book_metadata_source IS ?12
                    AND book_edition_id IS ?13
-                   AND poster_path IS ?14";
+                   AND poster_path IS ?14
+                   AND (?15 IS NULL OR EXISTS (
+                       SELECT 1 FROM settings WHERE key = ?15 AND value = ?16))";
+            let (origin_key, origin_value) = patch
+                .required_origin
+                .as_ref()
+                .map_or((None, None), |(key, value)| {
+                    (Some(key.as_str()), Some(value.as_str()))
+                });
             let changed = if let Some(fence) = repair_fence.as_ref() {
                 conn.execute(
                     &format!(
-                        "{base_sql} AND ?15 = ?1 AND EXISTS (
+                        "{base_sql} AND ?17 = ?1 AND EXISTS (
                            SELECT 1 FROM cluster_artwork_repairs
-                           WHERE item_id = ?15 AND owner_node_id = ?16 AND leader_term = ?17
-                             AND generation = ?18)"
+                           WHERE item_id = ?17 AND owner_node_id = ?18 AND leader_term = ?19
+                             AND generation = ?20)"
                     ),
                     params![
                         expected.id,
@@ -820,6 +828,8 @@ impl MediaStore for SqliteStore {
                         expected.book_metadata_source,
                         expected.book_edition_id,
                         expected.poster_path,
+                        origin_key,
+                        origin_value,
                         fence.item_id,
                         fence.owner_node_id,
                         fence.leader_term,
@@ -844,6 +854,8 @@ impl MediaStore for SqliteStore {
                         expected.book_metadata_source,
                         expected.book_edition_id,
                         expected.poster_path,
+                        origin_key,
+                        origin_value,
                     ],
                 )?
             };
