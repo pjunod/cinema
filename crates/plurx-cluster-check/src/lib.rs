@@ -74,6 +74,8 @@ pub use topology::{
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
+const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
+const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -258,12 +260,68 @@ async fn controller() -> Result<()> {
     run_leader_self_leave_case().await?;
     println!("cluster-check: four-voter leader self-leave with one survivor down");
     run_degraded_four_voter_leader_self_leave_case().await?;
+    println!("cluster-check: rolling quorum-watermark stream compatibility");
+    run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
     println!("cluster-check: all M1b/M1c/M1d/M3a failure contracts passed");
     Ok(())
+}
+
+/// Prove a new follower can talk to a leader that predates the watermark
+/// marker. The old handler receives the real serialized consistent-query
+/// request, returns SQLite's harmless syntax error, and then serves an
+/// ordinary consistent query on that exact WebSocket connection.
+async fn run_quorum_watermark_rolling_compatibility_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("watermark rolling-compatibility data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move {
+            ClusterProcesses::start_with_old_watermark_handler(
+                &executable,
+                &attempt_root,
+                reservation?,
+                1,
+            )
+            .await
+        }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    if cluster.leader().await? != 1 {
+        cluster
+            .request(1, Request::TriggerElection)
+            .await?
+            .require_ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if cluster.leader().await? == 1 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("old-handler voter 1 did not become compatibility leader");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    cluster
+        .request(2, Request::ProveOldWatermarkStreamCompatibility)
+        .await?
+        .require_ok()?;
+    cluster.shutdown_all().await
 }
 
 async fn run_membership_lifecycle_case() -> Result<()> {
@@ -342,6 +400,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     node_id,
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
+                    emulate_old_watermark_handler: false,
                 },
             )
             .await?;
@@ -1570,6 +1629,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         node_id: 1,
         root,
         nodes: specs,
+        emulate_old_watermark_handler: false,
     };
     // This voter runs hiqlite in-process rather than behind the stdin/stdout
     // protocol, so a lost port would otherwise surface as a growth verdict.
@@ -2105,18 +2165,89 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
         }
     }
 
-    // One more loss removes quorum. The remaining embedded process is alive,
-    // but its Store ping must fail rather than advertise readiness.
+    // Retain the actual current leader for the quorum-loss proof. Its latest
+    // commit watermark must be current and locally applied before the second
+    // process loss; this rules out a test that merely starts with stale data.
+    let quorum_loss_survivor = cluster.leader().await?;
+    let watermark_deadline = Instant::now() + Duration::from_secs(5);
+    let before_quorum_loss = loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.valid
+            && sample.watermark_valid
+            && sample.watermark_age_millis.is_some_and(|age| age < 1_000)
+            && sample.committed_index == Some(sample.applied_index)
+            && sample.apply_lag_entries == Some(0)
+        {
+            break sample;
+        }
+        if Instant::now() >= watermark_deadline {
+            bail!(
+                "current leader {quorum_loss_survivor} never published a fully applied pre-loss watermark: {sample:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let direct_before_loss =
+        quorum_watermark_observation(&mut cluster, quorum_loss_survivor).await?;
+    if direct_before_loss.leader_id != quorum_loss_survivor
+        || direct_before_loss.term != before_quorum_loss.current_term
+        || direct_before_loss.committed_index < before_quorum_loss.applied_index
+    {
+        bail!(
+            "direct pre-loss watermark did not describe retained leader {quorum_loss_survivor}: passive={before_quorum_loss:?}, direct={direct_before_loss:?}"
+        );
+    }
+
+    // One more loss removes quorum. The former leader remains alive and its
+    // local applied state remains fresh, but it must be unable to renew the
+    // original one-second proof. At and beyond that proof's exact deadline,
+    // the retained commit stays diagnostic-only and lag disappears.
     let second_loss = (1..=3)
-        .find(|node_id| *node_id != target_id && *node_id != survivor)
+        .find(|node_id| *node_id != target_id && *node_id != quorum_loss_survivor)
         .context("choose second loss")?;
     cluster.kill(second_loss).await?;
+    let expiry_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.watermark_age_millis.is_some_and(|age| age >= 1_000) {
+            if !sample.valid
+                || sample.watermark_valid
+                || sample.applied_index != before_quorum_loss.applied_index
+                || sample.committed_index != before_quorum_loss.committed_index
+                || sample.apply_lag_entries.is_some()
+            {
+                bail!(
+                    "former leader renewed or misreported an expired quorum proof: before={before_quorum_loss:?}, after={sample:?}"
+                );
+            }
+            break;
+        }
+        if Instant::now() >= expiry_deadline {
+            bail!(
+                "former leader {quorum_loss_survivor} did not expose the original watermark expiry"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.watermark_errors > before_quorum_loss.watermark_errors {
+            break;
+        }
+        if Instant::now() >= expiry_deadline {
+            bail!(
+                "former leader {quorum_loss_survivor} expired its proof but did not report a failed renewal"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     for request in [
+        Request::QuorumWatermark,
         Request::Ping,
         Request::ReadWithoutQuorum,
         Request::WriteWithoutQuorum,
     ] {
-        let response = cluster.request(survivor, request).await?;
+        let response = cluster.request(quorum_loss_survivor, request).await?;
         require_quorum_error(response)?;
     }
     cluster.assert_running().await?;
@@ -2137,6 +2268,8 @@ pub struct NodeLaunch {
     pub node_id: u64,
     pub root: PathBuf,
     pub nodes: Vec<NodeSpec>,
+    #[serde(default)]
+    pub emulate_old_watermark_handler: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2291,6 +2424,8 @@ pub enum Request {
     RebuildSearch,
     Metrics,
     PassiveRaftMetrics,
+    QuorumWatermark,
+    ProveOldWatermarkStreamCompatibility,
     ReplicationStatus,
     Ping,
     ReadWithoutQuorum,
@@ -2348,6 +2483,16 @@ pub enum Response {
         applied_index: Option<u64>,
         leader_known: Option<bool>,
         is_leader: Option<bool>,
+        watermark_valid: bool,
+        watermark_age_millis: Option<u64>,
+        watermark_errors: u64,
+        committed_index: Option<u64>,
+        apply_lag_entries: Option<u64>,
+    },
+    QuorumWatermark {
+        term: u64,
+        leader_id: u64,
+        committed_index: u64,
     },
     ReplicationStatus {
         status: ReplicationStatus,
@@ -2437,6 +2582,11 @@ struct PassiveRaftObservation {
     applied_index: u64,
     leader_known: bool,
     is_leader: bool,
+    watermark_valid: bool,
+    watermark_age_millis: Option<u64>,
+    watermark_errors: u64,
+    committed_index: Option<u64>,
+    apply_lag_entries: Option<u64>,
 }
 
 async fn passive_raft_observation(
@@ -2456,6 +2606,11 @@ async fn passive_raft_observation(
             applied_index: Some(applied_index),
             leader_known: Some(leader_known),
             is_leader: Some(is_leader),
+            watermark_valid,
+            watermark_age_millis,
+            watermark_errors,
+            committed_index,
+            apply_lag_entries,
         } => Ok(PassiveRaftObservation {
             valid,
             age_seconds,
@@ -2465,8 +2620,38 @@ async fn passive_raft_observation(
             applied_index,
             leader_known,
             is_leader,
+            watermark_valid,
+            watermark_age_millis,
+            watermark_errors,
+            committed_index,
+            apply_lag_entries,
         }),
         response => bail!("voter {node_id} passive Raft sample was absent: {response:?}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuorumWatermarkObservation {
+    term: u64,
+    leader_id: u64,
+    committed_index: u64,
+}
+
+async fn quorum_watermark_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<QuorumWatermarkObservation> {
+    match cluster.request(node_id, Request::QuorumWatermark).await? {
+        Response::QuorumWatermark {
+            term,
+            leader_id,
+            committed_index,
+        } => Ok(QuorumWatermarkObservation {
+            term,
+            leader_id,
+            committed_index,
+        }),
+        response => bail!("voter {node_id} quorum watermark was absent: {response:?}"),
     }
 }
 
@@ -2479,7 +2664,13 @@ async fn prove_passive_raft_observer(cluster: &mut ClusterProcesses) -> Result<(
         let mut ready = true;
         for node_id in 1..=3 {
             let sample = passive_raft_observation(cluster, node_id).await?;
-            ready &= sample.valid && sample.leader_known && sample.errors == 0;
+            ready &= sample.valid
+                && sample.leader_known
+                && sample.errors == 0
+                && sample.watermark_valid
+                && sample.watermark_age_millis.is_some()
+                && sample.committed_index.is_some()
+                && sample.apply_lag_entries.is_some();
             samples.push(sample);
         }
         if ready {
@@ -2516,6 +2707,67 @@ async fn prove_passive_raft_observer(cluster: &mut ClusterProcesses) -> Result<(
                 );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    let mut proofs = Vec::new();
+    for node_id in 1..=3 {
+        let proof = quorum_watermark_observation(cluster, node_id).await?;
+        let local = passive_raft_observation(cluster, node_id).await?;
+        if proof.committed_index < local.applied_index {
+            bail!(
+                "voter {node_id} quorum watermark {} did not cover local applied {}",
+                proof.committed_index,
+                local.applied_index
+            );
+        }
+        proofs.push(proof);
+    }
+    if proofs
+        .iter()
+        .any(|proof| proof.term != proofs[0].term || proof.leader_id != proofs[0].leader_id)
+    {
+        bail!("three voters disagreed on the quorum proof: {proofs:?}");
+    }
+    if proofs[0].leader_id != leader {
+        bail!(
+            "quorum proof named leader {} but cluster leader is {leader}",
+            proofs[0].leader_id
+        );
+    }
+
+    let before_renewal = [
+        passive_raft_observation(cluster, 1).await?.applied_index,
+        passive_raft_observation(cluster, 2).await?.applied_index,
+        passive_raft_observation(cluster, 3).await?.applied_index,
+    ];
+    let before_watermark_errors = [
+        initial[0].watermark_errors,
+        initial[1].watermark_errors,
+        initial[2].watermark_errors,
+    ];
+    for _ in 0..3 {
+        for node_id in 1..=3 {
+            let renewed = quorum_watermark_observation(cluster, node_id).await?;
+            if renewed.term != proofs[0].term
+                || renewed.leader_id != proofs[0].leader_id
+                || renewed.committed_index != proofs[0].committed_index
+            {
+                bail!("stable-term quorum renewal changed the proof: {renewed:?}");
+            }
+        }
+    }
+    for node_id in 1..=3 {
+        let after = passive_raft_observation(cluster, node_id).await?;
+        let before = before_renewal[(node_id - 1) as usize];
+        if after.applied_index != before {
+            bail!(
+                "quorum watermark renewals consumed Raft entries on voter {node_id}: {before} -> {}",
+                after.applied_index
+            );
+        }
+        if after.watermark_errors < before_watermark_errors[(node_id - 1) as usize] {
+            bail!("voter {node_id} quorum watermark error counter regressed");
         }
     }
 
@@ -2573,6 +2825,46 @@ async fn prove_passive_raft_observer(cluster: &mut ClusterProcesses) -> Result<(
     }
     if observed_local_leaders != 1 {
         bail!("passive observer reported {observed_local_leaders} local leaders after election");
+    }
+
+    let watermark_recovery_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut recovered = Vec::new();
+        for node_id in 1..=3 {
+            recovered.push(passive_raft_observation(cluster, node_id).await?);
+        }
+        if recovered.iter().all(|sample| {
+            sample.watermark_valid
+                && sample.current_term > proofs[0].term
+                && sample.watermark_age_millis.is_some()
+                && sample.committed_index.is_some()
+                && sample.apply_lag_entries.is_some()
+        }) {
+            break;
+        }
+        if Instant::now() >= watermark_recovery_deadline {
+            bail!("background quorum samplers did not recover after idle election: {recovered:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mut successor_proofs = Vec::new();
+    for node_id in 1..=3 {
+        let successor = quorum_watermark_observation(cluster, node_id).await?;
+        if successor.term <= proofs[0].term || successor.leader_id != new_leader {
+            bail!(
+                "voter {node_id} did not replace quorum generation {:?}: {successor:?}",
+                proofs[0]
+            );
+        }
+        successor_proofs.push(successor);
+    }
+    if successor_proofs.iter().any(|proof| {
+        proof.term != successor_proofs[0].term
+            || proof.leader_id != successor_proofs[0].leader_id
+            || proof.committed_index != successor_proofs[0].committed_index
+    }) {
+        bail!("voters disagreed after idle election: {successor_proofs:?}");
     }
     Ok(())
 }
@@ -2643,6 +2935,9 @@ impl NodeProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+        if launch.emulate_old_watermark_handler {
+            command.env(OLD_WATERMARK_HANDLER_ENV, "1");
+        }
         let mut child = command.spawn().context("spawn cluster voter")?;
         let input = child.stdin.take().context("voter stdin")?;
         let output = BufReader::new(child.stdout.take().context("voter stdout")?);
@@ -2745,6 +3040,24 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
     ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, None).await
+    }
+
+    async fn start_with_old_watermark_handler(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        old_handler_node: u64,
+    ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, Some(old_handler_node)).await
+    }
+
+    async fn start_inner(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        old_handler_node: Option<u64>,
+    ) -> Result<Self> {
         let (_listeners, specs) = reservation.into_inner();
         // Listeners are dropped here: the child process must bind the same
         // ports, so we cannot hold them across the spawn. The window between
@@ -2757,6 +3070,7 @@ impl ClusterProcesses {
                 node_id,
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
+                emulate_old_watermark_handler: old_handler_node == Some(node_id),
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
         }
@@ -4035,7 +4349,41 @@ async fn handle_request(
                 applied_index: view.sample.and_then(|sample| sample.last_applied_index),
                 leader_known: view.sample.map(|sample| sample.leader_known),
                 is_leader: view.sample.map(|sample| sample.is_leader),
+                watermark_valid: view.watermark_valid,
+                watermark_age_millis: view.watermark_age_millis,
+                watermark_errors: view.watermark_errors,
+                committed_index: view.watermark.map(|sample| sample.committed_index),
+                apply_lag_entries: view.watermark.and_then(|sample| sample.apply_lag_entries),
             })
+        }
+        Request::QuorumWatermark => {
+            let watermark = client.db_quorum_watermark().await?;
+            Ok(Response::QuorumWatermark {
+                term: watermark.term,
+                leader_id: watermark.leader_id,
+                committed_index: watermark.committed_index,
+            })
+        }
+        Request::ProveOldWatermarkStreamCompatibility => {
+            let error = client
+                .db_quorum_watermark()
+                .await
+                .expect_err("old handler must reject the reserved marker as SQL");
+            if !error.to_string().to_ascii_lowercase().contains("syntax") {
+                bail!("old handler rejected the watermark marker unexpectedly: {error}");
+            }
+            let mut rows = client
+                .query_consistent(WATERMARK_STREAM_COMPAT_PROBE, params!())
+                .await?;
+            if rows.len() != 1
+                || rows
+                    .swap_remove(0)
+                    .get::<i64>("hiqlite_watermark_stream_compat_v1")
+                    != 1
+            {
+                bail!("ordinary consistent query returned the wrong rolling-compatibility proof");
+            }
+            Ok(Response::Ok)
         }
         Request::ReplicationStatus => Ok(Response::ReplicationStatus {
             status: replication.status().await,
@@ -5677,6 +6025,7 @@ mod tests {
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
+            emulate_old_watermark_handler: false,
         };
 
         let config = node_config(&launch).expect("build the voter config");

@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** ready to build · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P1 landed; P2a–P2d staged for review · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -468,6 +468,25 @@ applied index is not a quorum-confirmed commit watermark; P2d remains the only
 slice allowed to add that claim and derive apply lag from it. The system status
 path remains separate from this narrow observer and retains its management
 fallback for maintenance callers.
+
+**P2d quorum watermark:** the vendored Hiqlite client asks the current database
+leader for OpenRaft's quorum-backed linearizable-read proof and returns only
+`(term, leader_id, committed_index)`. Followers carry that reserved request in
+the existing authenticated consistent-query envelope, so an older leader
+returns a harmless SQL error instead of failing the shared stream on an unknown
+wire variant. Both client and leader waits are bounded. Each process anchors a
+one-second monotonic lease before sending, renews at a staggered 500 ms cadence,
+and never extends the deadline after an error.
+
+`ReplicationMonitor` publishes the proof under the same seqlock as the passive
+local sample. Any term or `Option<leader_id>` transition advances an internal
+epoch, including `Some -> None -> same`, and permanently invalidates the old
+proof. A watermark is valid only while its pre-request deadline has not arrived,
+the local source is fresh, the local epoch, term, and leader still match, and a
+local applied index exists. Only that state derives saturating commit-to-apply
+lag. Metrics retain an invalid prior value for diagnosis, expose fixed
+`source="watermark"` validity, age, and error series, and never render either
+node identity.
 
 **Change:** Instrument `TimedClient` once so every replicated Store module uses
 the same bounded local-read · authority-read · write histograms and counters.
