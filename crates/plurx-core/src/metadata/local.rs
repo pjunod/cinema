@@ -21,25 +21,6 @@ use crate::store::{PublicationStore, Store};
 /// home and movie cards without a visible quality step.
 const THUMB_WIDTH: i64 = 500;
 
-/// Cancellation cleanup for bytes that have not been atomically published.
-struct TemporaryArtwork(PathBuf);
-
-impl TemporaryArtwork {
-    fn new(path: PathBuf) -> Self {
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TemporaryArtwork {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// The ffmpeg binary; overridable via `PLURX_FFMPEG` for jellyfin-ffmpeg or a
 /// pinned path — same convention as the transcoder and prober.
 fn ffmpeg_bin() -> String {
@@ -190,7 +171,7 @@ pub async fn enrich_home_library_with_publication(
     // its children already have the poster it inherits.
     for item in items {
         let poster = match item.kind {
-            ItemKind::Folder => match folder_poster(store.raw(), artwork_dir, item.id).await {
+            ItemKind::Folder => match folder_poster(store, artwork_dir, item.id).await {
                 Some(name) => {
                     report.inherited += 1;
                     Some(name)
@@ -201,13 +182,14 @@ pub async fn enrich_home_library_with_publication(
                 let Some(path) = first_file_path(store.raw(), item.id).await else {
                     continue;
                 };
-                match adopt_local_art(artwork_dir, item.id, &path).await {
+                match adopt_local_art(store, artwork_dir, item.id, &path).await {
                     Some(name) => {
                         report.adopted += 1;
                         Some(name)
                     }
                     None => {
                         match generate_thumb(
+                            store,
                             artwork_dir,
                             item.id,
                             &path,
@@ -279,14 +261,19 @@ async fn duration(store: &dyn Store, item_id: i64) -> Option<i64> {
 /// Art the owner already put next to the media wins over anything we could
 /// generate (REQ-META-4's spirit): `<stem>-thumb.jpg`/`-poster.jpg` for a
 /// file. Copied into the cache under the usual `{item_id}-poster.*` name.
-async fn adopt_local_art(artwork_dir: &Path, item_id: i64, media: &Path) -> Option<String> {
+async fn adopt_local_art(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    item_id: i64,
+    media: &Path,
+) -> Option<String> {
     let stem = media.file_stem()?.to_string_lossy().into_owned();
     let dir = media.parent()?;
     for suffix in ["-thumb", "-poster"] {
         for ext in ["jpg", "jpeg", "png"] {
             let candidate = dir.join(format!("{stem}{suffix}.{ext}"));
             if candidate.is_file() {
-                return copy_into_cache(artwork_dir, item_id, &candidate).await;
+                return copy_into_cache(store, artwork_dir, item_id, &candidate).await;
             }
         }
     }
@@ -294,30 +281,43 @@ async fn adopt_local_art(artwork_dir: &Path, item_id: i64, media: &Path) -> Opti
 }
 
 /// Local art for a folder: `poster.jpg`/`folder.jpg` inside the directory.
-async fn adopt_folder_art(artwork_dir: &Path, item_id: i64, dir: &Path) -> Option<String> {
+async fn adopt_folder_art(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    item_id: i64,
+    dir: &Path,
+) -> Option<String> {
     for name in ["poster", "folder"] {
         for ext in ["jpg", "jpeg", "png"] {
             let candidate = dir.join(format!("{name}.{ext}"));
             if candidate.is_file() {
-                return copy_into_cache(artwork_dir, item_id, &candidate).await;
+                return copy_into_cache(store, artwork_dir, item_id, &candidate).await;
             }
         }
     }
     None
 }
 
-async fn copy_into_cache(artwork_dir: &Path, item_id: i64, source: &Path) -> Option<String> {
+async fn copy_into_cache(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    item_id: i64,
+    source: &Path,
+) -> Option<String> {
     let ext = source
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("jpg")
         .to_lowercase();
-    let filename = format!("{item_id}-poster.{ext}");
-    let dest = artwork_dir.join(&filename);
-    match super::copy_artwork_atomically(source, &dest).await {
+    let bytes = read_local_art(source).await?;
+    let filename = store
+        .scoped_artwork_filename(&format!("{item_id}-poster.{ext}"), &bytes)
+        .await
+        .ok()?;
+    match crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await {
         Ok(()) => Some(filename),
-        Err(error) => {
-            tracing::warn!(source = %source.display(), %error, "copying local artwork");
+        Err(e) => {
+            tracing::warn!(source = %source.display(), error = %e, "copying local artwork");
             None
         }
     }
@@ -332,6 +332,7 @@ async fn copy_into_cache(artwork_dir: &Path, item_id: i64, source: &Path) -> Opt
 /// pipeline. Accepted for v1: it's a thumbnail. The transcode path's
 /// tone-map filter can be reused here later if it grates.
 async fn generate_thumb(
+    store: &PublicationStore<'_>,
     artwork_dir: &Path,
     item_id: i64,
     media: &Path,
@@ -340,6 +341,7 @@ async fn generate_thumb(
 ) -> Option<String> {
     let ffmpeg = ffmpeg_bin();
     generate_thumb_with(
+        Some(store),
         OsStr::new(&ffmpeg),
         artwork_dir,
         item_id,
@@ -351,6 +353,7 @@ async fn generate_thumb(
 }
 
 async fn generate_thumb_with(
+    store: Option<&PublicationStore<'_>>,
     ffmpeg: &OsStr,
     artwork_dir: &Path,
     item_id: i64,
@@ -358,17 +361,8 @@ async fn generate_thumb_with(
     kind: ItemKind,
     duration_ms: Option<i64>,
 ) -> Option<String> {
-    let filename = format!("{item_id}-poster.jpg");
-    let dest = artwork_dir.join(&filename);
-    let temporary = TemporaryArtwork::new(artwork_dir.join(format!(
-        ".{filename}.{}.tmp.jpg",
-        uuid::Uuid::new_v4().simple()
-    )));
-
     let mut cmd = tokio::process::Command::new(ffmpeg);
-    cmd.kill_on_drop(true)
-        .arg("-nostdin")
-        .args(["-v", "error", "-y"]);
+    cmd.arg("-nostdin").args(["-v", "error"]);
     if kind == ItemKind::Video {
         cmd.arg("-ss")
             .arg(format!("{:.3}", seek_seconds(duration_ms)));
@@ -378,31 +372,71 @@ async fn generate_thumb_with(
         .args(["-frames:v", "1"])
         .args(["-vf", &format!("scale=w={THUMB_WIDTH}:h=-2")])
         .args(["-q:v", "4"])
-        .arg(temporary.path());
+        .args(["-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
 
-    match cmd.output().await {
-        Ok(out) if out.status.success() && temporary.path().is_file() => {
-            match tokio::fs::rename(temporary.path(), &dest).await {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            use tokio::io::AsyncReadExt;
+            let mut bytes = Vec::new();
+            let read = match child.stdout.take() {
+                Some(stdout) => {
+                    stdout
+                        .take(super::MAX_ARTWORK_BYTES.saturating_add(1))
+                        .read_to_end(&mut bytes)
+                        .await
+                }
+                None => return None,
+            };
+            if read.is_err() || bytes.is_empty() || bytes.len() as u64 > super::MAX_ARTWORK_BYTES {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                tracing::warn!(path = %media.display(), "thumbnail output exceeded its bounded pipe");
+                return None;
+            }
+            let status = child.wait().await.ok()?;
+            if !status.success() {
+                tracing::warn!(path = %media.display(), %status, "thumbnail generation failed");
+                return None;
+            }
+            let filename = match store {
+                Some(store) => match store
+                    .scoped_artwork_filename(&format!("{item_id}-poster.jpg"), &bytes)
+                    .await
+                {
+                    Ok(filename) => filename,
+                    Err(error) => {
+                        tracing::warn!(item = item_id, %error, "fencing generated local artwork");
+                        return None;
+                    }
+                },
+                None => format!("{item_id}-poster.jpg"),
+            };
+            let published =
+                crate::fs_secure::atomic_write_child(artwork_dir, &filename, &bytes).await;
+            match published {
                 Ok(()) => Some(filename),
                 Err(error) => {
-                    tracing::warn!(path = %media.display(), %error, "installing generated thumbnail");
+                    tracing::warn!(item = item_id, %error, "publishing generated local artwork");
                     None
                 }
-            }
         }
-        Ok(out) => {
-            tracing::warn!(
-                path = %media.display(),
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "thumbnail generation failed"
-            );
-            None
         }
         Err(e) => {
             tracing::warn!(path = %media.display(), error = %e, "spawning ffmpeg for a thumbnail");
             None
         }
     }
+}
+
+async fn read_local_art(path: &Path) -> Option<Vec<u8>> {
+    let bytes = crate::fs_secure::read_bounded_regular(path, super::MAX_ARTWORK_BYTES)
+        .await
+        .ok()?;
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 /// Where to grab the frame: 20% in, clamped to [1 s, 300 s]. The opening
@@ -418,13 +452,17 @@ fn seek_seconds(duration_ms: Option<i64>) -> f64 {
 
 /// A folder wears its own `poster.jpg` if it has one, else the poster of its
 /// first child by recorded date. Cheap, deterministic, good enough.
-async fn folder_poster(store: &dyn Store, artwork_dir: &Path, folder_id: i64) -> Option<String> {
-    let children = store.get_item_children(folder_id).await.ok()?;
+async fn folder_poster(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    folder_id: i64,
+) -> Option<String> {
+    let children = store.raw().get_item_children(folder_id).await.ok()?;
     // Any child's file tells us which directory this folder mirrors.
     for child in &children {
-        if let Some(path) = first_file_path(store, child.id).await {
+        if let Some(path) = first_file_path(store.raw(), child.id).await {
             if let Some(dir) = path.parent() {
-                if let Some(name) = adopt_folder_art(artwork_dir, folder_id, dir).await {
+                if let Some(name) = adopt_folder_art(store, artwork_dir, folder_id, dir).await {
                     return Some(name);
                 }
             }
@@ -685,6 +723,7 @@ mod tests {
         let task_media = dir.path().join("video.mp4");
         let task = tokio::spawn(async move {
             generate_thumb_with(
+                None,
                 task_script.as_os_str(),
                 &task_artwork,
                 7,

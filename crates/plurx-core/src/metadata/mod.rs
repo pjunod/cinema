@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures_util::StreamExt;
+
 pub use anilist::AniListClient;
 pub use tmdb::TmdbClient;
 
@@ -29,6 +31,41 @@ const POSTER_SIZE: &str = "w500";
 // keeping TMDB's source resolution is the right tradeoff for large screens.
 const BACKDROP_SIZE: &str = "original";
 const STILL_SIZE: &str = "original";
+
+/// One ceiling shared by every artwork producer, clustered replication, and
+/// the serving path. Publishing bytes a voter can never serve creates a
+/// permanent repair loop, so producer limits are part of the storage format.
+pub const MAX_ARTWORK_BYTES: u64 = 15 * 1024 * 1024;
+
+pub(crate) async fn bounded_artwork_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, crate::error::MetadataError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARTWORK_BYTES)
+    {
+        return Err(crate::error::MetadataError::Http(format!(
+            "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
+        )));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|error| crate::error::MetadataError::Http(error.to_string()))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK_BYTES as usize {
+            return Err(crate::error::MetadataError::Http(format!(
+                "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(crate::error::MetadataError::Parse(
+            "artwork response was empty".to_owned(),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// Cap on the problem lines one pass records, mirroring `ScanReport`'s: past
 /// it only a trailing summary is added. A refresh of a library whose provider
@@ -504,6 +541,7 @@ async fn enrich_library_for_targets_inner(
             ItemKind::Movie => match movie_lookup(tmdb, &item, known).await {
                 Ok(Some(m)) => {
                     let poster = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -513,6 +551,7 @@ async fn enrich_library_for_targets_inner(
                     )
                     .await;
                     let backdrop = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -559,6 +598,7 @@ async fn enrich_library_for_targets_inner(
                 Ok(Some(m)) => {
                     let show_tmdb_id = m.tmdb_id;
                     let poster = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -568,6 +608,7 @@ async fn enrich_library_for_targets_inner(
                     )
                     .await;
                     let backdrop = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -773,6 +814,7 @@ async fn enrich_anime_library_inner(
         match client.find_anime(&item.title).await {
             Ok(Some(m)) => {
                 let poster = download_url(
+                    store,
                     client,
                     artwork_dir,
                     item.id,
@@ -781,6 +823,7 @@ async fn enrich_anime_library_inner(
                 )
                 .await;
                 let backdrop = download_url(
+                    store,
                     client,
                     artwork_dir,
                     item.id,
@@ -827,6 +870,7 @@ async fn enrich_anime_library_inner(
 
 /// Download an image from an absolute URL (AniList) into the artwork cache.
 async fn download_url(
+    store: &PublicationStore<'_>,
     client: &AniListClient,
     artwork_dir: &Path,
     item_id: i64,
@@ -843,7 +887,7 @@ async fn download_url(
             return Artwork::failed(format!("download: {e}"));
         }
     };
-    write_artwork(artwork_dir, item_id, kind, &bytes).await
+    write_artwork(store, artwork_dir, item_id, kind, &bytes).await
 }
 
 /// One artwork slot after an attempt: the file to store, and the attempt to
@@ -891,10 +935,28 @@ impl Artwork {
 }
 
 /// Write downloaded bytes into the artwork cache under the conventional name.
-async fn write_artwork(artwork_dir: &Path, item_id: i64, kind: &str, bytes: &[u8]) -> Artwork {
-    let filename = format!("{item_id}-{kind}.jpg");
+async fn write_artwork(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    item_id: i64,
+    kind: &str,
+    bytes: &[u8],
+) -> Artwork {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ARTWORK_BYTES {
+        return Artwork::failed(format!(
+            "artwork is outside the 1..={MAX_ARTWORK_BYTES} byte storage bound"
+        ));
+    }
+    let filename = match store
+        .scoped_artwork_filename(&format!("{item_id}-{kind}.jpg"), bytes)
+        .await
+    {
+        Ok(filename) => filename,
+        Err(error) => return Artwork::failed(format!("publication fence: {error}")),
+    };
     let dest: PathBuf = artwork_dir.join(&filename);
-    if let Err(e) = write_artwork_atomically(&dest, bytes).await {
+    let write = crate::fs_secure::atomic_write_child(artwork_dir, &filename, bytes).await;
+    if let Err(e) = write {
         tracing::warn!(path = %dest.display(), error = %e, "writing artwork");
         // A full or read-only artwork directory is as much a reason to come
         // back as a failed download, and from the item's side it is the same
@@ -991,6 +1053,7 @@ async fn enrich_episodes(
             let needs_art = season_item.poster_path.is_none();
             let poster = if needs_art {
                 cache_image(
+                    store,
                     tmdb,
                     artwork_dir,
                     season_item.id,
@@ -1045,6 +1108,7 @@ async fn enrich_episodes(
                 continue;
             };
             let still = cache_image(
+                store,
                 tmdb,
                 artwork_dir,
                 ep.id,
@@ -1109,6 +1173,7 @@ async fn apply(
 /// Download and cache one image, reporting both the file and the attempt.
 /// Failures stay non-fatal — they are now merely recorded rather than lost.
 async fn cache_image(
+    store: &PublicationStore<'_>,
     tmdb: &TmdbClient,
     artwork_dir: &Path,
     item_id: i64,
@@ -1126,7 +1191,7 @@ async fn cache_image(
             return Artwork::failed(format!("download: {e}"));
         }
     };
-    write_artwork(artwork_dir, item_id, kind, &bytes).await
+    write_artwork(store, artwork_dir, item_id, kind, &bytes).await
 }
 
 #[cfg(test)]
