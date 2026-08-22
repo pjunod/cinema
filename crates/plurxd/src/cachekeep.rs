@@ -370,11 +370,15 @@ fn staging_queue_recipe(name: &str) -> Option<&str> {
 /// inventory authorize cleanup even when the cache-location inventory is
 /// legitimately empty after a restart.
 fn final_queue_job(name: &str) -> Option<&str> {
+    final_queue_generation(name).map(|(job, _)| job)
+}
+
+fn final_queue_generation(name: &str) -> Option<(&str, i64)> {
     let (staging_name, fence) = name.rsplit_once("-f")?;
-    if fence.is_empty() || !fence.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    staging_queue_job(staging_name)
+    let fence = (!fence.is_empty() && fence.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| fence.parse::<i64>().ok())
+        .flatten()?;
+    Some((staging_queue_job(staging_name)?, fence))
 }
 
 fn final_recipe(name: &str) -> Option<&str> {
@@ -593,8 +597,25 @@ async fn delete_final_batch(
     // Iterate by reference so every unique-key eviction guard in the batch
     // remains alive until every same-recipe generation has been decided.
     for candidate in batch.iter() {
-        let owned = owned_paths.contains(&candidate.path)
-            || final_queue_job(&candidate.name).is_some_and(|job| queue_jobs.contains(job));
+        let queue_owned = if let Some((job_id, fence)) = final_queue_generation(&candidate.name) {
+            if !queue_jobs.contains(job_id) {
+                false
+            } else {
+                match store.pretranscode_job(job_id).await {
+                    Ok(Some(job)) => {
+                        job.state == "running" && job.owner_node_id == node_id && job.fence == fence
+                    }
+                    Ok(None) => false,
+                    Err(error) => {
+                        tracing::warn!(job = job_id, %error, "cache: could not recheck exact queue generation; keeping bytes");
+                        true
+                    }
+                }
+            }
+        } else {
+            false
+        };
+        let owned = owned_paths.contains(&candidate.path) || queue_owned;
         if owned {
             kept += 1;
             continue;
@@ -1330,9 +1351,6 @@ async fn sweep_orphan_dirs(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if final_queue_job(&name).is_some_and(|job| queue_staging.contains(job)) {
-            continue;
-        }
         let identity = match plurx_core::fs_secure::directory_identity_nofollow(&path).await {
             Ok(identity) => identity,
             Err(_) => continue,
@@ -2117,19 +2135,57 @@ mod tests {
             .expect("local reclaim")
             .expect("local job");
         assert_eq!(resumed.id, job_id);
+        let prefix = root.path().join("bb");
+        tokio::fs::create_dir_all(&prefix).await.expect("fanout");
+        let predecessor_final = prefix.join(format!("{recipe}-j{job_id}-f{}", first.fence));
+        let current_final = prefix.join(format!("{recipe}-j{job_id}-f{}", resumed.fence));
+        for final_dir in [&predecessor_final, &current_final] {
+            tokio::fs::create_dir_all(final_dir)
+                .await
+                .expect("commit-unknown final");
+            tokio::fs::write(final_dir.join("index.m3u8"), b"#EXTM3U\n#EXT-X-ENDLIST\n")
+                .await
+                .expect("playlist");
+        }
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(staging.exists(), "a locally reclaimed checkpoint was swept");
+        assert!(
+            !predecessor_final.exists() && current_final.exists(),
+            "only the exact active fence may retain a commit-unknown final"
+        );
+
+        assert!(store
+            .yield_pretranscode_job(&resumed, 150, 160)
+            .await
+            .expect("second yield"));
+        let resumed_again = store
+            .claim_pretranscode_job(NODE, &capabilities, &[], 160, 400)
+            .await
+            .expect("second local reclaim")
+            .expect("second local job");
+        let next_final = prefix.join(format!("{recipe}-j{job_id}-f{}", resumed_again.fence));
+        tokio::fs::create_dir_all(&next_final)
+            .await
+            .expect("next commit-unknown final");
+        tokio::fs::write(next_final.join("index.m3u8"), b"#EXTM3U\n#EXT-X-ENDLIST\n")
+            .await
+            .expect("next playlist");
+        sweep(&store, root.path(), NODE, unix_now()).await;
+        assert!(
+            !current_final.exists() && next_final.exists(),
+            "a repeated retry must reclaim its obsolete fence generation"
+        );
 
         let successor = store
-            .claim_pretranscode_job("node-b", &capabilities, &[], 301, 600)
+            .claim_pretranscode_job("node-b", &capabilities, &[], 401, 600)
             .await
             .expect("remote takeover")
             .expect("remote job");
-        assert_eq!(successor.fence, resumed.fence + 1);
+        assert_eq!(successor.fence, resumed_again.fence + 1);
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(
-            !staging.exists(),
-            "the predecessor's abandoned staging survived remote takeover"
+            !staging.exists() && !next_final.exists(),
+            "the predecessor's abandoned staging/final survived remote takeover"
         );
     }
 

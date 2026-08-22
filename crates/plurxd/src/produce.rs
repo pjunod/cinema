@@ -71,6 +71,46 @@ impl Part {
         }
     }
 
+    /// Parse a persisted resumable part without accepting ambiguous timeline
+    /// shapes. A killed ffmpeg may leave exactly one final `EXTINF` with no URI;
+    /// that one record is deliberately dropped. Every other URI must consume
+    /// exactly one duration, and a second duration may never overwrite the
+    /// first.
+    pub fn from_retained_playlist(text: &str) -> Option<Part> {
+        let mut segments = Vec::new();
+        let mut durations_ms = Vec::new();
+        let mut pending = None;
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Some(rest) = line.strip_prefix("#EXTINF:") {
+                if pending.is_some() {
+                    return None;
+                }
+                pending = Some(
+                    rest.split(',')
+                        .next()?
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|duration| duration.is_finite() && *duration >= 0.0)
+                        .map(|seconds| (seconds * 1000.0).round() as i64)?,
+                );
+                continue;
+            }
+            if line.starts_with('#') {
+                if pending.is_some() {
+                    return None;
+                }
+                continue;
+            }
+            durations_ms.push(pending.take()?);
+            segments.push(line.to_owned());
+        }
+        Some(Part {
+            segments,
+            durations_ms,
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }

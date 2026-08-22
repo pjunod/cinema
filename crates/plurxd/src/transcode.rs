@@ -886,6 +886,7 @@ pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
 struct FfmpegDescriptors {
     source: Option<std::os::fd::RawFd>,
     output: Option<std::os::fd::RawFd>,
+    subtitle: Option<std::os::fd::RawFd>,
 }
 
 fn spawn_ffmpeg(
@@ -904,7 +905,10 @@ fn spawn_ffmpeg(
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
-    if descriptors.source.is_some() || descriptors.output.is_some() {
+    if descriptors.source.is_some()
+        || descriptors.output.is_some()
+        || descriptors.subtitle.is_some()
+    {
         // The held handles remain close-on-exec in plurxd. Duplicate both
         // before assigning their fixed child descriptors so an unlucky raw-fd
         // number cannot make one dup2 clobber the other's source.
@@ -921,7 +925,8 @@ fn spawn_ffmpeg(
                 };
                 let source = duplicate(descriptors.source)?;
                 let output = duplicate(descriptors.output)?;
-                for (duplicate, target) in [(source, 3), (output, 4)] {
+                let subtitle = duplicate(descriptors.subtitle)?;
+                for (duplicate, target) in [(source, 3), (output, 4), (subtitle, 5)] {
                     let Some(duplicate) = duplicate else { continue };
                     if libc::dup2(duplicate, target) == -1 {
                         libc::close(duplicate);
@@ -1438,6 +1443,10 @@ struct Session {
     /// session's full lifetime so the budget sweep cannot remove its playlist
     /// or segments while an HTTP response can still reach them.
     _cache_reader: Option<crate::cachekeep::CacheReadGuard>,
+    /// Exact bounded text-subtitle inode inherited by ffmpeg as `/dev/fd/5`.
+    /// Keeping it for the session lifetime also lets a fallback child inherit
+    /// the same bytes without reopening a replaceable pathname.
+    subtitle_handle: Option<std::fs::File>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
     cache_manifest: Option<Arc<plurx_core::transcode::manifest::GenerationManifest>>,
@@ -1937,6 +1946,14 @@ pub struct SegmentFile {
     pub file: tokio::fs::File,
     pub len: u64,
     pub(crate) delivery: SegmentDelivery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentOpenError {
+    /// Authenticated snapshot memory is still owned by earlier response
+    /// bodies. This is an admission outcome, not evidence that the immutable
+    /// cache generation is corrupt.
+    Capacity,
 }
 
 /// Who is reading the segment behind a [`SegmentDelivery`].
@@ -3084,11 +3101,15 @@ pub(crate) fn validated_vod_part(text: &str) -> Option<crate::produce::Part> {
     let mut segments = Vec::new();
     let mut durations_ms = Vec::new();
     let mut pending_duration = None;
+    let mut header_tags = std::collections::BTreeSet::new();
+    let mut target_duration = None;
+    let mut started_segments = false;
     for line in &remaining[..remaining.len().saturating_sub(1)] {
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
             if pending_duration.is_some() {
                 return None;
             }
+            started_segments = true;
             pending_duration = Some(
                 rest.split(',')
                     .next()?
@@ -3099,7 +3120,34 @@ pub(crate) fn validated_vod_part(text: &str) -> Option<crate::produce::Part> {
                     .map(|seconds| (seconds * 1000.0).round() as i64)?,
             );
         } else if line.starts_with('#') {
-            continue;
+            // Legacy adoption authenticates and later serves this exact
+            // playlist. Only accept the URI-free header tags emitted by our
+            // VOD assembler; KEY, MAP, BYTERANGE and unknown extensions can
+            // otherwise smuggle references or byte interpretation outside
+            // the authenticated object inventory.
+            if pending_duration.is_some() || started_segments {
+                return None;
+            }
+            let tag = if *line == "#EXT-X-VERSION:3" {
+                "version"
+            } else if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+                let seconds = value.parse::<i64>().ok().filter(|value| {
+                    *value > 0 && *value <= MAX_RETAINED_SEGMENT_DURATION_MS / 1_000
+                })?;
+                target_duration = Some(seconds);
+                "target_duration"
+            } else if *line == "#EXT-X-MEDIA-SEQUENCE:0" {
+                "media_sequence"
+            } else if *line == "#EXT-X-PLAYLIST-TYPE:VOD" {
+                "playlist_type"
+            } else if *line == "#EXT-X-INDEPENDENT-SEGMENTS" {
+                "independent_segments"
+            } else {
+                return None;
+            };
+            if !header_tags.insert(tag) {
+                return None;
+            }
         } else {
             durations_ms.push(pending_duration.take()?);
             segments.push((*line).to_owned());
@@ -3130,6 +3178,12 @@ pub(crate) fn validated_vod_part(text: &str) -> Option<crate::produce::Part> {
         if total_ms > MAX_RETAINED_TITLE_DURATION_MS {
             return None;
         }
+    }
+    if target_duration.is_some_and(|target| {
+        let longest = part.durations_ms.iter().copied().max().unwrap_or_default();
+        target < (longest + 999) / 1_000
+    }) {
+        return None;
     }
     Some(part)
 }
@@ -3296,24 +3350,33 @@ pub async fn pretranscode_source_snapshot(
     }
 }
 
-fn bound_source_snapshot(source: Option<&BoundPretranscodeSource>) -> Option<LocalSourceSnapshot> {
+async fn bound_source_snapshot(
+    source: Option<&BoundPretranscodeSource>,
+) -> Option<LocalSourceSnapshot> {
     let source = source?;
-    let handle_snapshot = source
-        .handle
-        .metadata()
-        .ok()
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
-    if handle_snapshot != source.snapshot {
-        return None;
-    }
-    let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source.path).ok()?;
-    let current_snapshot = current
-        .metadata()
-        .ok()
-        .filter(|metadata| metadata.is_file())
-        .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
-    (current_snapshot == source.snapshot).then_some(current_snapshot)
+    let handle = Arc::clone(&source.handle);
+    let path = source.path.clone();
+    let expected = source.snapshot;
+    tokio::task::spawn_blocking(move || {
+        let handle_snapshot = handle
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+        if handle_snapshot != expected {
+            return None;
+        }
+        let current = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let current_snapshot = current
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+        (current_snapshot == expected).then_some(current_snapshot)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Renewal-safe view of a distributed queue claim.
@@ -3752,7 +3815,7 @@ async fn read_validated_part(
     let Ok(text) = String::from_utf8(bytes) else {
         return None;
     };
-    let part = crate::produce::Part::from_playlist(&text);
+    let part = crate::produce::Part::from_retained_playlist(&text)?;
     if part.is_empty()
         || part.segments.len() != part.durations_ms.len()
         || part.segments.len() >= plurx_core::transcode::manifest::MAX_OBJECTS
@@ -5041,7 +5104,7 @@ impl TranscodeManager {
             .codec
             .to_lowercase();
         matches!(codec.as_str(), "subrip" | "srt" | "webvtt" | "mov_text")
-            .then(|| crate::subtitles::vtt_path(&self.subtitle_cache, file, burn.subtitle_index))
+            .then(|| PathBuf::from("/dev/fd/5"))
     }
 
     /// Materialise a text subtitle before ffmpeg opens the video pipeline.
@@ -5051,16 +5114,16 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
         burn: Option<&plurx_core::transcode::SubtitleBurn>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<std::fs::File>, String> {
         let Some(burn) = burn else {
-            return Ok(());
+            return Ok(None);
         };
         if self.subtitle_file(file, Some(burn)).is_none() {
-            return Ok(());
+            return Ok(None);
         }
-        crate::subtitles::ensure_vtt(&self.subtitle_cache, file, burn.subtitle_index)
+        crate::subtitles::ensure_vtt_file(&self.subtitle_cache, file, burn.subtitle_index)
             .await
-            .map(|_| ())
+            .map(Some)
     }
 
     async fn invalidate_cache_location(
@@ -5279,6 +5342,7 @@ impl TranscodeManager {
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: Some(cache_reader),
+            subtitle_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
             last_request: Mutex::new(LastRequest::now("session-start")),
@@ -5815,7 +5879,7 @@ impl TranscodeManager {
                     }
                 }
                 if let Some(expected) = expected_source_snapshot {
-                    if bound_source_snapshot(bound_source.as_deref()) != Some(*expected) {
+                    if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
                         return Ok(OfflineProduceOutcome::SourceChanged);
                     }
                 }
@@ -5871,7 +5935,7 @@ impl TranscodeManager {
                     }
                 }
                 if let Some(expected) = expected_source_snapshot {
-                    if bound_source_snapshot(bound_source.as_deref()) != Some(*expected) {
+                    if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
                         return Ok(OfflineProduceOutcome::SourceChanged);
                     }
                 }
@@ -5911,7 +5975,8 @@ impl TranscodeManager {
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        self.ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
+        let subtitle_handle = self
+            .ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
             .await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
@@ -6028,7 +6093,10 @@ impl TranscodeManager {
             .await?;
         }
 
-        let mut published = match self.produce_into(&staging, &hash, &request).await {
+        let mut published = match self
+            .produce_into(&staging, &hash, &request, subtitle_handle.as_ref())
+            .await
+        {
             Ok(Some(published)) => published,
             Ok(None) => {
                 if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
@@ -6085,7 +6153,7 @@ impl TranscodeManager {
             }
         }
         if let Some(expected) = expected_source_snapshot {
-            if bound_source_snapshot(bound_source.as_deref()) != Some(*expected) {
+            if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
                 return Ok(OfflineProduceOutcome::SourceChanged);
             }
         }
@@ -6140,7 +6208,7 @@ impl TranscodeManager {
             }
         }
         if let Some(expected) = expected_source_snapshot {
-            if bound_source_snapshot(bound_source.as_deref()) != Some(*expected) {
+            if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
                 return Ok(OfflineProduceOutcome::SourceChanged);
             }
         }
@@ -6168,7 +6236,7 @@ impl TranscodeManager {
                 }
             }
             if let Some(expected) = expected_source_snapshot {
-                if bound_source_snapshot(bound_source.as_deref()) != Some(*expected) {
+                if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
                     let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
                     return Ok(OfflineProduceOutcome::SourceChanged);
                 }
@@ -6246,6 +6314,7 @@ impl TranscodeManager {
         temp: &plurx_core::fs_secure::SecureDirectory,
         hash: &str,
         request: &PortableProduction<'_>,
+        subtitle_handle: Option<&std::fs::File>,
     ) -> Result<Option<Published>, String> {
         let PortableProduction {
             file,
@@ -6400,6 +6469,7 @@ impl TranscodeManager {
                 FfmpegDescriptors {
                     source: bound_source_fd,
                     output: Some(temp.raw_fd()),
+                    subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
                 },
             )?;
 
@@ -7716,7 +7786,8 @@ impl TranscodeManager {
                 return Err(unsupported_build_error(reason));
             }
         }
-        self.ensure_text_subtitle(&file, subtitle_burn.as_ref())
+        let subtitle_handle = self
+            .ensure_text_subtitle(&file, subtitle_burn.as_ref())
             .await?;
 
         // Claim a hardware slot before spawning anything. An iGPU has one
@@ -7797,7 +7868,12 @@ impl TranscodeManager {
             Arc::clone(&progress),
             generation,
             &self.runtime_cache,
-            FfmpegDescriptors::default(),
+            FfmpegDescriptors {
+                subtitle: subtitle_handle
+                    .as_ref()
+                    .map(std::os::fd::AsRawFd::as_raw_fd),
+                ..FfmpegDescriptors::default()
+            },
         )?;
 
         tracing::info!(
@@ -7822,6 +7898,7 @@ impl TranscodeManager {
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
+            subtitle_handle,
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
@@ -8126,7 +8203,13 @@ impl TranscodeManager {
             Arc::clone(&session.progress),
             generation,
             runtime_cache,
-            FfmpegDescriptors::default(),
+            FfmpegDescriptors {
+                subtitle: session
+                    .subtitle_handle
+                    .as_ref()
+                    .map(std::os::fd::AsRawFd::as_raw_fd),
+                ..FfmpegDescriptors::default()
+            },
         ) {
             Ok(child) => {
                 *session.child.lock().await = Some(child);
@@ -8353,6 +8436,7 @@ impl TranscodeManager {
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
+            subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
@@ -9021,12 +9105,18 @@ impl TranscodeManager {
     /// response stream, and opening it *here* closes the window where the
     /// retention sweep could unlink the path between resolving it and reading
     /// it: an unlinked file that is already open stays readable.
-    pub async fn segment(&self, session_id: &str, name: &str) -> Option<SegmentFile> {
+    pub async fn segment(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<Option<SegmentFile>, SegmentOpenError> {
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
-            return None;
+            return Ok(None);
         }
-        let session = self.touch(session_id, "segment").await?;
+        let Some(session) = self.touch(session_id, "segment").await else {
+            return Ok(None);
+        };
         let path = session.dir.join(name);
         let idx = segment_index(name);
         let first_retained = session.segments.lock().await.first_retained_index();
@@ -9056,7 +9146,7 @@ impl TranscodeManager {
                 },
             )
             .await;
-            return None;
+            return Ok(None);
         }
 
         let mut authenticated_cached_file = if let Some(manifest) = &session.cache_manifest {
@@ -9065,10 +9155,11 @@ impl TranscodeManager {
             // ordinary miss; only a listed object whose bytes fail validation
             // can convict and retire the generation.
             if !manifest.contains_object(name) {
-                return None;
+                return Ok(None);
             }
             match manifest.open_verified_object(&session.dir, name).await {
                 Ok(Some(opened)) => Some(opened),
+                Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {
                     tracing::error!(
                         session = %session_id,
@@ -9092,7 +9183,7 @@ impl TranscodeManager {
                         "segment_object_mismatch",
                     )
                     .await;
-                    return None;
+                    return Ok(None);
                 }
             }
         } else {
@@ -9119,7 +9210,10 @@ impl TranscodeManager {
             if let Some((file, authenticated_len, snapshot_lease)) = opened {
                 let len = match authenticated_len {
                     Some(len) => len,
-                    None => file.metadata().await.ok()?.len(),
+                    None => match file.metadata().await {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => return Ok(None),
+                    },
                 };
                 let waited = started_waiting.elapsed();
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
@@ -9182,11 +9276,11 @@ impl TranscodeManager {
                     len,
                     snapshot_lease,
                 );
-                return Some(SegmentFile {
+                return Ok(Some(SegmentFile {
                     file,
                     len,
                     delivery,
-                });
+                }));
             }
             // Give up if the session was declared dead, or ffmpeg has exited and
             // the file still isn't there.
@@ -9223,7 +9317,7 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
             let exited = {
                 let mut child = session.child.lock().await;
@@ -9273,7 +9367,7 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -10156,6 +10250,7 @@ fn test_session(dir: PathBuf) -> Session {
         retirement_started: AtomicBool::new(false),
         cached: false,
         _cache_reader: None,
+        subtitle_handle: None,
         cache_manifest: None,
         cache_location: None,
         last_request: Mutex::new(LastRequest::now("test-start")),
@@ -10333,7 +10428,7 @@ mod tests {
             file.mtime
         );
         assert_eq!(
-            bound_source_snapshot(Some(&bound)),
+            bound_source_snapshot(Some(&bound)).await,
             None,
             "the old descriptor cannot authorize bytes at a replaced pathname"
         );
@@ -12011,6 +12106,22 @@ mod tests {
             "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:1.0,\n#EXT-X-ENDLIST\n"
         )
         .is_none());
+        for injected in [
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"https://attacker.invalid/key\"",
+            "#EXT-X-MAP:URI=\"init.mp4\"",
+            "#EXT-X-BYTERANGE:1024@0",
+        ] {
+            let playlist =
+                format!("#EXTM3U\n{injected}\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n");
+            assert!(
+                validated_vod_part(&playlist).is_none(),
+                "legacy adoption must reject {injected}"
+            );
+        }
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:2.0,\n#EXT-X-VERSION:3\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
     }
 
     #[tokio::test]
@@ -12039,6 +12150,42 @@ mod tests {
             assembled_publication(&capability, 1).await.is_none(),
             "an empty assembled segment must not become a published generation"
         );
+    }
+
+    #[tokio::test]
+    async fn retained_part_validation_rejects_overwritten_extinf_but_allows_killed_tail() {
+        let directory = tempfile::tempdir().expect("retained part");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
+            .await
+            .expect("segment");
+        let capability = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("part capability");
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:1.0,\n#EXTINF:2.0,\nseg00000.ts\n",
+        )
+        .await
+        .expect("ambiguous playlist");
+        assert!(
+            read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+                .await
+                .is_none(),
+            "a second EXTINF must not overwrite persisted resume authority"
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:3.0,\n",
+        )
+        .await
+        .expect("killed tail playlist");
+        let (part, _) = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+            .await
+            .expect("one unmatched killed tail is droppable");
+        assert_eq!(part.segments, ["seg00000.ts"]);
+        assert_eq!(part.durations_ms, [2_000]);
     }
 
     /// A live EVENT playlist needs both more than one segment and enough media
@@ -13624,7 +13771,11 @@ mod tests {
                 .expect("published segment")
                 .name
                 .clone();
-            assert!(mgr.segment(&info.session_id, &newest).await.is_some());
+            assert!(mgr
+                .segment(&info.session_id, &newest)
+                .await
+                .expect("segment admission")
+                .is_some());
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
@@ -14260,6 +14411,7 @@ mod tests {
             retirement_started: AtomicBool::new(false),
             cached,
             _cache_reader: None,
+            subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("test-start")),
@@ -15010,7 +15162,11 @@ mod tests {
             .await
             .expect("cached start");
         assert_eq!(info.encoder, "cached");
-        assert!(mgr.segment(&info.session_id, "seg99999.ts").await.is_none());
+        assert!(mgr
+            .segment(&info.session_id, "seg99999.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
         assert_eq!(
             mgr.active_sessions().await,
             1,
@@ -15024,12 +15180,20 @@ mod tests {
                 .is_some(),
             "an unlisted probe invalidated the valid cache location"
         );
-        assert!(mgr.segment(&info.session_id, "seg00000.ts").await.is_some());
+        assert!(mgr
+            .segment(&info.session_id, "seg00000.ts")
+            .await
+            .expect("segment admission")
+            .is_some());
 
         tokio::fs::write(dir.join("seg00001.ts"), b"corrupt listed object")
             .await
             .expect("corrupt listed segment");
-        assert!(mgr.segment(&info.session_id, "seg00001.ts").await.is_none());
+        assert!(mgr
+            .segment(&info.session_id, "seg00001.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
         assert_eq!(mgr.active_sessions().await, 0);
         assert!(
             store
@@ -16184,8 +16348,16 @@ mod tests {
             Err(PlaylistError::SessionGone),
             "an id with no session is gone, not a stream that failed to build"
         );
-        assert!(mgr.segment("missing", "seg00000.ts").await.is_none());
-        assert!(mgr.segment("missing", "../evil").await.is_none());
+        assert!(mgr
+            .segment("missing", "seg00000.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
+        assert!(mgr
+            .segment("missing", "../evil")
+            .await
+            .expect("segment admission")
+            .is_none());
         assert!(!mgr.stop_session("missing", "test").await);
 
         // A real start spawns ffmpeg (it fails async on the fake path, but the

@@ -85,7 +85,7 @@ impl ArtworkCoordinator {
     }
 
     async fn permit(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.permits).acquire_owned().await.ok()
+        Arc::clone(&self.permits).try_acquire_owned().ok()
     }
 
     fn client(&self) -> Option<reqwest::Client> {
@@ -136,10 +136,10 @@ pub(crate) async fn serve_cluster_artwork(
     filename: &str,
 ) -> Result<Response, ApiError> {
     let safe_name = safe_artwork_name(filename)?;
-    if let Ok(response) =
-        serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await
-    {
-        return Ok(response);
+    match serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await {
+        Ok(response) => return Ok(response),
+        Err(error) if is_artwork_capacity_error(&error) => return Err(error),
+        Err(_) => {}
     }
 
     let membership = state.membership.clone();
@@ -159,6 +159,7 @@ pub(crate) async fn serve_cluster_artwork(
         },
     )
     .await
+    .map_err(|_| artwork_capacity_error())?
     else {
         return Err(ApiError::NotFound("image"));
     };
@@ -168,23 +169,42 @@ pub(crate) async fn serve_cluster_artwork(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtworkCapacity;
+
+const ARTWORK_CAPACITY_CODE: &str = "artwork_response_capacity";
+
+fn artwork_capacity_error() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ARTWORK_CAPACITY_CODE,
+        "artwork response capacity is full; retry shortly",
+    )
+}
+
+fn is_artwork_capacity_error(error: &ApiError) -> bool {
+    matches!(error, ApiError::Typed { code, .. } if *code == ARTWORK_CAPACITY_CODE)
+}
+
 async fn fetch_and_materialize<F, Fut>(
     coordinator: &ArtworkCoordinator,
     artwork_dir: &FsPath,
     filename: &str,
     fetch: F,
-) -> Option<AdmittedArtworkBytes>
+) -> Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>
 where
     F: FnOnce(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<u8>>>,
 {
-    tokio::time::timeout(
+    match tokio::time::timeout(
         ARTWORK_FETCH_TOTAL_TIMEOUT,
         fetch_and_materialize_inner(coordinator, artwork_dir, filename, fetch),
     )
     .await
-    .ok()
-    .flatten()
+    {
+        Ok(result) => result,
+        Err(_) => Ok(None),
+    }
 }
 
 async fn fetch_and_materialize_inner<F, Fut>(
@@ -192,7 +212,7 @@ async fn fetch_and_materialize_inner<F, Fut>(
     artwork_dir: &FsPath,
     filename: &str,
     fetch: F,
-) -> Option<AdmittedArtworkBytes>
+) -> Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>
 where
     F: FnOnce(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<u8>>>,
@@ -201,31 +221,35 @@ where
     // This permit covers both the bounded local recheck and any peer response
     // buffer. Local hits and misses therefore share one process-wide memory
     // envelope instead of only limiting the network side of the operation.
-    let permit = coordinator.permit().await?;
+    let permit = coordinator.permit().await.ok_or(ArtworkCapacity)?;
     match read_bounded_local_artwork(artwork_dir.join(filename)).await {
         Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
-            return Some(AdmittedArtworkBytes {
+            return Ok(Some(AdmittedArtworkBytes {
                 bytes,
                 _permit: permit,
-            });
+            }));
         }
         Some((_, identity)) if content_addressed_artwork_name(filename) => {
             quarantine_corrupt_artwork(artwork_dir, filename, identity).await;
         }
         _ => {}
     }
-    let client = coordinator.client()?;
-    let bytes = fetch(client).await?;
+    let Some(client) = coordinator.client() else {
+        return Ok(None);
+    };
+    let Some(bytes) = fetch(client).await else {
+        return Ok(None);
+    };
     if let Err(error) = install_artwork(artwork_dir, filename, &bytes).await {
         // The caller can still use the complete peer response. Log the failed
         // materialization so a read-only or full data directory is visible,
         // but do not turn working peer failover into another broken image.
         tracing::warn!(filename, %error, "cannot materialize peer artwork");
     }
-    Some(AdmittedArtworkBytes {
+    Ok(Some(AdmittedArtworkBytes {
         bytes,
         _permit: permit,
-    })
+    }))
 }
 
 async fn serve_local_artwork(
@@ -236,7 +260,7 @@ async fn serve_local_artwork(
     let permit = coordinator
         .permit()
         .await
-        .ok_or(ApiError::NotFound("image"))?;
+        .ok_or_else(artwork_capacity_error)?;
     let path = artwork_dir.join(filename);
     match read_bounded_local_artwork(path.clone()).await {
         Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
@@ -1017,6 +1041,8 @@ async fn materialize_once(
                 },
             )
             .await
+            .ok()
+            .flatten()
             .is_some();
             (reference, copied)
         }
@@ -1479,7 +1505,7 @@ mod tests {
         let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
         let hits = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
-        for _ in 0..32 {
+        for _ in 0..MATERIALIZE_CONCURRENCY {
             let coordinator = Arc::clone(&coordinator);
             let directory = Arc::clone(&directory);
             let hits = Arc::clone(&hits);
@@ -1495,6 +1521,7 @@ mod tests {
                     },
                 )
                 .await
+                .expect("artwork admission")
                 .expect("materialized bytes")
             }));
         }
@@ -1537,13 +1564,20 @@ mod tests {
                     }
                 })
                 .await
-                .expect("bounded fetch")
+                .map(|bytes| bytes.expect("bounded fetch"))
             }));
         }
+        let mut admitted = 0usize;
+        let mut rejected = 0usize;
         for task in tasks {
-            task.await.expect("request task");
+            match task.await.expect("request task") {
+                Ok(_) => admitted += 1,
+                Err(ArtworkCapacity) => rejected += 1,
+            }
         }
         assert_eq!(maximum.load(Ordering::SeqCst), MATERIALIZE_CONCURRENCY);
+        assert_eq!(admitted, MATERIALIZE_CONCURRENCY);
+        assert_eq!(rejected, 24 - MATERIALIZE_CONCURRENCY);
     }
 
     #[tokio::test]
@@ -1568,17 +1602,16 @@ mod tests {
             )
             .await
         });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut request)
-                .await
-                .is_err(),
-            "local reads must wait for the same bounded response-buffer budget"
-        );
-        drop(held);
-        let response = request
+        let response = tokio::time::timeout(Duration::from_millis(20), &mut request)
             .await
-            .expect("local request")
-            .expect("local response");
+            .expect("capacity rejection must be prompt")
+            .expect("local request task")
+            .expect_err("full response-buffer budget must reject admission");
+        assert!(is_artwork_capacity_error(&response));
+        drop(held);
+        let response = serve_local_artwork(&coordinator, directory.path(), "bounded-local.jpg")
+            .await
+            .expect("local response after capacity release");
         assert_eq!(response.status(), StatusCode::OK);
 
         let mut retained = Vec::new();
@@ -1588,7 +1621,8 @@ mod tests {
         assert!(
             tokio::time::timeout(Duration::from_millis(20), coordinator.permit())
                 .await
-                .is_err(),
+                .expect("capacity result must be prompt")
+                .is_none(),
             "the response body must retain admission until the client drops it"
         );
         drop(response);

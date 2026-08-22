@@ -4,14 +4,14 @@
 //! publication, on the requested-object path, and by later scrubs; an offer
 //! never walks an entire film just to prove that one node owns it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 pub const MANIFEST_FILE: &str = "generation-manifest.json";
 const CHECKPOINT_FILE: &str = ".generation-manifest.checkpoint.json";
@@ -72,6 +72,38 @@ pub struct VerifiedObject {
 
 pub struct VerifiedObjectLease {
     _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifiedObjectError {
+    /// The hard response-snapshot memory budget is already held by response
+    /// bodies. Callers should reject admission promptly, not wait behind a
+    /// client whose socket may remain stalled indefinitely.
+    Capacity,
+    Other(String),
+}
+
+impl VerifiedObjectError {
+    pub fn is_capacity(&self) -> bool {
+        matches!(self, Self::Capacity)
+    }
+}
+
+impl std::fmt::Display for VerifiedObjectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capacity => formatter.write_str("authenticated response snapshot capacity full"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for VerifiedObjectError {}
+
+impl From<String> for VerifiedObjectError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
 }
 
 #[derive(Serialize)]
@@ -168,19 +200,6 @@ async fn open_read_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
     crate::fs_secure::open_read_nofollow(path).await
 }
 
-async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", path.display()))?;
-    let name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("{} has no safe filename", path.display()))?;
-    crate::fs_secure::atomic_write_child(parent, name, bytes)
-        .await
-        .map_err(|error| format!("publishing {}: {error}", path.display()))
-}
-
 fn fingerprint(metadata: &std::fs::Metadata) -> FileFingerprint {
     let modified = metadata
         .modified()
@@ -214,93 +233,16 @@ fn fingerprint(metadata: &std::fs::Metadata) -> FileFingerprint {
     }
 }
 
-async fn object_digest_controlled<F>(
-    path: &Path,
-    should_yield: &mut F,
-) -> Result<Option<(GenerationObject, FileFingerprint)>, String>
-where
-    F: FnMut() -> bool,
-{
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|error| format!("reading {} metadata: {error}", path.display()))?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(format!(
-            "generation object {} is not a regular file",
-            path.display()
-        ));
+#[cfg(unix)]
+fn secure_file_identity(metadata: &std::fs::Metadata) -> crate::fs_secure::FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    crate::fs_secure::FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
     }
-    if metadata.len() > MAX_OBJECT_BYTES {
-        return Err(format!(
-            "generation object {} exceeds the {} byte bound",
-            path.display(),
-            MAX_OBJECT_BYTES
-        ));
-    }
-    let mut file = open_read_nofollow(path)
-        .await
-        .map_err(|error| format!("opening {}: {error}", path.display()))?;
-    let opened_metadata = file
-        .metadata()
-        .await
-        .map_err(|error| format!("reading {} metadata: {error}", path.display()))?;
-    if !opened_metadata.is_file() || opened_metadata.len() > MAX_OBJECT_BYTES {
-        return Err(format!(
-            "generation object {} is not a bounded regular file",
-            path.display()
-        ));
-    }
-    let opened_fingerprint = fingerprint(&opened_metadata);
-    let mut hasher = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = vec![0_u8; 128 * 1024];
-    loop {
-        if should_yield() {
-            return Ok(None);
-        }
-        let read_limit = MAX_OBJECT_BYTES
-            .saturating_sub(bytes)
-            .saturating_add(1)
-            .min(buffer.len() as u64) as usize;
-        let read = file
-            .read(&mut buffer[..read_limit])
-            .await
-            .map_err(|error| format!("reading {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        bytes = bytes.saturating_add(read as u64);
-        if bytes > MAX_OBJECT_BYTES {
-            return Err(format!(
-                "generation object {} grew beyond the {} byte bound while reading",
-                path.display(),
-                MAX_OBJECT_BYTES
-            ));
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let final_metadata = file
-        .metadata()
-        .await
-        .map_err(|error| format!("reading {} metadata: {error}", path.display()))?;
-    if fingerprint(&final_metadata) != opened_fingerprint || bytes != opened_fingerprint.bytes {
-        return Err(format!(
-            "generation object {} changed while hashing",
-            path.display()
-        ));
-    }
-    let name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("generation object {} has no safe name", path.display()))?;
-    Ok(Some((
-        GenerationObject {
-            name: name.to_owned(),
-            bytes,
-            sha256: hex::encode(hasher.finalize()),
-        },
-        opened_fingerprint,
-    )))
 }
 
 async fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -333,59 +275,6 @@ async fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Strin
         return Err(format!("{} changed while reading", path.display()));
     }
     Ok(bytes)
-}
-
-async fn read_bounded_file_controlled<F>(
-    path: &Path,
-    max_bytes: u64,
-    should_yield: &mut F,
-) -> Result<Option<Vec<u8>>, String>
-where
-    F: FnMut() -> bool,
-{
-    let metadata = tokio::fs::symlink_metadata(path)
-        .await
-        .map_err(|error| format!("reading {} metadata: {error}", path.display()))?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > max_bytes
-    {
-        return Err(format!("{} is not a bounded regular file", path.display()));
-    }
-    let mut file = open_read_nofollow(path)
-        .await
-        .map_err(|error| format!("opening {}: {error}", path.display()))?;
-    let opened = file
-        .metadata()
-        .await
-        .map_err(|error| format!("reading {} metadata: {error}", path.display()))?;
-    if !opened.is_file() || opened.len() > max_bytes {
-        return Err(format!("{} is not a bounded regular file", path.display()));
-    }
-    let mut encoded = Vec::with_capacity(opened.len() as usize);
-    let mut buffer = vec![0_u8; 128 * 1024];
-    loop {
-        if should_yield() {
-            return Ok(None);
-        }
-        let remaining = opened
-            .len()
-            .saturating_sub(encoded.len() as u64)
-            .saturating_add(1);
-        let chunk = remaining.min(buffer.len() as u64) as usize;
-        let read = file
-            .read(&mut buffer[..chunk])
-            .await
-            .map_err(|error| format!("reading {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        encoded.extend_from_slice(&buffer[..read]);
-        if encoded.len() as u64 > opened.len() {
-            return Err(format!("{} changed while reading", path.display()));
-        }
-    }
-    Ok(Some(encoded))
 }
 
 /// Read one safe, regular generation object without trusting its pathname
@@ -454,154 +343,85 @@ enum CheckpointLoad {
     Yielded,
 }
 
-async fn load_checkpoint<F>(
-    root: &Path,
-    generation_id: &str,
-    ordered_names: &[String],
-    should_yield: &mut F,
-) -> CheckpointLoad
-where
-    F: FnMut() -> bool,
-{
-    let path = root.join(CHECKPOINT_FILE);
-    let encoded =
-        match read_bounded_file_controlled(&path, MAX_CHECKPOINT_BYTES, should_yield).await {
-            Ok(Some(encoded)) => encoded,
-            Ok(None) => return CheckpointLoad::Yielded,
-            Err(_) => {
-                return CheckpointLoad::Ready {
-                    objects: Vec::new(),
-                    needs_repair: true,
-                }
-            }
-        };
-    let mut lines = encoded.split_inclusive(|byte| *byte == b'\n');
-    let Some(header_record) = lines.next().filter(|line| !line.is_empty()) else {
-        return CheckpointLoad::Ready {
-            objects: Vec::new(),
-            needs_repair: true,
-        };
-    };
-    let header_complete = header_record.ends_with(b"\n");
-    let header_line = header_record.strip_suffix(b"\n").unwrap_or(header_record);
-    let Ok(header) = serde_json::from_slice::<CheckpointHeader>(header_line) else {
-        return CheckpointLoad::Ready {
-            objects: Vec::new(),
-            needs_repair: true,
-        };
-    };
-    if !header_complete
-        || header.format_version != FORMAT_VERSION
-        || header.generation_id != generation_id
+struct CheckpointValidationResume {
+    key: String,
+    checkpoint_identity: crate::fs_secure::FileIdentity,
+    offset: u64,
+    objects: Vec<CheckpointObject>,
+}
+
+const CHECKPOINT_RESUME_CACHE_BYTES: u64 = 96 * 1024 * 1024;
+const CHECKPOINT_RESUME_CACHE_ENTRIES: usize = 4;
+
+fn checkpoint_resume_cache() -> &'static std::sync::Mutex<VecDeque<CheckpointValidationResume>> {
+    static CACHE: OnceLock<std::sync::Mutex<VecDeque<CheckpointValidationResume>>> =
+        OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn take_checkpoint_resume(key: &str) -> Option<CheckpointValidationResume> {
+    let mut cache = checkpoint_resume_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let position = cache.iter().position(|entry| entry.key == key)?;
+    cache.remove(position)
+}
+
+fn remember_checkpoint_resume(entry: CheckpointValidationResume) {
+    if entry.offset > CHECKPOINT_RESUME_CACHE_BYTES {
+        return;
+    }
+    let mut cache = checkpoint_resume_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(position) = cache.iter().position(|current| current.key == entry.key) {
+        cache.remove(position);
+    }
+    cache.push_back(entry);
+    while cache.len() > CHECKPOINT_RESUME_CACHE_ENTRIES
+        || cache
+            .iter()
+            .map(|entry| entry.offset)
+            .fold(0_u64, u64::saturating_add)
+            > CHECKPOINT_RESUME_CACHE_BYTES
     {
-        return CheckpointLoad::Ready {
-            objects: Vec::new(),
-            needs_repair: true,
-        };
-    }
-    let mut objects = Vec::new();
-    let mut needs_repair = false;
-    for record in lines.filter(|line| !line.is_empty()) {
-        if should_yield() {
-            return CheckpointLoad::Yielded;
-        }
-        let complete = record.ends_with(b"\n");
-        let line = record.strip_suffix(b"\n").unwrap_or(record);
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(completed) = serde_json::from_slice::<CheckpointObject>(line) else {
-            needs_repair = true;
-            break;
-        };
-        if !complete {
-            needs_repair = true;
-        }
-        let index = objects.len();
-        if index >= ordered_names.len() {
-            return CheckpointLoad::Ready {
-                objects: Vec::new(),
-                needs_repair: true,
-            };
-        }
-        if completed.object.name != ordered_names[index]
-            || completed.object.bytes > MAX_OBJECT_BYTES
-            || !completed.authority_is_valid()
-        {
-            return CheckpointLoad::Ready {
-                objects: Vec::new(),
-                needs_repair: true,
-            };
-        }
-        let object_path = root.join(&completed.object.name);
-        let Ok(metadata) = tokio::fs::symlink_metadata(&object_path).await else {
-            return CheckpointLoad::Ready {
-                objects: Vec::new(),
-                needs_repair: true,
-            };
-        };
-        if !metadata.file_type().is_file()
-            || metadata.file_type().is_symlink()
-            || fingerprint(&metadata) != completed.fingerprint
-        {
-            return CheckpointLoad::Ready {
-                objects: Vec::new(),
-                needs_repair: true,
-            };
-        }
-        objects.push(completed);
-    }
-    CheckpointLoad::Ready {
-        objects,
-        needs_repair,
+        cache.pop_front();
     }
 }
 
-/// Append only newly completed objects. The checkpoint is an optimization:
-/// reaching its own conservative cap disables further persistence but can
-/// never make an otherwise valid final manifest fail.
-async fn append_checkpoint(
-    root: &Path,
-    _generation_id: &str,
-    objects: &[CheckpointObject],
-) -> Result<bool, String> {
-    let mut encoded = Vec::new();
-    for object in objects {
-        serde_json::to_writer(&mut encoded, object)
-            .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-        encoded.push(b'\n');
+/// Read one newline-delimited checkpoint record without allowing a malformed
+/// checkpoint to turn the line buffer into a checkpoint-sized allocation.
+async fn read_checkpoint_record<R>(
+    reader: &mut R,
+    max_bytes: u64,
+) -> std::io::Result<Option<(Vec<u8>, bool)>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut record = Vec::with_capacity(max_bytes.min(4 * 1024) as usize);
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if record.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some((record, false)))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        if record.len() as u64 + consumed as u64 > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "checkpoint record exceeds its byte bound",
+            ));
+        }
+        record.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some((record, true)));
+        }
     }
-    let directory = crate::fs_secure::SecureDirectory::open(root)
-        .await
-        .map_err(|error| format!("opening generation directory: {error}"))?;
-    directory
-        .append_bounded_child(CHECKPOINT_FILE, &encoded, MAX_CHECKPOINT_BYTES)
-        .await
-        .map_err(|error| format!("appending generation checkpoint: {error}"))
-}
-
-async fn replace_checkpoint(
-    root: &Path,
-    generation_id: &str,
-    objects: &[CheckpointObject],
-) -> Result<(), String> {
-    let checkpoint = CheckpointHeader {
-        format_version: FORMAT_VERSION,
-        generation_id: generation_id.to_owned(),
-    };
-    let mut encoded = serde_json::to_vec(&checkpoint)
-        .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-    encoded.push(b'\n');
-    for object in objects {
-        serde_json::to_writer(&mut encoded, object)
-            .map_err(|error| format!("serializing generation checkpoint: {error}"))?;
-        encoded.push(b'\n');
-    }
-    if encoded.len() as u64 > MAX_CHECKPOINT_BYTES {
-        return Err("generation checkpoint exceeds its size bound".to_owned());
-    }
-    let path = root.join(CHECKPOINT_FILE);
-    atomic_write(&path, &encoded).await
 }
 
 fn body_digest(generation_id: &str, objects: &[GenerationObject]) -> Result<String, String> {
@@ -637,115 +457,15 @@ pub async fn publish_controlled<F>(
     root: &Path,
     generation_id: &str,
     ordered_names: &[String],
-    mut should_yield: F,
+    should_yield: F,
 ) -> Result<Option<GenerationManifest>, String>
 where
     F: FnMut() -> bool,
 {
-    if generation_id.is_empty()
-        || generation_id.len() > 256
-        || ordered_names.is_empty()
-        || ordered_names.len() > MAX_OBJECTS
-        || ordered_names.iter().any(|name| !safe_object_name(name))
-        || ordered_names.iter().collect::<BTreeSet<_>>().len() != ordered_names.len()
-    {
-        return Err("invalid generation manifest identity or object list".to_owned());
-    }
-    let (mut completed, checkpoint_needs_repair) =
-        match load_checkpoint(root, generation_id, ordered_names, &mut should_yield).await {
-            CheckpointLoad::Ready {
-                objects,
-                needs_repair,
-            } => (objects, needs_repair),
-            CheckpointLoad::Yielded => return Ok(None),
-        };
-    let mut checkpoint_enabled = true;
-    if completed.is_empty() || checkpoint_needs_repair {
-        // A stale/corrupt checkpoint is never extended under a new identity.
-        // Persistence is best effort; hashing and final publication remain
-        // correct even on a read-only/full staging filesystem.
-        if let Err(error) = replace_checkpoint(root, generation_id, &completed).await {
-            tracing::warn!(%error, "generation digest checkpoint disabled");
-            checkpoint_enabled = false;
-        }
-    }
-    let mut persisted = completed.len();
-    for name in ordered_names.iter().skip(completed.len()) {
-        if should_yield() {
-            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
-                if let Err(error) =
-                    append_checkpoint(root, generation_id, &completed[persisted..]).await
-                {
-                    tracing::warn!(%error, "generation digest checkpoint disabled");
-                }
-            }
-            return Ok(None);
-        }
-        let Some((object, fingerprint)) =
-            object_digest_controlled(&root.join(name), &mut should_yield).await?
-        else {
-            if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
-                if let Err(error) =
-                    append_checkpoint(root, generation_id, &completed[persisted..]).await
-                {
-                    tracing::warn!(%error, "generation digest checkpoint disabled");
-                }
-            }
-            return Ok(None);
-        };
-        completed.push(CheckpointObject::new(object, fingerprint)?);
-        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), false) {
-            match append_checkpoint(root, generation_id, &completed[persisted..]).await {
-                Ok(true) => persisted = completed.len(),
-                Ok(false) => checkpoint_enabled = false,
-                Err(error) => {
-                    tracing::warn!(%error, "generation digest checkpoint disabled");
-                    checkpoint_enabled = false;
-                }
-            }
-        }
-    }
-    if should_yield() {
-        if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
-            if let Err(error) =
-                append_checkpoint(root, generation_id, &completed[persisted..]).await
-            {
-                tracing::warn!(%error, "generation digest checkpoint disabled");
-            }
-        }
-        return Ok(None);
-    }
-    let mut objects = completed
-        .into_iter()
-        .map(|completed| completed.object)
-        .collect::<Vec<_>>();
-    objects.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    if objects
-        .iter()
-        .any(|object| object.name == "index.m3u8" && object.bytes > MAX_MANIFEST_BYTES)
-    {
-        return Err("generation playlist exceeds its size bound".to_owned());
-    }
-    let manifest = GenerationManifest {
-        format_version: FORMAT_VERSION,
-        generation_id: generation_id.to_owned(),
-        object_count: objects.len(),
-        manifest_digest: body_digest(generation_id, &objects)?,
-        objects,
-    };
-    let encoded = serde_json::to_vec(&manifest)
-        .map_err(|error| format!("serializing generation manifest: {error}"))?;
-    if encoded.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err("generation manifest exceeds its size bound".to_owned());
-    }
-    let path = root.join(MANIFEST_FILE);
-    atomic_write(&path, &encoded).await?;
-    match tokio::fs::remove_file(root.join(CHECKPOINT_FILE)).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("removing generation checkpoint: {error}")),
-    }
-    Ok(Some(manifest))
+    let directory = crate::fs_secure::SecureDirectory::open(root)
+        .await
+        .map_err(|error| format!("opening generation directory: {error}"))?;
+    publish_controlled_directory(&directory, generation_id, ordered_names, should_yield).await
 }
 
 async fn load_checkpoint_directory<F>(
@@ -757,11 +477,8 @@ async fn load_checkpoint_directory<F>(
 where
     F: FnMut() -> bool,
 {
-    let encoded = match root
-        .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
-        .await
-    {
-        Ok(encoded) => encoded,
+    let directory_identity = match root.identity().await {
+        Ok(identity) => identity,
         Err(_) => {
             return CheckpointLoad::Ready {
                 objects: Vec::new(),
@@ -769,40 +486,127 @@ where
             };
         }
     };
-    let mut lines = encoded.split_inclusive(|byte| *byte == b'\n');
-    let Some(header_record) = lines.next().filter(|line| !line.is_empty()) else {
-        return CheckpointLoad::Ready {
-            objects: Vec::new(),
-            needs_repair: true,
-        };
+    let key = format!(
+        "{}:{}:{generation_id}",
+        directory_identity.device, directory_identity.inode
+    );
+    let mut file = match root.open_read_child(CHECKPOINT_FILE).await {
+        Ok(file) => file,
+        Err(_) => {
+            let _ = take_checkpoint_resume(&key);
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        }
     };
-    let header_complete = header_record.ends_with(b"\n");
-    let header_line = header_record.strip_suffix(b"\n").unwrap_or(header_record);
-    let Ok(header) = serde_json::from_slice::<CheckpointHeader>(header_line) else {
-        return CheckpointLoad::Ready {
-            objects: Vec::new(),
-            needs_repair: true,
-        };
+    let metadata = match file.metadata().await {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CHECKPOINT_BYTES => metadata,
+        _ => {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        }
     };
-    if !header_complete
-        || header.format_version != FORMAT_VERSION
-        || header.generation_id != generation_id
+    let checkpoint_identity = secure_file_identity(&metadata);
+    let mut resume = take_checkpoint_resume(&key)
+        .filter(|resume| {
+            resume.checkpoint_identity.same_inode(checkpoint_identity)
+                && resume.offset <= checkpoint_identity.size
+                && resume.objects.len() <= ordered_names.len()
+                && resume
+                    .objects
+                    .iter()
+                    .zip(ordered_names)
+                    .all(|(completed, requested)| completed.object.name == *requested)
+        })
+        .unwrap_or_else(|| CheckpointValidationResume {
+            key,
+            checkpoint_identity,
+            offset: 0,
+            objects: Vec::new(),
+        });
+    // The append-only writer never rewrites an already-persisted prefix. An
+    // inode replacement invalidates the cache above; growth on the same inode
+    // preserves the validated cursor and lets a preempted worker make forward
+    // progress instead of rescanning a large prefix on every retry.
+    resume.checkpoint_identity = checkpoint_identity;
+    if file
+        .seek(std::io::SeekFrom::Start(resume.offset))
+        .await
+        .is_err()
     {
         return CheckpointLoad::Ready {
             objects: Vec::new(),
             needs_repair: true,
         };
     }
-    let mut objects = Vec::new();
-    let mut needs_repair = false;
-    for record in lines.filter(|line| !line.is_empty()) {
+    let mut reader = tokio::io::BufReader::with_capacity(64 * 1024, file);
+    if resume.offset == 0 {
         if should_yield() {
+            remember_checkpoint_resume(resume);
             return CheckpointLoad::Yielded;
         }
-        let complete = record.ends_with(b"\n");
-        let line = record.strip_suffix(b"\n").unwrap_or(record);
+        let Ok(Some((header_record, header_complete))) =
+            read_checkpoint_record(&mut reader, MAX_CHECKPOINT_HEADER_BYTES).await
+        else {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        };
+        let header_line = header_record.strip_suffix(b"\n").unwrap_or(&header_record);
+        let Ok(header) = serde_json::from_slice::<CheckpointHeader>(header_line) else {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        };
+        if !header_complete
+            || header.format_version != FORMAT_VERSION
+            || header.generation_id != generation_id
+        {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        }
+        resume.offset = header_record.len() as u64;
+        if resume.offset > MAX_CHECKPOINT_BYTES {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        }
+    }
+    let mut needs_repair = false;
+    loop {
+        if should_yield() {
+            remember_checkpoint_resume(resume);
+            return CheckpointLoad::Yielded;
+        }
+        let record = match read_checkpoint_record(&mut reader, MAX_CHECKPOINT_RECORD_BYTES).await {
+            Ok(Some(record)) => record,
+            Ok(None) => break,
+            Err(_) => {
+                needs_repair = true;
+                break;
+            }
+        };
+        let (record, complete) = record;
+        let Some(next_offset) = resume.offset.checked_add(record.len() as u64) else {
+            needs_repair = true;
+            break;
+        };
+        if next_offset > MAX_CHECKPOINT_BYTES {
+            needs_repair = true;
+            break;
+        }
+        let line = record.strip_suffix(b"\n").unwrap_or(&record);
         if line.is_empty() {
-            continue;
+            needs_repair = true;
+            break;
         }
         let Ok(completed) = serde_json::from_slice::<CheckpointObject>(line) else {
             needs_repair = true;
@@ -811,7 +615,7 @@ where
         if !complete {
             needs_repair = true;
         }
-        let index = objects.len();
+        let index = resume.objects.len();
         if index >= ordered_names.len()
             || completed.object.name != ordered_names[index]
             || completed.object.bytes > MAX_OBJECT_BYTES
@@ -821,6 +625,10 @@ where
                 objects: Vec::new(),
                 needs_repair: true,
             };
+        }
+        if should_yield() {
+            remember_checkpoint_resume(resume);
+            return CheckpointLoad::Yielded;
         }
         let Ok(file) = root.open_read_child(&completed.object.name).await else {
             return CheckpointLoad::Ready {
@@ -840,7 +648,35 @@ where
                 needs_repair: true,
             };
         }
-        objects.push(completed);
+        resume.objects.push(completed);
+        resume.offset = next_offset;
+        if !complete {
+            break;
+        }
+    }
+    match reader.get_ref().metadata().await {
+        Ok(metadata) => {
+            let final_identity = secure_file_identity(&metadata);
+            if !metadata.is_file()
+                || !final_identity.same_inode(checkpoint_identity)
+                || final_identity.size != resume.offset
+                || final_identity.size > MAX_CHECKPOINT_BYTES
+            {
+                needs_repair = true;
+            } else {
+                resume.checkpoint_identity = final_identity;
+            }
+        }
+        Err(_) => needs_repair = true,
+    }
+    let objects = resume.objects;
+    if !needs_repair {
+        remember_checkpoint_resume(CheckpointValidationResume {
+            key: resume.key,
+            checkpoint_identity: resume.checkpoint_identity,
+            offset: resume.offset,
+            objects: objects.clone(),
+        });
     }
     CheckpointLoad::Ready {
         objects,
@@ -952,6 +788,41 @@ where
     )))
 }
 
+/// Recheck every checkpoint fingerprint immediately before publication.
+///
+/// A validation cursor may span cooperative worker invocations, so a file
+/// validated before an earlier yield can no longer be treated as current
+/// authority. This final descriptor-relative pass is deliberately not cached:
+/// it is the publication boundary that makes reuse of the resumable parsed
+/// prefix safe even if a staging object was replaced between retries.
+async fn checkpoint_fingerprints_match_directory(
+    root: &crate::fs_secure::SecureDirectory,
+    completed: &[CheckpointObject],
+) -> Result<bool, String> {
+    for object in completed {
+        let file = match root.open_read_child(&object.object.name).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "opening generation object {} for final validation: {error}",
+                    object.object.name
+                ));
+            }
+        };
+        let metadata = file.metadata().await.map_err(|error| {
+            format!(
+                "reading generation object {} for final validation: {error}",
+                object.object.name
+            )
+        })?;
+        if !metadata.is_file() || fingerprint(&metadata) != object.fingerprint {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Capability-relative variant used by the producer staging pipeline. It
 /// retains the same resumable checkpoints as pathname publication while no
 /// intermediate staging component can be redirected after binding.
@@ -1034,6 +905,14 @@ where
         if checkpoint_enabled && checkpoint_should_persist(persisted, completed.len(), true) {
             let _ = append_checkpoint_directory(root, generation_id, &completed[persisted..]).await;
         }
+        return Ok(None);
+    }
+    if !checkpoint_fingerprints_match_directory(root, &completed).await? {
+        // The resumable parse cache is an optimization, never publication
+        // authority. Replace the checkpoint inode so every cached cursor is
+        // invalidated, then let the next cooperative invocation rehash the
+        // generation from a clean header.
+        replace_checkpoint_directory(root, generation_id, &[]).await?;
         return Ok(None);
     }
     let mut objects = completed
@@ -1187,7 +1066,7 @@ impl GenerationManifest {
         &self,
         root: &Path,
         name: &str,
-    ) -> Result<Option<VerifiedObject>, String> {
+    ) -> Result<Option<VerifiedObject>, VerifiedObjectError> {
         let Some(expected) = self.object(name) else {
             return Ok(None);
         };
@@ -1224,10 +1103,17 @@ impl GenerationManifest {
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RESPONSE_LARGE_BUDGET_MIB)))
         }
         .clone();
-        let permit = budget
-            .acquire_many_owned(units)
-            .await
-            .map_err(|_| "authenticated response snapshot budget closed".to_owned())?;
+        let permit = match budget.try_acquire_many_owned(units) {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                return Err(VerifiedObjectError::Capacity)
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                return Err(VerifiedObjectError::Other(
+                    "authenticated response snapshot budget closed".to_owned(),
+                ))
+            }
+        };
         let mut hasher = Sha256::new();
         let mut snapshot = crate::fs_secure::anonymous_memory_file()
             .map_err(|error| format!("creating authenticated memory snapshot: {error}"))?;
@@ -1740,6 +1626,336 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_checkpoint_validation_resumes_across_small_preemption_budgets() {
+        const OBJECTS: usize = 128;
+        const PROBES_PER_PASS: usize = 17;
+
+        let directory = tempfile::tempdir().expect("generation directory");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let mut names = Vec::with_capacity(OBJECTS);
+        let mut completed = Vec::with_capacity(OBJECTS);
+        for index in 0..OBJECTS {
+            let name = format!("seg{index:05}.ts");
+            let bytes = format!("checkpoint object {index}").into_bytes();
+            tokio::fs::write(directory.path().join(&name), &bytes)
+                .await
+                .expect("object bytes");
+            let metadata = tokio::fs::metadata(directory.path().join(&name))
+                .await
+                .expect("object metadata");
+            completed.push(
+                CheckpointObject::new(
+                    GenerationObject {
+                        name: name.clone(),
+                        bytes: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(&bytes)),
+                    },
+                    fingerprint(&metadata),
+                )
+                .expect("checkpoint record"),
+            );
+            names.push(name);
+        }
+        replace_checkpoint_directory(&capability, "generation-resumable", &completed)
+            .await
+            .expect("seed checkpoint");
+
+        for pass in 1..=20 {
+            let mut probes = 0usize;
+            match load_checkpoint_directory(
+                &capability,
+                "generation-resumable",
+                &names,
+                &mut || {
+                    probes += 1;
+                    probes > PROBES_PER_PASS
+                },
+            )
+            .await
+            {
+                CheckpointLoad::Yielded => {}
+                CheckpointLoad::Ready {
+                    objects,
+                    needs_repair,
+                } => {
+                    assert!(!needs_repair);
+                    assert_eq!(objects, completed);
+                    assert!(pass > 1, "the budget must force at least one preemption");
+                    return;
+                }
+            }
+        }
+        panic!("checkpoint validation restarted instead of advancing its cached cursor");
+    }
+
+    #[tokio::test]
+    async fn validated_checkpoint_cursor_survives_a_later_object_hash_yield() {
+        const PREFIX: usize = 64;
+        let directory = tempfile::tempdir().expect("generation directory");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let mut names = Vec::with_capacity(PREFIX + 1);
+        let mut completed = Vec::with_capacity(PREFIX);
+        for index in 0..PREFIX {
+            let name = format!("seg{index:05}.ts");
+            let bytes = format!("durable prefix {index}").into_bytes();
+            tokio::fs::write(directory.path().join(&name), &bytes)
+                .await
+                .expect("prefix object");
+            let metadata = tokio::fs::metadata(directory.path().join(&name))
+                .await
+                .expect("prefix metadata");
+            completed.push(
+                CheckpointObject::new(
+                    GenerationObject {
+                        name: name.clone(),
+                        bytes: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(&bytes)),
+                    },
+                    fingerprint(&metadata),
+                )
+                .expect("checkpoint object"),
+            );
+            names.push(name);
+        }
+        let final_name = format!("seg{PREFIX:05}.ts");
+        tokio::fs::write(directory.path().join(&final_name), vec![0x71; 512 * 1024])
+            .await
+            .expect("unhashed suffix");
+        names.push(final_name);
+        replace_checkpoint_directory(&capability, "generation-post-load-yield", &completed)
+            .await
+            .expect("seed durable prefix");
+
+        let mut probes = 0usize;
+        let yielded =
+            publish_controlled_directory(&capability, "generation-post-load-yield", &names, || {
+                probes += 1;
+                probes >= 133
+            })
+            .await
+            .expect("yield after loading the durable prefix");
+        assert!(yielded.is_none());
+
+        let mut reload_probes = 0usize;
+        let loaded = load_checkpoint_directory(
+            &capability,
+            "generation-post-load-yield",
+            &names,
+            &mut || {
+                reload_probes += 1;
+                false
+            },
+        )
+        .await;
+        let CheckpointLoad::Ready { objects, .. } = loaded else {
+            panic!("cached EOF cursor unexpectedly yielded");
+        };
+        assert_eq!(objects.len(), PREFIX);
+        assert!(
+            reload_probes <= 2,
+            "a post-load hash yield must not force {PREFIX} prefix records through validation again"
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_between_cached_validation_and_publication_forces_rehash() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let first_name = "seg00000.ts".to_owned();
+        let second_name = "seg00001.ts".to_owned();
+        tokio::fs::write(directory.path().join(&first_name), b"original prefix")
+            .await
+            .expect("prefix object");
+        tokio::fs::write(directory.path().join(&second_name), vec![0x42; 512 * 1024])
+            .await
+            .expect("suffix object");
+        let metadata = tokio::fs::metadata(directory.path().join(&first_name))
+            .await
+            .expect("prefix metadata");
+        let completed = CheckpointObject::new(
+            GenerationObject {
+                name: first_name.clone(),
+                bytes: b"original prefix".len() as u64,
+                sha256: hex::encode(Sha256::digest(b"original prefix")),
+            },
+            fingerprint(&metadata),
+        )
+        .expect("checkpoint object");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        replace_checkpoint_directory(
+            &capability,
+            "generation-mutated",
+            std::slice::from_ref(&completed),
+        )
+        .await
+        .expect("seed durable prefix");
+        let names = vec![first_name.clone(), second_name];
+        let mut probes = 0usize;
+        assert!(
+            publish_controlled_directory(&capability, "generation-mutated", &names, || {
+                probes += 1;
+                probes >= 5
+            })
+            .await
+            .expect("yield after prefix validation")
+            .is_none()
+        );
+
+        tokio::fs::write(directory.path().join(&first_name), b"replacement prefix")
+            .await
+            .expect("mutate cached prefix");
+        assert!(
+            publish_controlled_directory(&capability, "generation-mutated", &names, || false)
+                .await
+                .expect("final fingerprint validation")
+                .is_none(),
+            "a stale cached digest must clear its checkpoint instead of publishing"
+        );
+        let manifest =
+            publish_controlled_directory(&capability, "generation-mutated", &names, || false)
+                .await
+                .expect("rehash replacement")
+                .expect("publish repaired generation");
+        assert!(manifest.verify_bytes(&first_name, b"replacement prefix"));
+        assert!(!manifest.verify_bytes(&first_name, b"original prefix"));
+    }
+
+    #[tokio::test]
+    async fn cached_checkpoint_cursor_is_bound_to_the_requested_object_prefix() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        for name in ["seg00000.ts", "seg00001.ts", "seg00002.ts"] {
+            tokio::fs::write(directory.path().join(name), name.as_bytes())
+                .await
+                .expect("object bytes");
+        }
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let mut completed = Vec::new();
+        for name in ["seg00000.ts", "seg00001.ts"] {
+            let bytes = name.as_bytes();
+            let metadata = tokio::fs::metadata(directory.path().join(name))
+                .await
+                .expect("object metadata");
+            completed.push(
+                CheckpointObject::new(
+                    GenerationObject {
+                        name: name.to_owned(),
+                        bytes: bytes.len() as u64,
+                        sha256: hex::encode(Sha256::digest(bytes)),
+                    },
+                    fingerprint(&metadata),
+                )
+                .expect("checkpoint object"),
+            );
+        }
+        replace_checkpoint_directory(&capability, "generation-list", &completed)
+            .await
+            .expect("seed checkpoint");
+        let original = vec!["seg00000.ts".to_owned(), "seg00001.ts".to_owned()];
+        assert!(matches!(
+            load_checkpoint_directory(&capability, "generation-list", &original, &mut || false)
+                .await,
+            CheckpointLoad::Ready { objects, .. } if objects.len() == 2
+        ));
+
+        let changed = vec!["seg00002.ts".to_owned(), "seg00001.ts".to_owned()];
+        assert!(matches!(
+            load_checkpoint_directory(&capability, "generation-list", &changed, &mut || false)
+                .await,
+            CheckpointLoad::Ready { objects, needs_repair: true } if objects.is_empty()
+        ));
+        let shortened = vec!["seg00000.ts".to_owned()];
+        assert!(matches!(
+            load_checkpoint_directory(&capability, "generation-list", &shortened, &mut || false)
+                .await,
+            CheckpointLoad::Ready { objects, needs_repair: true } if objects.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_growth_after_open_is_rejected_without_a_large_line_allocation() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        replace_checkpoint_directory(&capability, "generation-growing", &[])
+            .await
+            .expect("seed checkpoint");
+        let checkpoint_path = directory.path().join(CHECKPOINT_FILE);
+        let mut grew = false;
+        let loaded = load_checkpoint_directory(
+            &capability,
+            "generation-growing",
+            &["seg00000.ts".to_owned()],
+            &mut || {
+                if !grew {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&checkpoint_path)
+                        .expect("open checkpoint writer")
+                        .set_len(MAX_CHECKPOINT_BYTES + 1)
+                        .expect("grow checkpoint after validation stat");
+                    grew = true;
+                }
+                false
+            },
+        )
+        .await;
+        assert!(grew);
+        assert!(matches!(
+            loaded,
+            CheckpointLoad::Ready {
+                needs_repair: true,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn blank_checkpoint_tail_is_rejected_in_constant_record_work() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let header = CheckpointHeader {
+            format_version: FORMAT_VERSION,
+            generation_id: "generation-blank".to_owned(),
+        };
+        let mut encoded = serde_json::to_vec(&header).expect("header");
+        encoded.push(b'\n');
+        encoded.extend(std::iter::repeat_n(b'\n', 1024 * 1024));
+        capability
+            .atomic_write_child(CHECKPOINT_FILE, &encoded)
+            .await
+            .expect("blank-tail checkpoint");
+        let mut probes = 0usize;
+        let loaded = load_checkpoint_directory(
+            &capability,
+            "generation-blank",
+            &["seg00000.ts".to_owned()],
+            &mut || {
+                probes += 1;
+                false
+            },
+        )
+        .await;
+        assert!(matches!(
+            loaded,
+            CheckpointLoad::Ready {
+                needs_repair: true,
+                ..
+            }
+        ));
+        assert!(probes <= 2, "blank records must not consume one probe each");
+    }
+
+    #[tokio::test]
     async fn capability_publication_checkpoints_sub_interval_progress_before_yielding() {
         let directory = tempfile::tempdir().expect("generation directory");
         let names = (0..3)
@@ -1787,5 +2003,41 @@ mod tests {
             resume_calls <= 6,
             "resume should validate two checkpoint records and hash only the final object; got {resume_calls} yield probes"
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_snapshot_bodies_reject_same_class_admission_promptly() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let bytes = vec![0x5a; (RESPONSE_SMALL_MAX_MIB as usize + 1) * 1024 * 1024];
+        tokio::fs::write(directory.path().join("seg00000.ts"), &bytes)
+            .await
+            .expect("medium segment");
+        let manifest = GenerationManifest {
+            format_version: FORMAT_VERSION,
+            generation_id: "capacity-test".to_owned(),
+            object_count: 1,
+            objects: vec![GenerationObject {
+                name: "seg00000.ts".to_owned(),
+                bytes: bytes.len() as u64,
+                sha256: hex::encode(Sha256::digest(&bytes)),
+            }],
+            manifest_digest: String::new(),
+        };
+        let budget = RESPONSE_MEDIUM_BUDGET
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RESPONSE_MEDIUM_BUDGET_MIB)))
+            .clone();
+        let stalled_body = budget
+            .acquire_many_owned(RESPONSE_MEDIUM_BUDGET_MIB as u32)
+            .await
+            .expect("hold medium response class");
+
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            manifest.open_verified_object(directory.path(), "seg00000.ts"),
+        )
+        .await
+        .expect("admission result must be prompt");
+        assert!(matches!(observed, Err(VerifiedObjectError::Capacity)));
+        drop(stalled_body);
     }
 }

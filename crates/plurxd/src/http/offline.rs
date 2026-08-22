@@ -1168,6 +1168,13 @@ pub async fn segment(
     let opened = match &location.manifest {
         Some(manifest) => match manifest.open_verified_object(&location.dir, &segment).await {
             Ok(Some(opened)) => Some((opened.file, opened.bytes, Some(opened.lease))),
+            Err(error) if error.is_capacity() => {
+                return Err(ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "response_snapshot_capacity",
+                    "authenticated media response capacity is full; retry shortly",
+                ));
+            }
             Ok(None) | Err(_) => None,
         },
         None => {
