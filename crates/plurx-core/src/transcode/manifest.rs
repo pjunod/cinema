@@ -2048,6 +2048,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_length_object_yields_before_it_is_checkpointed() {
+        let directory = tempfile::tempdir().expect("generation directory");
+        let name = "seg00000.ts".to_owned();
+        tokio::fs::write(directory.path().join(&name), b"")
+            .await
+            .expect("empty segment");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        let mut probes = 0usize;
+        let yielded =
+            publish_controlled_directory(&capability, "generation-empty", &[name], || {
+                probes += 1;
+                true
+            })
+            .await
+            .expect("yield empty generation");
+        assert!(yielded.is_none());
+        assert_eq!(probes, 1);
+        assert!(!directory.path().join(MANIFEST_FILE).exists());
+        let checkpoint = capability
+            .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
+            .await
+            .expect("header-only checkpoint");
+        assert_eq!(
+            checkpoint
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .count(),
+            1,
+            "an empty object must not become durable progress after yielding"
+        );
+    }
+
+    #[tokio::test]
     async fn stalled_snapshot_bodies_reject_same_class_admission_promptly() {
         let directory = tempfile::tempdir().expect("generation directory");
         let bytes = vec![0x5a; (RESPONSE_SMALL_MAX_MIB as usize + 1) * 1024 * 1024];
