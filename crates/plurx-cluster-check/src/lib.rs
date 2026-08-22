@@ -65,6 +65,13 @@ use tokio::time::Instant as TokioInstant;
 mod production_progress;
 use production_progress::ProgressCoalescer;
 
+mod topology;
+pub use topology::{
+    percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
+    NodeAppliedIndex, ResourceSample, TopologyRun, TopologyWorkload,
+    TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
+};
+
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
@@ -183,6 +190,13 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("membership") => run_membership_lifecycle_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("topology") => {
+            let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from("target/validation/cluster-topology-semantic.json")
+            });
+            let order = topology::parse_topology_order(args.get(3).map(String::as_str))?;
+            run_topology_comparison(&output, order).await
+        }
         Some("node") => {
             let launch: NodeLaunch =
                 serde_json::from_str(args.get(2).context("node mode requires its launch JSON")?)?;
@@ -2262,6 +2276,10 @@ pub enum Request {
     Exercise {
         ordinal: u64,
     },
+    TopologyWrite {
+        ordinal: u64,
+        value: String,
+    },
     PostLossWrite {
         target: String,
         position_ms: i64,
@@ -3762,6 +3780,12 @@ async fn handle_request(
         }
         Request::Exercise { ordinal } => {
             exercise(store_ref(store)?, ordinal).await?;
+            Ok(Response::Ok)
+        }
+        Request::TopologyWrite { ordinal, ref value } => {
+            store_ref(store)?
+                .put_setting(&format!("cluster.topology.write.{ordinal:04}"), value)
+                .await?;
             Ok(Response::Ok)
         }
         Request::PostLossWrite {

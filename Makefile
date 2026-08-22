@@ -91,7 +91,11 @@ cluster-check: ## Run WAL recovery plus M1b-M2 durable-state, import, growth, an
 	  --test store_contract -- --test-threads=1
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  topology::tests::topology_artifact -- --nocapture
 	$(CARGO) run --locked -p plurx-cluster-check -- check
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  topology target/validation/cluster-topology-semantic.json 3,4
 
 .PHONY: cluster-growth
 cluster-growth: ## Measure and gate post-coalescer one-voter compacted growth
