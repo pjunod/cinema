@@ -586,9 +586,67 @@ pub(crate) struct MaterializeReport {
     pub references: usize,
     pub missing: usize,
     pub copied: usize,
+    pub deferred_capacity: usize,
     pub source_repairs: usize,
     pub unresolved: usize,
     pub orphans_removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtworkPullOutcome {
+    Copied,
+    Missing,
+    DeferredCapacity,
+}
+
+fn artwork_pull_outcome(
+    result: Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>,
+) -> ArtworkPullOutcome {
+    match result {
+        Ok(Some(_)) => ArtworkPullOutcome::Copied,
+        Ok(None) => ArtworkPullOutcome::Missing,
+        Err(ArtworkCapacity) => ArtworkPullOutcome::DeferredCapacity,
+    }
+}
+
+fn suppress_deferred_artwork_repairs(
+    deferred_items: BTreeSet<i64>,
+    unresolved_by_item: &mut BTreeMap<i64, Vec<String>>,
+    repair_after: &mut HashMap<i64, Instant>,
+) {
+    for item_id in deferred_items {
+        unresolved_by_item.remove(&item_id);
+        repair_after.remove(&item_id);
+    }
+}
+
+fn retain_recent_artwork_repairs(repair_after: &mut HashMap<i64, Instant>, now: Instant) {
+    // A due timestamp is the signal to run repair, not an expired cache entry.
+    // Keep it through at least one full provider backoff window so paginated
+    // inventories can revisit large libraries; genuinely deleted item ids age
+    // out without resetting every still-missing item at the moment it is due.
+    repair_after.retain(|_, retry| {
+        retry
+            .checked_add(SOURCE_REPAIR_BACKOFF)
+            .is_some_and(|stale_after| stale_after > now)
+    });
+}
+
+fn due_artwork_repairs(
+    unresolved_by_item: BTreeMap<i64, Vec<String>>,
+    repair_after: &mut HashMap<i64, Instant>,
+    now: Instant,
+) -> BTreeMap<i64, Vec<String>> {
+    let mut repair_items = BTreeMap::new();
+    for (item_id, filenames) in unresolved_by_item {
+        let retry = repair_after
+            .entry(item_id)
+            .or_insert(now + SOURCE_REPAIR_GRACE);
+        if *retry <= now {
+            repair_items.insert(item_id, filenames);
+        }
+    }
+    repair_items
 }
 
 #[cfg(test)]
@@ -1011,7 +1069,7 @@ async fn materialize_once(
     }
     report.missing = missing.len();
     let now = Instant::now();
-    repair_after.retain(|_, retry| *retry > now);
+    retain_recent_artwork_repairs(repair_after, now);
     if missing.is_empty() {
         return Ok(report);
     }
@@ -1032,53 +1090,54 @@ async fn materialize_once(
         async move {
             let filename = reference.filename.clone();
             let fetch_filename = filename.clone();
-            let copied = fetch_and_materialize(
-                &coordinator,
-                &artwork_dir,
-                &filename,
-                move |client| async move {
-                    fetch_peer_artwork(&client, &membership, &peers, &fetch_filename).await
-                },
-            )
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-            (reference, copied)
+            let outcome = artwork_pull_outcome(
+                fetch_and_materialize(
+                    &coordinator,
+                    &artwork_dir,
+                    &filename,
+                    move |client| async move {
+                        fetch_peer_artwork(&client, &membership, &peers, &fetch_filename).await
+                    },
+                )
+                .await,
+            );
+            (reference, outcome)
         }
     }))
     .buffer_unordered(MATERIALIZE_CONCURRENCY);
 
     let now = Instant::now();
     let mut unresolved_by_item = BTreeMap::<i64, Vec<String>>::new();
+    let mut deferred_items = BTreeSet::new();
     let mut observed_items = BTreeSet::new();
-    while let Some((reference, copied)) = pulls.next().await {
+    while let Some((reference, outcome)) = pulls.next().await {
         observed_items.insert(reference.item_id);
-        if copied {
-            report.copied += 1;
-        } else {
-            report.unresolved += 1;
-            unresolved_by_item
-                .entry(reference.item_id)
-                .or_default()
-                .push(reference.filename);
+        match outcome {
+            ArtworkPullOutcome::Copied => report.copied += 1,
+            ArtworkPullOutcome::Missing => {
+                report.unresolved += 1;
+                unresolved_by_item
+                    .entry(reference.item_id)
+                    .or_default()
+                    .push(reference.filename);
+            }
+            ArtworkPullOutcome::DeferredCapacity => {
+                report.deferred_capacity += 1;
+                deferred_items.insert(reference.item_id);
+            }
         }
     }
+    // Capacity says nothing about peer availability. If any filename for an
+    // item was deferred, do not turn the partial observation into a provider
+    // repair/backoff decision; the next reconciliation pass retries it.
+    suppress_deferred_artwork_repairs(deferred_items, &mut unresolved_by_item, repair_after);
     for item_id in observed_items {
         if !unresolved_by_item.contains_key(&item_id) {
             repair_after.remove(&item_id);
         }
     }
 
-    let mut repair_items = BTreeMap::<i64, Vec<String>>::new();
-    for (item_id, filenames) in unresolved_by_item {
-        let retry = repair_after
-            .entry(item_id)
-            .or_insert(now + SOURCE_REPAIR_GRACE);
-        if *retry <= now {
-            repair_items.insert(item_id, filenames);
-        }
-    }
+    let repair_items = due_artwork_repairs(unresolved_by_item, repair_after, now);
 
     for (item_id, filenames) in repair_items.into_iter().take(SOURCE_REPAIRS_PER_PASS) {
         let local_deadline = tokio::time::Instant::now() + SOURCE_REPAIR_LEASE;
@@ -1264,6 +1323,7 @@ pub(crate) async fn materialize_loop(state: AppState) {
                 references = report.references,
                 missing = report.missing,
                 copied = report.copied,
+                deferred_capacity = report.deferred_capacity,
                 source_repairs = report.source_repairs,
                 unresolved = report.unresolved,
                 orphans_removed = report.orphans_removed,
@@ -1632,6 +1692,53 @@ mod tests {
                 .expect("released response permit")
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn saturated_response_capacity_defers_reconciliation_repairs() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = tempfile::tempdir().expect("artwork directory");
+        let mut held = Vec::new();
+        for _ in 0..MATERIALIZE_CONCURRENCY {
+            held.push(coordinator.permit().await.expect("hold response permit"));
+        }
+        let outcome = artwork_pull_outcome(
+            fetch_and_materialize(&coordinator, directory.path(), "capacity.jpg", |_| async {
+                Some(b"peer bytes".to_vec())
+            })
+            .await,
+        );
+        assert_eq!(outcome, ArtworkPullOutcome::DeferredCapacity);
+
+        let item_id = 42;
+        let mut unresolved = BTreeMap::from([(item_id, vec!["capacity.jpg".to_owned()])]);
+        let mut repair_after = HashMap::from([(item_id, Instant::now())]);
+        suppress_deferred_artwork_repairs(
+            BTreeSet::from([item_id]),
+            &mut unresolved,
+            &mut repair_after,
+        );
+        assert!(unresolved.is_empty());
+        assert!(repair_after.is_empty());
+        drop(held);
+    }
+
+    #[test]
+    fn missing_artwork_becomes_repairable_after_the_grace_pass() {
+        let item_id = 77;
+        let missing = || BTreeMap::from([(item_id, vec!["77-poster.jpg".to_owned()])]);
+        let first_pass = Instant::now();
+        let mut repair_after = HashMap::new();
+        assert!(due_artwork_repairs(missing(), &mut repair_after, first_pass).is_empty());
+        assert_eq!(
+            repair_after.get(&item_id).copied(),
+            Some(first_pass + SOURCE_REPAIR_GRACE)
+        );
+
+        let after_grace = first_pass + SOURCE_REPAIR_GRACE + Duration::from_millis(1);
+        retain_recent_artwork_repairs(&mut repair_after, after_grace);
+        let due = due_artwork_repairs(missing(), &mut repair_after, after_grace);
+        assert_eq!(due.get(&item_id), Some(&vec!["77-poster.jpg".to_owned()]));
     }
 
     #[test]
