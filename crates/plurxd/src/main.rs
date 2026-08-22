@@ -782,6 +782,7 @@ fn build_state(
 /// that is down must not stall anything a viewer is waiting on — so each of
 /// these owns its own timing rather than riding on traffic.
 fn spawn_background_loops(state: &AppState) {
+    tokio::spawn(state.clone().store_metrics_loop());
     tokio::spawn(state.membership.clone().heartbeat_loop());
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be

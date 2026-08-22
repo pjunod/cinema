@@ -26,6 +26,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use plurx_core::domain::CachedTranscode;
@@ -49,6 +50,22 @@ use plurx_core::store::{keys, Store};
 #[derive(Clone, Default)]
 pub struct ActiveCacheReaders {
     states: Arc<Mutex<HashMap<String, CacheActivity>>>,
+    active_entries: Arc<AtomicUsize>,
+}
+
+/// Read-only, lock-free cache activity projection for process metrics.
+///
+/// This deliberately carries only the published counter, not the ownership
+/// map or any of the Store-bearing housekeeping machinery.
+#[derive(Clone)]
+pub(crate) struct ActiveCacheMetrics {
+    active_entries: Arc<AtomicUsize>,
+}
+
+impl ActiveCacheMetrics {
+    pub(crate) fn active_entries(&self) -> usize {
+        self.active_entries.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +95,12 @@ pub(crate) struct CacheEvictionGuard {
 }
 
 impl ActiveCacheReaders {
+    pub(crate) fn metrics(&self) -> ActiveCacheMetrics {
+        ActiveCacheMetrics {
+            active_entries: Arc::clone(&self.active_entries),
+        }
+    }
+
     fn lock_states(&self) -> MutexGuard<'_, HashMap<String, CacheActivity>> {
         self.states.lock().unwrap_or_else(|poisoned| {
             tracing::error!("cache ownership mutex was poisoned; recovering its state");
@@ -91,9 +114,13 @@ impl ActiveCacheReaders {
         match states.get_mut(recipe) {
             Some(CacheActivity::Readers(count)) => *count += 1,
             Some(CacheActivity::Evicting) => return None,
-            Some(state @ CacheActivity::IdleReader) => *state = CacheActivity::Readers(1),
+            Some(state @ CacheActivity::IdleReader) => {
+                *state = CacheActivity::Readers(1);
+                self.active_entries.fetch_add(1, Ordering::Relaxed);
+            }
             None => {
                 states.insert(recipe.to_owned(), CacheActivity::Readers(1));
+                self.active_entries.fetch_add(1, Ordering::Relaxed);
             }
         }
         Some(CacheReadGuard {
@@ -123,10 +150,7 @@ impl ActiveCacheReaders {
     /// Reader multiplicity stays internal; the operational question is how
     /// many cache entries housekeeping is presently forbidden to remove.
     pub fn active_entries(&self) -> usize {
-        self.lock_states()
-            .values()
-            .filter(|state| matches!(state, CacheActivity::Readers(_)))
-            .count()
+        self.active_entries.load(Ordering::Relaxed)
     }
 
     /// Whether this process has positive evidence that a recipe was real.
@@ -148,6 +172,7 @@ impl Drop for CacheReadGuard {
                 }
                 Some(state @ CacheActivity::Readers(_)) => {
                     *state = CacheActivity::IdleReader;
+                    self.readers.active_entries.fetch_sub(1, Ordering::Relaxed);
                     false
                 }
                 Some(CacheActivity::Evicting | CacheActivity::IdleReader) | None => true,
@@ -691,6 +716,27 @@ mod tests {
         assert_eq!(staging_recipe("abcdef-f42"), "abcdef");
         assert_eq!(staging_recipe("abcdef-final"), "abcdef-final");
         assert_eq!(staging_recipe("abcdef-f"), "abcdef-f");
+    }
+
+    #[test]
+    fn active_entry_snapshot_does_not_wait_for_the_ownership_map() {
+        let readers = ActiveCacheReaders::default();
+        let _reader = readers.begin_read("recipe").expect("reader claim");
+        let states = readers.lock_states();
+        let snapshot = readers.clone();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let handle = std::thread::spawn(move || sent.send(snapshot.active_entries()));
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .expect("atomic active-entry snapshot must not wait for the map"),
+            1
+        );
+        drop(states);
+        handle
+            .join()
+            .expect("join active-entry reader")
+            .expect("send");
     }
 
     const NODE: &str = "node-a";

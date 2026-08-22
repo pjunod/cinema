@@ -29,9 +29,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{keys, ArtworkRepairFence, SettingsStore};
+use super::{keys, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot, SettingsStore};
 use crate::cluster::coordination::Lease;
-use crate::domain::{Item, ItemKind, MediaFile, User};
+use crate::domain::{Item, ItemKind, MediaFile, OfflinePackageStats, User};
 use crate::error::StoreError;
 use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
@@ -1038,6 +1038,77 @@ impl SqliteStore {
         })
         .await
         .map_err(|e| StoreError::Task(e.to_string()))?
+    }
+}
+
+#[async_trait]
+impl MetricsStore for SqliteStore {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_read(move |conn| {
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM libraries),
+                    (SELECT COUNT(*) FROM users),
+                    COALESCE(SUM(state = 'queued'), 0),
+                    COALESCE(SUM(state = 'preparing'), 0),
+                    COALESCE(SUM(state = 'ready'), 0),
+                    COALESCE(SUM(state = 'failed'), 0),
+                    COALESCE(SUM(CASE WHEN state = 'queued'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'preparing'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'ready'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'failed'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    (SELECT COUNT(*) FROM offline_package_leases lease
+                     JOIN offline_packages active ON active.id = lease.package_id
+                     WHERE active.node_id = ?1 AND active.state = 'ready'
+                       AND lease.expires_at > ?2),
+                    (SELECT COALESCE(SUM(location.bytes), 0)
+                     FROM transcode_cache_locations location
+                     WHERE location.node_id = ?1
+                       AND location.storage_class = 'local'
+                       AND location.complete = 1
+                       AND EXISTS (
+                           SELECT 1 FROM offline_packages pinned
+                           WHERE pinned.node_id = location.node_id
+                             AND pinned.recipe_hash = location.recipe_hash
+                             AND pinned.state IN ('queued', 'preparing', 'ready')
+                       )),
+                    (SELECT COALESCE(SUM(status = 'pending'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(SUM(status = 'ok'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox)
+                 FROM offline_packages WHERE node_id = ?1",
+                params![node_id, now],
+                |row| {
+                    Ok(PrometheusStoreSnapshot {
+                        libraries: row.get(0)?,
+                        users: row.get(1)?,
+                        offline: OfflinePackageStats {
+                            queued: row.get(2)?,
+                            preparing: row.get(3)?,
+                            ready: row.get(4)?,
+                            failed: row.get(5)?,
+                            queued_bytes: row.get(6)?,
+                            preparing_bytes: row.get(7)?,
+                            ready_bytes: row.get(8)?,
+                            failed_bytes: row.get(9)?,
+                            active_leases: row.get(10)?,
+                            pinned_bytes: row.get(11)?,
+                        },
+                        watched_outbox: (row.get(12)?, row.get(13)?, row.get(14)?),
+                    })
+                },
+            )
+            .map_err(StoreError::from)
+        })
+        .await
     }
 }
 

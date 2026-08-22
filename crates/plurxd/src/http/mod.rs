@@ -4084,6 +4084,10 @@ mod tests {
                 row["kind"] == "offline_prepare" && row["label"] == "Preparing offline · Flight"
             })));
 
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (status_code, metrics) = call_text(&app, get("/metrics", None)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
@@ -4229,6 +4233,10 @@ mod tests {
             .await
             .expect("package lookup")
             .is_none());
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (_, metrics) = call_text(&app, get("/metrics", None)).await;
         assert!(metrics.contains("plurx_offline_packages{state=\"ready\"} 0"));
         assert!(metrics.contains("plurx_offline_cancellations_total 1"));

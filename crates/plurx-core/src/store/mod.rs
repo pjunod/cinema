@@ -80,6 +80,27 @@ pub struct ArtworkInventoryItem {
     pub backdrop_path: Option<String>,
 }
 
+/// One bounded aggregate read for Store-backed Prometheus gauges.
+///
+/// Keeping this as one Store primitive lets a replicated backend pay for one
+/// authority read per background sample instead of one read per metric family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrometheusStoreSnapshot {
+    pub libraries: i64,
+    pub users: i64,
+    pub offline: OfflinePackageStats,
+    pub watched_outbox: (i64, i64, i64),
+}
+
+#[async_trait]
+pub trait MetricsStore: Send + Sync + 'static {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+}
+
 /// Replicated owner/term/generation proof attached to every provider artwork
 /// mutation.
 /// A timeout may drop a submitted client future without cancelling its Raft
@@ -1556,6 +1577,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + MetricsStore
     + UserStore
     + ApiKeyStore
     + LibraryStore
@@ -1578,6 +1600,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + MetricsStore
         + UserStore
         + ApiKeyStore
         + LibraryStore

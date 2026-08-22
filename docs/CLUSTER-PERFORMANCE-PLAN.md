@@ -429,6 +429,19 @@ instrumentation changes.
 
 ### 6.3 P2 — instrument Store and Raft cost
 
+**P2a observer boundary:** `/metrics` reads an in-memory snapshot for library,
+user, offline-package, and watched-outbox gauges. One aggregate authority read
+refreshes the complete snapshot on a node-staggered 30–44 second cadence, with
+bounded exponential backoff after failures. A failed sample preserves the
+preceding complete value; boot-without-a-sample omits the Store-backed gauge
+families, and fixed validity, monotonic-age, and error series distinguish
+fresh, stale, and absent data. Session, active-cache, and sampled-Store values
+are lock-free on the scrape path. The handler extracts a Store-free substate,
+so it cannot observe the instrumentation it is about to expose. On four
+voters, the idle load is roughly one aggregate authority read per node per
+staggered interval rather than the prior draft's sixteen synchronized reads
+every fifteen seconds.
+
 **Change:** Instrument `TimedClient` once so every replicated Store module uses
 the same bounded local-read · authority-read · write histograms and counters.
 Extend the OpenRaft/Hiqlite metrics boundary with the explicit §5.1 sources:

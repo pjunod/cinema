@@ -23,11 +23,12 @@ use sha2::{Digest, Sha256};
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, ApiKeyStore, ArtworkRepairFence, NetworkPriorStore, PlaybackTelemetryStore,
-    SettingsStore, UserStore,
+    keys, ApiKeyStore, ArtworkRepairFence, MetricsStore, NetworkPriorStore, PlaybackTelemetryStore,
+    PrometheusStoreSnapshot, SettingsStore, UserStore,
 };
 use crate::domain::{
-    ApiKey, NetworkPrior, NetworkPriorObservation, PlaybackEvent, PlaybackEventQuery, User,
+    ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
+    PlaybackEventQuery, User,
 };
 use crate::error::StoreError;
 
@@ -978,6 +979,60 @@ impl NetworkPriorStore for HiqliteAuthStore {
 }
 
 #[async_trait]
+impl MetricsStore for HiqliteAuthStore {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        let row = self
+            .client()
+            .query_consistent_map::<PrometheusStoreRow, _>(
+                "SELECT \
+                    (SELECT COUNT(*) FROM libraries) AS libraries, \
+                    (SELECT COUNT(*) FROM users) AS users, \
+                    COALESCE(SUM(state = 'queued'), 0) AS queued, \
+                    COALESCE(SUM(state = 'preparing'), 0) AS preparing, \
+                    COALESCE(SUM(state = 'ready'), 0) AS ready, \
+                    COALESCE(SUM(state = 'failed'), 0) AS failed, \
+                    COALESCE(SUM(CASE WHEN state = 'queued' \
+                      THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0) AS queued_bytes, \
+                    COALESCE(SUM(CASE WHEN state = 'preparing' \
+                      THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0) AS preparing_bytes, \
+                    COALESCE(SUM(CASE WHEN state = 'ready' \
+                      THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0) AS ready_bytes, \
+                    COALESCE(SUM(CASE WHEN state = 'failed' \
+                      THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0) AS failed_bytes, \
+                    (SELECT COUNT(*) FROM offline_package_leases lease \
+                     JOIN offline_packages active ON active.id = lease.package_id \
+                     WHERE active.node_id = $1 AND active.state = 'ready' \
+                       AND lease.expires_at > $2) AS active_leases, \
+                    (SELECT COALESCE(SUM(location.bytes), 0) \
+                     FROM transcode_cache_locations location \
+                     WHERE location.node_id = $1 AND location.storage_class = 'local' \
+                       AND location.complete = 1 AND EXISTS ( \
+                         SELECT 1 FROM offline_packages pinned \
+                         WHERE pinned.node_id = location.node_id \
+                           AND pinned.recipe_hash = location.recipe_hash \
+                           AND pinned.state IN ('queued', 'preparing', 'ready'))) AS pinned_bytes, \
+                    (SELECT COALESCE(SUM(status = 'pending'), 0) \
+                     FROM watched_outbox) AS outbox_pending, \
+                    (SELECT COALESCE(SUM(status = 'ok'), 0) \
+                     FROM watched_outbox) AS outbox_ok, \
+                    (SELECT COALESCE(SUM(status = 'failed'), 0) \
+                     FROM watched_outbox) AS outbox_failed \
+                 FROM offline_packages WHERE node_id = $1",
+                params!(node_id, now),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Database("Prometheus snapshot returned no row".to_owned()))?;
+        Ok(row.into())
+    }
+}
+
+#[async_trait]
 impl SettingsStore for HiqliteAuthStore {
     async fn ping(&self) -> Result<(), StoreError> {
         timeout_store(self.client().is_healthy_db()).await?;
@@ -1611,6 +1666,68 @@ impl From<&mut Row<'_>> for PingRow {
 
 struct CountRow {
     count: i64,
+}
+
+struct PrometheusStoreRow {
+    libraries: i64,
+    users: i64,
+    queued: i64,
+    preparing: i64,
+    ready: i64,
+    failed: i64,
+    queued_bytes: i64,
+    preparing_bytes: i64,
+    ready_bytes: i64,
+    failed_bytes: i64,
+    active_leases: i64,
+    pinned_bytes: i64,
+    outbox_pending: i64,
+    outbox_ok: i64,
+    outbox_failed: i64,
+}
+
+impl From<&mut Row<'_>> for PrometheusStoreRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            libraries: row.get("libraries"),
+            users: row.get("users"),
+            queued: row.get("queued"),
+            preparing: row.get("preparing"),
+            ready: row.get("ready"),
+            failed: row.get("failed"),
+            queued_bytes: row.get("queued_bytes"),
+            preparing_bytes: row.get("preparing_bytes"),
+            ready_bytes: row.get("ready_bytes"),
+            failed_bytes: row.get("failed_bytes"),
+            active_leases: row.get("active_leases"),
+            pinned_bytes: row.get("pinned_bytes"),
+            outbox_pending: row.get("outbox_pending"),
+            outbox_ok: row.get("outbox_ok"),
+            outbox_failed: row.get("outbox_failed"),
+        }
+    }
+}
+
+impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
+    fn from(row: PrometheusStoreRow) -> Self {
+        Self {
+            libraries: row.libraries,
+            users: row.users,
+            offline: OfflinePackageStats {
+                queued: row.queued,
+                preparing: row.preparing,
+                ready: row.ready,
+                failed: row.failed,
+                queued_bytes: row.queued_bytes,
+                preparing_bytes: row.preparing_bytes,
+                ready_bytes: row.ready_bytes,
+                failed_bytes: row.failed_bytes,
+                active_leases: row.active_leases,
+                pinned_bytes: row.pinned_bytes,
+            },
+            watched_outbox: (row.outbox_pending, row.outbox_ok, row.outbox_failed),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for CountRow {

@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Query, State};
+use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use plurx_core::auth;
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use crate::state::{AppState, ScanStatus};
+use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
 pub struct ServerInfo {
@@ -2199,25 +2199,61 @@ pub async fn stop_offline_package(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// GET /metrics — Prometheus text exposition (unauthenticated; counts only).
-pub async fn metrics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    let uptime = state.started_at.elapsed().as_secs();
-    let sessions = state.transcode.active_sessions().await;
-    let libraries = state
-        .store
-        .list_libraries()
-        .await
-        .map(|l| l.len())
-        .unwrap_or(0);
-    let users = state.store.count_users().await.unwrap_or(0);
-    let active_cache_entries = state.transcode.active_cache_entries();
-    let offline = state
-        .store
-        .offline_package_stats(&state.node_id, now_unix())
-        .await
-        .unwrap_or_default();
-    let offline_metrics = format!(
-        "# HELP plurx_offline_packages Durable offline packages by state.\n\
+/// Store-free substate available to the unauthenticated Prometheus handler.
+/// Its fields expose only process-local counters and the background sample;
+/// the handler cannot reach `AppState::store` through this type.
+#[derive(Clone)]
+pub(crate) struct MetricsState {
+    started_at: Instant,
+    transcode: crate::transcode::TranscodeMetrics,
+    integration: Arc<IntegrationMetrics>,
+    offline: Arc<crate::offline::OfflineMetrics>,
+    store_metrics: StoreMetricsCache,
+}
+
+impl FromRef<AppState> for MetricsState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            started_at: state.started_at,
+            transcode: state.transcode.metrics_handle(),
+            integration: state.jobs.metrics_handle(),
+            offline: state.offline.metrics_handle(),
+            store_metrics: state.store_metrics.clone(),
+        }
+    }
+}
+
+fn render_store_metrics(view: StoreMetricsView) -> String {
+    let mut out = format!(
+        "# HELP plurx_store_metrics_sample_valid Whether the Store-backed gauge sample is present and fresh.\n\
+         # TYPE plurx_store_metrics_sample_valid gauge\n\
+         plurx_store_metrics_sample_valid {}\n\
+         # HELP plurx_store_metrics_sample_errors_total Failed Store-backed gauge samples.\n\
+         # TYPE plurx_store_metrics_sample_errors_total counter\n\
+         plurx_store_metrics_sample_errors_total {}\n",
+        u8::from(view.valid),
+        view.errors,
+    );
+    if let Some(age) = view.age_seconds {
+        out.push_str(&format!(
+            "# HELP plurx_store_metrics_sample_age_seconds Age of the last complete Store-backed gauge sample.\n\
+             # TYPE plurx_store_metrics_sample_age_seconds gauge\n\
+             plurx_store_metrics_sample_age_seconds {age}\n"
+        ));
+    }
+    let Some(sample) = view.sample else {
+        return out;
+    };
+    let offline = sample.offline;
+    let (pending, ok, failed) = sample.watched_outbox;
+    out.push_str(&format!(
+        "# HELP plurx_libraries_total Configured libraries.\n\
+         # TYPE plurx_libraries_total gauge\n\
+         plurx_libraries_total {}\n\
+         # HELP plurx_users_total Registered users.\n\
+         # TYPE plurx_users_total gauge\n\
+         plurx_users_total {}\n\
+         # HELP plurx_offline_packages Durable offline packages by state.\n\
          # TYPE plurx_offline_packages gauge\n\
          plurx_offline_packages{{state=\"queued\"}} {}\n\
          plurx_offline_packages{{state=\"preparing\"}} {}\n\
@@ -2235,9 +2271,13 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
          # HELP plurx_cache_pinned_bytes Completed cache bytes protected by offline packages.\n\
          # TYPE plurx_cache_pinned_bytes gauge\n\
          plurx_cache_pinned_bytes{{reason=\"offline\"}} {}\n\
-         # HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
-         # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {}\n{}",
+         # HELP plurx_watched_outbox Watched notifications queued for monarr, by state.\n\
+         # TYPE plurx_watched_outbox gauge\n\
+         plurx_watched_outbox{{status=\"pending\"}} {pending}\n\
+         plurx_watched_outbox{{status=\"ok\"}} {ok}\n\
+         plurx_watched_outbox{{status=\"failed\"}} {failed}\n",
+        sample.libraries,
+        sample.users,
         offline.queued,
         offline.preparing,
         offline.ready,
@@ -2248,7 +2288,21 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
         offline.failed_bytes,
         offline.active_leases,
         offline.pinned_bytes,
-        active_cache_entries,
+    ));
+    out
+}
+
+/// GET /metrics — Prometheus text exposition (unauthenticated; counts only).
+pub(crate) async fn metrics(
+    State(state): State<MetricsState>,
+) -> impl axum::response::IntoResponse {
+    let uptime = state.started_at.elapsed().as_secs();
+    let (sessions, active_cache_entries) = state.transcode.snapshot();
+    let store_metrics = render_store_metrics(state.store_metrics.snapshot());
+    let process_metrics = format!(
+        "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
+         # TYPE plurx_cache_protected_entries gauge\n\
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}",
         state.offline.prometheus(),
     );
 
@@ -2256,7 +2310,7 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
     // many times another application has called in at all — the pair that
     // answers "is the fast path actually being used, or is the scheduled
     // sweep quietly carrying everything?".
-    let (by_trigger, notifications) = state.jobs.metrics().snapshot();
+    let (by_trigger, notifications) = state.integration.snapshot();
     let mut scans = String::from(
         "# HELP plurx_scan_total Library scans started, by what asked for one.\n\
          # TYPE plurx_scan_total counter\n",
@@ -2266,18 +2320,6 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
             "plurx_scan_total{{trigger=\"{trigger}\"}} {count}\n"
         ));
     }
-    let (pending, ok, failed) = state
-        .store
-        .watched_outbox_counts()
-        .await
-        .unwrap_or((0, 0, 0));
-    scans.push_str(&format!(
-        "# HELP plurx_watched_outbox Watched notifications queued for monarr, by state.\n\
-         # TYPE plurx_watched_outbox gauge\n\
-         plurx_watched_outbox{{status=\"pending\"}} {pending}\n\
-         plurx_watched_outbox{{status=\"ok\"}} {ok}\n\
-         plurx_watched_outbox{{status=\"failed\"}} {failed}\n"
-    ));
     scans.push_str(&format!(
         "# HELP plurx_notify_received_total Scan requests received from other applications.\n\
          # TYPE plurx_notify_received_total counter\n\
@@ -2294,13 +2336,7 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         # HELP plurx_libraries_total Configured libraries.\n\
-         # TYPE plurx_libraries_total gauge\n\
-         plurx_libraries_total {libraries}\n\
-         # HELP plurx_users_total Registered users.\n\
-         # TYPE plurx_users_total gauge\n\
-         plurx_users_total {users}\n\
-         {scans}{offline_metrics}{playback_metrics}",
+         {scans}{store_metrics}{process_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         playback_metrics = crate::telemetry::prometheus(),
@@ -2318,6 +2354,65 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn prometheus_scrape_has_no_store_operation() {
+        let source = include_str!("system.rs");
+        let handler = source
+            .split_once("pub(crate) async fn metrics")
+            .expect("metrics handler")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("metrics test module")
+            .0;
+        let compact = handler
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(compact.starts_with("(State(state):State<MetricsState>"));
+        assert!(!compact.contains("AppState"));
+        assert!(!compact.contains(".store."));
+        assert!(!compact.contains("Store>"));
+
+        let substate = source
+            .split_once("pub(crate) struct MetricsState")
+            .expect("metrics substate")
+            .1
+            .split_once("impl FromRef<AppState> for MetricsState")
+            .expect("metrics substate conversion")
+            .0;
+        assert!(!substate.contains("Manager"));
+        assert!(!substate.contains("Arc<dyn Store>"));
+    }
+
+    #[test]
+    fn absent_and_stale_store_samples_are_explicit_in_exposition() {
+        let absent = render_store_metrics(StoreMetricsView {
+            sample: None,
+            age_seconds: None,
+            valid: false,
+            errors: 2,
+        });
+        assert!(absent.contains("plurx_store_metrics_sample_valid 0"));
+        assert!(absent.contains("plurx_store_metrics_sample_errors_total 2"));
+        assert!(!absent.contains("plurx_store_metrics_sample_age_seconds "));
+        assert!(!absent.contains("plurx_libraries_total"));
+
+        let stale = render_store_metrics(StoreMetricsView {
+            sample: Some(plurx_core::store::PrometheusStoreSnapshot {
+                libraries: 3,
+                users: 4,
+                ..Default::default()
+            }),
+            age_seconds: Some(121),
+            valid: false,
+            errors: 3,
+        });
+        assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
+        assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(stale.contains("plurx_libraries_total 3"));
+        assert!(stale.contains("plurx_users_total 4"));
+    }
 
     fn beacon(event: &str, ms: i64) -> ClientLog {
         ClientLog {
