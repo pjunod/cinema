@@ -42,6 +42,7 @@ impl Part {
     /// preempted part ends. It is dropped, because the bytes it describes are
     /// incomplete and the boundary this part resumes from must be one the
     /// viewer can actually play through.
+    #[cfg(test)]
     pub fn from_playlist(text: &str) -> Part {
         let mut segments = Vec::new();
         let mut durations_ms = Vec::new();
