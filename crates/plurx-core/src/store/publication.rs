@@ -58,9 +58,18 @@ impl PublicationFence {
         let renewed = coordinator.renew(&current, ttl).await;
         if self.revoked.load(Ordering::Acquire) {
             // A local deadline may win after the backend request was sent.
-            // Drain that bounded request, but never restore a lease after the
-            // worker has synchronously self-fenced.
-            *state = None;
+            // Retain an acknowledged replacement solely so release can retire
+            // it; the atomic revocation still blocks every publication.
+            match renewed {
+                Ok(Some(replacement)) => {
+                    *self
+                        .last
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement.clone();
+                    *state = Some(replacement);
+                }
+                Ok(None) | Err(_) => *state = None,
+            }
             return Ok(false);
         }
         match renewed {

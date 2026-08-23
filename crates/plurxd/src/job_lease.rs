@@ -61,7 +61,13 @@ impl ActiveJobLease {
                 let expiry = tokio::time::sleep(lease_time_remaining(current.expires_at_unix_ms));
                 tokio::pin!(expiry);
                 let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = heartbeat_cancel.cancelled() => {
+                        // Graceful release must join an already-dispatched
+                        // renewal before it samples and retires the final
+                        // token; dropping the future can detach a Raft write.
+                        let _ = renewal.await;
+                        break;
+                    }
                     _ = &mut expiry => {
                         // Revocation and loss notification are synchronous,
                         // but the already-dispatched renewal must still be
