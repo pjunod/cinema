@@ -2312,6 +2312,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     Request::ClaimArtworkRepairFence {
                         item_id: repair_item,
                         lease_ms: repair_lease_ms,
+                        inject_leader_change: false,
                     },
                 )
                 .await?
@@ -2387,6 +2388,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             Request::ClaimArtworkRepairFence {
                 item_id: repair_item,
                 lease_ms: repair_lease_ms,
+                inject_leader_change: false,
             },
         )
         .await?
@@ -2447,65 +2449,97 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(election_target, Request::TriggerElection)
         .await?
         .require_ok()?;
-    let handoff_deadline = Instant::now() + Duration::from_secs(10);
-    let handoff = loop {
-        let current = cluster.leader().await?;
-        if current != leader {
-            break current;
+    let handoff_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    let repair_lease = Duration::from_millis(repair_lease_ms);
+    let mut force_term_change_during_wait = true;
+    let (handoff, handoff_term) = loop {
+        let observed =
+            observe_artwork_repair_successor(&mut cluster, leader, repair_item, handoff_deadline)
+                .await?;
+        let observation_confirmed_at = Instant::now();
+        if observation_confirmed_at + repair_lease + Duration::from_millis(30) >= handoff_deadline {
+            bail!("artwork repair successor did not retain one stable lease window");
         }
-        if Instant::now() >= handoff_deadline {
-            bail!("artwork repair leadership did not move from voter {leader}");
+        let forced_this_window = force_term_change_during_wait;
+        if forced_this_window {
+            tokio::time::sleep(repair_lease / 2).await;
+            let target = (1..=3)
+                .find(|node_id| *node_id != observed.0 && *node_id != leader)
+                .context("artwork repair proof has no third election target")?;
+            cluster
+                .request(target, Request::TriggerElection)
+                .await?
+                .require_ok()?;
+            force_term_change_during_wait = false;
+            tokio::time::sleep(repair_lease / 2 + Duration::from_millis(30)).await;
+        } else {
+            tokio::time::sleep(repair_lease + Duration::from_millis(30)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    loop {
-        match cluster.request(handoff, Request::Metrics).await? {
+        match cluster.request(observed.0, Request::Metrics).await? {
             Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
                 quorum_acknowledged: true,
                 ..
-            } => break,
-            Response::Metrics { .. } => {}
-            response => bail!("unexpected successor metrics response: {response:?}"),
+            } if current_leader == observed.0 && current_term == observed.1 => {
+                if forced_this_window {
+                    bail!("forced artwork repair election did not change the observed term");
+                }
+                if observation_confirmed_at.elapsed() < repair_lease {
+                    bail!("artwork repair successor did not wait one complete monotonic lease");
+                }
+                break observed;
+            }
+            Response::Metrics { .. } => {
+                // A new term invalidates the receiver-local observation. The
+                // newly confirmed successor must observe the durable fence and
+                // wait its own complete monotonic lease before any CAS.
+            }
+            response => bail!("unexpected post-wait successor metrics response: {response:?}"),
         }
-        if Instant::now() >= handoff_deadline {
-            bail!("artwork repair successor never established a quorum lease");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
+    let (before_repeat_fence, before_repeat_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
     match cluster
         .request(
             handoff,
-            Request::ClaimArtworkRepair {
+            Request::ObserveArtworkRepair {
                 item_id: repair_item,
-                lease_ms: repair_lease_ms,
+                inject_leader_change: false,
             },
         )
         .await?
     {
-        Response::Flag { value: false } => {}
-        response => bail!("successor ignored the monotonic repair fence: {response:?}"),
+        Response::Flag { value: true } => {}
+        response => bail!("mature repair observation was not repeatable: {response:?}"),
     }
-    tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
+    let (after_repeat_fence, after_repeat_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
+    if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
+        bail!(
+            "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
+             {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
+             {after_repeat_index:?}"
+        );
+    }
     let mut handoff_winners = Vec::new();
     let mut new_fence = None;
     for node_id in 1..=3 {
         if node_id == handoff {
-            match cluster
-                .request(
-                    node_id,
-                    Request::ClaimArtworkRepairFence {
-                        item_id: repair_item,
-                        lease_ms: repair_lease_ms,
-                    },
-                )
-                .await?
+            match claim_artwork_repair_fence_once(
+                &mut cluster,
+                node_id,
+                repair_item,
+                repair_lease_ms,
+                false,
+            )
+            .await?
             {
-                Response::ArtworkRepairFence { fence: Some(fence) } => {
+                Some(fence) => {
                     handoff_winners.push(node_id);
                     new_fence = Some(fence);
                 }
-                Response::ArtworkRepairFence { fence: None } => {}
-                response => bail!("unexpected handoff repair fence response: {response:?}"),
+                None => {}
             }
         } else {
             match cluster
@@ -2524,8 +2558,57 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
         }
     }
+    match cluster.request(handoff, Request::Metrics).await? {
+        Response::Metrics {
+            leader: Some(current_leader),
+            current_term,
+            quorum_acknowledged: true,
+            ..
+        } if current_leader == handoff && current_term == handoff_term => {}
+        Response::Metrics { .. } => {
+            bail!("artwork repair topology changed during the generation CAS")
+        }
+        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
+    }
     if handoff_winners != [handoff] {
         bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
+    }
+    let (before_ambiguous_fence, before_ambiguous_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
+    if before_ambiguous_fence.is_some() {
+        bail!("ambiguous repair fixture already had a durable fence");
+    }
+    let ambiguous_claim = claim_artwork_repair_fence_once(
+        &mut cluster,
+        handoff,
+        wrong_target_item,
+        repair_lease_ms,
+        true,
+    )
+    .await
+    .expect_err("a typed leader change from a mutating repair claim must be fatal");
+    if !ambiguous_claim
+        .to_string()
+        .contains("mutating artwork repair claim was ambiguous and was not retried")
+    {
+        bail!("mutating repair ambiguity had the wrong verdict: {ambiguous_claim:#}");
+    }
+    let (after_ambiguous_fence, after_ambiguous_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
+    let after_ambiguous_fence =
+        after_ambiguous_fence.context("ambiguous repair claim did not apply its one attempt")?;
+    if after_ambiguous_fence.generation != 1
+        || after_ambiguous_fence.owner_node_id != format!("node-{handoff}")
+        || after_ambiguous_fence.leader_term != i64::try_from(handoff_term)?
+        || after_ambiguous_index
+            .zip(before_ambiguous_index)
+            .is_none_or(|(after, before)| after.saturating_sub(before) != 1)
+    {
+        bail!(
+            "ambiguous repair claim was not exactly one applied attempt: \
+             fence={after_ambiguous_fence:?}, applied={before_ambiguous_index:?}->\
+             {after_ambiguous_index:?}"
+        );
     }
     let new_fence = new_fence.context("new leader did not return its artwork repair fence")?;
     match cluster
@@ -3289,6 +3372,129 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     }
     cluster.shutdown_all().await?;
     Ok(())
+}
+
+/// Observe an old repair generation through one stable successor term before
+/// any call that can advance its durable fence. A Hiqlite leader-change error
+/// is retryable only here: `claim_artwork_source_repair` cannot reach its CAS
+/// until after this receiver-local observation has succeeded once.
+async fn observe_artwork_repair_successor(
+    cluster: &mut ClusterProcesses,
+    former_leader: u64,
+    item_id: i64,
+    deadline: Instant,
+) -> Result<(u64, u64)> {
+    let mut inject_leader_change = true;
+    loop {
+        if Instant::now() >= deadline {
+            bail!("artwork repair leadership did not stabilize away from voter {former_leader}");
+        }
+        let successor = cluster.leader().await?;
+        if successor == former_leader {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        let term = match cluster.request(successor, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == successor => current_term,
+            Response::Metrics { .. } => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            response => bail!("unexpected successor metrics response: {response:?}"),
+        };
+        let observed = match cluster
+            .request(
+                successor,
+                Request::ObserveArtworkRepair {
+                    item_id,
+                    inject_leader_change,
+                },
+            )
+            .await?
+        {
+            Response::Flag { value: true } => true,
+            Response::Flag { value: false } => false,
+            Response::MembershipLeaderChange { .. } => {
+                inject_leader_change = false;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            response => bail!("successor could not observe the durable repair fence: {response:?}"),
+        };
+        match cluster.request(successor, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if observed && current_leader == successor && current_term == term => {
+                return Ok((successor, term));
+            }
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == successor && current_term == term => {
+                bail!("successor could not observe the durable repair fence")
+            }
+            Response::Metrics { .. } => {}
+            response => bail!("unexpected successor post-observation metrics: {response:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn read_artwork_repair_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<(Option<ArtworkRepairFence>, Option<u64>)> {
+    let fence = match cluster
+        .request(node_id, Request::ReadArtworkRepairFence { item_id })
+        .await?
+    {
+        Response::ArtworkRepairFence { fence } => fence,
+        response => bail!("unexpected repair fence read response: {response:?}"),
+    };
+    let applied_index = match cluster.request(node_id, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => applied_index,
+        response => bail!("unexpected repair observation metrics: {response:?}"),
+    };
+    Ok((fence, applied_index))
+}
+
+/// A potentially mutating repair claim is sent exactly once. In particular,
+/// its typed routing ambiguity is terminal because the write may have applied.
+async fn claim_artwork_repair_fence_once(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+    lease_ms: u64,
+    inject_leader_change: bool,
+) -> Result<Option<ArtworkRepairFence>> {
+    match cluster
+        .request(
+            node_id,
+            Request::ClaimArtworkRepairFence {
+                item_id,
+                lease_ms,
+                inject_leader_change,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkRepairFence { fence } => Ok(fence),
+        Response::MembershipLeaderChange { .. } => {
+            bail!("mutating artwork repair claim was ambiguous and was not retried")
+        }
+        response => bail!("unexpected artwork repair fence response: {response:?}"),
+    }
 }
 
 /// Prove the self-leave path that a remote removal deliberately refuses: the
@@ -4326,6 +4532,13 @@ pub enum Request {
         node_id: String,
     },
     Heartbeat,
+    ObserveArtworkRepair {
+        item_id: i64,
+        inject_leader_change: bool,
+    },
+    ReadArtworkRepairFence {
+        item_id: i64,
+    },
     ClaimArtworkRepair {
         item_id: i64,
         lease_ms: u64,
@@ -4341,6 +4554,7 @@ pub enum Request {
     ClaimArtworkRepairFence {
         item_id: i64,
         lease_ms: u64,
+        inject_leader_change: bool,
     },
     ApplyArtworkRepairFence {
         target_item_id: i64,
@@ -4574,6 +4788,11 @@ pub enum Response {
     },
     MembershipError {
         code: String,
+        message: String,
+    },
+    /// Harness-only preservation of a typed Hiqlite routing verdict. This is
+    /// never accepted after a potentially mutating request.
+    MembershipLeaderChange {
         message: String,
     },
     Error {
@@ -6131,6 +6350,42 @@ async fn handle_request(
             membership_ref(membership)?.heartbeat().await?;
             Ok(Response::Ok)
         }
+        Request::ObserveArtworkRepair {
+            item_id,
+            inject_leader_change,
+        } => {
+            if inject_leader_change {
+                Ok(membership_error_response(MembershipError::LeaderChanged(
+                    "injected before the read-only repair observation".to_owned(),
+                )))
+            } else {
+                membership_ref(membership)?
+                    .observe_artwork_source_repair(item_id)
+                    .await
+                    .map(|value| Response::Flag { value })
+                    .or_else(|error| Ok(membership_error_response(error)))
+            }
+        }
+        Request::ReadArtworkRepairFence { item_id } => {
+            let mut rows = client
+                .query_consistent_map::<HarnessArtworkRepairRow, _>(
+                    "SELECT owner_node_id, leader_term, generation \
+                     FROM cluster_artwork_repairs WHERE item_id = $1",
+                    params!(item_id),
+                )
+                .await?;
+            if rows.len() > 1 {
+                bail!("artwork repair primary key returned multiple rows");
+            }
+            Ok(Response::ArtworkRepairFence {
+                fence: rows.pop().map(|row| ArtworkRepairFence {
+                    item_id,
+                    owner_node_id: row.owner_node_id,
+                    leader_term: row.leader_term,
+                    generation: row.generation,
+                }),
+            })
+        }
         Request::ClaimArtworkRepair { item_id, lease_ms } => membership_ref(membership)?
             .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
             .await
@@ -6174,13 +6429,31 @@ async fn handle_request(
                 .await?;
             Ok(Response::ItemId { item_id })
         }
-        Request::ClaimArtworkRepairFence { item_id, lease_ms } => membership_ref(membership)?
-            .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
-            .await
-            .map(|claim| Response::ArtworkRepairFence {
-                fence: claim.map(|claim| claim.fence().clone()),
-            })
-            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ClaimArtworkRepairFence {
+            item_id,
+            lease_ms,
+            inject_leader_change,
+        } => {
+            if inject_leader_change {
+                // Execute the real potentially mutating path, then discard its
+                // acknowledgement. This deterministically models the exact
+                // client ambiguity that must be fatal to the controller.
+                membership_ref(membership)?
+                    .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+                    .await?;
+                Ok(membership_error_response(MembershipError::LeaderChanged(
+                    "injected after applying a potentially mutating repair claim".to_owned(),
+                )))
+            } else {
+                membership_ref(membership)?
+                    .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+                    .await
+                    .map(|claim| Response::ArtworkRepairFence {
+                        fence: claim.map(|claim| claim.fence().clone()),
+                    })
+                    .or_else(|error| Ok(membership_error_response(error)))
+            }
+        }
         Request::ApplyArtworkRepairFence {
             target_item_id,
             ref fence,
@@ -6890,6 +7163,22 @@ impl From<&mut Row<'_>> for SingletonSettingRow {
     }
 }
 
+struct HarnessArtworkRepairRow {
+    owner_node_id: String,
+    leader_term: i64,
+    generation: i64,
+}
+
+impl From<&mut Row<'_>> for HarnessArtworkRepairRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            owner_node_id: row.get("owner_node_id"),
+            leader_term: row.get("leader_term"),
+            generation: row.get("generation"),
+        }
+    }
+}
+
 async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
     let mut rows = client
         .query_consistent_map::<SingletonLeaseRow, _>(
@@ -6940,9 +7229,12 @@ fn membership_ref(membership: &Option<MembershipManager>) -> Result<&MembershipM
 }
 
 fn membership_error_response(error: plurx_core::cluster::membership::MembershipError) -> Response {
-    Response::MembershipError {
-        code: error.code().to_owned(),
-        message: error.to_string(),
+    match error {
+        MembershipError::LeaderChanged(message) => Response::MembershipLeaderChange { message },
+        error => Response::MembershipError {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        },
     }
 }
 
@@ -8545,6 +8837,35 @@ mod tests {
         assert!(!singleton_trial_was_unstable(
             b"diagnostic mentioned CLUSTER_SINGLETON_UNSTABLE but was not a verdict\n"
         ));
+    }
+
+    #[test]
+    fn membership_harness_retries_only_typed_leader_changes() {
+        assert!(matches!(
+            membership_error_response(MembershipError::LeaderChanged("routing".to_owned())),
+            Response::MembershipLeaderChange { message } if message == "routing"
+        ));
+        assert!(matches!(
+            membership_error_response(MembershipError::Internal(
+                "LeaderChange text from an unrelated semantic error".to_owned()
+            )),
+            Response::MembershipError { code, .. } if code == "membership_internal"
+        ));
+    }
+
+    #[test]
+    fn mutating_artwork_claim_helper_has_exactly_one_dispatch() {
+        let source = include_str!("lib.rs");
+        let helper = source
+            .split_once("async fn claim_artwork_repair_fence_once")
+            .expect("single-dispatch claim helper")
+            .1
+            .split_once("async fn run_leader_self_leave_case")
+            .expect("helper boundary")
+            .0;
+        assert_eq!(helper.matches(".request(").count(), 1);
+        assert!(helper.contains("Response::MembershipLeaderChange"));
+        assert!(helper.contains("was ambiguous and was not retried"));
     }
 
     #[test]

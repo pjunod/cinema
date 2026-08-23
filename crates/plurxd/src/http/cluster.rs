@@ -134,7 +134,9 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::QuorumLoss
         | MembershipError::OfflineWork(_) => StatusCode::CONFLICT,
         MembershipError::NodeNotFound => StatusCode::NOT_FOUND,
-        MembershipError::Internal(_) => StatusCode::SERVICE_UNAVAILABLE,
+        MembershipError::LeaderChanged(_) | MembershipError::Internal(_) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     };
     ApiError::typed(status, error.code(), error.to_string())
 }
