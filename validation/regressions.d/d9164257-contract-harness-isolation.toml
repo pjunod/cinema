@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["d9164257", "f3040512", "ef528399"]
+commits = ["d9164257", "f3040512", "ef528399", "2394cc8b"]
 points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades"]
 checks = ["rust-gate", "cluster-auth"]
-reason = "The retained Rust and replicated-contract gates create an isolated three-voter ContractCluster for every migrated test and pass that cluster explicitly to the remote Store opener. The harness selects each cluster's complete six-port set while all probe listeners coexist, preventing duplicate numbers within the set, then reports child bind collisions concurrently and reallocates the entire set under a bounded retry. Reverting this merge follow-through restores calls to the removed process-global harness, omits the now-required cluster argument, or revives nondeterministic listener collisions."
+reason = "The retained Rust and replicated-contract gates create an isolated three-voter ContractCluster for every migrated test and pass that cluster explicitly to the remote Store opener. The harness selects each cluster's complete six-port set while all probe listeners coexist, preventing duplicate numbers within the set, concurrently observes stdout readiness and detached TLS listener stderr, classifies both Linux and macOS EADDRINUSE panic shapes, gives API-only bind failures a post-ready scheduling window, and reallocates the entire set under a bounded retry. Reverting this merge follow-through restores calls to the removed process-global harness, omits the now-required cluster argument, or revives nondeterministic listener collisions."
