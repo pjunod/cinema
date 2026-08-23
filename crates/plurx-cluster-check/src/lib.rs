@@ -1647,6 +1647,10 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         .await
         .context("compacted-growth voter health timed out")?;
     let metrics_client = client.clone();
+    let snapshot_metrics = metrics_client
+        .local_db_snapshot_metrics()
+        .context("obtain local snapshot instrumentation")?;
+    let snapshot_metrics_before = snapshot_metrics.snapshot();
     let telemetry_path = launch.root.join("node-1").join("telemetry-growth.db");
     let store = Arc::new(
         HiqliteAuthStore::bootstrap(client, "compacted-growth-check", &telemetry_path)
@@ -1786,6 +1790,39 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         "raw settle",
     )
     .await?;
+    let snapshot_metrics_after = snapshot_metrics.snapshot();
+    let build_ok_delta = snapshot_metrics_after
+        .build_ok
+        .count
+        .saturating_sub(snapshot_metrics_before.build_ok.count);
+    if build_ok_delta < 6 {
+        bail!(
+            "six observed real compactions produced only {build_ok_delta} successful snapshot build metrics"
+        );
+    }
+    for (name, before, after) in [
+        (
+            "build error",
+            snapshot_metrics_before.build_error.count,
+            snapshot_metrics_after.build_error.count,
+        ),
+        (
+            "install success",
+            snapshot_metrics_before.install_ok.count,
+            snapshot_metrics_after.install_ok.count,
+        ),
+        (
+            "install error",
+            snapshot_metrics_before.install_error.count,
+            snapshot_metrics_after.install_error.count,
+        ),
+    ] {
+        if after != before {
+            bail!(
+                "compacted-growth build-only flow unexpectedly changed {name} snapshot metrics from {before} to {after}"
+            );
+        }
+    }
     let raw_after_bytes = stable_directory_bytes(&data_dir).await?;
     let raw_report = CompactedGrowthReport {
         incoming_beats: GROWTH_INCOMING_BEATS,
@@ -1813,7 +1850,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
          bytes_per_beat={:.6} budget_bytes_per_beat={} \
          raw_control_physical_commits={} raw_control_applied_index_delta={} \
          raw_control_growth_bytes={} raw_control_bytes_per_beat={:.6} \
-         raw_control_rejected={}",
+         snapshot_build_ok_delta={} raw_control_rejected={}",
         report.incoming_beats,
         report.active_streams,
         GROWTH_BEAT_INTERVAL_SECS,
@@ -1830,6 +1867,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         raw_report.applied_index_delta,
         raw_report.compacted_growth_bytes,
         raw_report.compacted_growth_bytes as f64 / raw_report.incoming_beats as f64,
+        build_ok_delta,
         raw_rejection,
     );
     Ok(())

@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["2c5988cf"]
+ignore = true
+reason = "This documentation-only commit adds a proposed cluster page latency plan; it changes no runtime or validation behavior. The implementation PRs named by the plan carry their own functionality points and executable regression evidence."
