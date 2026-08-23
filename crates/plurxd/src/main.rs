@@ -2398,13 +2398,16 @@ mod startup_tests {
     /// Everything a request needs, assembled the way `run` assembles it.
     fn booted_state(dir: &std::path::Path) -> AppState {
         let config = config_in(dir);
+        let store = store_in(dir);
+        let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
         build_state(
             &config,
             "test-node".to_owned(),
             Arc::new(plurx_core::secrets::CredentialKey::generate()),
             plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            store_in(dir),
+            catalogue,
+            store,
             create_dirs(dir).expect("dirs"),
             Default::default(),
             Default::default(),
@@ -2677,12 +2680,14 @@ mod startup_tests {
         let handle = plurx_core::cluster::open_store(&config)
             .await
             .expect("store");
+        let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
         let booted = tokio::spawn(boot(
             config.clone(),
             Boot {
                 store: handle.store,
+                catalogue,
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
                 identity: handle.identity,

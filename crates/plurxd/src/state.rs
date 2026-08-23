@@ -297,6 +297,7 @@ impl StoreMetricsCache {
 pub struct AppState {
     pub store: Arc<dyn Store>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
+    #[allow(dead_code)] // the separately reviewed P3c route slice is its first consumer
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,

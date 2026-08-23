@@ -120,10 +120,23 @@ impl RowOwned {
         let term = parse("term", self.try_get("term")?)?;
         let leader_id = parse("leader_id", self.try_get("leader_id")?)?;
         let committed_index = parse("committed_index", self.try_get("committed_index")?)?;
-        let local_read_protocol_version = parse(
-            "local_read_protocol_version",
-            self.try_get("local_read_protocol_version")?,
-        )?;
+        // P3a leaders return the original three-column watermark. Preserve
+        // that quorum proof for Authority/readiness consumers during a serial
+        // rolling upgrade, while advertising protocol 0 so bounded local
+        // reads remain closed. A present but malformed version is still a
+        // corrupt response and must fail rather than being mistaken for old.
+        let local_read_protocol_version = if self
+            .columns
+            .iter()
+            .any(|column| column.name == "local_read_protocol_version")
+        {
+            parse(
+                "local_read_protocol_version",
+                self.try_get("local_read_protocol_version")?,
+            )?
+        } else {
+            0
+        };
         Ok(crate::DbQuorumWatermark {
             term,
             leader_id,

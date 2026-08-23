@@ -4112,6 +4112,7 @@ pub mod status {
                     .is_some_and(|current| {
                         current.current_term == self.current_term
                             && current.leader_id == self.leader_id
+                            && current.committed_index >= self.committed_index
                             && current.local_observation_epoch == self.local_observation_epoch
                             && current.applied_index >= self.applied_index
                     })
@@ -4196,6 +4197,51 @@ pub mod status {
         fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
             self.snapshot_metrics = metrics;
             self
+        }
+
+        /// Construct one current local/quorum proof for deterministic Store
+        /// boundary contracts. Production obtains both observations from the
+        /// live passive sampler; this helper is absent without the validation
+        /// feature.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn validation_bounded_ready() -> Self {
+            let metrics = Self::new(true);
+            assert!(metrics.publish_at(
+                &LocalDbRaftSnapshot {
+                    running: true,
+                    node_id: 1,
+                    current_term: 7,
+                    current_leader: Some(1),
+                    last_applied_term: Some(7),
+                    last_applied_index: Some(41),
+                },
+                0,
+            ));
+            assert!(metrics.publish_watermark_at(
+                DbQuorumWatermark {
+                    term: 7,
+                    leader_id: 1,
+                    committed_index: 41,
+                    local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+                },
+                0,
+                0,
+            ));
+            metrics
+        }
+
+        /// Revoke the current proof inside a validation-only local operation,
+        /// exercising production's post-query discard and Authority fallback.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        pub fn validation_revoke_bounded_proof(&self) {
+            let sequence = self.begin_write();
+            self.inner
+                .watermark_invalidated
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
         }
 
         /// Read one coherent snapshot without locks, Store access, or IO.

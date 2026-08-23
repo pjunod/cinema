@@ -660,6 +660,65 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn old_three_column_watermark_preserves_readiness_but_disables_local_reads() {
+        use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
+
+        let actual = RowOwned {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text("7".to_owned()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text("2".to_owned()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text("41".to_owned()),
+                },
+            ],
+        }
+        .into_db_quorum_watermark()
+        .expect("P3a watermark remains a valid quorum proof");
+
+        assert_eq!(actual.term, 7);
+        assert_eq!(actual.leader_id, 2);
+        assert_eq!(actual.committed_index, 41);
+        assert_eq!(actual.local_read_protocol_version, 0);
+    }
+
+    #[test]
+    fn malformed_present_local_read_protocol_is_rejected() {
+        use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
+
+        let error = RowOwned {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text("7".to_owned()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text("2".to_owned()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text("41".to_owned()),
+                },
+                ColumnOwned {
+                    name: "local_read_protocol_version".to_owned(),
+                    value: ValueOwned::Text("not-a-version".to_owned()),
+                },
+            ],
+        }
+        .into_db_quorum_watermark()
+        .expect_err("a malformed advertised protocol is not an old leader");
+
+        assert!(error.to_string().contains("invalid local_read_protocol_version"));
+    }
+
     #[tokio::test]
     async fn remote_shutdown_joins_streams_with_every_endpoint_unavailable() {
         let client = crate::Client::remote(
