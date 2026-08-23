@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["e287507f"]
+commits = ["f9141d1a"]
 points = ["cluster.auth", "core.media", "playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The retained same-handle segment regression requires an authenticated response snapshot to preserve the published bytes after its pathname is replaced. The production path now explicitly drains Tokio's accepted-but-still-in-flight file write before sealing and rewinding the anonymous memory file, preventing Linux sealing from producing an empty immutable response while preserving the fixed snapshot admission budget."

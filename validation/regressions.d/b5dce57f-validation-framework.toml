@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["2f1c6af9"]
+commits = ["b5dce57f"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
 reason = "The corrective-history audit requires the serving child admission correction to retain an exact functionality-point and runnable-check declaration. This ledger repair keeps that runtime fix attached to the separate-process cluster proof without claiming that the validation-only commit changed cluster behavior."

@@ -14,13 +14,14 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::Write as _;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -729,8 +730,12 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
         // as unstable so the parent can discard it instead of weakening the
         // lease-retirement assertion.
         let observed_leader = cluster.leader().await?;
-        let (observed_term, _) = raft_term_and_index(&mut cluster, observed_leader).await?;
-        if observed_term != stable_term || observed_leader != leader {
+        let (confirmed_leader, observed_term, _) =
+            raft_position(&mut cluster, observed_leader).await?;
+        if observed_term != stable_term
+            || observed_leader != leader
+            || confirmed_leader != Some(observed_leader)
+        {
             provider.shutdown().await;
             cluster.shutdown_all().await?;
             println!(

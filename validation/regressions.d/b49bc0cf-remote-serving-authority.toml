@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c0382b37"]
+commits = ["b49bc0cf"]
 points = ["cluster.auth"]
 checks = ["cluster-auth"]
 reason = "The retained distinct-process serving proof has no local Raft replica. Its remote monitor now renews only the pre-request-anchored quorum authority lease, never polls a voter management-metrics endpoint, exposes no fabricated local sample or apply-lag value, and remains ineligible for bounded replica reads. Focused regressions pin expiry at the original one-second deadline, retain a failed renewal only until that deadline, reject delayed or conflicting leader generations, and statically prevent the passive sampler from reintroducing metrics_db; the two-cycle live cut proof still requires readiness and media fencing, child retirement, majority-write convergence, and recovery."

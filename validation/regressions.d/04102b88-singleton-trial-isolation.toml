@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c79397a0"]
+commits = ["04102b88"]
 points = ["cluster.auth"]
 checks = ["cluster-auth"]
 reason = "The retained separate-process singleton proof keeps its no-term-change attribution boundary while treating a post-proof election as trial-level noise only after provider-call, exact-successor, stale-token, convergence, and cleanup assertions pass. Each of at most three attempts runs in a fresh controller process; an exact marker is the only retryable verdict, and a hard timeout kills and reaps the whole controller process group so voter grandchildren cannot leak or turn semantic, fencing, cleanup, or commit-budget failures into retries."

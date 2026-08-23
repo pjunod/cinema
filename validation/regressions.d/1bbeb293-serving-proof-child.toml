@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["04b3e1f2"]
+commits = ["1bbeb293"]
 points = ["cluster.auth"]
 checks = ["cluster-auth"]
 reason = "The retained separate-process serving partition proof must keep its stand-in media child's piped stdin owned for the whole admitted generation, observe that exact child as alive before isolation, kill and reap it independently when serving authority is lost, and allow parent death to close the pipe without leaking the child."
