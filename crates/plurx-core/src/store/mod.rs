@@ -15,6 +15,7 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+mod fragindex;
 mod sqlite;
 mod telemetry;
 
@@ -1876,6 +1877,39 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
 }
 
+/// Node-local fragment indexes.
+///
+/// Like [`PlaybackTelemetryStore`], these rows describe what one machine's
+/// ffmpeg produced from one machine's copy of a file, and must never be
+/// submitted to Raft: an index is a list of output byte counts, and
+/// [`crate::segplan::match_landing`] compares exactly those numbers to decide
+/// where a repositioned producer landed. One node's answer governing another
+/// node's bytes would put a viewer in the wrong part of the film with nothing
+/// to report it.
+#[async_trait]
+pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Store or replace one file's index.
+    async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: &crate::segplan::FragmentIndex,
+    ) -> Result<(), StoreError>;
+
+    /// The stored index, but only when it still describes this source.
+    ///
+    /// Invalidation is by mismatch rather than by deletion: a changed file or
+    /// a changed video pipeline simply stops matching, so nothing has to
+    /// notice the change and nothing can fail to.
+    async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError>;
+
+    /// Drop one file's index. `true` when a row was there.
+    async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -1893,6 +1927,7 @@ pub trait Store:
     + OfflinePackageStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
+    + FragmentIndexStore
     + CoordinationStore
     + FencedPublicationStore
     + MediaSessionStore
@@ -1918,6 +1953,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
+        + FragmentIndexStore
         + CoordinationStore
         + FencedPublicationStore
         + MediaSessionStore

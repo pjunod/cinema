@@ -11,6 +11,7 @@
 mod apikeys;
 mod cache;
 mod coordination;
+mod fragindex;
 mod library;
 mod media;
 mod offline;
@@ -734,6 +735,12 @@ const MIGRATIONS: &[&str] = &[
         ON media_sessions(state, lease_expires_at_ms, incarnation_id);
     CREATE INDEX media_sessions_retention
         ON media_sessions(state, updated_at_ms, incarnation_id);",
+    // v25: node-local fragment indexes. No foreign key to `files` on purpose:
+    // an index outlives a rescan that renumbers nothing, and its own identity
+    // columns already refuse to answer for a file that changed. The hiqlite
+    // backend carries this exact table in its per-voter sidecar rather than
+    // replicating one machine's ffmpeg output through Raft.
+    crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

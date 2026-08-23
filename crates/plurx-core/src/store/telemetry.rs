@@ -1,8 +1,12 @@
-//! Node-local playback telemetry storage shared by both durable backends.
+//! The node-local sidecar shared by both durable backends.
 //!
-//! Single-node SQLite carries this schema as migration v17. A hiqlite voter
-//! owns the same table in a separate SQLite sidecar because submitting an
-//! operational event through hiqlite's write API would replicate it via Raft.
+//! Playback telemetry, network priors, and fragment indexes all describe what
+//! happened on ONE machine, so single-node SQLite carries them as ordinary
+//! migrations while a hiqlite voter keeps them in a separate SQLite file:
+//! submitting any of them through hiqlite's write API would replicate a local
+//! observation via Raft and let one node's answer govern another node's bytes.
+//! The module is still named for telemetry because that was the first of the
+//! three; the discipline is what it shares, not the subject.
 
 #[cfg(any(test, feature = "hiqlite-store"))]
 use std::path::Path;
@@ -83,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 3;
+const SIDECAR_SCHEMA_VERSION: i64 = 4;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -423,6 +427,12 @@ impl NodeLocalTelemetry {
                 migration.push_str(NETWORK_PRIORS_SCHEMA);
                 migration.push('\n');
             }
+            // v4: fragment indexes. Node-local for the same reason as the
+            // rows above, and additive, so a v3 sidecar upgrades in place.
+            if !table_exists(&conn, "fragment_indexes")? {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -505,9 +515,34 @@ impl NodeLocalTelemetry {
         self.with_conn(|conn| {
             conn.execute("DELETE FROM playback_events", [])?;
             conn.execute("DELETE FROM network_priors", [])?;
+            conn.execute("DELETE FROM fragment_indexes", [])?;
             Ok(())
         })
         .await
+    }
+
+    pub(crate) async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: crate::segplan::FragmentIndex,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::put(conn, file_id, &index, now_ms))
+            .await
+    }
+
+    pub(crate) async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::get(conn, file_id, &identity))
+            .await
+    }
+
+    pub(crate) async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
+            .await
     }
 }
 
