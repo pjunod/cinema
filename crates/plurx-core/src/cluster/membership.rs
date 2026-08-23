@@ -1201,7 +1201,7 @@ impl MembershipManager {
         filename: &str,
         auth: &ArtworkPeerAuth,
     ) -> Result<bool, MembershipError> {
-        let inner = self.replicated_inner()?;
+        self.replicated_inner()?;
         let now = unix_ms()?;
         if now.abs_diff(auth.timestamp_ms) > ARTWORK_AUTH_WINDOW_MS as u64 {
             return Ok(false);
