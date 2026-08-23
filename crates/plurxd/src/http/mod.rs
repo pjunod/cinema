@@ -2747,7 +2747,10 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, media) = call(&app, get("/api/v1/cluster/media", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(media["protocol_version"], 1);
+        assert_eq!(
+            media["protocol_version"],
+            crate::media_pool::PROTOCOL_VERSION
+        );
         assert_eq!(media["remote_placement_enabled"], false);
         assert_eq!(media["remote_placement_rollout_ready"], false);
         assert_eq!(media["remote_placement_ready"], false);
