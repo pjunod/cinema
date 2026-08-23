@@ -1576,7 +1576,7 @@ mod tests {
     #[tokio::test]
     async fn blackholed_first_eight_peers_do_not_starve_the_ninth() {
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-        let fanout = stream::iter((0..9).map(|index| {
+        let fanout = stream::iter((0..9).map(move |index| {
             let started_tx = started_tx.clone();
             async move {
                 if index < 8 {
