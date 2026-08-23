@@ -3756,7 +3756,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let baseline_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        warm_snapshot,
+        Some(warm_snapshot),
         "baseline settle",
     )
     .await?;
@@ -3827,7 +3827,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let measured_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        baseline_snapshot,
+        Some(baseline_snapshot),
         "coalesced load",
     )
     .await?;
@@ -3837,7 +3837,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        measured_snapshot,
+        Some(measured_snapshot),
         "coalesced settle",
     )
     .await?;
@@ -3883,7 +3883,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        raw_measured_snapshot,
+        Some(raw_measured_snapshot),
         "raw settle",
     )
     .await?;
@@ -4012,35 +4012,62 @@ async fn applied_index(client: &Client) -> Result<u64> {
         .context("replicated store has no applied log index")
 }
 
-async fn snapshot_index(client: &Client) -> Result<u64> {
-    Ok(client
-        .metrics_db()
-        .await?
-        .snapshot
-        .map(|log| log.index)
-        .unwrap_or(0))
+async fn snapshot_index(client: &Client) -> Result<Option<u64>> {
+    Ok(client.metrics_db().await?.snapshot.map(|log| log.index))
 }
 
 async fn ensure_compaction_after(
     client: &Client,
     store: &HiqliteAuthStore,
-    previous_snapshot: u64,
+    previous_snapshot: Option<u64>,
     phase: &str,
 ) -> Result<u64> {
+    let metrics = client.metrics_db().await?;
+    if let Some(snapshot) = metrics
+        .snapshot
+        .filter(|log| previous_snapshot.is_none_or(|previous| log.index > previous))
+    {
+        return wait_for_purge(client, snapshot.index, phase).await;
+    }
+
+    // OpenRaft's LogsSinceLast policy triggers from the committed index, not
+    // from publication of the asynchronously built snapshot. Continuing to
+    // write until the snapshot metric appears creates a scheduler-dependent
+    // tail and contaminates the fixed-tail size comparison. Quorum-anchor the
+    // starting point, submit exactly enough writes to reach the trigger, then
+    // stop all writes while the snapshot builds and publishes.
+    let committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?
+        .committed_index;
+    let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
-    for ordinal in 0..=GROWTH_COMPACTION_LOGS + 512 {
-        if ordinal % 64 == 0 {
-            let metrics = client.metrics_db().await?;
-            if let Some(snapshot) = metrics.snapshot.filter(|log| log.index > previous_snapshot) {
-                return wait_for_purge(client, snapshot.index, phase).await;
-            }
-        }
+    for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
+    }
+    let final_committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} confirm exact compaction trigger"))?
+        .committed_index;
+    let expected_final = committed
+        .checked_add(writes)
+        .context("compaction trigger commit index overflowed")?;
+    if final_committed != expected_final {
+        bail!(
+            "{phase} compaction trigger was contaminated by concurrent writes: \
+             committed {committed} + {writes} planned writes reached {final_committed}, \
+             expected exact {expected_final}"
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let metrics = client.metrics_db().await?;
-        if let Some(snapshot) = metrics.snapshot.filter(|log| log.index > previous_snapshot) {
+        if let Some(snapshot) = metrics
+            .snapshot
+            .filter(|log| previous_snapshot.is_none_or(|previous| log.index > previous))
+        {
             return wait_for_purge(client, snapshot.index, phase).await;
         }
         if Instant::now() >= deadline {
@@ -4048,6 +4075,27 @@ async fn ensure_compaction_after(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn snapshot_trigger_plan(previous_snapshot: Option<u64>, committed: u64) -> Result<u64> {
+    if previous_snapshot.is_some_and(|snapshot| committed < snapshot) {
+        bail!("compaction commit {committed} precedes the observed snapshot {previous_snapshot:?}");
+    }
+    let snapshot_next = previous_snapshot
+        .map(|snapshot| {
+            snapshot
+                .checked_add(1)
+                .context("compaction snapshot next-index overflowed")
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let target_next = snapshot_next
+        .checked_add(GROWTH_COMPACTION_LOGS)
+        .context("compaction snapshot trigger next-index overflowed")?;
+    let committed_next = committed
+        .checked_add(1)
+        .context("compaction commit next-index overflowed")?;
+    Ok(target_next.saturating_sub(committed_next))
 }
 
 async fn wait_for_purge(client: &Client, snapshot: u64, phase: &str) -> Result<u64> {
@@ -8868,6 +8916,36 @@ mod tests {
         assert_eq!(helper.matches(".request(").count(), 1);
         assert!(helper.contains("Response::MembershipLeaderChange"));
         assert!(helper.contains("was ambiguous and was not retried"));
+    }
+
+    #[test]
+    fn compaction_plan_stops_writing_at_the_exact_openraft_trigger() {
+        assert_eq!(
+            snapshot_trigger_plan(None, 9_998).expect("plan before initial trigger"),
+            1
+        );
+        assert_eq!(
+            snapshot_trigger_plan(None, 9_999).expect("plan initial trigger"),
+            0
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(0), 9_999).expect("plan before index-zero trigger"),
+            1
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(0), 10_000).expect("plan index-zero trigger"),
+            0
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(1_000), 1_512).expect("plan partial tail"),
+            9_488
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(1_000), 11_609).expect("plan in-flight snapshot"),
+            0
+        );
+        assert!(snapshot_trigger_plan(Some(1_000), 999).is_err());
+        assert!(snapshot_trigger_plan(Some(u64::MAX), u64::MAX).is_err());
     }
 
     #[test]
