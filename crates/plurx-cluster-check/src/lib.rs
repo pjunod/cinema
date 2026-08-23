@@ -3798,7 +3798,11 @@ async fn settle_post_snapshot_tail(
     phase: &str,
 ) -> Result<()> {
     let target = snapshot.saturating_add(GROWTH_SETTLED_LOG_TAIL);
-    let mut applied = applied_index(client).await?;
+    // A write acknowledgement and OpenRaft's metrics-watch publication are
+    // distinct completion paths. Anchor both ends with a quorum-confirmed
+    // commit watermark so a temporarily stale `last_applied` sample cannot
+    // make the harness submit one extra settling write.
+    let applied = wait_for_quorum_applied(client, phase).await?;
     if applied > target {
         bail!(
             "{phase} snapshot was observed with a {}-entry tail, beyond the fixed {}-entry settling boundary",
@@ -3807,16 +3811,35 @@ async fn settle_post_snapshot_tail(
         );
     }
     let marker = "cluster.growth.post_snapshot_tail";
-    while applied < target {
+    for ordinal in applied..target {
         store
-            .put_setting(marker, &applied.saturating_sub(snapshot).to_string())
+            .put_setting(marker, &ordinal.saturating_sub(snapshot).to_string())
             .await?;
-        applied = applied_index(client).await?;
     }
+    let applied = wait_for_quorum_applied(client, phase).await?;
     if applied != target {
         bail!("{phase} post-snapshot tail settled at {applied}, expected exact index {target}");
     }
     Ok(())
+}
+
+async fn wait_for_quorum_applied(client: &Client, phase: &str) -> Result<u64> {
+    let committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} obtain settling commit watermark"))?
+        .committed_index;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let applied = applied_index(client).await?;
+        if applied >= committed {
+            return Ok(applied);
+        }
+        if Instant::now() >= deadline {
+            bail!("{phase} applied index did not reach quorum-confirmed commit {committed}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn stable_directory_bytes(root: &Path) -> Result<u64> {
