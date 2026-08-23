@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1c8a486f"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history-regressions audit requires one unique mapping for every classified corrective commit. This row records the metadata-only bounded-permit mapping commit without claiming additional runtime behavior."
