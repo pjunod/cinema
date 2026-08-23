@@ -1832,10 +1832,16 @@ abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
 
-The cache bytes remain node-local. Until P5 placement lands, a completed title
-accelerates playback only when the request reaches the node holding that
-location. Do not point multiple daemons at one cache directory to simulate a
-shared cache; verified shared roots and distributed reader pins are P6.
+The cache bytes remain node-local. With P5 remote placement enabled, any
+ingress may select a voter that advertises the exact verified generation and
+proxy that worker's session, so a completed title is no longer useful only
+when the client happened to reach its holder. Enablement is still explicit:
+`PUT /api/v1/settings` with
+`{"cluster_media_pool_enabled": true}` succeeds only when every committed
+voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
+separates enabled, rollout-ready, and effective-ready state. Do not point
+multiple daemons at one cache directory to simulate a shared cache; verified
+shared roots and distributed reader pins are P6.
 
 Operational evidence is available in Settings → Activity and Logs:
 

@@ -2337,17 +2337,17 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
 
     let isolated = loop {
         let observation = bounded_read(&mut cluster, follower, item_id).await?;
-        // The bounded-read permit and the readiness monitor consume the same
-        // expired proof on independent tasks. Do not accept the first local
-        // SQL refusal while readiness still exposes the node to a load
-        // balancer; wait for the complete externally visible fail-closed
-        // state inside the same lease deadline.
+        // Proof expiry and the production serving-fence poll are deliberately
+        // independent. The bounded reader can reject local SQL a few
+        // milliseconds before the common fence publishes not-ready; observe
+        // both states within the same 1.2 s contract instead of sampling the
+        // transient gap as a failure.
         if observation.non_consistent_query_calls == 0 && !observation.serving_ready {
             break observation;
         }
         if partition_started.elapsed() >= Duration::from_millis(1_200) {
             bail!(
-                "partitioned follower did not stop local SQL and fail readiness after the watermark lease: {observation:?}"
+                "partitioned follower did not fully fail closed after the watermark lease: {observation:?}"
             );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
