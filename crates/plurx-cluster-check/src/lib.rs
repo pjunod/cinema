@@ -902,6 +902,27 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     request: RedeemJoinRequest {
                         token_digest: join_token_digest(&first_issued.token),
                         raft_id: first_issued.raft_id,
+                        node_id: "node-1".to_owned(),
+                        hostname: "identity-collision".to_owned(),
+                        raft_address: first_spec.raft.clone(),
+                        api_address: first_spec.api.clone(),
+                        http_base: String::new(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_node_identity_in_use",
+    )?;
+    require_membership_error(
+        cluster
+            .request(
+                1,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&first_issued.token),
+                        raft_id: first_issued.raft_id,
                         node_id: "node-2".to_owned(),
                         hostname: "cluster-node-2".to_owned(),
                         raft_address: first_spec.raft,
@@ -1902,6 +1923,39 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         )
         .await?
         .require_ok()?;
+
+    // A removed identity remains permanently reserved. The same serialized
+    // first-redemption predicate covers active, pending-removal, and
+    // tombstoned rows, so an otherwise valid token cannot reanimate it.
+    let tombstone_collision = match cluster
+        .request(observer, Request::IssueJoinToken { ttl_ms: 120_000 })
+        .await?
+    {
+        Response::IssuedJoinToken { token } => token,
+        response => bail!("unexpected tombstone-collision token response: {response:?}"),
+    };
+    let removed_spec = specs[(target - 1) as usize].clone();
+    require_membership_error(
+        cluster
+            .request(
+                observer,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&tombstone_collision.token),
+                        raft_id: tombstone_collision.raft_id,
+                        node_id: target_node.clone(),
+                        hostname: "tombstone-collision".to_owned(),
+                        raft_address: removed_spec.raft,
+                        api_address: removed_spec.api,
+                        http_base: "http://127.0.0.1:33999".to_owned(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_node_identity_in_use",
+    )?;
     match cluster
         .request(
             observer,

@@ -199,6 +199,8 @@ pub enum MembershipError {
     InvalidHttpEndpoint,
     #[error("cluster HTTP endpoint is already owned by another active node")]
     HttpEndpointInUse,
+    #[error("cluster node identity is already present in membership history")]
+    NodeIdentityInUse,
     #[error("finish upgrading every active cluster node before changing membership")]
     MembershipUpgradeRequired,
     #[error(
@@ -239,6 +241,7 @@ impl MembershipError {
             Self::Incompatible => "join_incompatible",
             Self::InvalidHttpEndpoint => "cluster_http_endpoint_invalid",
             Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
+            Self::NodeIdentityInUse => "cluster_node_identity_in_use",
             Self::MembershipUpgradeRequired => "membership_upgrade_required",
             Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
@@ -1036,11 +1039,7 @@ impl MembershipManager {
                    SELECT 1 FROM cluster_join_tokens token \
                    WHERE token.token_hash = $3 AND token.raft_id = $4 \
                      AND token.state = 'issued' AND token.expires_at > $5) \
-                 AND NOT EXISTS (\
-                   SELECT 1 FROM cluster_nodes claimed_node \
-                   WHERE claimed_node.node_id = $1 AND claimed_node.removed_at IS NULL \
-                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing_claim \
-                       WHERE removing_claim.node_id = claimed_node.node_id)) \
+                 AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  AND NOT EXISTS (\
                    SELECT 1 FROM cluster_node_http owner_http \
                    JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
@@ -1062,6 +1061,7 @@ impl MembershipManager {
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                  WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  RETURNING node_id"
                     .to_owned(),
                 vec![
@@ -1075,6 +1075,7 @@ impl MembershipManager {
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                  WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  RETURNING node_id"
                     .to_owned(),
                 params!(request.node_id.as_str(), request.token_digest.as_str(), now),
@@ -1104,11 +1105,7 @@ impl MembershipManager {
             (
                 "INSERT INTO cluster_nodes \
                  (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
-                 VALUES ($1, $2, $3, $4, $5, NULL) \
-                 ON CONFLICT(node_id) DO UPDATE SET \
-                   raft_id = excluded.raft_id, raft_address = excluded.raft_address, \
-                   api_address = excluded.api_address, last_seen_at = excluded.last_seen_at, \
-                   removed_at = NULL"
+                 VALUES ($1, $2, $3, $4, $5, NULL)"
                     .to_owned(),
                 vec![
                     Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
@@ -1150,6 +1147,8 @@ impl MembershipManager {
                     Err(MembershipError::ReusedToken)
                 } else if latest.state == "redeeming" {
                     Err(MembershipError::ReservedToken)
+                } else if self.node_identity_exists(&request.node_id).await? {
+                    Err(MembershipError::NodeIdentityInUse)
                 } else if http_base.is_some() {
                     Err(MembershipError::HttpEndpointInUse)
                 } else {
@@ -1224,6 +1223,18 @@ impl MembershipManager {
             )
             .await?;
         rows.into_iter().next().ok_or(MembershipError::InvalidToken)
+    }
+
+    async fn node_identity_exists(&self, node_id: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id = $1",
+                params!(node_id),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
     pub async fn heartbeat(&self) -> Result<(), MembershipError> {
