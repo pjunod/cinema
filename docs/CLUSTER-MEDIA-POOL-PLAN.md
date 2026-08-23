@@ -622,10 +622,12 @@ CREATE TABLE media_playback_pointers (
 An identical request retry waits only to the bounded claim deadline and then
 returns the persisted, versioned normalized response or safely recovers the
 same incarnation. A fingerprint conflict retains the current conflict error.
-A missing request id remains a fresh, non-idempotent attempt, matching today's
-POST and deprecated GET bridge; it skips `media_session_requests` but still
-uses user-scoped playback supersession. Requiring request ids waits for a
-versioned public API and migrated clients.
+A missing public request id remains a fresh, non-idempotent attempt, matching
+today's POST and deprecated GET bridge. The server still claims its random
+incarnation as an internal request id before worker allocation, so ordinary
+creates cannot bypass per-user admission; only caller-visible replay semantics
+remain absent. Requiring public request ids waits for a versioned API and
+migrated clients.
 A request is normalized and length-checked before any consensus write. Limit
 each user to 32 in-flight claims and 64 current/starting incarnations, with an
 explicit stable overload error. Prune abandoned `starting` rows after their
@@ -669,6 +671,12 @@ CREATE TABLE media_sessions (
 
 CREATE INDEX media_sessions_owner
     ON media_sessions(owner_node_id, state, lease_expires_at_ms);
+CREATE INDEX media_sessions_user
+    ON media_sessions(user_id, state, lease_expires_at_ms);
+CREATE INDEX media_sessions_expiry
+    ON media_sessions(state, lease_expires_at_ms, incarnation_id);
+CREATE INDEX media_sessions_retention
+    ON media_sessions(state, updated_at_ms, incarnation_id);
 ```
 
 The server never reuses an incarnation id. After the request-retry window and
@@ -702,6 +710,13 @@ owner-row repair before retry. The ingress streams the signed peer response,
 preserving status · content type · content length · range semantics · ETag ·
 cache control. Do not buffer a segment in memory and do not expose an internal
 address to the client.
+
+Ending or superseding a route prevents every new positive-cache fill
+immediately. Another ingress that already validated the random bearer
+capability may finish authorizing from that entry only until its one-second
+monotonic TTL expires; owner fencing and best-effort exact worker abort run in
+parallel. This bounded media-capability revocation window is explicit and does
+not apply to household token/API-key authorization, which remains immediate.
 
 These are typed proxies, not a general header tunnel. Requests allow only the
 route's Range and conditional headers; responses allow only the documented

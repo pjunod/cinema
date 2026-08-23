@@ -73,6 +73,14 @@ pub(super) const MEDIA_SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS media
 pub(super) const MEDIA_SESSIONS_OWNER_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS media_sessions_owner
         ON media_sessions(owner_node_id, state, lease_expires_at_ms)";
+pub(super) const MEDIA_SESSIONS_USER_INDEX: &str = "CREATE INDEX IF NOT EXISTS media_sessions_user
+        ON media_sessions(user_id, state, lease_expires_at_ms)";
+pub(super) const MEDIA_SESSIONS_EXPIRY_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS media_sessions_expiry
+        ON media_sessions(state, lease_expires_at_ms, incarnation_id)";
+pub(super) const MEDIA_SESSIONS_RETENTION_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS media_sessions_retention
+        ON media_sessions(state, updated_at_ms, incarnation_id)";
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     for sql in [
@@ -81,6 +89,9 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_PLAYBACK_POINTERS_SCHEMA,
         MEDIA_SESSIONS_SCHEMA,
         MEDIA_SESSIONS_OWNER_INDEX,
+        MEDIA_SESSIONS_USER_INDEX,
+        MEDIA_SESSIONS_EXPIRY_INDEX,
+        MEDIA_SESSIONS_RETENTION_INDEX,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -126,6 +137,14 @@ struct PointerRow(String);
 impl From<&mut Row<'_>> for PointerRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("current_incarnation_id"))
+    }
+}
+
+struct PendingMaintenanceRow(i64);
+
+impl From<&mut Row<'_>> for PendingMaintenanceRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("pending"))
     }
 }
 
@@ -201,6 +220,10 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.user_id > 0
         && !activation.playback_id.is_empty()
         && activation.playback_id.len() <= 128
+        && activation
+            .expected_predecessor_incarnation_id
+            .as_ref()
+            .is_none_or(|value| valid_uuid(value))
         && activation
             .request_id
             .as_ref()
@@ -448,7 +471,8 @@ impl MediaSessionStore for HiqliteAuthStore {
             .execute(
                 "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
                   WHERE user_id = $3 AND request_id = $4 AND incarnation_id = $5
-                    AND state = 'starting' AND (owner_node_id IS NULL OR owner_node_id = $1)",
+                    AND state = 'starting' AND claim_expires_at_ms > $2
+                    AND (owner_node_id IS NULL OR owner_node_id = $1)",
                 params!(owner_node_id, now_ms, user_id, request_id, incarnation_id),
             )
             .await?
@@ -471,6 +495,13 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0);
+        if activation
+            .expected_predecessor_incarnation_id
+            .as_deref()
+            .is_some_and(|expected| current_pointer.as_deref() != Some(expected))
+        {
+            return Ok(None);
+        }
         let predecessor = match current_pointer
             .as_deref()
             .filter(|incarnation| *incarnation != activation.incarnation_id)
@@ -479,7 +510,11 @@ impl MediaSessionStore for HiqliteAuthStore {
             None => None,
         };
         let request_id = activation.request_id.as_deref().unwrap_or("");
-        let predecessor_incarnation = current_pointer.as_deref().unwrap_or("");
+        let predecessor_incarnation = activation
+            .expected_predecessor_incarnation_id
+            .as_deref()
+            .or(current_pointer.as_deref())
+            .unwrap_or("");
         let lease_resource = format!("session:{}", activation.incarnation_id);
         let removed_owner_key = removed_job_owner_key(&activation.owner_node_id);
         let statements = vec![
@@ -522,8 +557,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND ($12 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $12 AND incarnation_id = $1
-                         AND request_fingerprint = $5 AND state IN ('starting', 'resolved')
-                         AND owner_node_id = $6))
+                         AND request_fingerprint = $5 AND owner_node_id = $6
+                         AND ((state = 'starting' AND claim_expires_at_ms > $10)
+                           OR (state = 'resolved' AND response_json = $9))))
                     AND EXISTS (SELECT 1 FROM job_leases
                       WHERE resource = $13 AND owner_node_id = $6 AND fence = 1
                         AND expires_at_ms = $7 AND expires_at_ms > $10)
@@ -917,6 +953,51 @@ impl MediaSessionStore for HiqliteAuthStore {
     async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError> {
         let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
         let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
+        // A Hiqlite transaction is a replicated Raft proposal even when all
+        // statements affect zero rows. Keep idle clusters out of the write
+        // log by proving that at least one bounded cleanup has work first.
+        let pending = self
+            .client()
+            .query_consistent_map::<PendingMaintenanceRow, _>(
+                "SELECT 1 AS pending WHERE
+                    EXISTS (SELECT 1 FROM media_sessions
+                      WHERE state = 'active' AND lease_expires_at_ms <= $1)
+                    OR EXISTS (SELECT 1 FROM job_leases lease
+                      JOIN media_sessions session
+                        ON lease.resource = 'session:' || session.incarnation_id
+                      WHERE session.state = 'ended' AND session.lease_expires_at_ms <= $1
+                        AND lease.expires_at_ms > $1
+                        AND lease.revision < 9223372036854775807)
+                    OR EXISTS (SELECT 1 FROM media_playback_pointers pointer
+                      LEFT JOIN media_sessions session
+                        ON session.incarnation_id = pointer.current_incarnation_id
+                      WHERE session.incarnation_id IS NULL OR session.state != 'active'
+                        OR session.lease_expires_at_ms <= $1)
+                    OR EXISTS (SELECT 1 FROM media_session_requests
+                      WHERE state = 'starting' AND claim_expires_at_ms <= $1)
+                    OR EXISTS (SELECT 1 FROM media_session_requests
+                      WHERE state = 'failed' AND updated_at_ms < $2)
+                    OR EXISTS (SELECT 1 FROM media_session_requests request
+                      WHERE request.state = 'resolved' AND request.updated_at_ms < $3
+                        AND NOT EXISTS (SELECT 1 FROM media_sessions session
+                          WHERE session.incarnation_id = request.incarnation_id
+                            AND session.state = 'active'
+                            AND session.lease_expires_at_ms > $1))
+                    OR EXISTS (SELECT 1 FROM media_sessions
+                      WHERE state = 'ended' AND updated_at_ms < $3)
+                    OR EXISTS (SELECT 1 FROM job_leases lease
+                      WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $3
+                        AND NOT EXISTS (SELECT 1 FROM media_sessions session
+                          WHERE lease.resource = 'session:' || session.incarnation_id))",
+                params!(now_ms, failed_cutoff, retained_cutoff),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .is_some_and(|row| row.0 == 1);
+        if !pending {
+            return Ok(());
+        }
         let statements = vec![
             (
                 "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = $1,
@@ -933,10 +1014,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                           WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                         revision = revision + 1, updated_at_ms = $1
                   WHERE revision < 9223372036854775807
+                    AND expires_at_ms > $1
                     AND resource IN (
-                      SELECT 'session:' || incarnation_id FROM media_sessions
-                       WHERE state = 'ended' AND lease_expires_at_ms <= $1
-                       ORDER BY updated_at_ms, incarnation_id LIMIT $2)",
+                      SELECT 'session:' || session.incarnation_id
+                        FROM media_sessions session
+                        JOIN job_leases lease
+                          ON lease.resource = 'session:' || session.incarnation_id
+                       WHERE session.state = 'ended'
+                         AND session.lease_expires_at_ms <= $1
+                         AND lease.expires_at_ms > $1
+                       ORDER BY session.updated_at_ms, session.incarnation_id LIMIT $2)",
                 params!(now_ms, MAINTENANCE_BATCH),
             ),
             (

@@ -2893,7 +2893,7 @@ impl RequestClaim<'_> {
             // to leave unsaid.
             debug_assert!(false, "completed claim lost its own reservation");
             tracing::warn!(
-                session = session_id,
+                session = %session_log_id(session_id),
                 "request claim vanished before completion; a replay may duplicate this session"
             );
         }
@@ -9310,6 +9310,19 @@ impl TranscodeManager {
         self.sessions.lock().await.keys().cloned().collect()
     }
 
+    /// Make a set of sessions immediately unservable without waiting for
+    /// process teardown or recursive scratch cleanup. The detached cleanup
+    /// path later takes `child_transition`, removes the registry entries, and
+    /// reaps their resources; every serving path observes this monotonic bit.
+    pub async fn fence_sessions(&self, session_ids: &[String]) {
+        let sessions = self.sessions.lock().await;
+        for session_id in session_ids {
+            if let Some(session) = sessions.get(session_id) {
+                session.retired.store(true, Release);
+            }
+        }
+    }
+
     /// Abort a remote start only when the worker's process-local idempotency
     /// record proves that this exact internal incarnation created the session.
     pub async fn stop_session_for_request(
@@ -9328,6 +9341,9 @@ impl TranscodeManager {
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
+        if session.retired.load(Acquire) {
+            return None;
+        }
         *session.last_request.lock().await = LastRequest::now(kind);
         Some(session)
     }

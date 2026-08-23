@@ -190,6 +190,10 @@ const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 const MAX_INTERNAL_READ_PREVERIFY_PER_SECOND: u16 = 1_024;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
+// Five seconds at the admitted 1,024 reads/second, plus one second of margin.
+// Read proofs need their own short-lived cache: sharing the 30-second mutation
+// cache would either reject valid segment bursts or evict live mutation proofs.
+const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
 const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
 const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
@@ -734,6 +738,7 @@ struct ReplicatedMembership {
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
+    internal_read_replays: Mutex<BTreeMap<String, InternalReadReplayWindow>>,
     internal_read_preverify: Mutex<InternalReadAdmission>,
     internal_read_authority: tokio::sync::Mutex<BTreeMap<String, InternalReadAuthority>>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
@@ -775,6 +780,29 @@ impl InternalAuthReplayWindow {
         }
         if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
             || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
+        {
+            return false;
+        }
+        self.accepted.push_back((nonce.to_owned(), now));
+        true
+    }
+}
+
+#[derive(Default)]
+struct InternalReadReplayWindow {
+    accepted: VecDeque<(String, Instant)>,
+}
+
+impl InternalReadReplayWindow {
+    fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        while self.accepted.front().is_some_and(|(_, accepted_at)| {
+            now.saturating_duration_since(*accepted_at)
+                > Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64)
+        }) {
+            self.accepted.pop_front();
+        }
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
+            || self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER
         {
             return false;
         }
@@ -910,6 +938,7 @@ impl MembershipManager {
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_replays: Mutex::new(BTreeMap::new()),
+                internal_read_replays: Mutex::new(BTreeMap::new()),
                 internal_read_preverify: Mutex::new(InternalReadAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -1632,6 +1661,13 @@ impl MembershipManager {
             })?
             .retain(|node_id, _| keys.contains_key(node_id));
         inner
+            .internal_read_replays
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("internal read replay lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        inner
             .internal_read_authority
             .lock()
             .await
@@ -2197,10 +2233,10 @@ impl MembershipManager {
             .await
     }
 
-    /// Authenticate an idempotent read-only relay. Replaying one of these
-    /// signed requests can only repeat a capability-scoped media read, so the
-    /// mutation replay cache is deliberately reserved for start/abort/delete.
-    /// Signature verification remains mandatory and globally rate-bounded;
+    /// Authenticate an idempotent read-only relay. Signature verification is
+    /// mandatory, globally rate-bounded, and each signed nonce is single-use
+    /// for the complete five-second read window. A separate, right-sized
+    /// replay cache keeps segment bursts from consuming mutation admission;
     /// the live-voter proof is cached for one second per sender behind a
     /// single-flight mutex so segment bursts do not become Raft read bursts.
     pub async fn authorize_internal_peer_read_request(
@@ -2253,6 +2289,9 @@ impl MembershipManager {
             .activity_signature_is_valid(&auth.node_id, &message, &signature)
             .await?
         {
+            return Ok(false);
+        }
+        if !self.admit_internal_read_replay(&auth.node_id, &auth.nonce)? {
             return Ok(false);
         }
         let observed = Instant::now();
@@ -2385,6 +2424,13 @@ impl MembershipManager {
                     MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
                 })?
                 .remove(&evicted);
+            inner
+                .internal_read_replays
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("internal read replay lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
             inner.internal_read_authority.lock().await.remove(&evicted);
         }
         Ok(true)
@@ -2439,6 +2485,22 @@ impl MembershipManager {
         let now = Instant::now();
         let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
             MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+        })?;
+        Ok(replays
+            .entry(node_id.to_owned())
+            .or_default()
+            .admit(nonce, now))
+    }
+
+    fn admit_internal_read_replay(
+        &self,
+        node_id: &str,
+        nonce: &str,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut replays = inner.internal_read_replays.lock().map_err(|_| {
+            MembershipError::Internal("internal read replay lock was poisoned".to_owned())
         })?;
         Ok(replays
             .entry(node_id.to_owned())
@@ -3083,6 +3145,9 @@ impl MembershipManager {
             admission.remove(node_id);
         }
         if let Ok(mut replays) = inner.internal_auth_replays.lock() {
+            replays.remove(node_id);
+        }
+        if let Ok(mut replays) = inner.internal_read_replays.lock() {
             replays.remove(node_id);
         }
         inner.internal_read_authority.lock().await.remove(node_id);
@@ -4257,6 +4322,30 @@ mod tests {
         let started = Instant::now();
         let mut replays = InternalAuthReplayWindow::default();
         for index in 0..MAX_INTERNAL_REPLAYS_PER_PEER {
+            assert!(replays.admit(&format!("nonce-{index}"), started));
+        }
+        assert!(!replays.admit("overflow", started));
+        assert!(!replays.admit("nonce-0", started));
+    }
+
+    #[test]
+    fn internal_read_replay_is_rejected_for_the_entire_read_window() {
+        let started = Instant::now();
+        let mut replays = InternalReadReplayWindow::default();
+
+        assert!(replays.admit("nonce-a", started));
+        assert!(!replays.admit("nonce-a", started + Duration::from_millis(4_999)));
+        assert!(replays.admit(
+            "nonce-a",
+            started + Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64 + 1)
+        ));
+    }
+
+    #[test]
+    fn internal_read_replay_cache_rejects_instead_of_evicting_live_proofs() {
+        let started = Instant::now();
+        let mut replays = InternalReadReplayWindow::default();
+        for index in 0..MAX_INTERNAL_READ_REPLAYS_PER_PEER {
             assert!(replays.admit(&format!("nonce-{index}"), started));
         }
         assert!(!replays.admit("overflow", started));

@@ -200,6 +200,7 @@ mod tests {
             .create_user("session-owner", "hash", false)
             .await
             .expect("create session owner");
+        let now_ms = crate::media_sessions::unix_ms();
         state
             .store
             .activate_media_session(&MediaSessionActivation {
@@ -207,13 +208,14 @@ mod tests {
                 session_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
                 user_id: user.id,
                 playback_id: "player-a".to_owned(),
+                expected_predecessor_incarnation_id: None,
                 request_id: None,
                 request_fingerprint: "a".repeat(64),
                 owner_node_id: "test-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
-                now_ms: 100,
-                lease_expires_at_ms: 12_100,
+                now_ms,
+                lease_expires_at_ms: now_ms.saturating_add(12_000),
             })
             .await
             .expect("activate media route")

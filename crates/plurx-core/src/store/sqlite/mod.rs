@@ -726,7 +726,13 @@ const MIGRATIONS: &[&str] = &[
         updated_at_ms                 INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX media_sessions_owner
-        ON media_sessions(owner_node_id, state, lease_expires_at_ms);",
+        ON media_sessions(owner_node_id, state, lease_expires_at_ms);
+    CREATE INDEX media_sessions_user
+        ON media_sessions(user_id, state, lease_expires_at_ms);
+    CREATE INDEX media_sessions_expiry
+        ON media_sessions(state, lease_expires_at_ms, incarnation_id);
+    CREATE INDEX media_sessions_retention
+        ON media_sessions(state, updated_at_ms, incarnation_id);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2303,6 +2309,18 @@ mod tests {
                 "{table} schema"
             );
         }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
+                   AND name IN ('media_session_requests_expiry', 'media_sessions_owner',
+                                'media_sessions_user', 'media_sessions_expiry',
+                                'media_sessions_retention')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect media-session indexes"),
+            5
+        );
     }
 
     /// v13 adds a column to `items`, which is the migration shape with a

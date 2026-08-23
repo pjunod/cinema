@@ -747,6 +747,10 @@ pub struct MediaSessionActivation {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
+    /// When a stall reopen names a durable predecessor, activation is a CAS:
+    /// the playback pointer must still name this exact incarnation. Ordinary
+    /// starts leave this unset and replace whichever route is current.
+    pub expected_predecessor_incarnation_id: Option<String>,
     pub request_id: Option<String>,
     pub request_fingerprint: String,
     pub owner_node_id: String,

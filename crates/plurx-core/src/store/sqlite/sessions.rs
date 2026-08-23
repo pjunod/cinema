@@ -85,6 +85,10 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && !activation.playback_id.is_empty()
         && activation.playback_id.len() <= 128
         && activation
+            .expected_predecessor_incarnation_id
+            .as_ref()
+            .is_none_or(|value| valid_uuid(value))
+        && activation
             .request_id
             .as_ref()
             .is_none_or(|value| !value.is_empty() && value.len() <= 128)
@@ -282,7 +286,8 @@ impl MediaSessionStore for SqliteStore {
             Ok(conn.execute(
                 "UPDATE media_session_requests SET owner_node_id = ?1, updated_at_ms = ?2
                   WHERE user_id = ?3 AND request_id = ?4 AND incarnation_id = ?5
-                    AND state = 'starting' AND (owner_node_id IS NULL OR owner_node_id = ?1)",
+                    AND state = 'starting' AND claim_expires_at_ms > ?2
+                    AND (owner_node_id IS NULL OR owner_node_id = ?1)",
                 params![owner_node_id, now_ms, user_id, request_id, incarnation_id],
             )? == 1)
         })
@@ -302,18 +307,35 @@ impl MediaSessionStore for SqliteStore {
                 let matches: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM media_session_requests
                       WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
-                        AND request_fingerprint = ?4 AND state IN ('starting', 'resolved')
-                        AND owner_node_id = ?5",
+                        AND request_fingerprint = ?4 AND owner_node_id = ?5
+                        AND ((state = 'starting' AND claim_expires_at_ms > ?6)
+                          OR (state = 'resolved' AND response_json = ?7))",
                     params![
                         activation.user_id,
                         request_id,
                         activation.incarnation_id,
                         activation.request_fingerprint,
                         activation.owner_node_id,
+                        activation.now_ms,
+                        activation.response_json,
                     ],
                     |row| row.get(0),
                 )?;
                 if matches != 1 {
+                    tx.commit()?;
+                    return Ok(None);
+                }
+            }
+            if let Some(expected) = activation.expected_predecessor_incarnation_id.as_deref() {
+                let current = tx
+                    .query_row(
+                        "SELECT current_incarnation_id FROM media_playback_pointers
+                          WHERE user_id = ?1 AND playback_id = ?2",
+                        params![activation.user_id, activation.playback_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                if current.as_deref() != Some(expected) {
                     tx.commit()?;
                     return Ok(None);
                 }
@@ -736,11 +758,16 @@ impl MediaSessionStore for SqliteStore {
                     SET expires_at_ms = CASE
                           WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
                         revision = revision + 1, updated_at_ms = ?1
-                  WHERE revision < 9223372036854775807
+                  WHERE revision < 9223372036854775807 AND expires_at_ms > ?1
                     AND resource IN (
-                      SELECT 'session:' || incarnation_id FROM media_sessions
-                       WHERE state = 'ended' AND lease_expires_at_ms <= ?1
-                       ORDER BY updated_at_ms, incarnation_id LIMIT ?2)",
+                      SELECT 'session:' || session.incarnation_id
+                        FROM media_sessions session
+                        JOIN job_leases lease
+                          ON lease.resource = 'session:' || session.incarnation_id
+                       WHERE session.state = 'ended'
+                         AND session.lease_expires_at_ms <= ?1
+                         AND lease.expires_at_ms > ?1
+                       ORDER BY session.updated_at_ms, session.incarnation_id LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(

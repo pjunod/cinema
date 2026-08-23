@@ -1028,6 +1028,18 @@ impl HiqliteAuthStore {
                                 params!(),
                             ),
                             (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_USER_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_EXPIRY_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_RETENTION_INDEX,
+                                params!(),
+                            ),
+                            (
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",
                                 params!(

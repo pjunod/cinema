@@ -299,6 +299,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "media_session_route_by_incarnation",
     "renew_media_sessions",
     "end_media_session",
+    "maintain_media_sessions",
     "owned_media_sessions",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
@@ -783,6 +784,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 session_id: session_a.to_owned(),
                 user_id: first_user.id,
                 playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
                 request_id: Some("attempt-a".to_owned()),
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),
@@ -819,6 +821,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 session_id: session_b.to_owned(),
                 user_id: second_user.id,
                 playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
                 request_id: None,
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-b".to_owned(),
@@ -840,6 +843,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 session_id: session_a2.to_owned(),
                 user_id: first_user.id,
                 playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
                 request_id: None,
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),
@@ -876,6 +880,37 @@ async fn media_session_contract_runs_through_dyn_store() {
                 .map(|route| route.session_id),
             Some(session_a2.to_owned()),
             "{backend}"
+        );
+
+        let stale = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 160,
+                lease_expires_at_ms: 360,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale successor verdict: {error}"));
+        assert!(
+            stale.is_none(),
+            "{backend}: stale predecessor CAS must lose"
+        );
+        assert_eq!(
+            store
+                .media_session_route(session_a2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect fenced successor: {error}"))
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "{backend}: a delayed reopen must not end the current successor"
         );
 
         assert_eq!(
@@ -950,6 +985,76 @@ async fn media_session_contract_runs_through_dyn_store() {
             MediaSessionRequestClaim::Resolved(route)
                 if route.session_id == session_a && route.state == "ended"
         ));
+
+        let expired_activation_incarnation = "00000000-0000-4000-8000-0000000000a6";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-activation",
+                    &fingerprint,
+                    expired_activation_incarnation,
+                    430,
+                    440,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring activation: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "expired-activation",
+                expired_activation_incarnation,
+                "node-a",
+                439,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
+        assert!(store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: expired_activation_incarnation.to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
+                user_id: first_user.id,
+                playback_id: "expired-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                request_id: Some("expired-activation".to_owned()),
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 440,
+                lease_expires_at_ms: 640,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject expired activation: {error}"))
+            .is_none());
+
+        let expired_owner_incarnation = "00000000-0000-4000-8000-0000000000a7";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-owner",
+                    &fingerprint,
+                    expired_owner_incarnation,
+                    450,
+                    460,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring owner: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(!store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "expired-owner",
+                expired_owner_incarnation,
+                "node-a",
+                460,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject expired owner: {error}")));
 
         let maintenance_now = 24 * 60 * 60 * 1_000 + 1_000;
         store
@@ -4462,8 +4567,10 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
-             AND name IN ('media_session_requests_expiry', 'media_sessions_owner')",
-            2,
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner', \
+                          'media_sessions_user', 'media_sessions_expiry', \
+                          'media_sessions_retention')",
+            5,
         ),
     ] {
         let rows: Vec<I64Value> = client
@@ -4557,8 +4664,10 @@ async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
-             AND name IN ('media_session_requests_expiry', 'media_sessions_owner')",
-            2,
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner', \
+                          'media_sessions_user', 'media_sessions_expiry', \
+                          'media_sessions_retention')",
+            5,
         ),
     ] {
         let rows: Vec<I64Value> = client

@@ -38,6 +38,7 @@ const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
 const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
+const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,11 +139,16 @@ impl RemoteStartResponse {
             && (0.0..=MAX_MEDIA_MILLIS as f64 / 1_000.0).contains(&self.start_seconds)
             && self.media_origin_seconds.is_finite()
             && (0.0..=MAX_MEDIA_MILLIS as f64 / 1_000.0).contains(&self.media_origin_seconds)
-            && (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT)
-                .contains(&self.target_height)
             && match &self.kind {
-                SessionKind::Transcode { height } => *height == self.target_height,
-                SessionKind::Copy { .. } => true,
+                SessionKind::Transcode { height } => {
+                    *height == self.target_height
+                        && (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT)
+                            .contains(height)
+                }
+                // Copy reports source metadata, not a selected ladder rung.
+                // Unknown/audio sources use zero and existing sources may be
+                // below or above the transcode ladder's supported range.
+                SessionKind::Copy { .. } => self.target_height >= 0,
             }
             && !self.encoder.is_empty()
             && self.encoder.len() <= 256
@@ -517,6 +523,30 @@ pub(crate) fn unix_ms() -> i64 {
         .unwrap_or_default()
 }
 
+async fn fence_and_reap_sessions(state: &AppState, sessions: Vec<(String, String, &'static str)>) {
+    if sessions.is_empty() {
+        return;
+    }
+    let session_ids = sessions
+        .iter()
+        .map(|(_, session_id, _)| session_id.clone())
+        .collect::<Vec<_>>();
+    state.transcode.fence_sessions(&session_ids).await;
+    for (_, session_id, reason) in sessions {
+        let cleanup_state = state.clone();
+        tokio::spawn(async move {
+            cleanup_state
+                .media_sessions
+                .invalidate_route(&session_id)
+                .await;
+            cleanup_state
+                .transcode
+                .stop_session(&session_id, reason)
+                .await;
+        });
+    }
+}
+
 /// Renew only locally live workers. Lost ownership self-fences immediately;
 /// a transient store outage is allowed to use the already-committed lease but
 /// never past its exact expiry.
@@ -535,9 +565,6 @@ pub(crate) async fn lease_loop(state: AppState) {
             .collect::<HashSet<_>>();
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
-        if let Err(error) = state.store.maintain_media_sessions(now_ms).await {
-            tracing::debug!(%error, "media-session lifecycle maintenance unavailable");
-        }
         let routes = match state
             .store
             .owned_media_sessions(&state.node_id, now_ms)
@@ -555,14 +582,20 @@ pub(crate) async fn lease_loop(state: AppState) {
                         (incarnation_id.clone(), session_id.clone())
                     })
                     .collect::<Vec<_>>();
-                for (incarnation_id, session_id) in expired {
-                    state
-                        .transcode
-                        .stop_session(&session_id, "cluster lease expired")
-                        .await;
-                    state.media_sessions.invalidate_route(&session_id).await;
+                let cleanup = expired
+                    .iter()
+                    .map(|(incarnation_id, session_id)| {
+                        (
+                            incarnation_id.clone(),
+                            session_id.clone(),
+                            "cluster lease expired",
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (incarnation_id, _) in expired {
                     known.remove(&incarnation_id);
                 }
+                fence_and_reap_sessions(&state, cleanup).await;
                 continue;
             }
         };
@@ -577,14 +610,6 @@ pub(crate) async fn lease_loop(state: AppState) {
             })
             .map(|(incarnation_id, (session_id, _))| (incarnation_id.clone(), session_id.clone()))
             .collect::<Vec<_>>();
-        for (incarnation_id, session_id) in lost {
-            state
-                .transcode
-                .stop_session(&session_id, "cluster lease lost")
-                .await;
-            state.media_sessions.invalidate_route(&session_id).await;
-            known.remove(&incarnation_id);
-        }
         for route in &routes {
             known.insert(
                 route.incarnation_id.clone(),
@@ -631,6 +656,7 @@ pub(crate) async fn lease_loop(state: AppState) {
         .buffer_unordered(LEASE_RENEWAL_FANOUT)
         .collect::<Vec<_>>()
         .await;
+        let mut cleanup = Vec::new();
         for (chunk, outcome) in renewal_outcomes {
             match outcome {
                 Ok(Ok(renewed)) => {
@@ -645,14 +671,11 @@ pub(crate) async fn lease_loop(state: AppState) {
                                 ),
                             );
                         } else {
-                            state
-                                .transcode
-                                .stop_session(&route.session_id, "cluster lease lost")
-                                .await;
-                            state
-                                .media_sessions
-                                .invalidate_route(&route.session_id)
-                                .await;
+                            cleanup.push((
+                                route.incarnation_id.clone(),
+                                route.session_id.clone(),
+                                "cluster lease lost",
+                            ));
                             known.remove(&route.incarnation_id);
                         }
                     }
@@ -661,14 +684,11 @@ pub(crate) async fn lease_loop(state: AppState) {
                     tracing::debug!(%error, "media-session lease renewal chunk unavailable");
                     for route in &chunk {
                         if route.lease_expires_at_ms <= now_ms {
-                            state
-                                .transcode
-                                .stop_session(&route.session_id, "cluster lease expired")
-                                .await;
-                            state
-                                .media_sessions
-                                .invalidate_route(&route.session_id)
-                                .await;
+                            cleanup.push((
+                                route.incarnation_id.clone(),
+                                route.session_id.clone(),
+                                "cluster lease expired",
+                            ));
                             known.remove(&route.incarnation_id);
                         }
                     }
@@ -677,33 +697,57 @@ pub(crate) async fn lease_loop(state: AppState) {
                     tracing::debug!("media-session lease renewal fan-out exceeded its deadline");
                     for route in &chunk {
                         if route.lease_expires_at_ms <= now_ms {
-                            state
-                                .transcode
-                                .stop_session(&route.session_id, "cluster lease expired")
-                                .await;
-                            state
-                                .media_sessions
-                                .invalidate_route(&route.session_id)
-                                .await;
+                            cleanup.push((
+                                route.incarnation_id.clone(),
+                                route.session_id.clone(),
+                                "cluster lease expired",
+                            ));
                             known.remove(&route.incarnation_id);
                         }
                     }
                 }
             }
         }
+        for (incarnation_id, session_id) in lost {
+            cleanup.push((incarnation_id.clone(), session_id, "cluster lease lost"));
+            known.remove(&incarnation_id);
+        }
+        cleanup.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+        cleanup.dedup_by(|left, right| left.1 == right.1);
+        fence_and_reap_sessions(&state, cleanup).await;
         for route in routes
             .iter()
             .filter(|route| !live.contains(&route.session_id))
+            .take(MAX_STALE_SETTLEMENTS_PER_TICK)
         {
-            let _ = state
-                .store
-                .end_media_session(&route.session_id, now_ms)
-                .await;
-            state
-                .media_sessions
-                .invalidate_route(&route.session_id)
-                .await;
+            let cleanup_state = state.clone();
+            let session_id = route.session_id.clone();
+            tokio::spawn(async move {
+                let _ = cleanup_state
+                    .store
+                    .end_media_session(&session_id, now_ms)
+                    .await;
+                cleanup_state
+                    .media_sessions
+                    .invalidate_route(&session_id)
+                    .await;
+            });
             known.remove(&route.incarnation_id);
+        }
+    }
+}
+
+/// Retention and stale-row cleanup is intentionally independent from the
+/// three-second owner heartbeat. Session leases self-fence at their exact
+/// expiry, so cleanup can run coarsely without weakening correctness; the
+/// replicated backend also preflights and avoids an idle Raft proposal.
+pub(crate) async fn maintenance_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if let Err(error) = state.store.maintain_media_sessions(unix_ms()).await {
+            tracing::debug!(%error, "media-session lifecycle maintenance unavailable");
         }
     }
 }
@@ -808,6 +852,18 @@ mod tests {
         let mut nonfinite = response;
         nonfinite.start_seconds = f64::NAN;
         assert!(!nonfinite.is_valid());
+
+        let mut unknown_copy = valid_start_response();
+        unknown_copy.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+        };
+        unknown_copy.target_height = 0;
+        assert!(unknown_copy.is_valid());
+        unknown_copy.target_height = crate::transcode::MAX_HEIGHT + 1;
+        assert!(unknown_copy.is_valid());
+        unknown_copy.target_height = -1;
+        assert!(!unknown_copy.is_valid());
     }
 
     #[test]

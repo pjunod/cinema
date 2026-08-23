@@ -22,7 +22,8 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
-    MediaFile, MediaSessionActivation, MediaSessionRequestClaim, MediaSessionRoute, SubtitleStream,
+    MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRequestClaim,
+    MediaSessionRoute, SubtitleStream,
 };
 use plurx_core::playback::PlaybackMethod;
 use plurx_core::tracks::is_native_text_subtitle;
@@ -32,7 +33,7 @@ use super::extract::AuthUser;
 use crate::media_pool::MediaOfferRequest;
 use crate::media_sessions::{
     unix_ms, RelayHeaders, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, LEASE_TTL_MS, START_DEADLINE,
+    RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW, LEASE_TTL_MS, START_DEADLINE,
 };
 use crate::state::AppState;
 use crate::transcode::PlaylistError;
@@ -361,53 +362,59 @@ pub async fn create(
     let fingerprint = request.durable_intent_fingerprint(&user.username);
     let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
-    if let Some(request_id) = request.request_id.as_deref() {
-        match state
-            .store
-            .claim_media_session_request(
-                user.id,
-                request_id,
-                &fingerprint,
-                &incarnation_id,
-                now_ms,
-                now_ms.saturating_add(60_000),
-            )
-            .await?
+    // Every create occupies a durable admission row. A caller-supplied key
+    // keeps public idempotency; an ordinary create uses its unguessable
+    // incarnation internally so omitting request_id cannot bypass the
+    // in-flight cap or allocate encoders before admission.
+    let request_claim_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| incarnation_id.clone());
+    match state
+        .store
+        .claim_media_session_request(
+            user.id,
+            &request_claim_id,
+            &fingerprint,
+            &incarnation_id,
+            now_ms,
+            now_ms.saturating_add(60_000),
+        )
+        .await?
+    {
+        MediaSessionRequestClaim::Acquired {
+            incarnation_id: acquired,
+        } => incarnation_id = acquired,
+        MediaSessionRequestClaim::Resolved(route)
+            if route.state == "active" && route.lease_expires_at_ms > now_ms =>
         {
-            MediaSessionRequestClaim::Acquired {
-                incarnation_id: acquired,
-            } => incarnation_id = acquired,
-            MediaSessionRequestClaim::Resolved(route)
-                if route.state == "active" && route.lease_expires_at_ms > now_ms =>
-            {
-                return serde_json::from_str::<StartResponse>(&route.response_json)
-                    .map(Json)
-                    .map_err(ApiError::from);
-            }
-            MediaSessionRequestClaim::Resolved(_) => {
-                return Err(ApiError::typed(
-                    StatusCode::GONE,
-                    "media_session_ended",
-                    "this idempotent session was already released",
-                ));
-            }
-            MediaSessionRequestClaim::InFlight { .. } => {
-                return Err(ApiError::typed(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "media_session_starting",
-                    "an identical session request is still starting; retry shortly",
-                ));
-            }
-            MediaSessionRequestClaim::Conflict => {
-                return Err(ApiError::Conflict(
-                    "request_id was already used for a different session intent".to_owned(),
-                ));
-            }
-            MediaSessionRequestClaim::Overloaded => {
-                return Err(ApiError::ServiceUnavailable(
-                    "too many session starts are already active for this user".to_owned(),
-                ));
-            }
+            return serde_json::from_str::<StartResponse>(&route.response_json)
+                .map(Json)
+                .map_err(ApiError::from);
+        }
+        MediaSessionRequestClaim::Resolved(_) => {
+            return Err(ApiError::typed(
+                StatusCode::GONE,
+                "media_session_ended",
+                "this idempotent session was already released",
+            ));
+        }
+        MediaSessionRequestClaim::InFlight { .. } => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "media_session_starting",
+                "an identical session request is still starting; retry shortly",
+            ));
+        }
+        MediaSessionRequestClaim::Conflict => {
+            return Err(ApiError::Conflict(
+                "request_id was already used for a different session intent".to_owned(),
+            ));
+        }
+        MediaSessionRequestClaim::Overloaded => {
+            return Err(ApiError::ServiceUnavailable(
+                "too many session starts are already active for this user".to_owned(),
+            ));
         }
     }
 
@@ -425,23 +432,37 @@ pub async fn create(
     // A stall reopen must stay with its existing worker in P5: the normalized
     // predecessor state is process-local and automatic migration does not
     // become legal until the fenced P7 takeover protocol exists.
+    let mut expected_predecessor_incarnation_id = None;
     let pinned_owner = if let Some(previous_session_id) = request
         .previous_session_id
         .as_deref()
         .filter(|value| uuid::Uuid::parse_str(value).is_ok())
     {
-        let durable = state
-            .media_sessions
-            .route(previous_session_id)
-            .await?
-            .filter(|route| {
-                route.user_id == user.id
-                    && route.state == "active"
-                    && route.lease_expires_at_ms > unix_ms()
-            })
-            .map(|route| route.owner_node_id);
-        if durable.is_some() {
-            durable
+        // Bypass the positive route cache: an ended predecessor may remain
+        // cached briefly, but a reopen must bind to the durable pointer state.
+        let durable = state.store.media_session_route(previous_session_id).await?;
+        if let Some(route) = durable {
+            if route.user_id != user.id
+                || route.state != "active"
+                || route.lease_expires_at_ms <= unix_ms()
+            {
+                let _ = state
+                    .store
+                    .fail_media_session_request(
+                        user.id,
+                        &request_claim_id,
+                        &incarnation_id,
+                        unix_ms(),
+                    )
+                    .await;
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "media_session_superseded",
+                    "the session being reopened is no longer current",
+                ));
+            }
+            expected_predecessor_incarnation_id = Some(route.incarnation_id);
+            Some(route.owner_node_id)
         } else if state
             .transcode
             .active_session_ids()
@@ -567,45 +588,43 @@ pub async fn create(
         }
     }
     let Some((owner_node_id, info)) = started else {
-        if let Some(request_id) = request.request_id.as_deref() {
-            let _ = state
-                .store
-                .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
-                .await;
-        }
+        let _ = state
+            .store
+            .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
+            .await;
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
-    if let Some(request_id) = request.request_id.as_deref() {
-        match state
-            .store
-            .assign_media_session_request_owner(
-                user.id,
-                request_id,
-                &incarnation_id,
-                &owner_node_id,
-                unix_ms(),
-            )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id)
-                    .await;
-                let _ = state
-                    .store
-                    .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
-                    .await;
-                return Err(ApiError::ServiceUnavailable(
-                    "session ownership changed while placement was being committed".to_owned(),
-                ));
-            }
-            Err(error) => {
-                abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id)
-                    .await;
-                return Err(error.into());
-            }
+    match state
+        .store
+        .assign_media_session_request_owner(
+            user.id,
+            &request_claim_id,
+            &incarnation_id,
+            &owner_node_id,
+            unix_ms(),
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
+            let _ = state
+                .store
+                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
+                .await;
+            return Err(ApiError::ServiceUnavailable(
+                "session ownership changed while placement was being committed".to_owned(),
+            ));
+        }
+        Err(error) => {
+            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
+            let _ = state
+                .store
+                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
+                .await;
+            return Err(error.into());
         }
     }
     // The grade the session actually built, not the one the body asked for:
@@ -658,7 +677,8 @@ pub async fn create(
         session_id: info.session_id.clone(),
         user_id: user.id,
         playback_id: request.playback_id.clone(),
-        request_id: request.request_id.clone(),
+        expected_predecessor_incarnation_id,
+        request_id: Some(request_claim_id.clone()),
         request_fingerprint: fingerprint,
         owner_node_id: owner_node_id.clone(),
         lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
@@ -670,25 +690,38 @@ pub async fn create(
         Ok(Some(outcome)) => outcome,
         Ok(None) => {
             abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
-            if let Some(request_id) = request.request_id.as_deref() {
-                let _ = state
-                    .store
-                    .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
-                    .await;
-            }
+            let _ = state
+                .store
+                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
+                .await;
             return Err(ApiError::ServiceUnavailable(
                 "session ownership could not be activated".to_owned(),
             ));
         }
         Err(error) => {
-            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
-            if let Some(request_id) = request.request_id.as_deref() {
-                let _ = state
-                    .store
-                    .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
-                    .await;
+            let reconcile_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            if let Some(route) =
+                wait_for_exact_activation(&state, &activation, reconcile_deadline).await
+            {
+                MediaSessionActivationOutcome {
+                    route,
+                    predecessor: None,
+                }
+            } else {
+                // A timed-out replicated transaction may still commit after
+                // the client loses its response. Do not kill the worker or
+                // mark its request failed while that result is unknown. A
+                // bounded reconciler either adopts the exact durable route or
+                // cleans the exact uncommitted incarnation after the full
+                // confirmation window.
+                let reconcile_state = state.clone();
+                let reconcile_activation = activation.clone();
+                tokio::spawn(async move {
+                    reconcile_or_abort_activation(reconcile_state, reconcile_activation).await;
+                });
+                return Err(error.into());
             }
-            return Err(error.into());
         }
     };
     state
@@ -710,6 +743,73 @@ pub async fn create(
         Some(&request.playback_id),
     );
     Ok(Json(response))
+}
+
+fn route_matches_activation(
+    route: &MediaSessionRoute,
+    activation: &MediaSessionActivation,
+) -> bool {
+    route.incarnation_id == activation.incarnation_id
+        && route.session_id == activation.session_id
+        && route.user_id == activation.user_id
+        && route.playback_id == activation.playback_id
+        && route.request_fingerprint == activation.request_fingerprint
+        && route.owner_node_id == activation.owner_node_id
+        && route.state == "active"
+        && route.lease_expires_at_ms > unix_ms()
+        && route.recipe_json == activation.recipe_json
+        && route.response_json == activation.response_json
+}
+
+async fn wait_for_exact_activation(
+    state: &AppState,
+    activation: &MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> Option<MediaSessionRoute> {
+    loop {
+        match state
+            .store
+            .media_session_route_by_incarnation(&activation.incarnation_id)
+            .await
+        {
+            Ok(Some(route)) if route_matches_activation(&route, activation) => return Some(route),
+            Ok(Some(_)) => return None,
+            Ok(None) | Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+async fn reconcile_or_abort_activation(state: AppState, activation: MediaSessionActivation) {
+    let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
+    if let Some(route) = wait_for_exact_activation(&state, &activation, deadline).await {
+        state.media_sessions.cache_route(route.clone()).await;
+        if route.owner_node_id == state.node_id {
+            state.media_sessions.seed_owned_lease(&route).await;
+        }
+        return;
+    }
+    abort_started_session(
+        &state,
+        &activation.owner_node_id,
+        &activation.incarnation_id,
+        &activation.session_id,
+    )
+    .await;
+    if let Some(request_id) = activation.request_id.as_deref() {
+        let _ = state
+            .store
+            .fail_media_session_request(
+                activation.user_id,
+                request_id,
+                &activation.incarnation_id,
+                unix_ms(),
+            )
+            .await;
+    }
 }
 
 fn valid_playback_id(playback_id: &str) -> bool {
@@ -753,17 +853,20 @@ async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
     if route.owner_node_id == state.node_id {
         state
             .transcode
-            .stop_session(&route.session_id, "superseded by cluster session")
+            .stop_session_for_request(
+                &route.incarnation_id,
+                &route.session_id,
+                "superseded by cluster session",
+            )
             .await;
     } else {
-        let _ = state
+        state
             .media_sessions
-            .relay(
+            .abort_remote(
                 &route.owner_node_id,
-                &RelayRequest {
+                &RemoteAbortRequest {
+                    incarnation_id: route.incarnation_id.clone(),
                     session_id: route.session_id.clone(),
-                    resource: RelayResource::Delete,
-                    headers: RelayHeaders::default(),
                 },
             )
             .await;
@@ -2348,6 +2451,12 @@ async fn segment_local(
             ));
         }
     };
+    // A live media object is published only after bytes exist. Treat an empty
+    // file as an incomplete/corrupt publication instead of advertising the
+    // saturating `0..=0` calculation below as one byte and hanging the client.
+    if opened.len == 0 {
+        return Err(ApiError::NotFound("segment"));
+    }
     let content_type = segment_content_type(seg);
     let etag = segment_etag(session, seg, opened.len);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
