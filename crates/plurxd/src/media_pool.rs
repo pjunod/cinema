@@ -347,17 +347,23 @@ impl MediaPool {
             .write()
             .await
             .retain(|root, _| roots.contains(root));
+        // The common budget includes synchronous child launch. A slow or
+        // saturated process table cannot extend source admission past the
+        // same deadline merely by making spawn calls expensive.
+        let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
         let mut outcomes = self.reap_root_probes();
         outcomes.extend(self.start_root_probes(&roots));
-        let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
         loop {
-            outcomes.extend(self.reap_root_probes());
-            if !self.has_running_root_probe(&roots) {
-                break;
-            }
             let now = tokio::time::Instant::now();
             if now >= deadline {
+                // Fence every still-tracked observation before inspecting
+                // child status. A successful exit noticed after the deadline
+                // is therefore permanently negative.
                 self.signal_timed_out_root_probes(&roots);
+                break;
+            }
+            outcomes.extend(self.reap_root_probes());
+            if !self.has_running_root_probe(&roots) {
                 break;
             }
             tokio::time::sleep_until((now + Duration::from_millis(20)).min(deadline)).await;
@@ -383,7 +389,7 @@ impl MediaPool {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for root in roots {
             if registry.running.contains_key(root)
-                || registry.running.len() >= MAX_ROOT_PROBE_CHILDREN
+                || root_probe_capacity_remaining(registry.running.len()) == 0
             {
                 continue;
             }
@@ -1179,6 +1185,10 @@ fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn root_probe_capacity_remaining(running: usize) -> usize {
+    MAX_ROOT_PROBE_CHILDREN.saturating_sub(running)
+}
+
 fn unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1398,6 +1408,94 @@ mod tests {
             (0..=MAX_LIBRARY_ROOTS).map(|index| PathBuf::from(format!("/media/{index}"))),
         );
         assert_eq!(bounded.len(), MAX_LIBRARY_ROOTS);
+    }
+
+    #[test]
+    fn one_timed_out_generation_leaves_room_for_one_current_generation() {
+        assert_eq!(
+            root_probe_capacity_remaining(MAX_LIBRARY_ROOTS),
+            MAX_LIBRARY_ROOTS
+        );
+        assert_eq!(root_probe_capacity_remaining(MAX_ROOT_PROBE_CHILDREN), 0);
+        assert_eq!(
+            root_probe_capacity_remaining(MAX_ROOT_PROBE_CHILDREN.saturating_add(1)),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_fencing_retains_children_and_rejects_delayed_success() {
+        let pool = MediaPool::new(MembershipManager::unavailable());
+        let running_root = PathBuf::from("/media/running");
+        let running_child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn retained root probe");
+        pool.root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running
+            .insert(
+                running_root.clone(),
+                RootProbe {
+                    child: running_child,
+                    kill_sent: false,
+                },
+            );
+        pool.signal_timed_out_root_probes(&BTreeSet::from([running_root.clone()]));
+        let mut retained = pool
+            .root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running
+            .remove(&running_root)
+            .expect("timed-out child remains tracked until reap");
+        assert!(retained.kill_sent);
+        retained
+            .child
+            .wait()
+            .await
+            .expect("reap retained root probe");
+
+        let completed_root = PathBuf::from("/media/completed-after-deadline");
+        let mut completed_child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn completed root probe");
+        loop {
+            if completed_child
+                .try_wait()
+                .expect("observe completed root probe")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        pool.root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running
+            .insert(
+                completed_root.clone(),
+                RootProbe {
+                    child: completed_child,
+                    kill_sent: false,
+                },
+            );
+        pool.signal_timed_out_root_probes(&BTreeSet::from([completed_root.clone()]));
+        let outcomes = pool.reap_root_probes();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].0, completed_root);
+        assert!(!outcomes[0].1.readable);
     }
 
     #[tokio::test]
