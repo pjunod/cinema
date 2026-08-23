@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7a6fecb2", "414c4367"]
+points = ["cluster.auth", "validation.framework"]
+checks = ["cluster-auth", "history-regressions", "rust-gate"]
+reason = "The retained separate-process singleton contract resumes the stopped owner, waits for its read-only replicated readiness proof, dispatches the stale fenced publication exactly once, requires an authoritative rejection, and includes that one attempt plus lease retirement in the bounded Raft-entry sample."
