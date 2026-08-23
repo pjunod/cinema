@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["1c8a486f", "dce58988", "6e3b5aee", "feab0eb2", "d6ebd5d9", "58efeada", "8ab6db50", "37c9e255"]
+commits = ["1c8a486f", "dce58988", "6e3b5aee", "feab0eb2", "d6ebd5d9", "58efeada", "8ab6db50", "37c9e255", "012c8694"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
 reason = "The history-regressions audit requires one unique mapping for every classified corrective commit. This row records metadata-only bounded-read mapping commits without claiming additional runtime behavior."
