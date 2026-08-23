@@ -394,9 +394,10 @@ impl SharedCacheStore for SqliteStore {
                   ORDER BY l.last_seen_at, l.recipe_hash, l.generation_id
                   LIMIT ?3"
             ))?;
-            Ok(stmt
+            let rows = stmt
                 .query_map(params![storage_id, before_ms, limit], shared_from_row)?
-                .collect::<Result<Vec<_>, _>>()?)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
     }
@@ -589,9 +590,10 @@ impl SharedCacheStore for SqliteStore {
                            l.last_used_at, l.recipe_hash, l.generation_id
                   LIMIT ?3"
             ))?;
-            Ok(stmt
+            let rows = stmt
                 .query_map(params![storage_id, now_ms, limit], shared_from_row)?
-                .collect::<Result<Vec<_>, _>>()?)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
         .await
     }

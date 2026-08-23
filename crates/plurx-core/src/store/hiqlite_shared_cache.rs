@@ -198,7 +198,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(recipe_hash, storage_id))
+            .query_consistent_map::<SharedRow, _>(sql, params!(recipe_hash, storage_id))
             .await?
             .into_iter()
             .next()
@@ -469,7 +469,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(storage_id, before_ms, limit))
+            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, before_ms, limit))
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -573,9 +573,8 @@ impl SharedCacheStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?
             .into_iter()
-            .sum::<u64>();
-        usize::try_from(changed)
-            .map_err(|error| StoreError::Database(format!("pin renewal count overflow: {error}")))
+            .sum::<usize>();
+        Ok(changed)
     }
 
     async fn release_cache_consumer_pin(
@@ -671,7 +670,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(storage_id, now_ms, limit))
+            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, now_ms, limit))
             .await?
             .into_iter()
             .map(TryInto::try_into)
