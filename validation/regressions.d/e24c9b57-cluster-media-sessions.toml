@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["e24c9b57", "09879b4d", "5761a27f", "d6a20e41", "b594d76d", "c5c5322a", "ae2a0f9b", "7986c555", "8a6d071c", "985737b4", "f07a02ac", "73f1b8e3", "836dca1b", "09f39b12", "2adf7b19"]
+commits = ["e24c9b57", "09879b4d", "5761a27f", "d6a20e41", "b594d76d", "c5c5322a", "ae2a0f9b", "7986c555", "8a6d071c", "985737b4", "f07a02ac", "73f1b8e3", "836dca1b", "09f39b12", "2adf7b19", "ebead904"]
 points = ["core.media", "persistence.upgrades", "cluster.auth", "cluster.membership", "server.api", "playback.pipeline", "validation.framework"]
 checks = ["rust-gate", "database-upgrades", "cluster-auth", "security-boundaries", "resource-bounds", "playback-recovery", "history-regressions"]
 reason = """
