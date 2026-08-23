@@ -628,7 +628,12 @@ pub async fn create(
             let guard_user = user.id;
             let mut start_task = tokio::spawn(async move {
                 transcode
-                    .create_cluster_session(&worker_request, guard_user, &user_name)
+                    .create_cluster_session(
+                        &worker_request,
+                        guard_user,
+                        &user_name,
+                        placement_deadline,
+                    )
                     .await
                     .map(|started| {
                         let info = started.info;

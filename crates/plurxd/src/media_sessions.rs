@@ -51,12 +51,14 @@ const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const ROUTE_QUERY_SHARDS: usize = 32;
+const ROUTE_GENERATION_SHARDS: usize = 4_096;
 const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
 const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
 const LEASE_RENEWAL_MIN_REMAINING_MS: i64 = 4_000;
 const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
+const STALE_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -316,6 +318,7 @@ pub(crate) struct MediaSessionCoordinator {
     store: Arc<dyn Store>,
     routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
     route_queries: Arc<Vec<tokio::sync::Mutex<()>>>,
+    route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, (String, i64)>>>,
     #[cfg(test)]
     route_store_queries: Arc<std::sync::atomic::AtomicUsize>,
@@ -339,6 +342,11 @@ impl MediaSessionCoordinator {
                     .map(|_| tokio::sync::Mutex::new(()))
                     .collect(),
             ),
+            route_generations: Arc::new(
+                (0..ROUTE_GENERATION_SHARDS)
+                    .map(|_| std::sync::atomic::AtomicU64::new(0))
+                    .collect(),
+            ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             route_store_queries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -354,27 +362,46 @@ impl MediaSessionCoordinator {
         &self,
         session_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        if let Some(cached) = self.cached_route(session_id).await {
+        let deadline = tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE;
+        if let Some(cached) = tokio::time::timeout_at(deadline, self.cached_route(session_id))
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session route admission timed out".to_owned())
+            })?
+        {
             return Ok(cached);
         }
-        let mut hasher = DefaultHasher::new();
-        session_id.hash(&mut hasher);
-        let shard = hasher.finish() as usize % self.route_queries.len();
-        let _query = self.route_queries[shard].lock().await;
-        if let Some(cached) = self.cached_route(session_id).await {
+        let hash = route_hash(session_id);
+        let shard = hash % self.route_queries.len();
+        let generation_shard = hash % self.route_generations.len();
+        let _query = tokio::time::timeout_at(deadline, self.route_queries[shard].lock())
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session route admission timed out".to_owned())
+            })?;
+        if let Some(cached) = tokio::time::timeout_at(deadline, self.cached_route(session_id))
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session route admission timed out".to_owned())
+            })?
+        {
             return Ok(cached);
         }
+        let observed_generation =
+            self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire);
         #[cfg(test)]
         self.route_store_queries
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let route = tokio::time::timeout(
-            ROUTE_QUERY_DEADLINE,
-            self.store.media_session_route(session_id),
+        let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
+            .await
+            .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??
+            .filter(authorizing_route);
+        tokio::time::timeout_at(
+            deadline,
+            self.cache_queried_route_result(session_id, route, observed_generation),
         )
         .await
-        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??
-        .filter(authorizing_route);
-        Ok(self.cache_queried_route_result(session_id, route).await)
+        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))
     }
 
     pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
@@ -404,6 +431,8 @@ impl MediaSessionCoordinator {
         routes.retain(|_, cached| {
             cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
         });
+        let generation_shard = route_hash(session_id) % self.route_generations.len();
+        self.route_generations[generation_shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         insert_cached_route(&mut routes, session_id, route, now);
     }
 
@@ -415,12 +444,21 @@ impl MediaSessionCoordinator {
         &self,
         session_id: &str,
         route: Option<MediaSessionRoute>,
+        observed_generation: u64,
     ) -> Option<MediaSessionRoute> {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
         routes.retain(|_, cached| {
             cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
         });
+        let generation_shard = route_hash(session_id) % self.route_generations.len();
+        if self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire)
+            != observed_generation
+        {
+            return routes
+                .get(session_id)
+                .and_then(|cached| cached.route.clone());
+        }
         if let Some(cached) = routes.get(session_id) {
             return cached.route.clone();
         }
@@ -569,6 +607,12 @@ fn insert_cached_route(
             expires_at: now + ROUTE_CACHE_TTL,
         },
     );
+}
+
+fn route_hash(session_id: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 fn authorizing_route(route: &MediaSessionRoute) -> bool {
@@ -845,10 +889,20 @@ pub(crate) async fn lease_loop(state: AppState) {
             let settled_tx = settled_tx.clone();
             settling.insert(session_id.clone());
             tokio::spawn(async move {
-                let _ = cleanup_state
-                    .store
-                    .end_media_session(&session_id, unix_ms())
-                    .await;
+                match tokio::time::timeout(
+                    STALE_SETTLEMENT_DEADLINE,
+                    cleanup_state
+                        .store
+                        .end_media_session(&session_id, unix_ms()),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "stale media-session settlement unavailable")
+                    }
+                    Err(_) => tracing::debug!("stale media-session settlement timed out"),
+                }
                 cleanup_state.media_sessions.cache_miss(&session_id).await;
                 let _ = settled_tx.send(session_id).await;
             });
@@ -1116,15 +1170,23 @@ mod tests {
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
         };
+        let generation_shard = route_hash(session_id) % coordinator.route_generations.len();
+        let stale_miss_generation = coordinator.route_generations[generation_shard]
+            .load(std::sync::atomic::Ordering::Acquire);
         coordinator.cache_route(route.clone()).await;
-        assert_eq!(
+        coordinator.routes.lock().await.remove(session_id);
+        assert!(
             coordinator
-                .cache_queried_route_result(session_id, None)
+                .cache_queried_route_result(session_id, None, stale_miss_generation)
                 .await
-                .map(|route| route.incarnation_id),
-            Some("00000000-0000-4000-8000-0000000000c2".to_owned()),
-            "a stale in-flight miss must not overwrite a concurrent activation"
+                .is_none(),
+            "a stale in-flight miss must remain suppressed after cache eviction"
         );
+        assert!(
+            !coordinator.routes.lock().await.contains_key(session_id),
+            "the stale miss must not be published after activation"
+        );
+        coordinator.cache_route(route.clone()).await;
         assert_eq!(
             coordinator
                 .route(session_id)
@@ -1135,8 +1197,28 @@ mod tests {
             "activation must replace an earlier cached miss immediately"
         );
 
+        let stale_active = route.clone();
+        let stale_active_generation = coordinator.route_generations[generation_shard]
+            .load(std::sync::atomic::Ordering::Acquire);
         route.state = "ended".to_owned();
         route.lease_expires_at_ms = unix_ms();
+        coordinator.cache_route(route.clone()).await;
+        coordinator.routes.lock().await.remove(session_id);
+        assert!(
+            coordinator
+                .cache_queried_route_result(
+                    session_id,
+                    Some(stale_active),
+                    stale_active_generation,
+                )
+                .await
+                .is_none(),
+            "an active read begun before fencing must stay suppressed after eviction"
+        );
+        assert!(
+            !coordinator.routes.lock().await.contains_key(session_id),
+            "the stale active route must not be republished after fencing"
+        );
         coordinator.cache_route(route).await;
         assert!(
             coordinator

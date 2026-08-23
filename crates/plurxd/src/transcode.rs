@@ -45,6 +45,7 @@ const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
+const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
 
 /// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
 /// authorize playback and therefore never belong in logs, traces, metrics, or
@@ -7271,11 +7272,19 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_id: i64,
         user_name: &str,
+        deadline: tokio::time::Instant,
     ) -> Result<ClusterSessionStart, String> {
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
-        let replacement = self.acquire_cluster_replacement_gate(gate_key).await?;
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the replacement start expired before it could reap its predecessor",
+            ));
+        }
         let info = self
             .create_session_inner(req, user_name, &supersession_user)
             .await?;
@@ -7285,6 +7294,7 @@ impl TranscodeManager {
     async fn acquire_cluster_replacement_gate(
         &self,
         key: String,
+        deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
         let gate = {
             let mut entries = self
@@ -7306,7 +7316,15 @@ impl TranscodeManager {
                 gate
             }
         };
-        let permit = gate.lock_owned().await;
+        let gate_deadline = std::cmp::min(
+            deadline,
+            tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
+        );
+        let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
+            .await
+            .map_err(|_| {
+                capacity_error("another replacement for this player is still being committed")
+            })?;
         Ok(ClusterReplacementGuard {
             registry: Arc::clone(&self.cluster_replacement_gates),
             key,
@@ -18072,6 +18090,46 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_gate_refuses_a_wait_past_its_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let key = r#"[["user_id",42],"deadline-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key.clone(), tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("a timed-out replacement must never reach predecessor reap"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+
+        drop(held);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a live retry acquires the released gate");
+        drop(reacquired);
     }
 
     /// Track intent is orthogonal to height normalization. A stall claim keeps

@@ -11,7 +11,8 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
     unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ABORT_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_PATH,
+    RemoteStartResponse, ABORT_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW,
+    START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
 
@@ -58,6 +59,7 @@ pub(crate) async fn start(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<RemoteStartResponse>, StatusCode> {
+    let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
     let request = serde_json::from_slice::<RemoteStartRequest>(&body)
         .ok()
@@ -79,7 +81,12 @@ pub(crate) async fn start(
     let start_task = tokio::spawn(async move {
         let started = start_state
             .transcode
-            .create_cluster_session(&request.request, request.user_id, &user.username)
+            .create_cluster_session(
+                &request.request,
+                request.user_id,
+                &user.username,
+                start_deadline,
+            )
             .await?;
         let response = RemoteStartResponse::from(started.info);
         let confirmation_state = start_state.clone();
