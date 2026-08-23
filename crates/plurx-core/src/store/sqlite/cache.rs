@@ -407,6 +407,18 @@ impl TranscodeCacheStore for SqliteStore {
                            AND location.manifest_digest IS ?5)",
                 params![hash, node, class, relative, manifest],
             )?;
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE EXISTS (
+                    SELECT 1 FROM transcode_cache_locations location
+                     WHERE location.recipe_hash = ?1 AND location.node_id = ?2
+                       AND location.storage_class = ?3 AND location.relative_dir = ?4
+                       AND location.manifest_digest IS ?5
+                       AND cache_consumer_pins.storage_id = location.storage_id
+                       AND cache_consumer_pins.recipe_hash = location.recipe_hash
+                       AND cache_consumer_pins.generation_id = location.generation_id)",
+                params![hash, node, class, relative, manifest],
+            )?;
             let changed = tx.execute(
                 "DELETE FROM transcode_cache_locations
                   WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3

@@ -295,10 +295,15 @@ where
     #[cfg(feature = "cache")]
     member_cache.await??;
 
+    let api_nodes = node_config
+        .nodes
+        .iter()
+        .map(|node| node.addr_api.clone())
+        .collect();
     let client = Client::new_local(
         state,
+        api_nodes,
         tls_api_client_config,
-        #[cfg(feature = "cache")]
         tls_api_no_verify,
         #[cfg(feature = "sqlite")]
         tx_client_stream,

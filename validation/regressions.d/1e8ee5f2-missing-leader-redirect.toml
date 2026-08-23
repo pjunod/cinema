@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1e8ee5f2"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained singleton stale-token trial suspends and resumes its former leader before issuing the stale fenced mutation. A resumed follower may reject that write with ForwardToLeader(None, None) before it has republished the current leader; the vendored client now treats that response as definitive non-acceptance, performs side-effect-free authenticated leader discovery in a detached two-second budget, atomically queues the discovered leader through the stream manager, and only then uses its existing single retry. Discovery timeout returns the original redirect without retry, and proxy-mode clients remain pinned to their configured trust boundary."

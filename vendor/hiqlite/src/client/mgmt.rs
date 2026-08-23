@@ -52,13 +52,22 @@ pub struct LocalDbRaftSnapshot {
 /// The term and leader identity describe the leadership proof, not the term
 /// that originally appended the committed entry. Callers must bind this tuple
 /// to a fresh local Raft observation before using it for a bounded read.
+///
+/// The protocol scalar advertises that the watermark source implements the
+/// same local-read contract as the receiver. A newer receiver therefore fails
+/// closed while an older leader is active during a rolling upgrade.
 #[cfg(feature = "sqlite")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DbQuorumWatermark {
     pub term: u64,
     pub leader_id: u64,
     pub committed_index: u64,
+    pub local_read_protocol_version: u64,
 }
+
+/// First protocol that binds one local database query to a quorum watermark.
+#[cfg(feature = "sqlite")]
+pub const DB_LOCAL_READ_PROTOCOL_VERSION: u64 = 1;
 
 /// Receiver for the in-process database Raft metrics watch channel.
 ///
@@ -128,6 +137,7 @@ pub(crate) async fn db_quorum_watermark_local(
         term: after.current_term,
         leader_id: state.id,
         committed_index: committed.index,
+        local_read_protocol_version: DB_LOCAL_READ_PROTOCOL_VERSION,
     })
 }
 
@@ -236,12 +246,13 @@ impl Client {
     }
 
     // This is separated from the `self.send_with_retry_db()` to avoid recursion on leader unreachable
-    async fn get_metrics_remote(&self, url: String) -> Result<RaftMetrics<NodeId, Node>, Error> {
-        // This should never be called if we have a local client with its own replicated data
-        debug_assert!(
-            self.inner.state.is_none(),
-            "get_metrics_remote should never be called with local state"
-        );
+    pub(crate) async fn get_metrics_remote(
+        &self,
+        url: String,
+    ) -> Result<RaftMetrics<NodeId, Node>, Error> {
+        // Ordinary local metrics remain in-process. Missing-leader recovery may
+        // deliberately query a configured peer while the resumed local watch
+        // has not republished the current leader.
         debug_assert!(
             self.inner.api_secret.is_some(),
             "api_secret should always exist for remote clients"
@@ -352,8 +363,8 @@ impl Client {
         }
     }
 
-    /// Perform a graceful shutdown for this Raft node.
-    /// Works on local clients only and can't shut down remote nodes.
+    /// Perform a graceful shutdown for a local Raft node, or close the owned
+    /// streams and rate ticker for a remote client without stopping servers.
     ///
     /// The shutdown adds a 10 delay on purpose for smoothing out Kubernetes rolling releases and
     /// make the whole process more graceful, because a whole new leader election might be necessary.
@@ -361,8 +372,8 @@ impl Client {
     /// In future versions, there will be the possibility to trigger a graceful leader election
     /// upfront, but this has not been stabilized in this version.
     pub async fn shutdown(&self) -> Result<(), Error> {
-        if let Some(state) = &self.inner.state {
-            if tokio::time::timeout(
+        let primary = if let Some(state) = &self.inner.state {
+            match tokio::time::timeout(
                 Duration::from_secs(15),
                 Self::shutdown_execute(
                     state,
@@ -378,18 +389,50 @@ impl Client {
                 ),
             )
             .await
-            .is_err()
             {
-                Err(Error::Error(
+                Ok(result) => result,
+                Err(_) => Err(Error::Error(
                     "Timeout reached while shutting down Raft".into(),
-                ))
-            } else {
-                Ok(())
+                )),
             }
         } else {
-            Err(Error::Error(
-                "Shutdown for remote Raft clients is not yet implemented".into(),
-            ))
+            Ok(())
+        };
+
+        self.inner.stream_shutdown.send_replace(true);
+        let handles = self
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        let mut cleanup_error = None;
+        for mut handle in handles {
+            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if cleanup_error.is_none() {
+                        cleanup_error = Some(Error::Error(error.to_string().into()));
+                    }
+                }
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    if cleanup_error.is_none() {
+                        cleanup_error = Some(Error::Error(
+                            "Timeout reached while closing a client background task".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Err(error) = primary {
+            Err(error)
+        } else if let Some(error) = cleanup_error {
+            Err(error)
+        } else {
+            Ok(())
         }
     }
 
@@ -566,6 +609,8 @@ impl Client {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use std::time::Duration;
+
     #[test]
     fn local_watch_accessor_has_no_remote_fallback() {
         let source = include_str!("mgmt.rs");
@@ -607,10 +652,148 @@ mod tests {
             term: u64::MAX,
             leader_id: u64::MAX - 1,
             committed_index: u64::MAX - 2,
+            local_read_protocol_version: super::DB_LOCAL_READ_PROTOCOL_VERSION,
         };
         let actual = crate::query::rows::RowOwned::from_db_quorum_watermark(expected)
             .into_db_quorum_watermark()
             .expect("watermark row");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn old_three_column_watermark_preserves_readiness_but_disables_local_reads() {
+        use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
+
+        let actual = RowOwned {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text("7".to_owned()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text("2".to_owned()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text("41".to_owned()),
+                },
+            ],
+        }
+        .into_db_quorum_watermark()
+        .expect("P3a watermark remains a valid quorum proof");
+
+        assert_eq!(actual.term, 7);
+        assert_eq!(actual.leader_id, 2);
+        assert_eq!(actual.committed_index, 41);
+        assert_eq!(actual.local_read_protocol_version, 0);
+    }
+
+    #[test]
+    fn malformed_present_local_read_protocol_is_rejected() {
+        use crate::query::rows::{ColumnOwned, RowOwned, ValueOwned};
+
+        let error = RowOwned {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text("7".to_owned()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text("2".to_owned()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text("41".to_owned()),
+                },
+                ColumnOwned {
+                    name: "local_read_protocol_version".to_owned(),
+                    value: ValueOwned::Text("not-a-version".to_owned()),
+                },
+            ],
+        }
+        .into_db_quorum_watermark()
+        .expect_err("a malformed advertised protocol is not an old leader");
+
+        assert!(error.to_string().contains("invalid local_read_protocol_version"));
+    }
+
+    #[tokio::test]
+    async fn remote_shutdown_joins_streams_with_every_endpoint_unavailable() {
+        let client = crate::Client::remote(
+            vec!["127.0.0.1:0".to_owned()],
+            false,
+            false,
+            "remote-shutdown-test".to_owned(),
+            true,
+            #[cfg(feature = "cache")]
+            Some(crate::config::RateLimitConfig { rps: 0, burst: 0 }),
+            Some(crate::config::RateLimitConfig { rps: 0, burst: 0 }),
+        )
+        .await
+        .expect("create remote client");
+        let expected_background_tasks = if cfg!(feature = "listen_notify") {
+            4
+        } else if cfg!(feature = "cache") {
+            3
+        } else {
+            2
+        };
+        assert_eq!(
+            client
+                .inner
+                .background_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            expected_background_tasks
+        );
+
+        // Let the ticker consume its immediate first tick, then queue both a
+        // stream request and rate waiters so shutdown must resolve them.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let operation_client = client.clone();
+        let operation = tokio::spawn(async move { operation_client.db_quorum_watermark().await });
+        let db_rate_client = client.clone();
+        let db_rate = tokio::spawn(async move { db_rate_client.rate_limit_db().await });
+        #[cfg(feature = "cache")]
+        let cache_rate_client = client.clone();
+        #[cfg(feature = "cache")]
+        let cache_rate = tokio::spawn(async move { cache_rate_client.rate_limit_cache().await });
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), client.shutdown())
+            .await
+            .expect("remote shutdown deadline")
+            .expect("remote shutdown");
+        assert!(
+            operation
+                .await
+                .expect("stream operation did not panic")
+                .is_err()
+        );
+        assert!(
+            db_rate
+                .await
+                .expect("DB rate waiter did not panic")
+                .is_err()
+        );
+        #[cfg(feature = "cache")]
+        assert!(
+            cache_rate
+                .await
+                .expect("cache rate waiter did not panic")
+                .is_err()
+        );
+        assert!(*client.inner.stream_shutdown.borrow());
+        assert!(
+            client
+                .inner
+                .background_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 }

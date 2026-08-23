@@ -174,7 +174,7 @@ pub async fn system_info(
         instance_id: state.store.instance_id().await?,
         uptime_seconds: state.started_at.elapsed().as_secs(),
         users: state.store.count_users().await?,
-        libraries: state.store.list_libraries().await?.len(),
+        libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
         replication,
         hw_slots_in_use: hw_in_use,
@@ -215,7 +215,7 @@ pub async fn library_shape(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<MediaShapeDto>, ApiError> {
-    let s = state.store.media_shape().await?;
+    let s = state.catalogue.media_shape().await?;
     Ok(Json(MediaShapeDto {
         probed: s.probed,
         unprobed: s.unprobed,
@@ -765,6 +765,10 @@ fn emit_client_playback_event(
     if let Some(info) = info {
         join_session_truth(&mut event, info);
     }
+    event.session_id = event
+        .session_id
+        .as_deref()
+        .map(crate::transcode::session_log_id);
     crate::telemetry::emit_with_network(store, event, network);
 }
 
@@ -1133,6 +1137,11 @@ pub struct SettingsDto {
     /// Opt-in physical-device experiment: serve new live sessions as typeless
     /// sliding playlists from their first response. Off by default.
     pub hls_typeless_sliding: bool,
+    /// Cluster-wide opt-in for placing new HLS workers on another voter. The
+    /// readiness bit is true only while the replicated flag is enabled and
+    /// every committed voter publishes the current media protocol.
+    pub cluster_media_pool_enabled: bool,
+    pub cluster_media_pool_ready: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -1292,6 +1301,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     );
     let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
+    let cluster_media_pool_enabled =
+        setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
+    let cluster_media_pool_ready =
+        cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1317,6 +1330,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_scratch_max_bytes,
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
+        cluster_media_pool_enabled,
+        cluster_media_pool_ready,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -1379,6 +1394,10 @@ pub struct UpdateSettings {
     pub hls_ahead_max_bytes: Option<String>,
     pub hls_scratch_max_bytes: Option<String>,
     pub hls_typeless_sliding: Option<bool>,
+    /// Enable remote live-session placement cluster-wide. Enabling is refused
+    /// until every committed voter is freshly publishing this protocol;
+    /// disabling always succeeds.
+    pub cluster_media_pool_enabled: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -1413,6 +1432,13 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    if req.cluster_media_pool_enabled == Some(true)
+        && !state.media_pool.remote_rollout_ready().await
+    {
+        return Err(ApiError::Conflict(
+            "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
+        ));
+    }
     match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => {}
         (Some(requested_mode), Some(quality)) => {
@@ -1478,6 +1504,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HLS_TYPELESS_SLIDING, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.cluster_media_pool_enabled {
+        state
+            .store
+            .put_setting(keys::CLUSTER_MEDIA_POOL_ENABLED, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(mode) = &req.sub_mode {
@@ -1963,8 +1995,8 @@ pub struct Delivery {
     /// play the last range request or progress beacon — which is the clock the
     /// idle expiry runs on.
     pub idle_seconds: u64,
-    /// The `sessions` row this is the same stream as, where one exists, so a
-    /// page can show one line per viewer and still reach the encoder detail.
+    /// One-way correlation for the `sessions` row this stream belongs to.
+    /// The raw HLS capability is never exposed through diagnostics.
     pub session_id: Option<String>,
     /// Bytes handed to this client, where anything counts them. Direct play
     /// counts nothing: `serve_file_range` hands a file to axum and never sees
@@ -1993,7 +2025,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             title: s.item_title.clone(),
             started_unix: s.started_unix,
             idle_seconds: s.idle_seconds,
-            session_id: Some(s.id.clone()),
+            session_id: Some(crate::transcode::session_log_id(&s.id)),
             delivered_bytes: Some(s.delivered_bytes),
             delivered_bps: s.delivered_bps,
         })
@@ -2042,7 +2074,14 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             .then(a.file_id.cmp(&b.file_id))
             .then(a.user.cmp(&b.user))
     });
-    (sessions.into_iter().map(|(s, _)| s).collect(), out)
+    let sessions = sessions
+        .into_iter()
+        .map(|(mut session, _)| {
+            session.id = crate::transcode::session_log_id(&session.id);
+            session
+        })
+        .collect();
+    (sessions, out)
 }
 
 /// An item's title, read once per request however many rows want it.
@@ -2152,7 +2191,21 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let stopped = state.transcode.stop_session(&id, "stopped by admin").await;
+    let session_id = state
+        .transcode
+        .active_session_ids()
+        .await
+        .into_iter()
+        .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
+    let stopped = match session_id {
+        Some(session_id) => {
+            state
+                .transcode
+                .stop_session(&session_id, "stopped by admin")
+                .await
+        }
+        None => false,
+    };
     if !stopped {
         return Err(ApiError::NotFound("session"));
     }
@@ -2227,12 +2280,16 @@ fn render_passive_raft_metrics(
          plurx_raft_metric_sample_errors_total{{source=\"watermark\"}} {}\n\
          # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
          # TYPE plurx_raft_leader_changes_total counter\n\
-         plurx_raft_leader_changes_total {}\n",
+         plurx_raft_leader_changes_total {}\n\
+         # HELP plurx_raft_local_read_protocol_supported Whether the watermark source supports this binary's bounded local-read protocol.\n\
+         # TYPE plurx_raft_local_read_protocol_supported gauge\n\
+         plurx_raft_local_read_protocol_supported {}\n",
         u8::from(view.valid),
         u8::from(view.watermark_valid),
         view.errors,
         view.watermark_errors,
         view.leader_changes,
+        u8::from(view.watermark_local_reads_supported),
     );
     if view.age_seconds.is_some() || view.watermark_age_millis.is_some() {
         out.push_str(
@@ -2576,12 +2633,14 @@ mod tests {
             errors: 3,
             leader_changes: 4,
             watermark_source: true,
+            watermark_requires_local_binding: true,
             watermark: Some(QuorumWatermarkSample {
                 committed_index: 45,
                 apply_lag_entries: Some(3),
             }),
             watermark_age_millis: Some(250),
             watermark_valid: true,
+            watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
                 build_ok: DbSnapshotHistogram {
@@ -2610,6 +2669,7 @@ mod tests {
         assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
         assert!(rendered.contains("plurx_raft_commit_index 45"));
         assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
+        assert!(rendered.contains("plurx_raft_local_read_protocol_supported 1"));
         assert!(rendered.contains(
             "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"0.1\"} 1"
         ));
@@ -2642,9 +2702,11 @@ mod tests {
                 errors: 0,
                 leader_changes: 0,
                 watermark_source: true,
+                watermark_requires_local_binding: true,
                 watermark: None,
                 watermark_age_millis: None,
                 watermark_valid: false,
+                watermark_local_reads_supported: true,
                 watermark_errors: 1,
                 snapshot_metrics: None,
             }
@@ -2661,9 +2723,11 @@ mod tests {
             errors: 0,
             leader_changes: 0,
             watermark_source: false,
+            watermark_requires_local_binding: false,
             watermark: None,
             watermark_age_millis: None,
             watermark_valid: false,
+            watermark_local_reads_supported: false,
             watermark_errors: 0,
             snapshot_metrics: None,
         });
@@ -2940,7 +3004,8 @@ mod tests {
         })
         .await
         .expect("joined client event persisted");
-        assert_eq!(row.session_id.as_deref(), Some("session-a"));
+        let correlation = crate::transcode::session_log_id("session-a");
+        assert_eq!(row.session_id.as_deref(), Some(correlation.as_str()));
         assert_eq!(row.file_id, Some(42));
         assert_eq!(row.speed_recent, Some(1.7));
         assert_eq!(row.ahead_seconds, Some(34));

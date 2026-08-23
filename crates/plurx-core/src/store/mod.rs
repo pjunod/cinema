@@ -38,11 +38,16 @@ mod hiqlite_pretranscode;
 mod hiqlite_publication;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_reading;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sessions;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_shared_cache;
 
 pub mod replicated;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::HiqliteOperationCounts;
@@ -60,14 +65,16 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheManifestCheck, CachedTranscode, HomePreviewPage, InProgressItem, Item,
-    ItemEdit, ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
+    CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
+    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
     PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup,
-    WatchState,
+    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
+    User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -139,6 +146,10 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Opt in to remote media-session placement only after every committed
+    /// voter is publishing the current media protocol. Absent is deliberately
+    /// off so rolling upgrades keep all starts local.
+    pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -1244,6 +1255,162 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     async fn cache_bytes(&self, node_id: &str) -> Result<i64, StoreError>;
 }
 
+/// Storage-keyed cache generations and their distributed reader pins.
+///
+/// The legacy TranscodeCacheStore remains the rolling-upgrade interface for
+/// node-local roots. Shared roots use this boundary exclusively: callers must
+/// name the immutable generation they validated, and GC must present the exact
+/// live lease that authorized retirement.
+#[async_trait]
+pub trait SharedCacheStore: Send + Sync + 'static {
+    async fn put_cache_storage_member(&self, member: &CacheStorageMember)
+        -> Result<(), StoreError>;
+
+    async fn cache_storage_member(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+    ) -> Result<Option<CacheStorageMember>, StoreError>;
+
+    async fn mark_cache_storage_suspect(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+        observed_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn shared_cache_hit(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+    ) -> Result<Option<SharedCacheGeneration>, StoreError>;
+
+    async fn touch_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        file_id: i64,
+        recipe_version: i64,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        bytes: i64,
+        manifest_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Fence only the exact still-incomplete publication claim into durable
+    /// cleanup state. A stale or commit-uncertain publisher must never delete
+    /// a completed replacement.
+    async fn abandon_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Forget an exact abandoned claim only after its derived staging/final
+    /// paths have been removed. A crash before this call remains discoverable.
+    async fn finalize_abandoned_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Return a bounded oldest-first inventory of incomplete publication
+    /// claims whose owner has exceeded the publication recovery window.
+    async fn stale_shared_cache_claims(
+        &self,
+        storage_id: &str,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
+    /// Insert or renew a pin only while the exact complete generation remains
+    /// current. Validation and mutation are one database statement/transaction.
+    async fn acquire_cache_consumer_pin(
+        &self,
+        pin: &CacheConsumerPin,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Renew matching epochs in one bounded owner-liveness transaction.
+    async fn renew_cache_consumer_pins(
+        &self,
+        pins: &[CacheConsumerPin],
+        now_ms: i64,
+    ) -> Result<usize, StoreError>;
+
+    async fn release_cache_consumer_pin(
+        &self,
+        storage_id: &str,
+        recipe_hash: &str,
+        generation_id: &str,
+        consumer_kind: CacheConsumerKind,
+        consumer_id: &str,
+        consumer_epoch: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Delete at most `limit` expired durable pins for one storage root,
+    /// oldest first. Lookup-pin release is best effort, so crash recovery must
+    /// not depend on the process that acquired a short-lived bridge pin
+    /// surviving its expiry. The storage scope keeps each GC lease's database
+    /// work bounded by the matching `(storage_id, expires_at_ms)` index.
+    async fn prune_expired_cache_consumer_pins(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<usize, StoreError>;
+
+    async fn shared_cache_gc_candidates(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
+    /// Retire the exact generation only when the supplied GC lease is still
+    /// current and no live typed consumer pin exists. Filesystem deletion may
+    /// happen only after this returns a fresh successor lease and the caller
+    /// confirms that successor is still live.
+    async fn retire_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<Option<Lease>, StoreError>;
+
+    /// Remove an exact GC tombstone only after its deterministic final and
+    /// quarantine paths have been removed under the same live GC lease.
+    async fn finalize_retired_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<Option<Lease>, StoreError>;
+}
+
 /// Durable distributed work for speculative whole-title transcodes.
 ///
 /// Candidate generation is a singleton, but execution is deliberately not:
@@ -1794,6 +1961,80 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
     ) -> Result<(), StoreError>;
 }
 
+/// Durable idempotency and routing for cluster-owned live HLS sessions.
+///
+/// Capability bytes stay in `session_id`; every mutation additionally fences
+/// on the never-reused incarnation plus owner epoch. Implementations bound
+/// client-controlled rows before inserting them.
+#[async_trait]
+pub trait MediaSessionStore: Send + Sync + 'static {
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+    ) -> Result<MediaSessionRequestClaim, StoreError>;
+
+    async fn assign_media_session_request_owner(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn activate_media_session(
+        &self,
+        activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    async fn fail_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn media_session_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn media_session_route_by_incarnation(
+        &self,
+        incarnation_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn renew_media_sessions(
+        &self,
+        owner_node_id: &str,
+        renewals: &[MediaSessionRenewal],
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Vec<String>, StoreError>;
+
+    async fn end_media_session(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError>;
+
+    async fn owned_media_sessions(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -1807,12 +2048,14 @@ pub trait Store:
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
+    + SharedCacheStore
     + PretranscodeJobStore
     + OfflinePackageStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + CoordinationStore
     + FencedPublicationStore
+    + MediaSessionStore
     + Send
     + Sync
     + 'static
@@ -1831,16 +2074,349 @@ impl<T> Store for T where
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore
+        + SharedCacheStore
         + PretranscodeJobStore
         + OfflinePackageStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + CoordinationStore
         + FencedPublicationStore
+        + MediaSessionStore
         + Send
         + Sync
         + 'static
 {
+}
+
+/// The only application-facing boundary for catalogue consistency choices.
+///
+/// Ordinary [`Store`] methods remain Authority. This wrapper may run one
+/// explicitly eligible Hiqlite catalogue operation locally, but only while a
+/// fresh quorum watermark, matching local Raft generation, negotiated read
+/// protocol, and configured apply-lag budget all remain valid. It revalidates
+/// after the complete operation and discards the result before falling back to
+/// Authority when the proof changes in flight.
+#[derive(Clone)]
+pub struct CatalogueReader {
+    authority: Arc<dyn Store>,
+    #[cfg(feature = "hiqlite-store")]
+    bounded: Option<BoundedCatalogueReader>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone)]
+struct BoundedCatalogueReader {
+    store: Arc<HiqliteAuthStore>,
+    metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+    enabled: bool,
+    max_apply_lag_entries: u64,
+    #[cfg(feature = "cluster-read-cost-validation")]
+    revoke_after_next_local: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CatalogueReader {
+    /// Preserve the existing Authority behavior for SQLite, recovery boots,
+    /// tests, and callers that have not opted into bounded replica reads.
+    #[must_use]
+    pub fn authority(store: Arc<dyn Store>) -> Self {
+        Self {
+            authority: store,
+            #[cfg(feature = "hiqlite-store")]
+            bounded: None,
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        enabled: bool,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self {
+            authority,
+            bounded: Some(BoundedCatalogueReader {
+                store,
+                metrics,
+                enabled,
+                max_apply_lag_entries,
+                #[cfg(feature = "cluster-read-cost-validation")]
+                revoke_after_next_local: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        }
+    }
+
+    /// Construct the production bounded reader for real seeded-store
+    /// contracts outside this module.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn validation_replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self::replicated(authority, store, metrics, true, max_apply_lag_entries)
+    }
+
+    /// Revoke the proof after exactly the next local query and before its
+    /// post-query validation, forcing result discard and Authority fallback.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    pub fn validation_revoke_after_next_local(&self) {
+        if let Some(bounded) = &self.bounded {
+            bounded
+                .revoke_after_next_local
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded<T, F, Fut>(&self, local_read: F) -> Option<T>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        let bounded = self.bounded.as_ref()?;
+        if !bounded.enabled {
+            return None;
+        }
+        let store = Arc::clone(&bounded.store);
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let revoke_after_local = Arc::clone(&bounded.revoke_after_next_local);
+        let metrics = bounded.metrics.clone();
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let post_query_metrics = metrics.clone();
+        // A bounded read is an optimization, never a new application-visible
+        // failure mode. Proof loss is represented by `None`; treat a local
+        // SQL/row-mapping failure the same way and retry the existing Authority
+        // path below. The Authority result remains the caller's result.
+        metrics
+            .run_bounded_replica(bounded.max_apply_lag_entries, move || async move {
+                let result = local_read(store).await;
+                #[cfg(feature = "cluster-read-cost-validation")]
+                if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    post_query_metrics.validation_revoke_bounded_proof();
+                }
+                result
+            })
+            .await?
+            .ok()
+    }
+
+    pub async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_library(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_library(id).await
+    }
+
+    pub async fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_list_libraries().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.list_libraries().await
+    }
+
+    pub async fn get_item(&self, id: i64) -> Result<Option<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item(id).await
+    }
+
+    pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item_children(parent_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item_children(parent_id).await
+    }
+
+    pub async fn list_top_items_in_genre(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        // Both the existing Authority implementation and this local variant
+        // read the page and count in separate statements. The bounded permit
+        // covers that whole operation but deliberately does not promise a
+        // stronger cross-statement SQLite snapshot than Authority did.
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let genre = genre.map(str::to_owned);
+            if let Some(result) = self
+                .bounded(move |store| async move {
+                    store
+                        .local_list_top_items_in_genre(
+                            library_id,
+                            sort,
+                            offset,
+                            limit,
+                            genre.as_deref(),
+                        )
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority
+            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .await
+    }
+
+    pub async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_home_preview_pages(limit_per_library).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.home_preview_pages(limit_per_library).await
+    }
+
+    pub async fn recently_added(
+        &self,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_recently_added(library_id, limit).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.recently_added(library_id, limit).await
+    }
+
+    pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file(id).await
+    }
+
+    pub async fn files_for_item(&self, item_id: i64) -> Result<Vec<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_files_for_item(item_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.files_for_item(item_id).await
+    }
+
+    pub async fn child_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_child_counts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.child_counts(ids).await
+    }
+
+    pub async fn item_max_heights(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_max_heights(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_max_heights(ids).await
+    }
+
+    pub async fn item_media_facts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, MediaFacts>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_media_facts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_media_facts(ids).await
+    }
+
+    pub async fn media_shape(&self) -> Result<MediaShape, StoreError> {
+        // Preserve the existing Authority method's multi-statement aggregate
+        // semantics. The permit prevents an expired/stale replica result; it
+        // is not a new transaction spanning these independent aggregates.
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_media_shape().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.media_shape().await
+    }
+
+    pub async fn get_file_probe_json(&self, file_id: i64) -> Result<Option<String>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file_probe_json(file_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file_probe_json(file_id).await
+    }
 }
 
 // Compile-time proof that the composed trait remains object-safe and that the

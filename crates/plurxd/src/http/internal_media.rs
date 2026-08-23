@@ -52,6 +52,29 @@ pub(crate) async fn offers(
     Ok(Json(local_offer(&state, &request).await))
 }
 
+pub(crate) async fn shared_cache_canary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::shared_cache::CanaryResponse>, StatusCode> {
+    authorize(
+        &state,
+        &headers,
+        "POST",
+        crate::shared_cache::CANARY_PATH,
+        &body,
+    )
+    .await?;
+    let request = serde_json::from_slice::<crate::shared_cache::CanaryRequest>(&body)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    state
+        .shared_cache
+        .answer_canary(&request)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::CONFLICT)
+}
+
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,

@@ -402,6 +402,137 @@ budgets plus Home settled. Each delayed cohort enforces first content and every
 sample must prove both a 250 ms response time for its named optional endpoint
 and a 250 ms settled-minus-content gap before its settled bound is relaxed.
 
+### Replaceable cluster writes
+
+Replicated cache activity is deliberately less chatty than cache ownership.
+Repeated unfenced claim or use touches for one recipe and node within one
+serving process share one successful quorum write for five seconds. Active
+producer claim renewals use the fenced publication path: they remain
+synchronous because the same transaction advances the producer lease. The
+durable activity timestamp can therefore trail the newest in-process unfenced
+activity by less than five seconds; no cache publication path moves it backward.
+Completion, integrity invalidation, forgetting a cache location, and every
+offline/job ownership transition remain synchronous quorum mutations and do
+not use this gate.
+
+Manifest integrity scrubbing is separately bounded rather than time-coalesced:
+up to 128 location observations and their cursors share one quorum transaction.
+Its observation timestamp is monotone even if two completed batches arrive out
+of order; the cursor stays coupled to the batch that performed the checks.
+
+Membership keeps its existing one-heartbeat-per-node, ten-second cadence and
+thirty-second reachable window. Only concurrent or duplicate submissions
+inside 250 ms are collapsed. A caller waits for the first durable result before
+suppression is reported, and a failed first write reserves no window, allowing
+the next waiter to retry. A node is reachable through exactly 30 seconds after
+its last committed heartbeat and leaves rotation immediately after that
+boundary.
+
+There is no configuration or schema migration for these coalescers. Rolling
+downgrade is safe: an older process resumes the prior higher write rate. If
+diagnosing cache age, compare timestamps with the five-second durability
+boundary rather than treating every request as a promised database update.
+
+### Run the named four-machine topology campaign
+
+The P0c runner uses four private Linux hosts for voters and a fifth, external
+controller for load generation. It never joins, removes, pauses, or reuses a
+live plurx voter. Each measured topology gets fresh containers, ports in the
+IANA dynamic/private range (`49152--65535`), and a new
+`/var/tmp/plurx-cluster-named.*` data root on local durable storage. A
+controller-generated 256-bit nonce makes every root a single, predeclared
+basename. The same nonce is part of every container name, so two campaigns can
+never claim the same cleanup target. Successful and failed runs remove only
+the exact container names and nonce paths they recorded before remote creation.
+Each newly created root also receives a sibling marker derived from the
+separate, private output-owner capability; cleanup refuses a colliding root
+without that marker instead of treating the random basename as proof of
+ownership. The marker remains until the root itself is gone, so interrupted
+cleanup is safely retryable. Voter containers carry the same capability in a
+private cleanup label, and cleanup refuses to stop a colliding container unless
+its raw Docker inspection matches.
+
+Build from the isolated clone and keep private hostnames and addresses in an
+ignored config under `target/`:
+
+```bash
+cp benchmarks/cluster-named-runner.example.json \
+  target/cluster-named-runner.json
+$EDITOR target/cluster-named-runner.json
+
+sha=$(git rev-parse HEAD)
+export PLURX_NAMED_HOSTS='private-ssh-alias-1 private-ssh-alias-2 private-ssh-alias-3 private-ssh-alias-4'
+scripts/cluster-named-runner image "$sha"
+scripts/cluster-named-runner collect \
+  target/cluster-named-runner.json \
+  target/cluster-topology-named
+```
+
+The image command refuses a dirty or untracked clone and sends `git archive` of
+the exact full source SHA to Docker, so ignored credentials and controller-only
+files cannot enter the build context. It builds for the common native
+architecture reported by the four voters and requires that SHA as the image
+tag. Both Dockerfile stages are pinned by manifest digest. The build embeds the
+full source SHA in the runner binary and the runtime image's OCI revision
+label; collection executes that binary by immutable image ID and verifies both
+identities locally and on every voter. Collection independently requires a
+clean controller tree with the same HEAD at its opening and closing
+boundaries. It rechecks the image digest, native Linux architecture, four
+distinct salted machine identities, and an external controller identity before
+and after measurement. It also resamples and binds those fingerprints to each
+raw run. Every measured and cleanup container executes the verified digest
+with pulls disabled, never the mutable tag.
+
+Runtime SSH names, private addresses, and raw machine ids are transport-only;
+committed artifacts use bounded, opaque classification labels and build-salted
+fingerprints. The runner rejects public labels that contain transports, URLs,
+IP addresses, credential/identity markers, or token-shaped values, and accepts
+only the local `plurx-cluster-check:<full-sha>` image name. Before collection,
+confirm the configured ports are free, the controller and voters have no
+concurrent build, scan, backup, or benchmark work, and every `/var/tmp` root is
+the declared local durable device rather than tmpfs or a network mount.
+
+Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
+every raw `pair-NN.json`. After at least three pairs it computes the paired
+four-voter ÷ three-voter ratios for write p99, CPU seconds, storage-write bytes,
+and network-transmit bytes. Resource counters are captured concurrently on all
+voters at the stable pre-write barrier and again after convergence; the
+artifact retains monotone workload-window deltas, while Linux `VmHWM` is reset
+at the opening barrier. It may stop only when all two-sided 95% Student-t
+intervals have at most 5% multiplicative half-width, or after seven pairs with
+an `inconclusive` result. `campaign.json` records the medians, intervals,
+stopping verdict, isolated load-generator declaration, and reviewed budgets.
+Every raw run repeats the same isolation declaration and records the exact
+controller and voter fingerprint set used for that topology. Validate retained
+bytes and every cross-file hash with:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- \
+  topology-campaign-validate path/to/campaign.json
+```
+
+The output directory must not exist. `collect` generates a per-invocation
+256-bit owner and must win one atomic directory claim before it arms its cleanup
+trap, reserves ports, or creates remote state. A losing controller never owns a
+manifest and therefore cannot clean the winner. Pair files and `campaign.json`
+are published with same-directory, no-replace hard links, so a competing writer
+cannot overwrite earlier evidence. During an active topology,
+`.active-cleanup.json` is bound to that owner and atomically created with mode
+`0600` because it contains private transport details. The helper traps
+interruption and replays only its manifest through time-bounded SSH cleanup. It
+opens both the manifest and owner marker without following links, requires
+regular mode-`0600` files, retains their descriptors during remote cleanup, and
+rechecks their device/inode identities before deleting the manifest. It does
+not automatically clean a stale manifest from another invocation. If the
+controller itself is killed, recover the retained manifest explicitly before
+reusing the runner hosts. Preserve that directory as evidence and choose a
+fresh output directory for the next campaign:
+
+```bash
+scripts/cluster-named-runner cleanup \
+  target/cluster-topology-named/.active-cleanup.json
+```
+
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
 settings ship, `storage.data_dir` remains the compatibility root. On a fresh
 install, child mounts can isolate their workloads:
@@ -568,6 +699,39 @@ machine. `/healthz` is insufficient here; it proves that HTTP is alive, not
 that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
+
+**Enable bounded catalogue reads only after the rolling update settles.** Keep
+`cluster.bounded_replica_reads = false` while any voter runs an older build.
+After every voter is ready on the same bounded-read protocol, set the following
+identically on every voter and restart them one at a time again:
+
+```toml
+[cluster]
+bounded_replica_reads = true
+bounded_replica_max_lag_entries = 64
+```
+
+The optimization is limited to library browse, item/file lookup,
+recently-added, genre, Home previews, and technical-aggregate calls in the
+native and Plex-compatible read handlers. Authentication, watch state,
+settings, membership, leases, jobs, cache/offline ownership, mutations, and
+every write remain Authority operations. Search remains its existing
+node-local derived-index operation. Write-followed-by-read handlers continue to
+use Authority.
+
+A local result is returned only when a one-second quorum watermark, local
+term/leader/epoch, negotiated protocol, and the configured `0..10000` entry
+lag budget remain valid before and after the complete operation. Missing or
+changing proof and local SQL/mapping errors discard the local result and retry
+Authority. The existing multi-statement genre/count and media-shape operations
+retain their Authority semantics; the permit is not a new cross-statement
+snapshot guarantee.
+
+Set `cluster.bounded_replica_reads = false` on all voters, one at a time, for an
+immediate rollback that changes no schema or membership. `/readyz` removes a
+voter whose quorum proof is absent or whose local apply lag is nonzero; the
+read helper also falls back independently, so bypassing the load balancer does
+not turn an expired proof into a stale response.
 
 **Use readiness conservatively at the reverse proxy.** `/readyz` is an active
 replicated-store proof, not a free process counter: it checks cluster health and
@@ -791,6 +955,10 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Database, artwork, transcode cache (created if missing) |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
+| `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
+| `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
@@ -1666,10 +1834,71 @@ abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
 
-The cache bytes remain node-local. Until P5 placement lands, a completed title
-accelerates playback only when the request reaches the node holding that
-location. Do not point multiple daemons at one cache directory to simulate a
-shared cache; verified shared roots and distributed reader pins are P6.
+The cache bytes remain node-local. With P5 remote placement enabled, any
+ingress may select a voter that advertises the exact verified generation and
+proxy that worker's session, so a completed title is no longer useful only
+when the client happened to reach its holder. Enablement is still explicit:
+`PUT /api/v1/settings` with
+`{"cluster_media_pool_enabled": true}` succeeds only when every committed
+voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
+separates enabled, rollout-ready, and effective-ready state.
+
+#### Optional verified shared cache
+
+P6 adds a direct shared-cache fast path without making it a cluster
+requirement. Local cache and P5 owner routing remain complete fallbacks. Use
+the shared path only when all participating voters mount the same writable
+filesystem; never point two daemons at one ordinary node-local cache directory.
+
+Configure both node-local values on every participating voter. Paths may differ
+between hosts, but the id must describe the same underlying filesystem:
+
+```toml
+[cluster]
+shared_cache_dir = "/srv/plurx-shared"
+shared_cache_id = "media-cache-a"
+```
+
+The equivalent container variables are `PLURX_SHARED_CACHE_DIR` and
+`PLURX_SHARED_CACHE_ID`. Create and mount the directory before starting plurx,
+and give the daemon uid permission to create, rename, read, and remove entries.
+The id is combined with the durable cluster identity, so the same operator name
+in two unrelated clusters does not alias replicated cache state.
+
+Startup does not trust matching configuration. Every committed voter must pass
+an authenticated two-way canary: each node writes unpredictable bytes, a peer
+reads them and writes a response, and the origin reads that response back. Only
+then does the node classify completed portable generations as shared. A
+one-voter cluster performs the same write/read proof locally. Missing mounts,
+read-only mounts, different filesystems, identity mismatches, and unreachable
+voters leave the fast path unavailable while P5 local-holder routing continues.
+
+Portable, manifest-fenced speculative generations are copied into immutable
+shared generation directories after local publication succeeds. A nonproducer
+may then serve the verified generation directly instead of proxying through its
+producer. Every requested manifest and object is still authenticated; the
+canary proves common writable storage at admission time, not permanent byte
+integrity.
+
+Media sessions, ready offline packages, and active offline downloads hold typed
+replicated pins for the exact storage/recipe/generation identity. Session pins
+renew in the existing owner-liveness batch rather than per segment. Shared GC
+requires the exact `shared-cache-gc:<storage_id>` lease and retires the pointer
+only when no unexpired pin exists in that same transaction. Retirement first
+turns the row into a non-readable cleanup tombstone, then quarantines and
+deletes the deterministic generation path, and finally removes the tombstone.
+A crash at any boundary leaves bounded retryable state for the next lease owner.
+
+Any runtime shared-root `ENOENT`, I/O, manifest, or identity failure immediately
+marks this node's proof suspect and disables shared classification. Look for
+`shared cache proof lost; falling back to node-local holders`. The local ready
+generation remains usable when shared publication fails, and a later successful
+canary readmits the shared path. The two TOML keys are forward-compatible and
+already-running mixed-version P5 nodes ignore them. That is not a database
+downgrade guarantee: once a restarted P6 node advances SQLite to v26 or the
+replicated cluster schema to v11, a P5 binary refuses that newer schema. Roll
+forward, or restore the matching pre-P6 database snapshot with the older binary;
+do not attempt a code-only downgrade.
 
 Operational evidence is available in Settings → Activity and Logs:
 

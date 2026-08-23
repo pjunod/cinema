@@ -255,6 +255,7 @@ pub struct StreamListing {
 
 /// Deregisters its stream when dropped. Held by the response body, so it
 /// outlives the request handler and dies with the connection.
+#[derive(Clone)]
 pub struct StreamGuard {
     streams: Arc<Streams>,
     id: String,

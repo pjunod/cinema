@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9f245cdc", "a8f3137a", "31f25173"]
+points = ["cluster.auth", "cluster.membership", "core.media", "persistence.upgrades"]
+checks = ["cluster-auth", "database-upgrades", "rust-gate"]
+reason = "The retained P4 contracts admit only unfenced, replaceable cache activity and duplicate membership heartbeats to bounded process-local gates. Equal-identity waiters share the first successful quorum result, failures retry immediately, terminal and fenced operations bypass coalescing, timestamps remain monotone under wall-clock rollback, and the identity map degrades safely at its hard cap. The separate-process cluster check measures committed-index deltas, proving one cache burst and one duplicate-heartbeat window each consume one Raft entry while distinct and terminal controls remain durable."

@@ -17,7 +17,11 @@ hiqlite-store = ["dep:hiqlite", "dep:rustls"]
 # Test-only operation accounting for deterministic three-voter read-cost gates.
 # The daemon does not enable this feature, so production requests pay no atomic
 # counter overhead.
-cluster-read-cost-validation = ["hiqlite-store"]
+cluster-read-cost-validation = ["hiqlite-store", "hiqlite/validation-test-helpers"]
+# Exposes force paths used only by the separate-process fault harness. The
+# daemon never enables this feature, so production callers cannot bypass
+# write coalescing accidentally.
+cluster-validation = ["hiqlite-store"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -67,6 +71,7 @@ zeroize = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 axum = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 # The encoder `hiqlite-wal` writes Raft entries with. Tests only, and only so
 # the import transaction estimate can be checked against the real encoding
 # rather than trusted. Already in the tree via hiqlite, so this adds no new

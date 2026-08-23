@@ -622,6 +622,72 @@ pub struct CachedTranscode {
     pub last_used_at: i64,
 }
 
+/// One node's current proof that it can use a cache storage identity.
+///
+/// Paths deliberately do not cross this boundary. A shared path is node-local
+/// configuration; replicated state records only the stable storage identity
+/// and the result of a recent two-way mount proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheStorageMember {
+    pub storage_id: String,
+    pub node_id: String,
+    /// `local` or `shared`.
+    pub storage_class: String,
+    pub verified_at_ms: i64,
+    /// `verified`, `suspect`, or `unverified`.
+    pub verification_state: String,
+}
+
+/// One immutable, storage-keyed cache generation.
+///
+/// `generation_id` is part of every reader pin and deletion decision. A stale
+/// observation can therefore never pin or retire a replacement generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SharedCacheGeneration {
+    pub recipe_hash: String,
+    pub file_id: i64,
+    pub storage_id: String,
+    pub generation_id: String,
+    pub relative_dir: String,
+    pub bytes: i64,
+    pub manifest_digest: Option<String>,
+    pub last_used_at: i64,
+    /// True after a fenced GC winner retired the readable pointer but before
+    /// the derived filesystem paths and tombstone were durably finalized.
+    pub cleanup_pending: bool,
+}
+
+/// Durable consumers that can keep one shared-cache generation alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheConsumerKind {
+    MediaSession,
+    OfflinePackage,
+    OfflineDownload,
+}
+
+impl CacheConsumerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MediaSession => "media_session",
+            Self::OfflinePackage => "offline_package",
+            Self::OfflineDownload => "offline_download",
+        }
+    }
+}
+
+/// One exact distributed reader pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheConsumerPin {
+    pub storage_id: String,
+    pub recipe_hash: String,
+    pub generation_id: String,
+    pub consumer_kind: CacheConsumerKind,
+    pub consumer_id: String,
+    pub consumer_epoch: i64,
+    pub expires_at_ms: i64,
+}
+
 /// Bounded ownership facts for filesystem cleanup. `complete` is false when
 /// the backend found more rows than the safety ceiling; callers must then
 /// fail closed rather than treating an omitted owner as an orphan.
@@ -696,6 +762,96 @@ pub struct PretranscodeJob {
     pub not_before_ms: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// Durable owner route for one capability-authenticated HLS session.
+///
+/// The public `session_id` is random and never reused. `incarnation_id` is the
+/// coordination identity minted before placement; playback ids group a
+/// viewer's successive sessions but are never used as fences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MediaSessionRoute {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
+    pub state: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_origin_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Result of atomically claiming a user-scoped session-creation request id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSessionRequestClaim {
+    Acquired {
+        incarnation_id: String,
+    },
+    InFlight {
+        incarnation_id: String,
+        owner_node_id: Option<String>,
+        claim_expires_at_ms: i64,
+    },
+    Resolved(Box<MediaSessionRoute>),
+    Conflict,
+    Overloaded,
+}
+
+/// Inputs committed when a selected worker has created the local session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivation {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    /// When a stall reopen names a durable predecessor, activation is a CAS:
+    /// the playback pointer must still name this exact incarnation. Ordinary
+    /// starts leave this unset and replace whichever route is current.
+    pub expected_predecessor_incarnation_id: Option<String>,
+    /// Distinguishes an unfenced ordinary start from a legacy reopen that
+    /// observed no durable predecessor. When true with no expected id, the
+    /// atomic activation requires the playback pointer to remain absent.
+    pub fence_predecessor: bool,
+    pub request_id: Option<String>,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivationOutcome {
+    pub route: MediaSessionRoute,
+    pub predecessor: Option<MediaSessionRoute>,
+}
+
+/// One exact owner/epoch tuple in the two-second session liveness batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionRenewal {
+    pub incarnation_id: String,
+    pub owner_epoch: i64,
+}
+
+/// Lean owner inventory used by the liveness loop and removal barrier.
+/// Persisted recipes and responses are deliberately excluded from this hot
+/// path so renewal cost is independent of user-shaped JSON sizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedMediaSessionLease {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
 }
 
 /// Versioned, bounded filter attached to a queue row.
@@ -1030,7 +1186,7 @@ impl ItemSort {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ItemPage {
     pub items: Vec<Item>,
     pub total: i64,
@@ -1042,7 +1198,7 @@ pub struct ItemPage {
 /// HTTP layer joins these pages to the authoritative library roster and emits
 /// an empty page for them. Keeping only the id here avoids leaking HTTP DTOs
 /// into the durable storage boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HomePreviewPage {
     pub library_id: i64,
     pub items: Vec<Item>,
@@ -1062,7 +1218,7 @@ pub struct HomePreviewPage {
 /// Counts, deliberately, not a list. Nobody needs to know which files; they
 /// need to know whether the 4K HDR they own is mostly the kind the fast path
 /// can reach.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MediaShape {
     /// Files with a successful probe. Everything below is a subset — an
     /// unprobed file has no codec, no height and no HDR flavour, and counting

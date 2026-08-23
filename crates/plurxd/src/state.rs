@@ -24,7 +24,7 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationStore, Store,
+    keys, ArtworkRepairFence, CatalogueReader, PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -296,8 +296,12 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
+    pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    /// Monotonic, Store-free authority for mutable media and readiness.
+    pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
     /// Bounded authenticated client for node-local activity snapshots.
@@ -306,6 +310,8 @@ pub struct AppState {
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
+    /// Authenticated remote start/abort and streaming HLS relay transport.
+    pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -316,6 +322,9 @@ pub struct AppState {
     /// Finished content-addressed transcodes. Offline routes never join a
     /// request-controlled path directly to this root.
     pub cache_dir: PathBuf,
+    /// Optional shared-cache mount, admitted only while its all-voter canary
+    /// proof remains current.
+    pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
@@ -385,6 +394,7 @@ impl AppState {
         system: SystemInfo,
         logs: Arc<LogBuffer>,
     ) -> Self {
+        let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 server_name,
@@ -397,6 +407,10 @@ impl AppState {
                 credential_key: Arc::new(CredentialKey::generate()),
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_id: String::new(),
+                shared_cache_dir: PathBuf::new(),
+                shared_cache_id: String::new(),
+                catalogue,
             },
             store,
             dirs,
@@ -424,7 +438,12 @@ impl AppState {
             credential_key,
             replication,
             membership,
+            cluster_id,
+            shared_cache_dir,
+            shared_cache_id,
+            catalogue,
         } = config;
+        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -440,6 +459,14 @@ impl AppState {
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
         let progress = crate::progress::ProgressCoalescer::new(Arc::clone(&store));
+        let shared_cache = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_cache_dir,
+            shared_cache_id,
+            &cluster_id,
+            node_id.clone(),
+            membership.clone(),
+            Arc::clone(&store),
+        );
         let transcode = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -456,7 +483,8 @@ impl AppState {
                 cache_dir.clone(),
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-            ),
+            )
+            .with_shared_cache(Arc::clone(&shared_cache)),
         );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.
         let trakt_base = std::env::var("PLURX_TRAKT_BASE")
@@ -471,19 +499,27 @@ impl AppState {
         let offline =
             OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+            membership.clone(),
+            Arc::clone(&store),
+        );
         AppState {
             store,
+            catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
             ),
+            serving,
             membership,
             media_pool,
+            media_sessions,
             server_name,
             node_id,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
+            shared_cache,
             subs_dir,
             pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
                 matches!(
@@ -575,6 +611,10 @@ pub struct AppConfig {
     /// Actual backend selected before HTTP starts; tests default to SQLite.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    pub cluster_id: String,
+    pub shared_cache_dir: PathBuf,
+    pub shared_cache_id: String,
+    pub catalogue: CatalogueReader,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

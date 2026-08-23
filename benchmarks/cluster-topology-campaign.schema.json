@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-topology-campaign-v1.json",
+  "title": "plurx named-runner topology campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "runner_id",
+    "image",
+    "image_digest",
+    "native_architecture",
+    "controller_machine_fingerprint",
+    "voter_machine_fingerprints",
+    "controller_host",
+    "load_generator_host",
+    "load_generator_isolation",
+    "voter_labels",
+    "min_pairs",
+    "max_pairs",
+    "confidence_half_width_percent",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "stop_reason",
+    "result",
+    "raw_pairs",
+    "metrics",
+    "budgets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "named_runner" },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "runner_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "image": { "type": "string", "pattern": "^plurx-cluster-check:[0-9a-f]{40}$" },
+    "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "native_architecture": { "enum": ["amd64", "arm64"] },
+    "controller_machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "voter_machine_fingerprints": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "controller_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_isolation": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "voter_labels": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "min_pairs": { "const": 3 },
+    "max_pairs": { "const": 7 },
+    "confidence_half_width_percent": { "const": 5.0 },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "stop_reason": { "enum": ["precision_reached", "max_pairs_reached"] },
+    "result": { "enum": ["accepted", "inconclusive"] },
+    "raw_pairs": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/raw_pair" }
+    },
+    "metrics": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/metric" }
+    },
+    "budgets": { "$ref": "#/$defs/budgets" }
+  },
+  "$defs": {
+    "raw_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pair_index", "topology_order", "artifact_path", "artifact_sha256"],
+      "properties": {
+        "pair_index": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "topology_order": {
+          "oneOf": [
+            { "const": [3, 4] },
+            { "const": [4, 3] }
+          ]
+        },
+        "artifact_path": { "type": "string", "pattern": "^pair-[0-9]{2}\\.json$" },
+        "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "unit",
+        "three_voter_values",
+        "four_voter_values",
+        "four_over_three_ratios",
+        "median_three_voter",
+        "median_four_voter",
+        "median_ratio",
+        "geometric_mean_ratio",
+        "ci95_lower_ratio",
+        "ci95_upper_ratio",
+        "ci95_half_width_percent",
+        "precision_reached"
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "acknowledged_write_p99",
+            "cpu",
+            "storage_write",
+            "network_transmit"
+          ]
+        },
+        "unit": { "enum": ["microseconds", "seconds", "bytes"] },
+        "three_voter_values": { "$ref": "#/$defs/positive_samples" },
+        "four_voter_values": { "$ref": "#/$defs/positive_samples" },
+        "four_over_three_ratios": { "$ref": "#/$defs/positive_samples" },
+        "median_three_voter": { "type": "number", "exclusiveMinimum": 0 },
+        "median_four_voter": { "type": "number", "exclusiveMinimum": 0 },
+        "median_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "geometric_mean_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_lower_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_upper_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_half_width_percent": { "type": "number", "minimum": 0 },
+        "precision_reached": { "type": "boolean" }
+      }
+    },
+    "positive_samples": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 7,
+      "items": { "type": "number", "exclusiveMinimum": 0 }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "additional_request_errors",
+        "unaffected_store_p99_regression_percent",
+        "instrumentation_cpu_and_wall_overhead_percent",
+        "auth_activity_entry_reduction_percent",
+        "authority_catalogue_read_reduction_percent",
+        "browse_p99_regression_percent"
+      ],
+      "properties": {
+        "additional_request_errors": { "const": 0 },
+        "unaffected_store_p99_regression_percent": { "const": 10.0 },
+        "instrumentation_cpu_and_wall_overhead_percent": { "const": 2.0 },
+        "auth_activity_entry_reduction_percent": { "const": 95.0 },
+        "authority_catalogue_read_reduction_percent": { "const": 70.0 },
+        "browse_p99_regression_percent": { "const": 10.0 }
+      }
+    }
+  }
+}
