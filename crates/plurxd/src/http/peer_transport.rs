@@ -112,6 +112,68 @@ impl PeerTransport {
             })?;
         read_bounded(response, deadline, max_response_bytes).await
     }
+
+    /// Send an authenticated peer request but leave the response body as a
+    /// stream. Media segments can be much larger than control-plane JSON and
+    /// must apply TCP backpressure instead of being accumulated at ingress.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_stream(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        method: reqwest::Method,
+        path: &'static str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+        auth_mode: PeerAuthMode,
+    ) -> Result<reqwest::Response, PeerTransportError> {
+        let Some(url) = peer_url(base, path) else {
+            return Err(PeerTransportError::Unreachable);
+        };
+        let Some(client) = self.client.as_ref().ok() else {
+            return Err(PeerTransportError::Unreachable);
+        };
+        let timestamp_ms = unix_ms();
+        let method_name = method.as_str();
+        let auth = match auth_mode {
+            PeerAuthMode::LegacyActivity => self
+                .membership
+                .sign_activity_request(expected_node_id, timestamp_ms)
+                .map(SignedPeerAuth::Activity),
+            PeerAuthMode::ExactRequest => self
+                .membership
+                .sign_internal_peer_request(
+                    expected_node_id,
+                    timestamp_ms,
+                    &uuid::Uuid::new_v4().to_string(),
+                    method_name,
+                    path,
+                    &body,
+                )
+                .map(SignedPeerAuth::Exact),
+        }
+        .map_err(|_| PeerTransportError::Unreachable)?;
+        let mut request = client.request(method, url);
+        request = match auth {
+            SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
+            SignedPeerAuth::Exact(auth) => signed_headers(request, &auth),
+        };
+        if !body.is_empty() {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+        }
+        tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| PeerTransportError::TimedOut)?
+            .map_err(|error| {
+                if error.is_timeout() {
+                    PeerTransportError::TimedOut
+                } else {
+                    PeerTransportError::Unreachable
+                }
+            })
+    }
 }
 
 enum SignedPeerAuth {
@@ -285,6 +347,18 @@ mod tests {
 
     #[test]
     fn exact_header_parser_requires_a_canonical_signed_nonce() {
+        let mut household = axum::http::HeaderMap::new();
+        household.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer household-session-token"
+                .parse()
+                .expect("household bearer"),
+        );
+        assert!(
+            exact_auth_from_headers(&household).is_none(),
+            "internal media routes must not widen a household bearer into peer authority"
+        );
+
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(NODE_HEADER, "node-a".parse().expect("node"));
         headers.insert(TARGET_HEADER, "node-b".parse().expect("target"));

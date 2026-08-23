@@ -261,7 +261,7 @@ pub async fn run<R: AsyncRead + Unpin>(
             Err(e) => {
                 // A killed child closes the pipe under us. That is a session
                 // ending, not a fault to shout about.
-                tracing::debug!(session = %session_id, "copy segmenter pipe read: {e}");
+                tracing::debug!(session = %crate::transcode::session_log_id(session_id), "copy segmenter pipe read: {e}");
                 break;
             }
         };
@@ -287,7 +287,7 @@ pub async fn run<R: AsyncRead + Unpin>(
                     // died — the playlist keeps what was real, without an
                     // ENDLIST claiming the film finished here.
                     tracing::error!(
-                        session = %session_id,
+                        session = %crate::transcode::session_log_id(session_id),
                         "copy segmenter lost the fragment stream: {e}"
                     );
                     return finish(segmenter, &mut out, session_id, false).await;
@@ -338,7 +338,7 @@ pub async fn run<R: AsyncRead + Unpin>(
                         };
                         match fmp4::promote_hevc_parameter_sets(&mut init, &fragment) {
                             Ok(true) => tracing::info!(
-                                session = %session_id,
+                                session = %crate::transcode::session_log_id(session_id),
                                 "promoted in-band HEVC parameter sets into the HLS init segment"
                             ),
                             Ok(false) => {}
@@ -350,7 +350,7 @@ pub async fn run<R: AsyncRead + Unpin>(
                         }
                         match fmp4::promote_hdr10_static_metadata(&mut init, &fragment) {
                             Ok(true) => tracing::info!(
-                                session = %session_id,
+                                session = %crate::transcode::session_log_id(session_id),
                                 "promoted HDR10 static metadata into the HLS init segment"
                             ),
                             Ok(false) => {}
@@ -373,12 +373,12 @@ pub async fn run<R: AsyncRead + Unpin>(
                             if let Err(e) = out.write_segment(&published).await {
                                 if session_gone(&e) {
                                     tracing::debug!(
-                                        session = %session_id,
+                                        session = %crate::transcode::session_log_id(session_id),
                                         "session directory went away mid-write; stopping"
                                     );
                                 } else {
                                     tracing::error!(
-                                        session = %session_id,
+                                        session = %crate::transcode::session_log_id(session_id),
                                         "writing {}: {e}", published.name()
                                     );
                                 }
@@ -392,7 +392,7 @@ pub async fn run<R: AsyncRead + Unpin>(
                             if !out.started {
                                 return Outcome::Unsupported(format!("{e}"));
                             }
-                            tracing::error!(session = %session_id, "merging a segment: {e}");
+                            tracing::error!(session = %crate::transcode::session_log_id(session_id), "merging a segment: {e}");
                             return Outcome::Ran(seg.counts());
                         }
                     }
@@ -401,7 +401,7 @@ pub async fn run<R: AsyncRead + Unpin>(
                         if held > MEMORY_WARN_BYTES {
                             warned_memory = true;
                             tracing::warn!(
-                                session = %session_id, held_bytes = held,
+                                session = %crate::transcode::session_log_id(session_id), held_bytes = held,
                                 "copy segmenter is holding more than a segment's worth of \
                                  bytes; the byte ceiling should have cut before here"
                             );
@@ -484,7 +484,7 @@ async fn finish(
                         Ok(()) => {}
                         Err(e) if session_gone(&e) => {
                             tracing::debug!(
-                                session = %session_id,
+                                session = %crate::transcode::session_log_id(session_id),
                                 "session directory went away before the final segment; stopping"
                             );
                             wrote_all = false;
@@ -492,7 +492,7 @@ async fn finish(
                         }
                         Err(e) => {
                             tracing::error!(
-                                session = %session_id,
+                                session = %crate::transcode::session_log_id(session_id),
                                 "writing a final segment: {e}"
                             );
                             wrote_all = false;
@@ -503,16 +503,16 @@ async fn finish(
                 wrote_all
             }
             Err(e) => {
-                tracing::error!(session = %session_id, "merging the final segment: {e}");
+                tracing::error!(session = %crate::transcode::session_log_id(session_id), "merging the final segment: {e}");
                 false
             }
         };
         if final_ok {
             if let Err(e) = out.write_endlist().await {
                 if session_gone(&e) {
-                    tracing::debug!(session = %session_id, "session gone before the playlist end");
+                    tracing::debug!(session = %crate::transcode::session_log_id(session_id), "session gone before the playlist end");
                 } else {
-                    tracing::error!(session = %session_id, "writing the playlist end: {e}");
+                    tracing::error!(session = %crate::transcode::session_log_id(session_id), "writing the playlist end: {e}");
                 }
             }
         }

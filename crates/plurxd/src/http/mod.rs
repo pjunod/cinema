@@ -17,6 +17,7 @@ mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_media;
+pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
@@ -308,6 +309,24 @@ pub fn router(state: AppState) -> Router {
             crate::media_pool::OFFERS_PATH,
             post(internal_media::offers)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
+        .route(
+            crate::media_sessions::START_PATH,
+            post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ABORT_PATH,
+            post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::RELAY_PATH,
+            post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
         )
         .nest("/api/v1", api)
         .merge(plex_routes)
@@ -2907,7 +2926,13 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, media) = call(&app, get("/api/v1/cluster/media", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(media["protocol_version"], 1);
+        assert_eq!(
+            media["protocol_version"],
+            crate::media_pool::PROTOCOL_VERSION
+        );
+        assert_eq!(media["remote_placement_enabled"], false);
+        assert_eq!(media["remote_placement_rollout_ready"], false);
+        assert_eq!(media["remote_placement_ready"], false);
         assert_eq!(media["nodes"].as_array().map(Vec::len), Some(1));
         assert!(
             !media.to_string().contains("path"),
@@ -2916,6 +2941,45 @@ mod tests {
         let (status, body) = call(&app, get("/api/v1/cluster/nodes", Some(&admin))).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("every committed voter")),
+            "legacy settings errors retain their {{error}} response contract: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], false);
+        assert_eq!(body["cluster_media_pool_ready"], false);
 
         let leave_body = json!({ "node_id": "test-node" });
         let (status, _) = call(
