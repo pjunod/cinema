@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["927e3366"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained six-compaction live growth proof computes the exact OpenRaft LogsSinceLast trigger in next-index space, distinguishes no snapshot from a real snapshot at index zero, quorum-brackets the planned writes to reject concurrent contamination, stops all writes while asynchronous snapshot publication completes, and preserves the strict 512-entry settled-tail bound."
