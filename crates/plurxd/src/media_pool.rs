@@ -356,7 +356,7 @@ impl MediaPool {
         let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
         let mut outcomes = self.reap_root_probes();
         self.start_root_probes(&roots, deadline).await;
-        outcomes.extend(self.reap_root_probes());
+        outcomes.extend(self.reap_root_probes_until(&roots, deadline));
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -415,21 +415,24 @@ impl MediaPool {
                 }
                 match spawn_library_root_probe(&root) {
                     Ok(mut child) => {
+                        let mut registry = registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Check while holding the publication lock. Otherwise
+                        // this thread can be preempted after an earlier clock
+                        // sample and insert a positive-capable child after the
+                        // refresher has already performed its final fence.
                         let late = tokio::time::Instant::now() >= deadline;
                         if late {
                             let _ = child.start_kill();
                         }
-                        registry
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .running
-                            .insert(
-                                root,
-                                RootProbe {
-                                    child,
-                                    kill_sent: late,
-                                },
-                            );
+                        registry.running.insert(
+                            root,
+                            RootProbe {
+                                child,
+                                kill_sent: late,
+                            },
+                        );
                     }
                     Err(error) => {
                         tracing::debug!(%error, path = %root.display(), "could not start media root probe");
