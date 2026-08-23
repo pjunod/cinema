@@ -666,10 +666,12 @@ reconciliation; it is released only after the exact worker is accepted or
 aborted. This still reaps the old local worker before admission, which lets a
 one-slot encoder replace itself without deadlocking. A racing replacement may
 wait at most three seconds for that gate and must still be inside the caller's
-common placement deadline before it can reap anything. The activation and its
-cleanup guard run in an owned task, so client disconnects, placement deadlines,
-renames, and racing starts cannot strand an encoder or publish a route to a
-worker another attempt already killed.
+common placement deadline before it can reap anything. The worker carries that
+deadline through request claim recovery and normalization, then checks it again
+immediately before either transcode or copy-video predecessor reap. The
+activation and its cleanup guard run in an owned task, so client disconnects,
+placement deadlines, renames, and racing starts cannot strand an encoder or
+publish a route to a worker another attempt already killed.
 
 ## 7. Owner proxy and takeover — the capability URL stays stable
 
@@ -1089,8 +1091,11 @@ strictly outlives the complete ingress timeline. Fenced workers stop renewing
 even while child teardown waits on a transition lock. SQLite route/inventory
 lookups use the read pool, while active/negative route caching bounds Hiqlite
 read pressure. Stale-session settlement attempts also time out and release
-their fixed tracking slots, allowing an idempotent later retry after an
-unknown commit result.
+their in-flight tracking state into the same fixed 64-slot retry boundary.
+Failed attempts use a 30-second exponential backoff capped at five minutes,
+and retry state is retained only while the durable route remains visible. This
+allows an idempotent later retry after an unknown commit result without queuing
+another uncancellable Store operation on every three-second lease tick.
 
 Remote placement remains an explicit cluster-wide opt-in. An admin enables it
 with `PUT /api/v1/settings` and
