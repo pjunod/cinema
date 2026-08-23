@@ -1426,6 +1426,10 @@ struct Session {
     /// has decided to replace but reaches the gate after the watchdog.
     #[cfg(test)]
     watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous at the first per-session activity read. It proves
+    /// the manager registry lock was released before telemetry can wait.
+    #[cfg(test)]
+    activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -1877,6 +1881,18 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    #[cfg(test)]
+    {
+        let pause = s
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
     let (ahead, first_retained_segment, published_end_ms) = {
         let index = s.segments.lock().await;
         (
@@ -2632,6 +2648,14 @@ pub struct SessionInfo {
     /// after resume so a flapping session cannot look healthy merely because
     /// the activity poll landed between transitions.
     pub suspend_count: u64,
+}
+
+/// Cheap identity used to choose the globally newest activity before walking
+/// any session telemetry locks.
+#[derive(Clone, Debug)]
+pub struct DeliveryCandidate {
+    pub id: String,
+    pub started_unix: i64,
 }
 
 /// What a client asked for, normalised. Two requests with the same
@@ -5388,6 +5412,8 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: Some(cache_reader),
@@ -7945,6 +7971,8 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -8483,6 +8511,8 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -8707,17 +8737,87 @@ impl TranscodeManager {
     /// would relabel a stream mid-play. The method is fixed when the session
     /// is created and never moves.
     pub async fn list_deliveries(&self) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        self.list_deliveries_bounded(usize::MAX).await
+    }
+
+    /// A diagnostics-safe prefix that bounds the expensive per-session
+    /// telemetry reads before they begin.
+    pub async fn list_deliveries_bounded(
+        &self,
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let candidates = self.delivery_candidates_bounded(limit).await;
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let mut details = self
+            .delivery_details_bounded(&ids, limit)
+            .await
+            .into_iter()
+            .map(|detail| (detail.0.id.clone(), detail))
+            .collect::<HashMap<_, _>>();
+        candidates
+            .into_iter()
+            .filter_map(|candidate| details.remove(&candidate.id))
+            .collect()
+    }
+
+    /// Top-K session identities without awaiting any per-session telemetry.
+    pub async fn delivery_candidates_bounded(&self, limit: usize) -> Vec<DeliveryCandidate> {
+        let sessions = self.sessions.lock().await;
+        let ids = crate::delivery::newest_ids_bounded(
+            sessions
+                .iter()
+                .map(|(id, session)| (id.as_str(), session.started_unix)),
+            limit,
+        );
+        let mut candidates = ids
+            .into_iter()
+            .filter_map(|id| {
+                sessions.get(&id).map(|session| DeliveryCandidate {
+                    id,
+                    started_unix: session.started_unix,
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .started_unix
+                .cmp(&left.started_unix)
+                .then(left.id.cmp(&right.id))
+        });
+        candidates
+    }
+
+    /// Enrich only explicitly selected sessions. Clone the Arcs under the map
+    /// lock, then release it before awaiting any session-owned lock.
+    pub async fn delivery_details_bounded(
+        &self,
+        ids: &[String],
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            ids.iter()
+                .take(limit)
+                .filter_map(|id| {
+                    sessions
+                        .get(id)
+                        .cloned()
+                        .map(|session| (id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
-        let sessions = self.sessions.lock().await;
-        let mut out = Vec::with_capacity(sessions.len());
-        for (id, s) in sessions.iter() {
+        let mut out = Vec::with_capacity(selected.len());
+        for (id, s) in selected {
             out.push((
-                session_info(id, s, limits, global_live_bytes, global_ahead_bytes).await,
+                session_info(&id, &s, limits, global_live_bytes, global_ahead_bytes).await,
                 s.method,
             ));
         }
-        out.sort_by_key(|(s, _)| s.started_unix);
         out
     }
 
@@ -10296,6 +10396,7 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_verdict_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         watchdog_transition_pause: std::sync::Mutex::new(None),
+        activity_detail_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         retirement_started: AtomicBool::new(false),
         cached: false,
@@ -10375,6 +10476,47 @@ mod tests {
         );
         drop(sessions);
         handle.join().expect("join session reader").expect("send");
+    }
+
+    #[tokio::test]
+    async fn activity_telemetry_wait_never_holds_the_session_map() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = tempfile::tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = Arc::new(test_session(dir.path().join("session")));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("selected".to_owned(), Arc::clone(&session));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let reader = Arc::clone(&manager);
+        let detail = tokio::spawn(async move {
+            reader
+                .delivery_details_bounded(&["selected".to_owned()], 1)
+                .await
+        });
+        pause.wait().await;
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
+                .await
+                .expect("another map operation must not wait on selected-session telemetry"),
+            1
+        );
+        pause.wait().await;
+        assert_eq!(detail.await.expect("activity reader").len(), 1);
     }
 
     fn profile5_file() -> plurx_core::domain::MediaFile {
@@ -14457,6 +14599,7 @@ mod tests {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached,

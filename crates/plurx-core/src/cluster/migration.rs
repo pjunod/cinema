@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hiqlite-store")]
 use super::membership::{
-    decode_join_token, join_token_digest, ClusterPeer, FinalizeJoinRequest, JoinPayload,
-    JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
+    decode_join_token, join_token_digest, ActivitySigningKey, ClusterPeer, FinalizeJoinRequest,
+    JoinPayload, JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
 };
 
 pub const SQLITE_FILENAME: &str = "plurx.db";
@@ -69,6 +69,8 @@ const ACTIVATION_ATTEMPT_FILENAME: &str = "hiqlite-activation.in-progress";
 const RAFT_SECRET_FILENAME: &str = "secret_raft";
 #[cfg(feature = "hiqlite-store")]
 const API_SECRET_FILENAME: &str = "secret_api";
+#[cfg(feature = "hiqlite-store")]
+const ACTIVITY_SIGNING_KEY_FILENAME: &str = "activity_http_signing_key";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_DATABASE_FILENAME: &str = "plurx.db";
 #[cfg(feature = "hiqlite-store")]
@@ -465,6 +467,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             hostname: super::membership::system_short_hostname().unwrap_or_default(),
             raft_address: local.raft_address.clone(),
             api_address: local.api_address.clone(),
+            http_base: configured_artwork_url(config)?,
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
         },
@@ -529,6 +532,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
                 &config.cluster.credential_key_path(&config.storage.data_dir),
             )?,
         },
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         payload.activation_marker,
     )
     .await
@@ -1340,6 +1344,7 @@ async fn open_active_store_with_key(
             api: secrets.api,
             credential_key: credential_key_secret,
         },
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
     )
     .await
@@ -1937,9 +1942,19 @@ fn configured_advertise_host(config: &Config) -> Result<String, StoreError> {
 fn configured_join_url(config: &Config) -> Result<String, StoreError> {
     let configured = config.cluster.join_url.trim().trim_end_matches('/');
     if !configured.is_empty() {
-        if !(configured.starts_with("http://") || configured.starts_with("https://")) {
+        let url = reqwest::Url::parse(configured).map_err(|_| {
+            StoreError::Migration("cluster.join_url must be a valid http(s) URL".to_owned())
+        })?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err(StoreError::Migration(
-                "cluster.join_url must start with http:// or https://".to_owned(),
+                "cluster.join_url must be an http(s) URL without credentials, query, or fragment"
+                    .to_owned(),
             ));
         }
         return Ok(configured.to_owned());
@@ -1955,14 +1970,14 @@ fn configured_join_url(config: &Config) -> Result<String, StoreError> {
 
 #[cfg(feature = "hiqlite-store")]
 fn configured_artwork_url(config: &Config) -> Result<String, StoreError> {
-    let configured = config.cluster.artwork_url.trim().trim_end_matches('/');
+    let configured = config.cluster.artwork_url.trim();
     if !configured.is_empty() {
-        if !(configured.starts_with("http://") || configured.starts_with("https://")) {
-            return Err(StoreError::Migration(
-                "cluster.artwork_url must start with http:// or https://".to_owned(),
-            ));
-        }
-        return Ok(configured.to_owned());
+        return super::membership::normalize_internal_http_base(configured).ok_or_else(|| {
+            StoreError::Migration(
+                "cluster.artwork_url must be an http(s) origin without credentials or a path"
+                    .to_owned(),
+            )
+        });
     }
     Ok(format!(
         "http://{}",
@@ -2121,6 +2136,13 @@ fn load_or_create_secret(data_dir: &Path, filename: &str) -> Result<String, Stor
     }
     remove_file_if_present(&temporary)?;
     read_secret(&path)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn load_or_create_activity_signing_key(data_dir: &Path) -> Result<ActivitySigningKey, StoreError> {
+    let seed = load_or_create_secret(data_dir, ACTIVITY_SIGNING_KEY_FILENAME)?;
+    ActivitySigningKey::from_seed_hex(&seed)
+        .map_err(|error| StoreError::Identity(error.to_string()))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2792,6 +2814,32 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_url_preserves_reverse_proxy_prefix_but_peer_url_requires_an_origin() {
+        let mut config = Config::default();
+        config.cluster.join_url = "https://cluster.example/plurx/".to_owned();
+        assert_eq!(
+            configured_join_url(&config).expect("path-prefixed join coordinator"),
+            "https://cluster.example/plurx"
+        );
+
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        assert!(
+            configured_artwork_url(&config).is_err(),
+            "peer routes must not inherit a reverse-proxy path prefix"
+        );
+
+        for invalid in [
+            "https://user:secret@cluster.example/plurx",
+            "https://cluster.example/plurx?redirect=elsewhere",
+            "file:///tmp/plurx.sock",
+        ] {
+            config.cluster.join_url = invalid.to_owned();
+            assert!(configured_join_url(&config).is_err(), "accepted {invalid}");
+        }
+    }
     use crate::store::{SettingsStore, SqliteStore};
 
     #[cfg(feature = "hiqlite-store")]
@@ -3610,6 +3658,8 @@ mod tests {
                 hostname: "joining-test-node".to_owned(),
                 raft_address: staged_local.raft_address,
                 api_address: staged_local.api_address,
+                http_base: configured_artwork_url(&joining_config)
+                    .expect("derive the staged node artwork origin"),
                 schema_version: AUTH_SCHEMA_VERSION,
                 protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             })

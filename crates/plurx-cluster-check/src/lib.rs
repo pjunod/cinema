@@ -14,26 +14,25 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::io::Write as _;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
+use hmac::{Hmac, Mac};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::cluster::membership::{
-    join_token_digest, ArtworkPeerAuth, ClusterAvailability, ClusterPeer, FinalizeJoinRequest,
-    IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager, MembershipStatus,
-    RedeemJoinRequest,
+    join_token_digest, ActivityPeerAuth, ActivitySigningKey, ArtworkPeerAuth, ClusterAvailability,
+    ClusterPeer, FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError,
+    MembershipManager, MembershipStatus, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -467,7 +466,10 @@ async fn run_singleton_takeover_case() -> Result<()> {
     let peers = (1..=3)
         .filter(|node_id| *node_id != old_owner)
         .collect::<Vec<_>>();
-    let (stable_term, _) = raft_term_and_index(&mut cluster, leader).await?;
+    let (stable_leader, stable_term, _) = raft_position(&mut cluster, leader).await?;
+    if stable_leader != Some(leader) {
+        bail!("singleton proof leader changed before its initial boundary sample");
+    }
     let mut provider = ProviderFixture::start().await?;
 
     let initial = start_singleton_probe(&mut cluster, old_owner, &provider.url).await?;
@@ -512,8 +514,9 @@ async fn run_singleton_takeover_case() -> Result<()> {
         );
     }
     wait_until_lease_expired(&mut cluster, leader, &authoritative_old).await?;
-    let (baseline_term, applied_before) = raft_term_and_index(&mut cluster, leader).await?;
-    if baseline_term != stable_term || cluster.leader().await? != leader {
+    let (baseline_leader, baseline_term, applied_before) =
+        raft_position(&mut cluster, leader).await?;
+    if baseline_term != stable_term || baseline_leader != Some(leader) {
         bail!("pausing a follower changed leader/term before singleton takeover");
     }
 
@@ -577,6 +580,17 @@ async fn run_singleton_takeover_case() -> Result<()> {
     wait_singleton_outcome(&mut cluster, *successor_node, &["published"]).await?;
     require_singleton_value(&mut cluster, leader, "successor", false).await?;
 
+    // Keep the no-election invariant scoped to the takeover itself. A voter
+    // resumed after being stopped longer than an election timeout can
+    // legitimately increment the term before it receives a fresh heartbeat.
+    // Applied indexes are global log positions, so the post-baseline budget
+    // below can still include the resumed stale-token rejection even when that
+    // scheduling race elects a new leader.
+    let (takeover_leader, takeover_term, _) = raft_position(&mut cluster, leader).await?;
+    if takeover_term != stable_term || takeover_leader != Some(leader) {
+        bail!("singleton takeover changed leader/term before the paused voter resumed");
+    }
+
     paused.resume()?;
     wait_singleton_outcome(&mut cluster, old_owner, &["lease_lost"]).await?;
     provider.release_old_owner();
@@ -609,11 +623,17 @@ async fn run_singleton_takeover_case() -> Result<()> {
             provider.call_count()
         );
     }
-    let (final_term, applied_after) = raft_term_and_index(&mut cluster, leader).await?;
-    if final_term != stable_term || cluster.leader().await? != leader {
-        bail!("singleton proof changed leader/term during its measured interval");
-    }
-    let delta = applied_after.saturating_sub(applied_before);
+    // Take the maximum applied position across all live voters. Sampling a
+    // separately discovered leader can undercount just after an election: it
+    // may contain the committed stale-token entry without having applied it
+    // yet, while the former leader already did. A backward maximum is an
+    // invalid proof, not a zero-entry interval.
+    let applied_after = max_applied_index(&mut cluster, &[1, 2, 3]).await?;
+    let delta = applied_after.checked_sub(applied_before).ok_or_else(|| {
+        anyhow::anyhow!(
+            "singleton applied index moved backward: before={applied_before} after={applied_after}"
+        )
+    })?;
     if delta > SINGLETON_POST_BASELINE_COMMIT_BUDGET {
         bail!(
             "singleton takeover consumed {delta} post-baseline Raft entries (budget {}): old={authoritative_old:?} successor={successor:?}",
@@ -773,15 +793,28 @@ async fn require_singleton_value(
     }
 }
 
-async fn raft_term_and_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<(u64, u64)> {
+async fn raft_position(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<(Option<u64>, u64, u64)> {
     match cluster.request(node_id, Request::Metrics).await? {
         Response::Metrics {
+            leader,
             current_term,
             applied_index: Some(applied_index),
             ..
-        } => Ok((current_term, applied_index)),
+        } => Ok((leader, current_term, applied_index)),
         response => bail!("singleton proof could not sample Raft position: {response:?}"),
     }
+}
+
+async fn max_applied_index(cluster: &mut ClusterProcesses, nodes: &[u64]) -> Result<u64> {
+    let mut maximum = None;
+    for node_id in nodes {
+        let (_, _, applied) = raft_position(cluster, *node_id).await?;
+        maximum = Some(maximum.map_or(applied, |current: u64| current.max(applied)));
+    }
+    maximum.context("singleton proof had no live voter applied-index samples")
 }
 
 fn unix_time_ms() -> Result<i64> {
@@ -881,14 +914,92 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     };
     require_dump_setting(&initial_dump, "instance.id", INSTANCE_ID)?;
 
+    // A joiner must claim its HTTP origin before any staged membership row is
+    // visible or voter promotion can start. Reuse the same token after the
+    // refusal to prove the failed claim reserved neither the credential nor
+    // an unusable second voter.
+    let first_issued = match cluster
+        .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
+        .await?
+    {
+        Response::IssuedJoinToken { token } => token,
+        response => bail!("unexpected duplicate-origin join token response: {response:?}"),
+    };
+    let first_spec = specs[1].clone();
+    require_membership_error(
+        cluster
+            .request(
+                1,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&first_issued.token),
+                        raft_id: first_issued.raft_id,
+                        node_id: "node-1".to_owned(),
+                        hostname: "identity-collision".to_owned(),
+                        raft_address: first_spec.raft.clone(),
+                        api_address: first_spec.api.clone(),
+                        http_base: String::new(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_node_identity_in_use",
+    )?;
+    require_membership_error(
+        cluster
+            .request(
+                1,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&first_issued.token),
+                        raft_id: first_issued.raft_id,
+                        node_id: "node-2".to_owned(),
+                        hostname: "cluster-node-2".to_owned(),
+                        raft_address: first_spec.raft,
+                        api_address: first_spec.api,
+                        http_base: "http://127.0.0.1:33001".to_owned(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_http_endpoint_in_use",
+    )?;
+    let after_duplicate = match cluster.request(1, Request::MembershipStatus).await? {
+        Response::MembershipStatus { status } => status,
+        response => bail!("unexpected post-duplicate membership status: {response:?}"),
+    };
+    if after_duplicate.availability != ClusterAvailability::SingleNode
+        || after_duplicate.nodes.len() != 1
+    {
+        bail!("duplicate origin changed singleton membership: {after_duplicate:?}");
+    }
+    cluster
+        .request(
+            1,
+            Request::SeedLegacyPartialRedemption {
+                token_digest: join_token_digest(&first_issued.token),
+                node_id: "node-2".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+
+    let mut first_issued = Some(first_issued);
     let mut first_redeemed = None;
     for node_id in 2..=3 {
-        let issued = match cluster
-            .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
-            .await?
-        {
-            Response::IssuedJoinToken { token } => token,
-            response => bail!("unexpected join-token response: {response:?}"),
+        let issued = match first_issued.take().filter(|_| node_id == 2) {
+            Some(issued) => issued,
+            None => match cluster
+                .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
+                .await?
+            {
+                Response::IssuedJoinToken { token } => token,
+                response => bail!("unexpected join-token response: {response:?}"),
+            },
         };
         if issued.raft_id != node_id {
             bail!(
@@ -898,6 +1009,18 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
         let spec = specs[(node_id - 1) as usize].clone();
         let token_digest = join_token_digest(&issued.token);
+        if node_id == 3 {
+            cluster
+                .request(
+                    1,
+                    Request::SeedLegacyPartialRedemption {
+                        token_digest: token_digest.clone(),
+                        node_id: "node-3".to_owned(),
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
         let request = RedeemJoinRequest {
             token_digest: token_digest.clone(),
             raft_id: issued.raft_id,
@@ -905,9 +1028,23 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             hostname: format!("cluster-node-{node_id}"),
             raft_address: spec.raft,
             api_address: spec.api,
+            http_base: format!("http://127.0.0.1:{}", 33_000 + node_id),
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_VERSION,
         };
+        if node_id == 2 {
+            let mut no_http_resume = request.clone();
+            no_http_resume.http_base.clear();
+            cluster
+                .request(
+                    1,
+                    Request::RedeemJoin {
+                        request: no_http_resume,
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
         cluster
             .request(
                 1,
@@ -917,6 +1054,31 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             )
             .await?
             .require_ok()?;
+        if node_id == 2 {
+            cluster
+                .request(
+                    1,
+                    Request::SeedHistoricalHttpDuplicate {
+                        node_id: "historical-node".to_owned(),
+                        public_http_url: request.http_base.clone(),
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
+        let mut changed_origin = request.clone();
+        changed_origin.http_base = format!("http://127.0.0.1:{}", 34_000 + node_id);
+        require_membership_error(
+            cluster
+                .request(
+                    1,
+                    Request::RedeemJoin {
+                        request: changed_origin,
+                    },
+                )
+                .await?,
+            "cluster_http_endpoint_in_use",
+        )?;
         cluster
             .spawn_node(
                 &executable,
@@ -978,6 +1140,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         hostname: "expired-host".to_owned(),
                         raft_address: "127.0.0.1:1".to_owned(),
                         api_address: "127.0.0.1:2".to_owned(),
+                        http_base: "http://127.0.0.1:3".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
                     },
@@ -1009,6 +1172,70 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         bail!("three-voter membership status was not healthy: {status:?}");
     }
+    let activity_peers = match cluster.request(1, Request::ActivityPeers).await? {
+        Response::ActivityPeers { peers } => peers,
+        response => bail!("unexpected activity-peer response: {response:?}"),
+    };
+    if activity_peers.len() != 2
+        || activity_peers
+            .iter()
+            .any(|(_, endpoint, reachable)| endpoint.is_none() || !reachable)
+    {
+        bail!("cluster-internal activity endpoints were incomplete: {activity_peers:?}");
+    }
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let auth = match cluster
+        .request(
+            1,
+            Request::SignActivityRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("unexpected activity signature response: {response:?}"),
+    };
+    match cluster
+        .request(2, Request::AuthorizeActivityRequest { auth: auth.clone() })
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("peer rejected shared cluster activity authority: {response:?}"),
+    }
+    match cluster
+        .request(3, Request::AuthorizeActivityRequest { auth: auth.clone() })
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("cross-target activity proof was accepted: {response:?}"),
+    }
+    let stale_time = now - 30_001;
+    let stale_auth = match cluster
+        .request(
+            1,
+            Request::SignActivityRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: stale_time,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("unexpected stale activity signature response: {response:?}"),
+    };
+    let mut forged_auth = auth;
+    forged_auth.signature = "00".repeat(32);
+    for request in [
+        Request::AuthorizeActivityRequest { auth: forged_auth },
+        Request::AuthorizeActivityRequest { auth: stale_auth },
+    ] {
+        match cluster.request(2, request).await? {
+            Response::Flag { value: false } => {}
+            response => bail!("invalid activity authority was accepted: {response:?}"),
+        }
+    }
     let public_status = serde_json::to_string(&status)?;
     if public_status.contains(&redeemed_token)
         || public_status.contains("api_address")
@@ -1027,7 +1254,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             )
             .await?,
         "membership_internal",
-        "already published by another cluster node",
+        "conflicts with an existing node claim",
     )?;
     for node_id in 1..=3 {
         let urls = match cluster.request(node_id, Request::ArtworkPeerUrls).await? {
@@ -1461,6 +1688,33 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
+    let observer_node_id = format!("node-{observer}");
+    let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let departing_activity_proof = match cluster
+        .request(
+            target,
+            Request::SignActivityRequest {
+                target_node_id: observer_node_id,
+                timestamp_ms: activity_now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("unexpected departing activity proof response: {response:?}"),
+    };
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: departing_activity_proof.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("a live voter's activity proof was refused: {response:?}"),
+    }
     let departing_artwork_proof = match cluster
         .request(
             target,
@@ -1473,6 +1727,9 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ArtworkPeerAuth { auth } => auth,
         response => bail!("unexpected artwork proof response: {response:?}"),
     };
+    if !legacy_artwork_proof_is_valid("poster.jpg", &departing_artwork_proof)? {
+        bail!("the production artwork signer changed the established v4 HMAC wire");
+    }
     match cluster
         .request(
             observer,
@@ -1485,6 +1742,21 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         Response::Flag { value: true } => {}
         response => bail!("a live voter's artwork proof was refused: {response:?}"),
+    }
+    let legacy_artwork_proof =
+        shared_secret_artwork_proof(&format!("node-{target}"), "poster.jpg", activity_now)?;
+    match cluster
+        .request(
+            observer,
+            Request::VerifyArtworkPeer {
+                filename: "poster.jpg".to_owned(),
+                auth: legacy_artwork_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("the established v4 artwork HMAC wire was refused: {response:?}"),
     }
     match cluster
         .request(
@@ -1609,6 +1881,53 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         )
         .await?
         .require_ok()?;
+    let removed_activity_now =
+        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let removed_activity_proof = match cluster
+        .request(
+            target,
+            Request::SignActivityRequest {
+                target_node_id: format!("node-{observer}"),
+                timestamp_ms: removed_activity_now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("removed voter could not mint its retained-key proof: {response:?}"),
+    };
+    let impersonated_node = (1..=3)
+        .find(|node_id| *node_id != target && *node_id != observer)
+        .context("choose the other surviving voter")?;
+    let impersonated_activity_proof = shared_secret_activity_proof(
+        &format!("node-{impersonated_node}"),
+        &format!("node-{observer}"),
+        removed_activity_now,
+    )?;
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: impersonated_activity_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter impersonated a surviving activity peer: {response:?}"),
+    }
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: removed_activity_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter retained activity access: {response:?}"),
+    }
     match cluster
         .request(
             observer,
@@ -1696,6 +2015,39 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         )
         .await?
         .require_ok()?;
+
+    // A removed identity remains permanently reserved. The same serialized
+    // first-redemption predicate covers active, pending-removal, and
+    // tombstoned rows, so an otherwise valid token cannot reanimate it.
+    let tombstone_collision = match cluster
+        .request(observer, Request::IssueJoinToken { ttl_ms: 120_000 })
+        .await?
+    {
+        Response::IssuedJoinToken { token } => token,
+        response => bail!("unexpected tombstone-collision token response: {response:?}"),
+    };
+    let removed_spec = specs[(target - 1) as usize].clone();
+    require_membership_error(
+        cluster
+            .request(
+                observer,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&tombstone_collision.token),
+                        raft_id: tombstone_collision.raft_id,
+                        node_id: target_node.clone(),
+                        hostname: "tombstone-collision".to_owned(),
+                        raft_address: removed_spec.raft,
+                        api_address: removed_spec.api,
+                        http_base: "http://127.0.0.1:33999".to_owned(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_node_identity_in_use",
+    )?;
     match cluster
         .request(
             observer,
@@ -2178,12 +2530,11 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         nodes: specs,
         emulate_old_watermark_handler: false,
     };
-    // This voter runs hiqlite in-process rather than behind the stdin/stdout
-    // protocol, so a lost port would otherwise surface as a growth verdict.
     // The reservation is dropped here: hiqlite binds its own sockets from the
-    // address strings, so we must release the port before it can bind it.
+    // address strings, so we must release the port before it can bind it. A
+    // collision is returned synchronously and the binary maps it to the
+    // retryable bind-failure exit status.
     drop(listeners);
-    install_bind_failure_guard(BindFailureChannel::Stderr, voter_listen_addrs(&launch)?);
     let mut config = node_config(&launch)?;
     config.filename_db = Cow::Borrowed("growth.db");
     config.raft_config = NodeConfig::default_raft_config(GROWTH_COMPACTION_LOGS);
@@ -2912,6 +3263,16 @@ pub enum Request {
     /// rows before MembershipManager starts, proving the rolling upgrade path
     /// rather than only the schema a fresh binary would create.
     SeedLegacyArtworkUrls,
+    /// Recreate the previous rolling binary's crash window: its first write
+    /// reserved the token, while the node/staging transaction never ran.
+    SeedLegacyPartialRedemption {
+        token_digest: String,
+        node_id: String,
+    },
+    SeedHistoricalHttpDuplicate {
+        node_id: String,
+        public_http_url: String,
+    },
     Bootstrap,
     RejectIdentityDrift,
     Open,
@@ -2925,6 +3286,14 @@ pub enum Request {
         request: FinalizeJoinRequest,
     },
     MembershipStatus,
+    SignActivityRequest {
+        target_node_id: String,
+        timestamp_ms: i64,
+    },
+    AuthorizeActivityRequest {
+        auth: ActivityPeerAuth,
+    },
+    ActivityPeers,
     ArtworkPeerUrls,
     RejectDuplicateArtworkUrl {
         public_http_url: String,
@@ -3079,6 +3448,12 @@ pub enum Response {
     Ok,
     Flag {
         value: bool,
+    },
+    ActivityAuth {
+        auth: ActivityPeerAuth,
+    },
+    ActivityPeers {
+        peers: Vec<(String, Option<String>, bool)>,
     },
     SeededOfflineRemovalWork {
         user_id: i64,
@@ -3759,7 +4134,7 @@ impl ClusterProcesses {
         // Listeners are dropped here: the child process must bind the same
         // ports, so we cannot hold them across the spawn. The window between
         // releasing the port and the child binding it is the residual race
-        // that [`install_bind_failure_guard`] + retry handle.
+        // that synchronous listener binding plus the retry wrapper handle.
         drop(_listeners);
         let mut nodes = Vec::with_capacity(specs.len());
         for node_id in 1..=specs.len() as u64 {
@@ -4382,11 +4757,7 @@ struct NodeMutableState {
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
-    // Arm this before hiqlite can spawn a listener, so a bind that lost its
-    // port is reported as a port collision rather than surviving as a voter
-    // that answers every later request with a durable-state symptom.
     let listeners = voter_listen_addrs(&launch)?;
-    install_bind_failure_guard(BindFailureChannel::Protocol, listeners.clone());
     let _ = ServerTlsConfig::server_config_self_signed(LISTEN_ADDR).await;
     let client = match hiqlite::start_node(node_config(&launch)?).await {
         Ok(client) => client,
@@ -4492,6 +4863,41 @@ async fn handle_request(
             }
             Ok(Response::Ok)
         }
+        Request::SeedLegacyPartialRedemption {
+            token_digest,
+            node_id,
+        } => {
+            let changed = client
+                .execute(
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                     WHERE token_hash = $2 AND state = 'issued'",
+                    hiqlite::macros::params!(node_id.as_str(), token_digest.as_str()),
+                )
+                .await?;
+            if changed != 1 {
+                bail!("could not seed the legacy partial redemption");
+            }
+            client
+                .execute(
+                    "DELETE FROM cluster_node_http WHERE node_id = $1",
+                    hiqlite::macros::params!(node_id),
+                )
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::SeedHistoricalHttpDuplicate {
+            node_id,
+            public_http_url,
+        } => {
+            client
+                .execute(
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) VALUES ($1, $2) \
+                     ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url",
+                    hiqlite::macros::params!(node_id, public_http_url),
+                )
+                .await?;
+            Ok(Response::Ok)
+        }
         Request::Bootstrap => {
             let opened = Arc::new(
                 HiqliteAuthStore::bootstrap(client.clone(), INSTANCE_ID, telemetry_path).await?,
@@ -4539,6 +4945,26 @@ async fn handle_request(
             .await
             .map(|status| Response::MembershipStatus { status })
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::SignActivityRequest {
+            target_node_id,
+            timestamp_ms,
+        } => Ok(Response::ActivityAuth {
+            auth: membership_ref(membership)?
+                .sign_activity_request(&target_node_id, timestamp_ms)?,
+        }),
+        Request::AuthorizeActivityRequest { auth } => Ok(Response::Flag {
+            value: membership_ref(membership)?
+                .authorize_activity_request(&auth)
+                .await?,
+        }),
+        Request::ActivityPeers => Ok(Response::ActivityPeers {
+            peers: membership_ref(membership)?
+                .activity_peers()
+                .await?
+                .into_iter()
+                .map(|peer| (peer.node_id, peer.http_base, peer.reachable))
+                .collect(),
+        }),
         Request::ArtworkPeerUrls => membership_ref(membership)?
             .reachable_peer_http_urls()
             .await
@@ -4587,6 +5013,7 @@ async fn handle_request(
                     for statement in [
                         "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
                         "DELETE FROM cluster_node_http WHERE node_id = $1",
+                        "DELETE FROM cluster_node_activity_keys WHERE node_id = $1",
                         "DELETE FROM cluster_nodes WHERE node_id = $1",
                     ] {
                         client
@@ -5477,6 +5904,67 @@ fn membership_error_response(error: plurx_core::cluster::membership::MembershipE
     }
 }
 
+/// Reproduce the removed-node exploit from the shared-HMAC design: a daemon
+/// that retained the cluster API secret freshly claims a surviving sender.
+/// The per-node Ed25519 verifier must reject this proof; the former verifier
+/// accepted it because every voter possessed the same key.
+fn shared_secret_activity_proof(
+    claimed_node_id: &str,
+    target_node_id: &str,
+    timestamp_ms: i64,
+) -> Result<ActivityPeerAuth> {
+    let mut message = b"plurx-internal-activity-v1".to_vec();
+    for value in [claimed_node_id, target_node_id] {
+        message.extend_from_slice(&u64::try_from(value.len())?.to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct retained shared-secret proof: {error}"))?;
+    mac.update(&message);
+    Ok(ActivityPeerAuth {
+        node_id: claimed_node_id.to_owned(),
+        target_node_id: target_node_id.to_owned(),
+        timestamp_ms,
+        signature: hex::encode(mac.finalize().into_bytes()),
+    })
+}
+
+/// Build an artwork proof without the production signer so this fixture
+/// remains a golden compatibility check for the established v4 HMAC wire.
+fn shared_secret_artwork_proof(
+    node_id: &str,
+    filename: &str,
+    timestamp_ms: i64,
+) -> Result<ArtworkPeerAuth> {
+    let message = format!("plurx-artwork-v1\n{node_id}\n{timestamp_ms}\n{filename}");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct legacy artwork proof: {error}"))?;
+    mac.update(message.as_bytes());
+    Ok(ArtworkPeerAuth {
+        node_id: node_id.to_owned(),
+        timestamp_ms,
+        signature: hex::encode(mac.finalize().into_bytes()),
+    })
+}
+
+/// Verify a production proof without the production verifier. Together with
+/// `shared_secret_artwork_proof`, this checks both rolling-upgrade directions.
+fn legacy_artwork_proof_is_valid(filename: &str, auth: &ArtworkPeerAuth) -> Result<bool> {
+    let signature = match hex::decode(&auth.signature) {
+        Ok(signature) => signature,
+        Err(_) => return Ok(false),
+    };
+    let message = format!(
+        "plurx-artwork-v1\n{}\n{}\n{filename}",
+        auth.node_id, auth.timestamp_ms
+    );
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct legacy artwork verifier: {error}"))?;
+    mac.update(message.as_bytes());
+    Ok(mac.verify_slice(&signature).is_ok())
+}
+
 async fn membership_manager(
     client: &Client,
     store: Arc<HiqliteAuthStore>,
@@ -5532,7 +6020,7 @@ async fn membership_manager_with_identity_artwork_url(
         store,
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
-            node_id,
+            node_id: node_id.clone(),
             raft_id,
         },
         ClusterPeer {
@@ -5547,6 +6035,9 @@ async fn membership_manager_with_identity_artwork_url(
             api: API_SECRET.to_owned(),
             credential_key: "00".repeat(32),
         },
+        ActivitySigningKey::from_seed_hex(&hex::encode(Sha256::digest(format!(
+            "plurx-cluster-check-activity-key:{node_id}:{raft_id}"
+        ))))?,
         ActivationMarker {
             marker_version: 1,
             cluster_id: INSTANCE_ID.to_owned(),
@@ -6887,20 +7378,6 @@ pub fn free_port() -> Result<u16> {
     Ok(TcpListener::bind((LISTEN_ADDR, 0))?.local_addr()?.port())
 }
 
-/// The last port collision this process observed, recorded by
-/// [`install_bind_failure_guard`].
-static BIND_FAILURE: OnceLock<String> = OnceLock::new();
-
-/// Where a voter reports a listener that never bound.
-#[derive(Clone, Copy, Debug)]
-pub enum BindFailureChannel {
-    /// Write a [`Response::Error`] on the stdin/stdout voter protocol, so the
-    /// controller reads the collision as this voter's own startup verdict.
-    Protocol,
-    /// Print to stderr, for a harness voter that has no protocol peer.
-    Stderr,
-}
-
 /// Is this error a port taken between allocation and bind, rather than
 /// anything the cluster contract asserts?
 ///
@@ -6912,62 +7389,6 @@ pub enum BindFailureChannel {
 pub fn is_port_collision(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
     text.contains(PORT_COLLISION) || text.contains("Address already in use")
-}
-
-/// Make a listener that never bound the voter's own verdict.
-///
-/// hiqlite serves its raft and its API listener from detached `tokio::spawn`
-/// tasks that `.unwrap()` the serve future (`hiqlite-0.14.0/src/start.rs:148`
-/// and `:231`). A bind that loses its port panics one of those tasks and
-/// nothing else: `start_node` has already returned `Ok`,
-/// `wait_until_healthy_db` probes only the *local* database, and the process
-/// stays alive serving one dead listener. The collision then reached the
-/// controller as whatever the crippled voter failed at next — a replicated
-/// deadline for the API port, or `no such table: cluster_meta` for a
-/// linearizable read that never reached a state machine, which reads as an
-/// un-migrated store rather than a busy port.
-///
-/// This hook turns that panic into a classified verdict and stops the voter,
-/// so a port collision cannot go on to be reported as durable-state damage.
-/// Panics that are not bind failures keep their previous behaviour.
-pub fn install_bind_failure_guard(channel: BindFailureChannel, addresses: Vec<String>) {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let Some(payload) = bind_failure_payload(info) else {
-            previous(info);
-            return;
-        };
-        let message = format!(
-            "{PORT_COLLISION}: a voter listener could not bind one of [{}]: {payload}",
-            addresses.join(", ")
-        );
-        let _ = BIND_FAILURE.set(message.clone());
-        match channel {
-            BindFailureChannel::Protocol => {
-                // A panic hook cannot drive the async writer, so emit the same
-                // newline framing the controller reads synchronously.
-                if let Ok(mut line) = serde_json::to_vec(&Response::Error { message }) {
-                    line.push(b'\n');
-                    let mut stdout = std::io::stdout();
-                    let _ = stdout.write_all(&line);
-                    let _ = stdout.flush();
-                }
-            }
-            BindFailureChannel::Stderr => eprintln!("{message}"),
-        }
-        // Leaving the voter alive is the defect being fixed: it would keep
-        // answering with downstream symptoms of the dead listener. `exit`
-        // rather than `abort` so an instrumented build still writes its
-        // coverage profile.
-        std::process::exit(BIND_FAILURE_EXIT);
-    }));
-}
-
-/// The panic message, when the panic is a listener that could not bind.
-fn bind_failure_payload(info: &PanicHookInfo<'_>) -> Option<String> {
-    let payload = info.payload_as_str()?;
-    (payload.contains("AddrInUse") || payload.contains("Address already in use"))
-        .then(|| payload.to_owned())
 }
 
 /// The addresses this voter's hiqlite node will bind.
@@ -6994,19 +7415,15 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
 
 /// Prove both of a voter's listeners accept before it announces readiness.
 ///
-/// Readiness used to depend on nothing but the local database, so a voter
-/// whose listener lost its port still wrote `Response::Ready`. Connecting to
-/// each address is the positive half of the proof — it catches a listener that
-/// is simply absent. The negative half is [`install_bind_failure_guard`],
-/// which is what separates "my listener is up" from "somebody else's listener
-/// is up on my port", because a squatter accepts connections too.
+/// `hiqlite::start_node` now pre-binds both sockets before returning, which is
+/// the identity proof: another process cannot own either address after that
+/// successful return. These bounded connects are only the readiness half,
+/// proving both spawned servers are accepting before the voter announces
+/// itself to the controller.
 async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
     for address in addresses {
         let deadline = TokioInstant::now() + LISTENER_PROOF_TIMEOUT;
         loop {
-            if let Some(failure) = BIND_FAILURE.get() {
-                bail!("{failure}");
-            }
             match tokio::net::TcpStream::connect(address).await {
                 Ok(_) => break,
                 Err(error) if TokioInstant::now() >= deadline => {
@@ -7016,28 +7433,6 @@ async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
                 }
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
-        }
-        // A successful connection means *something* is listening on the port,
-        // but it may be a squatter rather than our own listener. Try to bind
-        // the same address to check whether the port is actually free.
-        // If we can bind, our listener never bound — the port was taken by
-        // another process between allocation and hiqlite's bind attempt.
-        // hiqlite's bind failure panics in a spawned task where the panic
-        // hook does not fire, so BIND_FAILURE would not be set. This check
-        // catches that case.
-        let probe = std::net::TcpListener::bind(address);
-        if let Ok(listener) = probe {
-            // The port is free — our listener never bound. Release the probe
-            // and report the collision so the controller can retry.
-            drop(listener);
-            bail!(
-                "{PORT_COLLISION}: voter listener {address} was never bound; the port was taken between allocation and bind"
-            );
-        }
-        // EADDRINUSE means someone has the port — either our listener or a
-        // squatter. Check BIND_FAILURE in case the panic guard caught it.
-        if let Some(failure) = BIND_FAILURE.get() {
-            bail!("{failure}");
         }
     }
     Ok(())

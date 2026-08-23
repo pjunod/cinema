@@ -1543,11 +1543,12 @@ pub async fn stream_mp4(
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("srv-{}", uuid::Uuid::new_v4()));
-    let tracked = Some(
-        state
-            .streams
-            .register(&sid, user.id, &user.username, id, readrate),
-    );
+    let tracked =
+        Some(
+            state
+                .streams
+                .register(&sid, user.id, &user.username, id, file.item_id, readrate),
+        );
     remux(RemuxSpec {
         path: &file.path,
         start: q.start,

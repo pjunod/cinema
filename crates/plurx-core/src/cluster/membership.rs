@@ -15,8 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hiqlite::macros::params;
-use hiqlite::{Client, Node, Row};
+use hiqlite::{Client, Node, Param, Row};
 use hmac::{Hmac, Mac};
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -130,12 +131,25 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_node_http (\
          node_id TEXT PRIMARY KEY, \
          public_http_url TEXT NOT NULL) STRICT",
+    // A durable exact-origin claim distinguishes pre-M3d shared-address rows
+    // from origins admitted by the node-scoped redemption protocol. Legacy
+    // rows may migrate once; an in-flight redemption cannot substitute a new
+    // origin, while an established node may later readdress its own endpoint.
+    "CREATE TABLE IF NOT EXISTS cluster_node_http_claims (\
+         node_id TEXT PRIMARY KEY, \
+         public_http_url TEXT NOT NULL) STRICT",
     // Additive so a rolling upgrade can teach old membership rows their
     // machine names without rewriting the cluster_nodes table underneath an
     // older voter. Every new daemon creates this table before its heartbeat.
     "CREATE TABLE IF NOT EXISTS cluster_node_hostnames (\
          node_id TEXT PRIMARY KEY, \
          hostname TEXT NOT NULL) STRICT",
+    // Activity HTTP authority is node-specific. Unlike the shared Hiqlite API
+    // secret, a removed node's retained private key cannot impersonate a
+    // surviving voter. Keys are immutable once published for a node id.
+    "CREATE TABLE IF NOT EXISTS cluster_node_activity_keys (\
+         node_id TEXT PRIMARY KEY, \
+         public_key TEXT NOT NULL) STRICT",
     // Provider/source repair is a replicated side effect. The current Raft
     // leader arbitrates one durable claim per item and term; a successor waits
     // a full local monotonic lease before fencing an abandoned older term.
@@ -168,6 +182,12 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL,
 ];
 
+const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
+const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
+const MAX_ACTIVITY_PEERS: usize = 64;
+const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
+const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
     #[error("cluster membership is unavailable while this node uses SQLite recovery")]
@@ -182,6 +202,12 @@ pub enum MembershipError {
     ReservedToken,
     #[error("joining binary is incompatible with this cluster")]
     Incompatible,
+    #[error("cluster HTTP endpoint must be an http(s) origin without credentials or a path")]
+    InvalidHttpEndpoint,
+    #[error("cluster HTTP endpoint is already owned by another active node")]
+    HttpEndpointInUse,
+    #[error("cluster node identity is already present in membership history")]
+    NodeIdentityInUse,
     #[error("finish upgrading every active cluster node before changing membership")]
     MembershipUpgradeRequired,
     #[error(
@@ -220,6 +246,9 @@ impl MembershipError {
             Self::ReusedToken => "join_token_reused",
             Self::ReservedToken => "join_token_reserved",
             Self::Incompatible => "join_incompatible",
+            Self::InvalidHttpEndpoint => "cluster_http_endpoint_invalid",
+            Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
+            Self::NodeIdentityInUse => "cluster_node_identity_in_use",
             Self::MembershipUpgradeRequired => "membership_upgrade_required",
             Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
@@ -297,6 +326,10 @@ pub struct RedeemJoinRequest {
     pub hostname: String,
     pub raft_address: String,
     pub api_address: String,
+    /// Explicitly advertised plurxd endpoint. This remains cluster-internal;
+    /// public membership projections intentionally omit it.
+    #[serde(default)]
+    pub http_base: String,
     pub schema_version: i64,
     pub protocol_version: i64,
 }
@@ -377,6 +410,79 @@ pub struct ClusterNodeRecord {
     /// Raft membership after a rejected or indeterminate request, so expose
     /// the fence instead of rendering the node as fully operational.
     pub removal_pending: bool,
+}
+
+/// Internal addressing paired with the privacy-safe health projection.
+/// This type is never serialized by the public membership API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityPeer {
+    pub node_id: String,
+    pub http_base: Option<String>,
+    pub reachable: bool,
+}
+
+/// Route-scoped proof that one live voter requested another voter's activity
+/// projection. Naming both ends prevents a captured proof from being replayed
+/// against every daemon in the cluster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityPeerAuth {
+    pub node_id: String,
+    pub target_node_id: String,
+    pub timestamp_ms: i64,
+    pub signature: String,
+}
+
+/// Process-local Ed25519 authority for the cluster activity HTTP route.
+///
+/// The seed is persisted as an owner-only file by the migration coordinator;
+/// only the public half is replicated. Intentionally not `Clone` or `Debug`.
+pub struct ActivitySigningKey {
+    key_pair: Ed25519KeyPair,
+}
+
+impl ActivitySigningKey {
+    pub fn from_seed_hex(seed: &str) -> Result<Self, MembershipError> {
+        let seed = hex::decode(seed).map_err(|_| {
+            MembershipError::Internal("activity signing seed is not hexadecimal".to_owned())
+        })?;
+        if seed.len() != 32 {
+            return Err(MembershipError::Internal(
+                "activity signing seed must be exactly 32 bytes".to_owned(),
+            ));
+        }
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed).map_err(|_| {
+            MembershipError::Internal("activity signing seed is invalid".to_owned())
+        })?;
+        Ok(Self { key_pair })
+    }
+
+    fn public_key_hex(&self) -> String {
+        hex::encode(self.key_pair.public_key().as_ref())
+    }
+
+    fn sign_hex(&self, message: &[u8]) -> String {
+        hex::encode(self.key_pair.sign(message).as_ref())
+    }
+}
+
+/// Normalize one cluster-internal HTTP origin. Stored endpoints are treated
+/// as origins, never as arbitrary URLs: path, query, fragment, and userinfo
+/// would make route joining ambiguous or expose authority to another origin.
+#[must_use]
+pub fn normalize_internal_http_base(value: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(value.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    url.set_path("");
+    Some(url.as_str().trim_end_matches('/').to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,12 +700,52 @@ struct ReplicatedMembership {
     bootstrap_http: String,
     artwork_http: String,
     secrets: JoinSecrets,
+    activity_signing_key: ActivitySigningKey,
+    activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
+    activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
+    activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
+}
+
+struct ActivityAuthAdmission {
+    window_started: Instant,
+    checks: u8,
+}
+
+impl ActivityAuthAdmission {
+    fn admit(&mut self, now: Instant, maximum: u8) -> bool {
+        if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
+            self.window_started = now;
+            self.checks = 0;
+        }
+        if self.checks >= maximum {
+            return false;
+        }
+        self.checks += 1;
+        true
+    }
+}
+
+fn insert_bounded_activity_public_key(
+    keys: &mut BTreeMap<String, Vec<u8>>,
+    node_id: String,
+    public_key: Vec<u8>,
+) -> Option<String> {
+    let evicted = if keys.contains_key(&node_id) || keys.len() < MAX_ACTIVITY_PEERS {
+        None
+    } else {
+        keys.keys().next().cloned()
+    };
+    if let Some(evicted) = evicted.as_deref() {
+        keys.remove(evicted);
+    }
+    keys.insert(node_id, public_key);
+    evicted
 }
 
 #[derive(Clone)]
@@ -661,6 +807,7 @@ impl MembershipManager {
         bootstrap_http: String,
         artwork_http: String,
         secrets: JoinSecrets,
+        activity_signing_key: ActivitySigningKey,
         activation_marker: ActivationMarker,
     ) -> Result<Self, MembershipError> {
         let replication = ReplicationMonitor::replicated(client.clone());
@@ -678,6 +825,13 @@ impl MembershipManager {
                 bootstrap_http,
                 artwork_http,
                 secrets,
+                activity_signing_key,
+                activity_public_keys: Mutex::new(BTreeMap::new()),
+                activity_auth_admission: Mutex::new(BTreeMap::new()),
+                activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
                 activation_marker,
                 replication,
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -732,6 +886,8 @@ impl MembershipManager {
         }
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
+        self.publish_activity_signing_key().await?;
+        self.refresh_activity_public_keys().await?;
         self.publish_http_url().await
     }
 
@@ -829,12 +985,20 @@ impl MembershipManager {
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
+        let http_base = if request.http_base.is_empty() {
+            None
+        } else {
+            Some(
+                normalize_internal_http_base(&request.http_base)
+                    .ok_or(MembershipError::InvalidHttpEndpoint)?,
+            )
+        };
         let now = unix_ms()?;
         let record = self.token_record(&request.token_digest).await?;
         if record.raft_id != request.raft_id as i64 {
             return Err(MembershipError::InvalidToken);
         }
-        match record.state.as_str() {
+        let resume_legacy_partial = match record.state.as_str() {
             "redeemed" => return Err(MembershipError::ReusedToken),
             "redeeming" if record.node_id.as_deref() != Some(&request.node_id) => {
                 return Err(MembershipError::ReservedToken)
@@ -844,84 +1008,219 @@ impl MembershipManager {
             // still refuses an unused token below, and a different node id is
             // refused above, so this does not restore bearer authority.
             "redeeming" => {
-                self.upsert_hostname(
-                    &request.node_id,
-                    &membership_hostname(&request.hostname, &request.api_address),
-                )
-                .await?;
-                return Ok(());
+                match self.redeeming_node_matches(request).await? {
+                    Some(false) => return Err(MembershipError::NodeIdentityInUse),
+                    Some(true) => {
+                        if let Some(http_base) = http_base.as_deref() {
+                            self.claim_redeeming_http_origin(request, http_base).await?;
+                        }
+                        self.upsert_hostname(
+                            &request.node_id,
+                            &membership_hostname(&request.hostname, &request.api_address),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    // The previous rolling version reserved the token before
+                    // its node-publication transaction. Repair that crash
+                    // shape below under the exact reservation.
+                    None => true,
+                }
             }
             "issued" if record.expires_at <= now => return Err(MembershipError::ExpiredToken),
-            "issued" => {}
+            "issued" => false,
             _ => return Err(MembershipError::InvalidToken),
-        }
+        };
 
-        let changed = inner
-            .client
-            .execute(
-                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
-                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3",
-                params!(request.node_id.as_str(), request.token_digest.as_str(), now),
-            )
-            .await?;
-        if changed != 1 {
-            let latest = self.token_record(&request.token_digest).await?;
-            return if latest.expires_at <= now {
-                Err(MembershipError::ExpiredToken)
-            } else if latest.state == "redeemed" {
-                Err(MembershipError::ReusedToken)
+        // Claiming the origin, reserving the token, installing the rolling-
+        // upgrade guards, and publishing the staged node are one Raft
+        // transaction. The token reservation returns the claimed node id and
+        // every publication statement consumes that output. A duplicate
+        // origin or a lost token race therefore produces no dependency output
+        // and Hiqlite rolls the entire transaction back.
+        let mut statements = Vec::new();
+        let proof_statement_index = if let Some(http_base) = http_base.as_deref() {
+            statements.push((
+                "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                 SELECT $1, $2 WHERE EXISTS (\
+                   SELECT 1 FROM cluster_join_tokens token \
+                   WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                     AND ((token.state = 'issued' AND token.expires_at > $5) \
+                       OR (token.state = 'redeeming' AND token.node_id = $1))) \
+                 AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
+                   WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                 AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                 AND NOT EXISTS (\
+                   SELECT 1 FROM cluster_node_http owner_http \
+                   JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                   WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                     AND owner_node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                       WHERE removing.node_id = owner_node.node_id)) \
+                 ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url \
+                 RETURNING node_id"
+                    .to_owned(),
+                params!(
+                    request.node_id.as_str(),
+                    http_base,
+                    request.token_digest.as_str(),
+                    request.raft_id as i64,
+                    now
+                ),
+            ));
+            if resume_legacy_partial {
+                0
             } else {
-                Err(MembershipError::ReservedToken)
-            };
+                statements.push((
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                     WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                     RETURNING node_id"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(request.token_digest.clone()),
+                        Param::Integer(now),
+                    ],
+                ));
+                1
+            }
+        } else if resume_legacy_partial {
+            statements.push((
+                "UPDATE cluster_join_tokens SET node_id = node_id \
+                 WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
+                   AND state = 'redeeming' \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                 RETURNING node_id"
+                    .to_owned(),
+                params!(
+                    request.node_id.as_str(),
+                    request.token_digest.as_str(),
+                    request.raft_id as i64
+                ),
+            ));
+            0
+        } else {
+            statements.push((
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                 RETURNING node_id"
+                    .to_owned(),
+                params!(request.node_id.as_str(), request.token_digest.as_str(), now),
+            ));
+            0
+        };
+        if let Some(http_base) = http_base.as_deref() {
+            statements.push((
+                "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                 VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                   public_http_url = excluded.public_http_url \
+                 WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Text(http_base.to_owned()),
+                ],
+            ));
         }
-        inner
-            .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
-                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
-                       last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(request.node_id.as_str(), now),
-                ),
-                (
-                    "INSERT INTO cluster_node_join_staging (node_id) VALUES ($1) \
-                     ON CONFLICT(node_id) DO NOTHING"
-                        .to_owned(),
-                    params!(request.node_id.as_str()),
-                ),
-                (
-                    "INSERT INTO cluster_nodes \
-                     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
-                     VALUES ($1, $2, $3, $4, $5, NULL) \
-                     ON CONFLICT(node_id) DO UPDATE SET \
-                       raft_id = excluded.raft_id, raft_address = excluded.raft_address, \
-                       api_address = excluded.api_address, last_seen_at = excluded.last_seen_at, \
-                       removed_at = NULL"
-                        .to_owned(),
-                    params!(
-                        request.node_id.as_str(),
-                        request.raft_id as i64,
-                        request.raft_address.as_str(),
-                        request.api_address.as_str(),
-                        now
-                    ),
-                ),
-                (
-                    "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
-                     AND last_seen_at = $2"
-                        .to_owned(),
-                    params!(request.node_id.as_str(), now),
-                ),
-            ])
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        self.upsert_hostname(
-            &request.node_id,
-            &membership_hostname(&request.hostname, &request.api_address),
-        )
-        .await?;
+        statements.extend([
+            (
+                "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
+                 VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                   last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Integer(now),
+                ],
+            ),
+            (
+                "INSERT INTO cluster_node_join_staging (node_id) VALUES ($1) \
+                 ON CONFLICT(node_id) DO NOTHING"
+                    .to_owned(),
+                vec![Param::StmtOutputNamed(
+                    proof_statement_index,
+                    "node_id".into(),
+                )],
+            ),
+            (
+                "INSERT INTO cluster_nodes \
+                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
+                 VALUES ($1, $2, $3, $4, $5, NULL)"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Integer(request.raft_id as i64),
+                    Param::Text(request.raft_address.clone()),
+                    Param::Text(request.api_address.clone()),
+                    Param::Integer(now),
+                ],
+            ),
+            (
+                "INSERT INTO cluster_node_hostnames (node_id, hostname) VALUES ($1, $2) \
+                 ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Text(membership_hostname(&request.hostname, &request.api_address)),
+                ],
+            ),
+            (
+                "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+                 AND last_seen_at = $2"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Integer(now),
+                ],
+            ),
+        ]);
+        let transaction = inner.client.txn(statements).await;
+        match transaction {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
+            }
+            Err(error) if error.to_string().contains("StmtIndex(") => {
+                let latest = self.token_record(&request.token_digest).await?;
+                if latest.state == "redeemed" {
+                    return Err(MembershipError::ReusedToken);
+                }
+                if latest.state == "redeeming" {
+                    if latest.node_id.as_deref() != Some(&request.node_id) {
+                        return Err(MembershipError::ReservedToken);
+                    }
+                    return match self.redeeming_node_matches(request).await? {
+                        Some(false) => Err(MembershipError::NodeIdentityInUse),
+                        Some(true) => {
+                            if let Some(http_base) = http_base.as_deref() {
+                                self.claim_redeeming_http_origin(request, http_base).await?;
+                            }
+                            self.upsert_hostname(
+                                &request.node_id,
+                                &membership_hostname(&request.hostname, &request.api_address),
+                            )
+                            .await?;
+                            Ok(())
+                        }
+                        None if http_base.is_some() => Err(MembershipError::HttpEndpointInUse),
+                        None => Err(MembershipError::Internal(
+                            "legacy join reservation could not publish its node row".to_owned(),
+                        )),
+                    };
+                }
+                return if latest.expires_at <= now {
+                    Err(MembershipError::ExpiredToken)
+                } else if self.node_identity_exists(&request.node_id).await? {
+                    Err(MembershipError::NodeIdentityInUse)
+                } else if http_base.is_some() {
+                    Err(MembershipError::HttpEndpointInUse)
+                } else {
+                    Err(MembershipError::InvalidToken)
+                };
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
 
@@ -990,6 +1289,126 @@ impl MembershipManager {
         rows.into_iter().next().ok_or(MembershipError::InvalidToken)
     }
 
+    async fn node_identity_exists(&self, node_id: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id = $1",
+                params!(node_id),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
+    }
+
+    /// Classify a same-node reservation left by an interrupted redemption.
+    /// `None` is the legacy crash shape; `Some(true)` is an already-published
+    /// retry; `Some(false)` is an identity collision and must never be upserted.
+    async fn redeeming_node_matches(
+        &self,
+        request: &RedeemJoinRequest,
+    ) -> Result<Option<bool>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<RedeemingNodeRow, _>(
+                "SELECT node.raft_id, node.raft_address, node.api_address, node.removed_at, \
+                   EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) AS removal_pending \
+                 FROM cluster_nodes node WHERE node.node_id = $1",
+                params!(request.node_id.as_str()),
+            )
+            .await?;
+        Ok(rows.first().map(|row| {
+            row.raft_id == request.raft_id as i64
+                && row.raft_address == request.raft_address
+                && row.api_address == request.api_address
+                && row.removed_at.is_none()
+                && !row.removal_pending
+        }))
+    }
+
+    /// Upgrade a previously published legacy redemption with its exact HTTP
+    /// origin. The serialized statement revalidates both token reservation
+    /// and node identity so removal or finalization cannot race the repair.
+    async fn claim_redeeming_http_origin(
+        &self,
+        request: &RedeemJoinRequest,
+        http_base: &str,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let transaction = inner
+            .client
+            .txn(vec![
+                (
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                     SELECT $1, $2 WHERE EXISTS (\
+                       SELECT 1 FROM cluster_join_tokens token \
+                       WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                         AND token.state = 'redeeming' AND token.node_id = $1) \
+                     AND EXISTS (\
+                       SELECT 1 FROM cluster_nodes node \
+                       WHERE node.node_id = $1 AND node.raft_id = $4 \
+                         AND node.raft_address = $5 AND node.api_address = $6 \
+                         AND node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                           WHERE removal.node_id = node.node_id)) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
+                       WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                     AND NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http owner_http \
+                       JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                       WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                         AND owner_node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                           WHERE removing.node_id = owner_node.node_id)) \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     RETURNING node_id"
+                        .to_owned(),
+                    params!(
+                        request.node_id.as_str(),
+                        http_base,
+                        request.token_digest.as_str(),
+                        request.raft_id as i64,
+                        request.raft_address.as_str(),
+                        request.api_address.as_str()
+                    ),
+                ),
+                (
+                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(http_base.to_owned()),
+                    ],
+                ),
+            ])
+            .await;
+        match transaction {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                return Ok(());
+            }
+            Err(error) if error.to_string().contains("StmtIndex(") => {}
+            Err(error) => return Err(error.into()),
+        }
+        let latest = self.token_record(&request.token_digest).await?;
+        if latest.state == "redeemed" {
+            return Err(MembershipError::ReusedToken);
+        }
+        if latest.node_id.as_deref() != Some(&request.node_id) {
+            return Err(MembershipError::ReservedToken);
+        }
+        match self.redeeming_node_matches(request).await? {
+            Some(false) => Err(MembershipError::NodeIdentityInUse),
+            _ => Err(MembershipError::HttpEndpointInUse),
+        }
+    }
+
     pub async fn heartbeat(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let now = unix_ms()?;
@@ -1047,6 +1466,76 @@ impl MembershipManager {
         Ok(())
     }
 
+    /// Publish the public half of this node's durable activity authority.
+    ///
+    /// A key is immutable for a node id. Losing the private file is therefore
+    /// a fail-closed recovery event, not permission to replace replicated
+    /// authority; operators must recover the data directory or rejoin with a
+    /// new node identity.
+    async fn publish_activity_signing_key(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let public_key = inner.activity_signing_key.public_key_hex();
+        let changed = inner
+            .client
+            .execute(
+                "INSERT INTO cluster_node_activity_keys (node_id, public_key) \
+                 SELECT $1, $2 WHERE EXISTS (\
+                   SELECT 1 FROM cluster_nodes node \
+                   WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                       WHERE removal.node_id = node.node_id)) \
+                 ON CONFLICT(node_id) DO UPDATE SET public_key = excluded.public_key \
+                 WHERE cluster_node_activity_keys.public_key = excluded.public_key",
+                params!(inner.identity.node_id.as_str(), public_key.as_str()),
+            )
+            .await?;
+        if changed != 1 {
+            return Err(MembershipError::Internal(
+                "local activity signing key does not match immutable cluster authority".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refresh the bounded local verifier set from replicated membership.
+    /// Invalid signatures never cross the consensus boundary; this cache is
+    /// only a cheap prefilter, while the final live-voter decision remains a
+    /// consistent read below.
+    async fn refresh_activity_public_keys(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_map::<ActivityPublicKeyRow, _>(
+                "SELECT key.node_id, key.public_key \
+                 FROM cluster_node_activity_keys key \
+                 JOIN cluster_nodes node ON node.node_id = key.node_id \
+                 WHERE node.removed_at IS NULL AND node.node_id != $1 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
+            )
+            .await?;
+        let keys = rows
+            .into_iter()
+            .filter_map(|row| {
+                let key = hex::decode(row.public_key).ok()?;
+                (key.len() == 32).then_some((row.node_id, key))
+            })
+            .collect::<BTreeMap<_, _>>();
+        inner
+            .activity_auth_admission
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("activity admission lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        *inner.activity_public_keys.lock().map_err(|_| {
+            MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+        })? = keys;
+        Ok(())
+    }
+
     /// Publish this process-constant address once at startup. Rewriting it on
     /// every ten-second liveness beat would double steady Raft traffic while
     /// carrying no new information.
@@ -1057,32 +1546,64 @@ impl MembershipManager {
         // this table without that constraint, and may temporarily contain the
         // former shared join URL in every row while voters roll forward. A
         // node may replace its own legacy value, but may never claim a URL
-        // currently published by another node.
-        let changed = inner
+        // currently published by another node. A still-redeeming token freezes
+        // the durable origin chosen during redemption; after finalization the
+        // active node identity may atomically publish an operator readdress.
+        let transaction = inner
             .client
-            .execute(
-                "INSERT INTO cluster_node_http (node_id, public_http_url) \
-                 SELECT $1, $2 WHERE NOT EXISTS (\
-                   SELECT 1 FROM cluster_node_http AS owner_http \
-                   WHERE owner_http.public_http_url = $2 \
-                     AND owner_http.node_id != $1 \
-                     AND EXISTS (\
-                       SELECT 1 FROM cluster_nodes AS owner_node \
-                       WHERE owner_node.node_id = owner_http.node_id \
-                         AND owner_node.removed_at IS NULL \
-                         AND NOT EXISTS (\
-                           SELECT 1 FROM cluster_node_removals AS removing \
-                           WHERE removing.node_id = owner_node.node_id))) \
-                 ON CONFLICT(node_id) DO UPDATE SET \
-                   public_http_url = excluded.public_http_url",
-                params!(inner.identity.node_id.as_str(), inner.artwork_http.as_str()),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::Internal(format!(
-                "artwork URL {} is already published by another cluster node",
-                inner.artwork_http
-            )));
+            .txn(vec![
+                (
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                     SELECT $1, $2 WHERE EXISTS (\
+                       SELECT 1 FROM cluster_nodes self_node \
+                       WHERE self_node.node_id = $1 AND self_node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals self_removal \
+                           WHERE self_removal.node_id = self_node.node_id)) \
+                     AND (NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http_claims claim \
+                       WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                       OR NOT EXISTS (SELECT 1 FROM cluster_join_tokens token \
+                         WHERE token.node_id = $1 AND token.state = 'redeeming')) \
+                     AND NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http AS owner_http \
+                       WHERE owner_http.public_http_url = $2 \
+                         AND owner_http.node_id != $1 \
+                         AND EXISTS (\
+                           SELECT 1 FROM cluster_nodes AS owner_node \
+                           WHERE owner_node.node_id = owner_http.node_id \
+                             AND owner_node.removed_at IS NULL \
+                             AND NOT EXISTS (\
+                               SELECT 1 FROM cluster_node_removals AS removing \
+                               WHERE removing.node_id = owner_node.node_id))) \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     RETURNING node_id"
+                        .to_owned(),
+                    params!(inner.identity.node_id.as_str(), inner.artwork_http.as_str()),
+                ),
+                (
+                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(inner.artwork_http.clone()),
+                    ],
+                ),
+            ])
+            .await;
+        match transaction {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
+            }
+            Err(error) if error.to_string().contains("StmtIndex(") => {
+                return Err(MembershipError::Internal(format!(
+                    "artwork URL {} conflicts with an existing node claim",
+                    inner.artwork_http
+                )));
+            }
+            Err(error) => return Err(error.into()),
         }
         self.upsert_hostname(&inner.identity.node_id, &inner.local_hostname)
             .await
@@ -1325,8 +1846,9 @@ impl MembershipManager {
         Ok(rows.into_iter().map(|row| row.public_http_url).collect())
     }
 
-    /// Sign a one-file materialization request without exposing the shared
-    /// cluster API secret to the HTTP transport.
+    /// Sign one artwork request with the established rolling-compatible HMAC
+    /// wire. Activity uses separate per-node authority below; changing this
+    /// already-deployed protocol requires its own negotiated transition.
     pub fn artwork_peer_auth(&self, filename: &str) -> Result<ArtworkPeerAuth, MembershipError> {
         let inner = self.replicated_inner()?;
         let timestamp_ms = unix_ms()?;
@@ -1341,9 +1863,7 @@ impl MembershipManager {
         })
     }
 
-    /// Verify the proof and the sender's live membership. A removed node still
-    /// knows the old cluster secret, so signature validity alone is not enough
-    /// authority to read bytes from the surviving voters.
+    /// Verify the established artwork proof and the sender's live membership.
     pub async fn verify_artwork_peer_auth(
         &self,
         filename: &str,
@@ -1365,7 +1885,6 @@ impl MembershipManager {
         if mac.verify_slice(&signature).is_err() {
             return Ok(false);
         }
-
         let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         let rows = inner
             .client
@@ -1380,14 +1899,240 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
+    /// Resolve peer daemon endpoints without widening the public node status.
+    pub async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let now = unix_ms()?;
+        let voters = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .voter_ids()
+            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
+            .collect::<BTreeSet<_>>();
+        let rows = inner
+            .client
+            .query_map::<ActivityPeerRow, _>(
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                        http.public_http_url \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| voters.contains(&row.raft_id))
+            .take(MAX_ACTIVITY_PEERS)
+            .map(|row| ActivityPeer {
+                http_base: row.http_base,
+                node_id: row.node_id,
+                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
+            })
+            .collect())
+    }
+
+    /// Sign one short-lived, sender-and-target-bound activity request with
+    /// this node's private key.
+    pub fn sign_activity_request(
+        &self,
+        target_node_id: &str,
+        timestamp_ms: i64,
+    ) -> Result<ActivityPeerAuth, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let message = activity_auth_message(&inner.identity.node_id, target_node_id, timestamp_ms);
+        Ok(ActivityPeerAuth {
+            node_id: inner.identity.node_id.clone(),
+            target_node_id: target_node_id.to_owned(),
+            timestamp_ms,
+            signature: inner.activity_signing_key.sign_hex(&message),
+        })
+    }
+
+    /// Authenticate the per-node proof and confirm that its sender is still a
+    /// live, non-removed committed voter.
+    pub async fn authorize_activity_request(
+        &self,
+        auth: &ActivityPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if auth.target_node_id != inner.identity.node_id
+            || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
+            || auth.node_id == auth.target_node_id
+        {
+            return Ok(false);
+        }
+        let signature = match hex::decode(&auth.signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
+        };
+        let message = activity_auth_message(&auth.node_id, &auth.target_node_id, auth.timestamp_ms);
+        if !self
+            .activity_signature_is_valid(&auth.node_id, &message, &signature)
+            .await?
+            || !self.admit_activity_authority_check(&auth.node_id)?
+        {
+            return Ok(false);
+        }
+        self.verify_live_activity_authority(&auth.node_id, now)
+            .await
+    }
+
+    async fn activity_signature_is_valid(
+        &self,
+        node_id: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let cached = inner
+            .activity_public_keys
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+            })?
+            .get(node_id)
+            .cloned();
+        if let Some(public_key) = cached {
+            return Ok(UnparsedPublicKey::new(&ED25519, public_key)
+                .verify(message, signature)
+                .is_ok());
+        }
+        if !self.admit_activity_key_lookup()? {
+            return Ok(false);
+        }
+        let rows = inner
+            .client
+            .query_map::<ActivityPublicKeyRow, _>(
+                "SELECT key.node_id, key.public_key \
+                 FROM cluster_node_activity_keys key \
+                 JOIN cluster_nodes node ON node.node_id = key.node_id \
+                 WHERE key.node_id = $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) LIMIT 1",
+                params!(node_id),
+            )
+            .await?;
+        let Some((node_id, public_key)) = rows.into_iter().next().and_then(|row| {
+            let public_key = hex::decode(row.public_key).ok()?;
+            (public_key.len() == 32).then_some((row.node_id, public_key))
+        }) else {
+            return Ok(false);
+        };
+        if UnparsedPublicKey::new(&ED25519, &public_key)
+            .verify(message, signature)
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        let evicted = {
+            let mut keys = inner.activity_public_keys.lock().map_err(|_| {
+                MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+            })?;
+            insert_bounded_activity_public_key(&mut keys, node_id, public_key)
+        };
+        if let Some(evicted) = evicted {
+            inner
+                .activity_auth_admission
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("activity admission lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
+        }
+        Ok(true)
+    }
+
+    fn admit_activity_key_lookup(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        Ok(inner
+            .activity_key_lookup_admission
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal(
+                    "activity key-lookup admission lock was poisoned".to_owned(),
+                )
+            })?
+            .admit(now, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND))
+    }
+
+    fn admit_activity_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut admission = inner.activity_auth_admission.lock().map_err(|_| {
+            MembershipError::Internal("activity admission lock was poisoned".to_owned())
+        })?;
+        let state = admission
+            .entry(node_id.to_owned())
+            .or_insert(ActivityAuthAdmission {
+                window_started: now,
+                checks: 0,
+            });
+        Ok(state.admit(now, MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND))
+    }
+
+    async fn verify_live_activity_authority(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        if !metrics
+            .membership_config
+            .voter_ids()
+            .any(|raft_id| raft_id == inner.identity.raft_id)
+        {
+            return Ok(false);
+        }
+        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "SELECT node.raft_id \
+                 FROM cluster_nodes node \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                   AND node.last_seen_at >= $2 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                params!(node_id, reachable_after),
+            )
+            .await?;
+        Ok(rows.len() == 1
+            && metrics
+                .membership_config
+                .voter_ids()
+                .any(|raft_id| raft_id == rows[0].raft_id))
+    }
+
     pub async fn heartbeat_loop(self) {
         if self.inner.is_none() {
             return;
         }
         loop {
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-            if let Err(error) = self.heartbeat().await {
-                tracing::warn!(code = error.code(), "cluster node heartbeat failed");
+            match self.heartbeat().await {
+                Err(error) => {
+                    tracing::warn!(code = error.code(), "cluster node heartbeat failed");
+                }
+                Ok(()) => {
+                    if let Err(error) = self.refresh_activity_public_keys().await {
+                        tracing::warn!(
+                            code = error.code(),
+                            "cluster activity verifier refresh failed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1951,6 +2696,12 @@ impl MembershipManager {
         let Ok(inner) = self.replicated_inner() else {
             return;
         };
+        if let Ok(mut keys) = inner.activity_public_keys.lock() {
+            keys.remove(node_id);
+        }
+        if let Ok(mut admission) = inner.activity_auth_admission.lock() {
+            admission.remove(node_id);
+        }
         if let Err(error) = inner
             .client
             .execute(
@@ -2618,6 +3369,26 @@ impl From<&mut Row<'_>> for JoinTokenRow {
     }
 }
 
+struct RedeemingNodeRow {
+    raft_id: i64,
+    raft_address: String,
+    api_address: String,
+    removed_at: Option<i64>,
+    removal_pending: bool,
+}
+
+impl From<&mut Row<'_>> for RedeemingNodeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            raft_id: row.get("raft_id"),
+            raft_address: row.get("raft_address"),
+            api_address: row.get("api_address"),
+            removed_at: row.get("removed_at"),
+            removal_pending: row.get("removal_pending"),
+        }
+    }
+}
+
 struct TargetNodeRow {
     raft_id: i64,
 }
@@ -2629,6 +3400,52 @@ struct MembershipNodeRow {
     hostname: String,
     last_seen_at: i64,
     removal_pending: bool,
+}
+
+struct ActivityPeerRow {
+    node_id: String,
+    raft_id: u64,
+    last_seen_at: i64,
+    http_base: Option<String>,
+}
+
+impl From<&mut Row<'_>> for ActivityPeerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            node_id: row.get("node_id"),
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            last_seen_at: row.get("last_seen_at"),
+            http_base: row.get("public_http_url"),
+        }
+    }
+}
+
+struct ActivityPublicKeyRow {
+    node_id: String,
+    public_key: String,
+}
+
+impl From<&mut Row<'_>> for ActivityPublicKeyRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            node_id: row.get("node_id"),
+            public_key: row.get("public_key"),
+        }
+    }
+}
+
+struct ActivityAuthNodeRow {
+    raft_id: u64,
+}
+
+impl From<&mut Row<'_>> for ActivityAuthNodeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
+        }
+    }
 }
 
 struct HttpUrlRow {
@@ -2678,6 +3495,16 @@ impl From<&mut Row<'_>> for CountRow {
             count: row.get("count"),
         }
     }
+}
+
+fn activity_auth_message(node_id: &str, target_node_id: &str, timestamp_ms: i64) -> Vec<u8> {
+    let mut message = ACTIVITY_AUTH_CONTEXT.to_vec();
+    for value in [node_id, target_node_id] {
+        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
+    message
 }
 
 impl From<&mut Row<'_>> for HttpUrlRow {
@@ -2934,6 +3761,39 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_key_cache_replaces_one_peer_without_exceeding_its_bound() {
+        let mut keys = (0..MAX_ACTIVITY_PEERS)
+            .map(|index| (format!("node-{index:03}"), vec![index as u8; 32]))
+            .collect::<BTreeMap<_, _>>();
+
+        let evicted =
+            insert_bounded_activity_public_key(&mut keys, "node-064".to_owned(), vec![0x64; 32]);
+
+        assert_eq!(keys.len(), MAX_ACTIVITY_PEERS);
+        assert_eq!(evicted.as_deref(), Some("node-000"));
+        assert!(!keys.contains_key("node-000"));
+        assert_eq!(keys.get("node-064"), Some(&vec![0x64; 32]));
+    }
+
+    #[test]
+    fn activity_key_lookup_admission_reopens_after_one_window() {
+        let started = Instant::now();
+        let mut admission = ActivityAuthAdmission {
+            window_started: started,
+            checks: 0,
+        };
+
+        for _ in 0..MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND {
+            assert!(admission.admit(started, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND));
+        }
+        assert!(!admission.admit(started, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND));
+        assert!(admission.admit(
+            started + Duration::from_secs(1),
+            MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND
+        ));
+    }
 
     #[test]
     fn every_post_send_membership_error_keeps_the_removal_fence() {
@@ -3621,6 +4481,7 @@ mod tests {
             hostname: "node-b.example.net".to_owned(),
             raft_address: "node-b:32401".to_owned(),
             api_address: "node-b:32402".to_owned(),
+            http_base: "http://node-b:32400".to_owned(),
             schema_version: payload.schema_version,
             protocol_version: payload.protocol_version,
         };

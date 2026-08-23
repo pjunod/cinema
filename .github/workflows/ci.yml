@@ -194,7 +194,11 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold hosted runner currently spends about fourteen minutes compiling
+    # the isolated harness before its three-voter proof completes. Keep enough
+    # headroom for the already-passing proof and artifact cleanup instead of
+    # cancelling a successful run at the job boundary.
+    timeout-minutes: 25
     env:
       # The M0 proof has its own manifest, but not its own dependency build.
       # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph that

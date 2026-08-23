@@ -15,6 +15,7 @@ mod error;
 mod extract;
 mod hls;
 pub(crate) mod images;
+pub(crate) mod internal_activity;
 mod items;
 mod keys;
 mod libraries;
@@ -282,6 +283,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route(internal_activity::PATH, get(internal_activity::snapshot))
         .nest("/api/v1", api)
         .merge(plex_routes)
         .fallback(web::fallback)
@@ -418,7 +420,7 @@ mod tests {
     /// The same app, plus the state behind it — for tests that have to put the
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
-    fn test_app_with_state() -> (Router, AppState) {
+    pub(super) fn test_app_with_state() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = std::env::temp_dir().join(format!("plurx-test-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
@@ -7377,7 +7379,7 @@ mod tests {
         // it is guessable by construction — ownership is what protects it.
         let (_stream, _guard) = state
             .streams
-            .register("pb-1-s1", 9999, "someone-else", 42, 4.0);
+            .register("pb-1-s1", 9999, "someone-else", 42, 5, 4.0);
         assert_eq!(
             call(&app, get("/api/v1/stream/pb-1-s1/status", Some(&admin)))
                 .await

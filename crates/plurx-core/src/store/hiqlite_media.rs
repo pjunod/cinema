@@ -1,6 +1,6 @@
 //! Replicated media catalogue implementation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -64,6 +64,20 @@ struct ItemRow {
     book_work_id: Option<String>,
     book_edition_id: Option<String>,
     book_metadata_source: Option<String>,
+}
+
+struct ItemTitleRow {
+    item_id: i64,
+    title: String,
+}
+
+impl From<&mut Row<'_>> for ItemTitleRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            item_id: row.get("item_id"),
+            title: row.get("title"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for ArtworkInventoryItem {
@@ -871,6 +885,26 @@ impl MediaStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         )
+    }
+
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ids = serde_json::to_string(ids)
+            .map_err(|error| StoreError::Task(format!("encode item title ids: {error}")))?;
+        Ok(self
+            .client()
+            .query_consistent_map::<ItemTitleRow, _>(
+                "SELECT id AS item_id, title FROM items \
+                 WHERE id IN (SELECT value FROM json_each($1)) ORDER BY id",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.item_id, row.title))
+            .collect())
     }
 
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {

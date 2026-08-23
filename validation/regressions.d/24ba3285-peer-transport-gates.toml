@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["24ba3285"]
+points = ["cluster.auth", "validation.framework"]
+checks = ["rust-gate", "history-regressions"]
+reason = "The retained Rust gate compiles every target with warnings denied, and the history audit validates the peer-transport correction against registered functionality points. Reverting this follow-up restores an unused replicated-membership binding or an invalid regression point that prevents the PR matrix from running."
