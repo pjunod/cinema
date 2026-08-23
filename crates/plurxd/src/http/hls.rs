@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -505,20 +506,43 @@ pub async fn create(
             break;
         }
         let result = if candidate == state.node_id {
-            match tokio::time::timeout_at(
-                placement_deadline,
-                state
-                    .transcode
-                    .create_session(&remote_request.request, &user.username),
-            )
-            .await
-            {
-                Ok(result) => result
+            // `create_session` owns a child process before it publishes the
+            // session map entry, so dropping its future at the deadline is not
+            // cancellation-safe. Let an owned task reach a verdict; if the
+            // caller's common deadline wins, a reconciler removes only the
+            // exact late incarnation this attempt created.
+            let transcode = Arc::clone(&state.transcode);
+            let worker_request = remote_request.request.clone();
+            let user_name = user.username.clone();
+            let mut start_task =
+                tokio::spawn(
+                    async move { transcode.create_session(&worker_request, &user_name).await },
+                );
+            match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
+                Ok(Ok(result)) => result
                     .map(RemoteStartResponse::from)
                     .map_err(|error| session_start_error(id, error)),
-                Err(_) => Err(ApiError::ServiceUnavailable(
-                    "local media worker exceeded the placement deadline".to_owned(),
-                )),
+                Ok(Err(error)) => Err(ApiError::Internal(format!(
+                    "local media worker task failed: {error}"
+                ))),
+                Err(_) => {
+                    let transcode = Arc::clone(&state.transcode);
+                    let incarnation_id = incarnation_id.clone();
+                    tokio::spawn(async move {
+                        if let Ok(Ok(info)) = start_task.await {
+                            transcode
+                                .stop_session_for_request(
+                                    &incarnation_id,
+                                    &info.session_id,
+                                    "late local cluster start",
+                                )
+                                .await;
+                        }
+                    });
+                    Err(ApiError::ServiceUnavailable(
+                        "local media worker exceeded the placement deadline".to_owned(),
+                    ))
+                }
             }
         } else {
             state
@@ -2327,6 +2351,7 @@ async fn segment_local(
     let content_type = segment_content_type(seg);
     let etag = segment_etag(session, seg, opened.len);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        opened.delivery.finish_without_body();
         return Ok((
             StatusCode::NOT_MODIFIED,
             [
@@ -2343,6 +2368,7 @@ async fn segment_local(
     let requested_range = match requested_byte_range(headers.range.as_deref(), opened.len) {
         Ok(range) => range,
         Err(()) => {
+            opened.delivery.finish_without_body();
             return Ok((
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [
@@ -2351,33 +2377,25 @@ async fn segment_local(
                     (header::ETAG, etag),
                 ],
             )
-                .into_response())
+                .into_response());
         }
     };
     if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
-        match opened
+        let read_elapsed = match opened
             .file
             .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
             .read_to_end(&mut init)
             .await
         {
-            Ok(bytes) => {
-                delivery.note_read(bytes as u64, started.elapsed());
-                // The body is buffered, so delivery is complete here — the
-                // gate above guarantees the bound could not truncate it.
-                // Unlike the streamed path below, a client that abandons this
-                // response is still recorded as fully delivered; the
-                // asymmetry is documented in docs/PLAYBACK.md.
-                delivery.finish();
-            }
+            Ok(_) => started.elapsed(),
             Err(error) => {
                 delivery.fail(&error);
                 return Err(ApiError::Internal(error.to_string()));
             }
-        }
+        };
         if let Ok((_, file)) = session_file(state, session).await {
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
@@ -2398,6 +2416,12 @@ async fn segment_local(
             }
             None => (StatusCode::OK, init, None),
         };
+        // The storage inspection reads the complete init so it can normalize
+        // codec metadata, but client-delivery accounting follows only the
+        // bytes placed in this response (especially for a Range request).
+        delivery.expect_at_most(body.len() as u64);
+        delivery.note_read(body.len() as u64, read_elapsed);
+        delivery.finish();
         let mut response = Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, content_type)
@@ -2424,16 +2448,16 @@ async fn segment_local(
         .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
         .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
     if start > 0 {
-        opened
-            .file
-            .seek(std::io::SeekFrom::Start(start))
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if let Err(error) = opened.file.seek(std::io::SeekFrom::Start(start)).await {
+            opened.delivery.fail(&error);
+            return Err(ApiError::Internal(error.to_string()));
+        }
     }
     let opened_len = end.saturating_sub(start).saturating_add(1);
     let total_len = opened.len;
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
-    let delivery = opened.delivery;
+    let mut delivery = opened.delivery;
+    delivery.expect_at_most(opened_len);
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
     // an abandoned body is the `response_dropped` case, and it is the only one
@@ -2563,6 +2587,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("drain".to_owned(), "seg00001.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");
@@ -2596,6 +2621,94 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
+        let dir = tempfile::tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
+        let body = vec![5_u8; 16 * 1024];
+        tokio::fs::write(dir.path().join("seg00004.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=1024-2047".parse().expect("range"));
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            headers,
+        )
+        .await
+        .expect("partial response");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 2_048)
+                .await
+                .expect("partial body")
+                .len(),
+            1_024
+        );
+        assert_eq!(fixture.delivered_bytes(), 1_024);
+
+        let mut conditional = HeaderMap::new();
+        conditional.insert(
+            header::IF_NONE_MATCH,
+            segment_etag("range", "seg00004.m4s", body.len() as u64)
+                .parse()
+                .expect("etag"),
+        );
+        let not_modified = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            conditional,
+        )
+        .await
+        .expect("conditional response");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+        let mut unsatisfiable = HeaderMap::new();
+        unsatisfiable.insert(
+            header::RANGE,
+            "bytes=999999-".parse().expect("invalid range value"),
+        );
+        let rejected = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            unsatisfiable,
+        )
+        .await
+        .expect("range response");
+        assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert!(
+            fixture.settle().await.is_empty(),
+            "valid partial and intentionally bodyless responses are not incomplete deliveries"
+        );
+
+        let init_dir = tempfile::tempdir().expect("init directory");
+        let init_fixture = HlsDeliveryFixture::publish(init_dir.path(), "init-range").await;
+        tokio::fs::write(init_dir.path().join("init.mp4"), vec![9_u8; 4_096])
+            .await
+            .expect("init bytes");
+        let mut init_headers = HeaderMap::new();
+        init_headers.insert(header::RANGE, "bytes=0-3".parse().expect("init range"));
+        let init_response = segment(
+            State(init_fixture.state.clone()),
+            AxPath(("init-range".to_owned(), "init.mp4".to_owned())),
+            init_headers,
+        )
+        .await
+        .expect("init partial response");
+        assert_eq!(
+            axum::body::to_bytes(init_response.into_body(), 16)
+                .await
+                .expect("init body")
+                .len(),
+            4
+        );
+        assert_eq!(init_fixture.delivered_bytes(), 4);
+        assert!(init_fixture.settle().await.is_empty());
+    }
+
     /// A client that walks away mid-segment is the case nothing else observes:
     /// the handler has already returned, the stream never reaches EOF, and no
     /// error is raised. Only `Drop` can name it, which also makes it the
@@ -2614,6 +2727,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("abandoned".to_owned(), "seg00002.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");
@@ -2669,6 +2783,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("unreadable".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");

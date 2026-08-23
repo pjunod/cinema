@@ -735,7 +735,7 @@ struct ReplicatedMembership {
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
     internal_read_preverify: Mutex<InternalReadAdmission>,
-    internal_read_authority: tokio::sync::Mutex<BTreeMap<String, Instant>>,
+    internal_read_authority: tokio::sync::Mutex<BTreeMap<String, InternalReadAuthority>>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -753,6 +753,11 @@ struct ActivityAuthAdmission {
 struct InternalReadAdmission {
     window_started: Instant,
     checks: u16,
+}
+
+struct InternalReadAuthority {
+    expires_at: Instant,
+    refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -2251,24 +2256,53 @@ impl MembershipManager {
             return Ok(false);
         }
         let observed = Instant::now();
-        let mut authority = inner.internal_read_authority.lock().await;
-        authority.retain(|_, expires_at| *expires_at > observed);
-        if authority
-            .get(&auth.node_id)
-            .is_some_and(|expires_at| *expires_at > observed)
+        let refresh = {
+            let mut authority = inner.internal_read_authority.lock().await;
+            if let Some(entry) = authority.get(&auth.node_id) {
+                if entry.expires_at > observed {
+                    return Ok(true);
+                }
+                Arc::clone(&entry.refresh)
+            } else {
+                // Only senders with a verified cached signing key reach this
+                // map. Keep expired entries as their per-sender single-flight
+                // gates; membership/key eviction removes them, so the map has
+                // the same hard peer bound without a global slow-query lock.
+                if authority.len() >= MAX_ACTIVITY_PEERS {
+                    return Ok(false);
+                }
+                let refresh = Arc::new(tokio::sync::Mutex::new(()));
+                authority.insert(
+                    auth.node_id.clone(),
+                    InternalReadAuthority {
+                        expires_at: observed,
+                        refresh: Arc::clone(&refresh),
+                    },
+                );
+                refresh
+            }
+        };
+        let _refresh = refresh.lock().await;
         {
-            return Ok(true);
+            // A waiter for this sender may find that the task ahead of it
+            // already refreshed authority. Re-check without coupling any
+            // other sender to the consistent read below.
+            let authority = inner.internal_read_authority.lock().await;
+            if authority
+                .get(&auth.node_id)
+                .is_some_and(|entry| entry.expires_at > Instant::now())
+            {
+                return Ok(true);
+            }
         }
         let live = self
             .verify_live_activity_authority(&auth.node_id, now)
             .await?;
         if live {
-            if authority.len() >= MAX_ACTIVITY_PEERS && !authority.contains_key(&auth.node_id) {
-                if let Some(evicted) = authority.keys().next().cloned() {
-                    authority.remove(&evicted);
-                }
+            let mut authority = inner.internal_read_authority.lock().await;
+            if let Some(entry) = authority.get_mut(&auth.node_id) {
+                entry.expires_at = Instant::now() + INTERNAL_READ_AUTHORITY_TTL;
             }
-            authority.insert(auth.node_id.clone(), observed + INTERNAL_READ_AUTHORITY_TTL);
         }
         Ok(live)
     }

@@ -2088,6 +2088,14 @@ impl SegmentDelivery {
         self.expected_bytes = self.expected_bytes.min(bytes);
     }
 
+    /// Mark a conditional or unsatisfiable response that intentionally has no
+    /// media body. Opening the authenticated object proved the capability;
+    /// the HTTP contract owes zero bytes and must not look like abandonment.
+    pub(crate) fn finish_without_body(&mut self) {
+        self.expected_bytes = 0;
+        self.finish();
+    }
+
     fn emit(&self, event: &str, reason: &str, ms: i64, mut extra: serde_json::Value) {
         // Stamped centrally rather than at each call site: an untagged
         // `segment_delivery_*` row is indistinguishable from a client fetch,
