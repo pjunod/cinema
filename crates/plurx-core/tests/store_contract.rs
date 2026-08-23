@@ -10290,6 +10290,25 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             1,
             "{backend}"
         );
+        assert_eq!(
+            store
+                .renew_cache_consumer_pins(
+                    &[CacheConsumerPin {
+                        expires_at_ms: 1_200,
+                        ..session_pin.clone()
+                    }],
+                    202,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay older renewal: {error}")),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 1_300, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: monotone pin candidates: {error}"))
+            .is_empty());
         assert!(store
             .release_cache_consumer_pin(
                 &storage_id,

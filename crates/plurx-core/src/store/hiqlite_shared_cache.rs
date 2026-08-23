@@ -455,7 +455,7 @@ impl SharedCacheStore for HiqliteAuthStore {
             validate_pin(pin, now_ms)?;
             statements.push((
                 "UPDATE cache_consumer_pins
-                    SET expires_at_ms = $7
+                    SET expires_at_ms = MAX(expires_at_ms, $7)
                   WHERE storage_id = $1 AND recipe_hash = $2
                     AND generation_id = $3 AND consumer_kind = $4
                     AND consumer_id = $5 AND consumer_epoch = $6
