@@ -843,7 +843,7 @@ mod tests {
         let error = NodeLocalTelemetry::open(&path)
             .err()
             .expect("future sidecar schema must be refused");
-        assert!(error.to_string().contains("only knows v3"), "{error}");
+        assert!(error.to_string().contains("only knows v4"), "{error}");
     }
 
     #[tokio::test]
