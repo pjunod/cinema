@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d9164257"]
+points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Rust and replicated-contract gates create an isolated three-voter ContractCluster for every migrated test and pass that cluster explicitly to the remote Store opener. Reverting this merge follow-through restores calls to the removed process-global harness or omits the now-required cluster argument, preventing all-target compilation and replicated contract execution."
