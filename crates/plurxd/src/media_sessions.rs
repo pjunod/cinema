@@ -38,6 +38,7 @@ const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
 const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
+const LEASE_RENEWAL_MIN_REMAINING_MS: i64 = 4_000;
 const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -554,8 +555,14 @@ pub(crate) async fn lease_loop(state: AppState) {
     let mut interval = tokio::time::interval(LEASE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut known = HashMap::<String, (String, i64)>::new();
+    let mut settling = HashSet::<String>::new();
+    let (settled_tx, mut settled_rx) =
+        tokio::sync::mpsc::channel::<String>(MAX_STALE_SETTLEMENTS_PER_TICK);
     loop {
         interval.tick().await;
+        while let Ok(session_id) = settled_rx.try_recv() {
+            settling.remove(&session_id);
+        }
         let now_ms = unix_ms();
         let live = state
             .transcode
@@ -573,10 +580,11 @@ pub(crate) async fn lease_loop(state: AppState) {
             Ok(routes) => routes,
             Err(error) => {
                 tracing::debug!(%error, "media-session lease inventory unavailable");
+                let failure_now_ms = unix_ms();
                 let expired = known
                     .iter()
                     .filter(|(_, (session_id, expires_at_ms))| {
-                        live.contains(session_id) && *expires_at_ms <= now_ms
+                        live.contains(session_id) && *expires_at_ms <= failure_now_ms
                     })
                     .map(|(incarnation_id, (session_id, _))| {
                         (incarnation_id.clone(), session_id.clone())
@@ -633,8 +641,22 @@ pub(crate) async fn lease_loop(state: AppState) {
             let store = Arc::clone(&state.store);
             let owner_node_id = state.node_id.clone();
             async move {
+                // Inventory and fan-out time consume the existing lease. A
+                // renewal must compare against wall time at the store call,
+                // never the earlier tick snapshot, or a delayed batch could
+                // revive a lease that expired while it waited.
+                let renewal_now_ms = unix_ms();
                 let renewals = chunk
                     .iter()
+                    // The replicated store has a three-second hard boundary
+                    // inside this four-second caller deadline. Refuse to send
+                    // work without the complete window remaining, so even a
+                    // commit-unknown reply cannot revive an already-expired
+                    // lease. Omitted routes fail closed in the outcome pass.
+                    .filter(|route| {
+                        route.lease_expires_at_ms
+                            > renewal_now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
+                    })
                     .map(|route| MediaSessionRenewal {
                         incarnation_id: route.incarnation_id.clone(),
                         owner_epoch: route.owner_epoch,
@@ -645,19 +667,19 @@ pub(crate) async fn lease_loop(state: AppState) {
                     store.renew_media_sessions(
                         &owner_node_id,
                         &renewals,
-                        now_ms,
-                        now_ms.saturating_add(LEASE_TTL_MS),
+                        renewal_now_ms,
+                        renewal_now_ms.saturating_add(LEASE_TTL_MS),
                     ),
                 )
                 .await;
-                (chunk, outcome)
+                (chunk, renewal_now_ms, outcome)
             }
         }))
         .buffer_unordered(LEASE_RENEWAL_FANOUT)
         .collect::<Vec<_>>()
         .await;
         let mut cleanup = Vec::new();
-        for (chunk, outcome) in renewal_outcomes {
+        for (chunk, renewal_now_ms, outcome) in renewal_outcomes {
             match outcome {
                 Ok(Ok(renewed)) => {
                     let renewed = renewed.into_iter().collect::<HashSet<_>>();
@@ -667,7 +689,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                                 route.incarnation_id.clone(),
                                 (
                                     route.session_id.clone(),
-                                    now_ms.saturating_add(LEASE_TTL_MS),
+                                    renewal_now_ms.saturating_add(LEASE_TTL_MS),
                                 ),
                             );
                         } else {
@@ -683,27 +705,29 @@ pub(crate) async fn lease_loop(state: AppState) {
                 Ok(Err(error)) => {
                     tracing::debug!(%error, "media-session lease renewal chunk unavailable");
                     for route in &chunk {
-                        if route.lease_expires_at_ms <= now_ms {
-                            cleanup.push((
-                                route.incarnation_id.clone(),
-                                route.session_id.clone(),
-                                "cluster lease expired",
-                            ));
-                            known.remove(&route.incarnation_id);
-                        }
+                        // Store timeouts and transport errors are commit-
+                        // unknown: SQLite blocking work and a submitted Raft
+                        // proposal may still complete after their future is
+                        // dropped. Fence the worker regardless of its prior
+                        // expiry so a late durable renewal cannot resurrect
+                        // serving authority.
+                        cleanup.push((
+                            route.incarnation_id.clone(),
+                            route.session_id.clone(),
+                            "cluster lease renewal ambiguous",
+                        ));
+                        known.remove(&route.incarnation_id);
                     }
                 }
                 Err(_) => {
                     tracing::debug!("media-session lease renewal fan-out exceeded its deadline");
                     for route in &chunk {
-                        if route.lease_expires_at_ms <= now_ms {
-                            cleanup.push((
-                                route.incarnation_id.clone(),
-                                route.session_id.clone(),
-                                "cluster lease expired",
-                            ));
-                            known.remove(&route.incarnation_id);
-                        }
+                        cleanup.push((
+                            route.incarnation_id.clone(),
+                            route.session_id.clone(),
+                            "cluster lease renewal ambiguous",
+                        ));
+                        known.remove(&route.incarnation_id);
                     }
                 }
             }
@@ -715,22 +739,29 @@ pub(crate) async fn lease_loop(state: AppState) {
         cleanup.sort_unstable_by(|left, right| left.1.cmp(&right.1));
         cleanup.dedup_by(|left, right| left.1 == right.1);
         fence_and_reap_sessions(&state, cleanup).await;
-        for route in routes
+        let settlement_capacity = MAX_STALE_SETTLEMENTS_PER_TICK.saturating_sub(settling.len());
+        let unsettled = routes
             .iter()
             .filter(|route| !live.contains(&route.session_id))
-            .take(MAX_STALE_SETTLEMENTS_PER_TICK)
-        {
+            .filter(|route| !settling.contains(&route.session_id))
+            .take(settlement_capacity)
+            .cloned()
+            .collect::<Vec<_>>();
+        for route in unsettled {
             let cleanup_state = state.clone();
             let session_id = route.session_id.clone();
+            let settled_tx = settled_tx.clone();
+            settling.insert(session_id.clone());
             tokio::spawn(async move {
                 let _ = cleanup_state
                     .store
-                    .end_media_session(&session_id, now_ms)
+                    .end_media_session(&session_id, unix_ms())
                     .await;
                 cleanup_state
                     .media_sessions
                     .invalidate_route(&session_id)
                     .await;
+                let _ = settled_tx.send(session_id).await;
             });
             known.remove(&route.incarnation_id);
         }

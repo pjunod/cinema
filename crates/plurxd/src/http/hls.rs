@@ -104,6 +104,79 @@ pub struct StartResponse {
     pub delivered_dynamic_range: Option<String>,
 }
 
+/// Owns a published worker until the replicated activation has a definitive
+/// outcome. Request futures are cancellation points at every store/network
+/// await; tying cleanup to this value prevents a disconnected client from
+/// leaving an encoder and its durable start claim behind.
+struct StartedSessionGuard {
+    cleanup: Option<StartedSessionCleanup>,
+}
+
+struct StartedSessionCleanup {
+    state: AppState,
+    owner_node_id: String,
+    incarnation_id: String,
+    session_id: String,
+    user_id: i64,
+    request_id: String,
+}
+
+impl StartedSessionGuard {
+    fn new(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+    ) -> Self {
+        Self {
+            cleanup: Some(StartedSessionCleanup {
+                state,
+                owner_node_id,
+                incarnation_id,
+                session_id,
+                user_id,
+                request_id,
+            }),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for StartedSessionGuard {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let _ = runtime.spawn(async move {
+            abort_started_session(
+                &cleanup.state,
+                &cleanup.owner_node_id,
+                &cleanup.incarnation_id,
+                &cleanup.session_id,
+            )
+            .await;
+            let _ = cleanup
+                .state
+                .store
+                .fail_media_session_request(
+                    cleanup.user_id,
+                    &cleanup.request_id,
+                    &cleanup.incarnation_id,
+                    unix_ms(),
+                )
+                .await;
+        });
+    }
+}
+
 /// Everything a client must say to open a stream.
 ///
 /// A body rather than a query string, and a POST rather than a GET, because
@@ -359,7 +432,7 @@ pub async fn create(
             "request_id must contain 1 to 128 characters".to_owned(),
         ));
     }
-    let fingerprint = request.durable_intent_fingerprint(&user.username);
+    let fingerprint = request.durable_intent_fingerprint(user.id);
     let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
     // Every create occupies a durable admission row. A caller-supplied key
@@ -530,38 +603,45 @@ pub async fn create(
             break;
         }
         let result = if candidate == state.node_id {
-            // `create_session` owns a child process before it publishes the
-            // session map entry, so dropping its future at the deadline is not
-            // cancellation-safe. Let an owned task reach a verdict; if the
-            // caller's common deadline wins, a reconciler removes only the
-            // exact late incarnation this attempt created.
+            // Session creation owns a child process before publishing the map
+            // entry. An owned task reaches a verdict even if this request is
+            // cancelled, and its returned guard cleans the exact late worker
+            // if nobody receives it.
             let transcode = Arc::clone(&state.transcode);
             let worker_request = remote_request.request.clone();
             let user_name = user.username.clone();
-            let mut start_task =
-                tokio::spawn(
-                    async move { transcode.create_session(&worker_request, &user_name).await },
-                );
+            let guard_state = state.clone();
+            let guard_owner = candidate.clone();
+            let guard_incarnation = incarnation_id.clone();
+            let guard_request = request_claim_id.clone();
+            let guard_user = user.id;
+            let mut start_task = tokio::spawn(async move {
+                transcode
+                    .create_cluster_session(&worker_request, &user_name)
+                    .await
+                    .map(|info| {
+                        let session_id = info.session_id.clone();
+                        let response = RemoteStartResponse::from(info);
+                        let guard = StartedSessionGuard::new(
+                            guard_state,
+                            guard_owner,
+                            guard_incarnation,
+                            session_id,
+                            guard_user,
+                            guard_request,
+                        );
+                        (response, guard)
+                    })
+            });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
-                Ok(Ok(result)) => result
-                    .map(RemoteStartResponse::from)
-                    .map_err(|error| session_start_error(id, error)),
+                Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
                 Ok(Err(error)) => Err(ApiError::Internal(format!(
                     "local media worker task failed: {error}"
                 ))),
                 Err(_) => {
-                    let transcode = Arc::clone(&state.transcode);
-                    let incarnation_id = incarnation_id.clone();
                     tokio::spawn(async move {
-                        if let Ok(Ok(info)) = start_task.await {
-                            transcode
-                                .stop_session_for_request(
-                                    &incarnation_id,
-                                    &info.session_id,
-                                    "late local cluster start",
-                                )
-                                .await;
-                        }
+                        // Dropping a successful output drops its armed guard.
+                        let _ = start_task.await;
                     });
                     Err(ApiError::ServiceUnavailable(
                         "local media worker exceeded the placement deadline".to_owned(),
@@ -573,6 +653,17 @@ pub async fn create(
                 .media_sessions
                 .start_remote(&candidate, &remote_request, placement_deadline)
                 .await
+                .map(|info| {
+                    let guard = StartedSessionGuard::new(
+                        state.clone(),
+                        candidate.clone(),
+                        incarnation_id.clone(),
+                        info.session_id.clone(),
+                        user.id,
+                        request_claim_id.clone(),
+                    );
+                    (info, guard)
+                })
                 .map_err(|error| {
                     ApiError::ServiceUnavailable(format!(
                         "media worker {candidate} could not start the session: {error:?}"
@@ -580,8 +671,8 @@ pub async fn create(
                 })
         };
         match result {
-            Ok(info) => {
-                started = Some((candidate, info));
+            Ok((info, guard)) => {
+                started = Some((candidate, info, guard));
                 break;
             }
             Err(error) => {
@@ -590,7 +681,7 @@ pub async fn create(
             }
         }
     }
-    let Some((owner_node_id, info)) = started else {
+    let Some((owner_node_id, info, guard)) = started else {
         let _ = state
             .store
             .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
@@ -612,21 +703,12 @@ pub async fn create(
     {
         Ok(true) => {}
         Ok(false) => {
-            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
-            let _ = state
-                .store
-                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
-                .await;
+            // The armed guard aborts the exact worker and fails this claim.
             return Err(ApiError::ServiceUnavailable(
                 "session ownership changed while placement was being committed".to_owned(),
             ));
         }
         Err(error) => {
-            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
-            let _ = state
-                .store
-                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
-                .await;
             return Err(error.into());
         }
     }
@@ -690,44 +772,54 @@ pub async fn create(
         response_json,
         now_ms: activation_now_ms,
     };
-    let outcome = match state.store.activate_media_session(&activation).await {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => {
-            abort_started_session(&state, &owner_node_id, &incarnation_id, &info.session_id).await;
-            let _ = state
-                .store
-                .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
-                .await;
-            return Err(ApiError::ServiceUnavailable(
+    // Once activation begins, this owned task also owns the cleanup guard.
+    // A disconnected HTTP client cannot interrupt the commit-unknown
+    // reconciliation and accidentally kill an activated winner (or leak an
+    // unactivated worker).
+    let activation_state = state.clone();
+    let outcome = tokio::spawn(async move {
+        let mut guard = guard;
+        match activation_state
+            .store
+            .activate_media_session(&activation)
+            .await
+        {
+            Ok(Some(outcome)) => {
+                guard.disarm();
+                Ok(outcome)
+            }
+            Ok(None) => Err(ApiError::ServiceUnavailable(
                 "session ownership could not be activated".to_owned(),
-            ));
-        }
-        Err(error) => {
-            let reconcile_deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-            if let Some(route) =
-                wait_for_exact_activation(&state, &activation, reconcile_deadline).await
-            {
-                MediaSessionActivationOutcome {
-                    route,
-                    predecessor: None,
+            )),
+            Err(error) => {
+                let reconcile_deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                if let Some(route) =
+                    wait_for_exact_activation(&activation_state, &activation, reconcile_deadline)
+                        .await
+                {
+                    guard.disarm();
+                    Ok(MediaSessionActivationOutcome {
+                        route,
+                        predecessor: None,
+                    })
+                } else {
+                    // A timed-out replicated transaction may still commit
+                    // after the caller loses its response. Transfer ownership
+                    // to the bounded reconciler before disarming this guard.
+                    let reconcile_state = activation_state.clone();
+                    let reconcile_activation = activation.clone();
+                    tokio::spawn(async move {
+                        reconcile_or_abort_activation(reconcile_state, reconcile_activation).await;
+                    });
+                    guard.disarm();
+                    Err(error.into())
                 }
-            } else {
-                // A timed-out replicated transaction may still commit after
-                // the client loses its response. Do not kill the worker or
-                // mark its request failed while that result is unknown. A
-                // bounded reconciler either adopts the exact durable route or
-                // cleans the exact uncommitted incarnation after the full
-                // confirmation window.
-                let reconcile_state = state.clone();
-                let reconcile_activation = activation.clone();
-                tokio::spawn(async move {
-                    reconcile_or_abort_activation(reconcile_state, reconcile_activation).await;
-                });
-                return Err(error.into());
             }
         }
-    };
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("media activation task failed: {error}")))??;
     state
         .media_sessions
         .cache_route(outcome.route.clone())

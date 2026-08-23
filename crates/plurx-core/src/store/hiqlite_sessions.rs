@@ -312,7 +312,7 @@ async fn claim_existing_or_reacquire(
     if row.request_fingerprint != fingerprint {
         return Ok(MediaSessionRequestClaim::Conflict);
     }
-    if row.state == "failed" {
+    if row.state == "failed" || (row.state == "starting" && row.claim_expires_at_ms <= now_ms) {
         let reacquired = store
             .client()
             .execute(
@@ -320,7 +320,9 @@ async fn claim_existing_or_reacquire(
                     SET state = 'starting', claim_expires_at_ms = $1,
                         incarnation_id = $2, owner_node_id = NULL,
                         response_json = NULL, updated_at_ms = $3
-                  WHERE user_id = $4 AND request_id = $5 AND state = 'failed'
+                  WHERE user_id = $4 AND request_id = $5
+                    AND (state = 'failed'
+                      OR (state = 'starting' AND claim_expires_at_ms <= $3))
                     AND request_fingerprint = $6
                     AND (SELECT COUNT(*) FROM media_session_requests
                           WHERE user_id = $4 AND state = 'starting'
@@ -351,7 +353,9 @@ async fn claim_existing_or_reacquire(
         }
         return match request_row(store, user_id, request_id).await? {
             Some(current)
-                if current.state == "failed" && current.request_fingerprint == fingerprint =>
+                if (current.state == "failed"
+                    || (current.state == "starting" && current.claim_expires_at_ms <= now_ms))
+                    && current.request_fingerprint == fingerprint =>
             {
                 Ok(MediaSessionRequestClaim::Overloaded)
             }
@@ -563,7 +567,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                            OR (state = 'resolved' AND response_json = $9))))
                     AND EXISTS (SELECT 1 FROM job_leases
                       WHERE resource = $13 AND owner_node_id = $6 AND fence = 1
-                        AND expires_at_ms = $7 AND expires_at_ms > $10)
+                        AND expires_at_ms = $7 AND expires_at_ms > $10
+                        AND updated_at_ms = $10
+                        AND revision < 9223372036854775807)
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $16)
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $3 AND incarnation_id != $1) < $14
                     AND (SELECT COUNT(*) FROM media_sessions
@@ -598,7 +605,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     request_id,
                     lease_resource.as_str(),
                     MAX_SESSION_ROWS_PER_USER,
-                    MAX_OWNED
+                    MAX_OWNED,
+                    removed_owner_key.as_str()
                 ),
             ),
             (
@@ -741,7 +749,8 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if changed.get(1).copied() != Some(1)
+        if changed.first().copied() != Some(1)
+            || changed.get(1).copied() != Some(1)
             || changed.get(4).copied() != Some(1)
             || changed.get(5).copied() != Some(0)
         {

@@ -154,20 +154,24 @@ impl MediaSessionStore for SqliteStore {
             if let Some((fingerprint, state, existing_incarnation, owner, expires)) = existing {
                 let outcome = if fingerprint != request_fingerprint {
                     MediaSessionRequestClaim::Conflict
-                } else if state == "failed" {
+                } else if state == "failed" || (state == "starting" && expires <= now_ms) {
                     let reacquired = tx.execute(
                         "UPDATE media_session_requests
                             SET state = 'starting', claim_expires_at_ms = ?1,
                                 incarnation_id = ?2, owner_node_id = NULL,
                                 response_json = NULL, updated_at_ms = ?3
-                          WHERE user_id = ?4 AND request_id = ?5 AND state = 'failed'
+                          WHERE user_id = ?4 AND request_id = ?5
+                            AND (state = 'failed'
+                              OR (state = 'starting' AND claim_expires_at_ms <= ?3))
                             AND request_fingerprint = ?6
                             AND (SELECT COUNT(*) FROM media_session_requests
                                   WHERE user_id = ?4 AND state = 'starting'
                                     AND claim_expires_at_ms > ?3) < ?7
                             AND (SELECT COUNT(*) FROM media_sessions
                                   WHERE user_id = ?4 AND state IN ('starting', 'active')
-                                    AND lease_expires_at_ms > ?3) < ?8",
+                                    AND lease_expires_at_ms > ?3) < ?8
+                            AND (SELECT COUNT(*) FROM media_sessions
+                                  WHERE user_id = ?4) < ?9",
                         params![
                             claim_expires_at_ms,
                             incarnation_id,
@@ -177,6 +181,7 @@ impl MediaSessionStore for SqliteStore {
                             request_fingerprint,
                             MAX_IN_FLIGHT_PER_USER,
                             MAX_CURRENT_PER_USER,
+                            MAX_SESSION_ROWS_PER_USER,
                         ],
                     )? == 1;
                     if reacquired {

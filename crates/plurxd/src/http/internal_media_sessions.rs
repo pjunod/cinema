@@ -72,11 +72,60 @@ pub(crate) async fn start(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let response = state
-        .transcode
-        .create_session(&request.request, &user.username)
+    // The worker publication and its activation-confirmation watcher are one
+    // owned operation. If the peer disconnects after ffmpeg starts, dropping
+    // this HTTP future cannot strand the worker before the watcher is armed.
+    let start_state = state.clone();
+    let start_task = tokio::spawn(async move {
+        let response = start_state
+            .transcode
+            .create_cluster_session(&request.request, &user.username)
+            .await
+            .map(RemoteStartResponse::from)?;
+        let confirmation_state = start_state.clone();
+        let confirmation_incarnation = request.incarnation_id.clone();
+        let confirmation_session = response.session_id.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
+            loop {
+                match confirmation_state
+                    .store
+                    .media_session_route_by_incarnation(&confirmation_incarnation)
+                    .await
+                {
+                    Ok(Some(route))
+                        if route.session_id == confirmation_session
+                            && route.owner_node_id == confirmation_state.node_id
+                            && route.state == "active"
+                            && route.lease_expires_at_ms > unix_ms() =>
+                    {
+                        confirmation_state
+                            .media_sessions
+                            .seed_owned_lease(&route)
+                            .await;
+                        return;
+                    }
+                    Ok(Some(_)) => break,
+                    Ok(None) | Err(_) if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            confirmation_state
+                .transcode
+                .stop_session_for_request(
+                    &confirmation_incarnation,
+                    &confirmation_session,
+                    "cluster activation not confirmed",
+                )
+                .await;
+        });
+        Ok::<RemoteStartResponse, String>(response)
+    });
+    let response = start_task
         .await
-        .map(RemoteStartResponse::from)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|error| {
             if error.contains("already used") {
                 StatusCode::CONFLICT
@@ -86,45 +135,6 @@ pub(crate) async fn start(
                 StatusCode::UNPROCESSABLE_ENTITY
             }
         })?;
-    let confirmation_state = state.clone();
-    let confirmation_incarnation = request.incarnation_id.clone();
-    let confirmation_session = response.session_id.clone();
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
-        loop {
-            match confirmation_state
-                .store
-                .media_session_route_by_incarnation(&confirmation_incarnation)
-                .await
-            {
-                Ok(Some(route))
-                    if route.session_id == confirmation_session
-                        && route.owner_node_id == confirmation_state.node_id
-                        && route.state == "active"
-                        && route.lease_expires_at_ms > unix_ms() =>
-                {
-                    confirmation_state
-                        .media_sessions
-                        .seed_owned_lease(&route)
-                        .await;
-                    return;
-                }
-                Ok(Some(_)) => break,
-                Ok(None) | Err(_) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Ok(None) | Err(_) => break,
-            }
-        }
-        confirmation_state
-            .transcode
-            .stop_session_for_request(
-                &confirmation_incarnation,
-                &confirmation_session,
-                "cluster activation not confirmed",
-            )
-            .await;
-    });
     Ok(Json(response))
 }
 

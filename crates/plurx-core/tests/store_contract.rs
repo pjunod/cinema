@@ -47,9 +47,10 @@ use plurx_core::secrets::CredentialKey;
 use plurx_core::store::MetricsStore;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
-    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
-    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore,
-    TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
+    OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
+    TraktStore, TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE,
+    AUTH_SCHEMA_VERSION,
 };
 use plurx_core::store::{
     ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
@@ -657,6 +658,47 @@ async fn media_session_contract_runs_through_dyn_store() {
             "{backend}: fingerprints must use one canonical lowercase encoding"
         );
 
+        let expired_incarnation = "00000000-0000-4000-8000-0000000000d1";
+        let recovered_incarnation = "00000000-0000-4000-8000-0000000000d2";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-attempt",
+                    &fingerprint,
+                    expired_incarnation,
+                    1,
+                    2,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring request: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-attempt",
+                    &fingerprint,
+                    recovered_incarnation,
+                    2,
+                    12,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reclaim exact expired request: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == recovered_incarnation
+        ));
+        assert!(store
+            .fail_media_session_request(
+                first_user.id,
+                "expired-attempt",
+                recovered_incarnation,
+                3,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle expired request fixture: {error}")));
+
         let failed_incarnation = "00000000-0000-4000-8000-0000000000e1";
         let retried_incarnation = "00000000-0000-4000-8000-0000000000e2";
         assert!(matches!(
@@ -1115,6 +1157,155 @@ async fn media_session_contract_runs_through_dyn_store() {
             .is_none());
     })
     .await;
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_media_activation_requires_its_lease_mutation() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated media activation contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated media activation client");
+    let user = store
+        .create_user("lease-fence-user", "hash", false)
+        .await
+        .expect("create lease-fence user");
+    let fingerprint = "c".repeat(64);
+
+    let max_incarnation = "00000000-0000-4000-8000-0000000000c1";
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                user.id,
+                "max-revision-attempt",
+                &fingerprint,
+                max_incarnation,
+                100,
+                200,
+            )
+            .await
+            .expect("claim max-revision activation"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    assert!(store
+        .assign_media_session_request_owner(
+            user.id,
+            "max-revision-attempt",
+            max_incarnation,
+            "removed-node",
+            110,
+        )
+        .await
+        .expect("assign max-revision owner"));
+    raw.execute(
+        "INSERT INTO job_leases
+            (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+         VALUES ($1, $2, 1, 9223372036854775807, $3, $4)",
+        hiqlite::params!(
+            format!("session:{max_incarnation}"),
+            "removed-node",
+            320_i64,
+            120_i64
+        ),
+    )
+    .await
+    .expect("seed exhausted media lease");
+    assert!(store
+        .activate_media_session(&MediaSessionActivation {
+            incarnation_id: max_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
+            user_id: user.id,
+            playback_id: "max-revision-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("max-revision-attempt".to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "removed-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            now_ms: 120,
+            lease_expires_at_ms: 320,
+        })
+        .await
+        .expect("reject exhausted media lease")
+        .is_none());
+
+    let removed_incarnation = "00000000-0000-4000-8000-0000000000c3";
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                user.id,
+                "removed-owner-attempt",
+                &fingerprint,
+                removed_incarnation,
+                130,
+                230,
+            )
+            .await
+            .expect("claim removed-owner activation"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    assert!(store
+        .assign_media_session_request_owner(
+            user.id,
+            "removed-owner-attempt",
+            removed_incarnation,
+            "removed-node",
+            140,
+        )
+        .await
+        .expect("assign removed owner"));
+    raw.execute(
+        "INSERT INTO job_leases
+            (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+         VALUES ($1, $2, 1, 7, $3, $4)",
+        hiqlite::params!(
+            format!("session:{removed_incarnation}"),
+            "removed-node",
+            350_i64,
+            150_i64
+        ),
+    )
+    .await
+    .expect("seed retained removed-owner media lease");
+    raw.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, '', $2)",
+        hiqlite::params!("internal.cluster_job_owner_removed.removed-node", 150_i64),
+    )
+    .await
+    .expect("mark media owner removed");
+    assert!(store
+        .activate_media_session(&MediaSessionActivation {
+            incarnation_id: removed_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
+            user_id: user.id,
+            playback_id: "removed-owner-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("removed-owner-attempt".to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: "removed-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            now_ms: 150,
+            lease_expires_at_ms: 350,
+        })
+        .await
+        .expect("reject removed-owner media lease")
+        .is_none());
 }
 
 #[tokio::test]

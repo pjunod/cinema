@@ -2794,7 +2794,7 @@ impl SessionRequest {
     /// For an Auto transcode the numeric height is excluded on purpose: a
     /// network-prior refresh between transport attempts may recompute it, but
     /// the same `request_id` must still recover the first persisted answer.
-    fn intent_fingerprint(&self, user_name: &str) -> String {
+    fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
             SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
             SessionKind::Transcode { height } => format!("t{height}"),
@@ -2831,16 +2831,19 @@ impl SessionRequest {
         .to_string()
     }
 
+    fn intent_fingerprint(&self, user_name: &str) -> String {
+        self.intent_fingerprint_with_user_scope(Some(user_name))
+    }
+
     /// Fixed-width durable identity used by the replicated session claim.
     ///
-    /// Keep the established JSON identity above unchanged for process-local
-    /// rolling-deploy recovery, then hash it before it enters replicated
-    /// storage. The digest bounds both the schema and every log/diagnostic
-    /// surface regardless of client-controlled playback identifiers.
-    pub(crate) fn durable_intent_fingerprint(&self, user_name: &str) -> String {
-        hex::encode(Sha256::digest(
-            self.intent_fingerprint(user_name).as_bytes(),
-        ))
+    /// Replicated request rows are already scoped by the immutable user id.
+    /// Exclude the mutable username so an account rename cannot turn an
+    /// otherwise identical idempotent replay into a conflict. The established
+    /// process-local identity above keeps the username scope it has always had.
+    pub(crate) fn durable_intent_fingerprint(&self, user_id: i64) -> String {
+        let durable = serde_json::json!([user_id, self.intent_fingerprint_with_user_scope(None),]);
+        hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }
 
@@ -7188,6 +7191,27 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
     ) -> Result<StartInfo, String> {
+        self.create_session_inner(req, user_name, true).await
+    }
+
+    /// Start a cluster-owned worker without process-local playback
+    /// supersession. The durable activation CAS chooses and returns the exact
+    /// predecessor; reaping before that verdict lets racing starts kill the
+    /// winner and publish a route to the loser.
+    pub async fn create_cluster_session(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+    ) -> Result<StartInfo, String> {
+        self.create_session_inner(req, user_name, false).await
+    }
+
+    async fn create_session_inner(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+        supersede_existing: bool,
+    ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
             _ => {
@@ -7230,6 +7254,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
+                    supersede_existing,
                 )
                 .await?
             }
@@ -7249,6 +7274,7 @@ impl TranscodeManager {
                     user_name,
                     &req.playback_id,
                     req.automatic,
+                    supersede_existing,
                 )
                 .await?
             }
@@ -8114,6 +8140,7 @@ impl TranscodeManager {
             playback_id,
             false,
             false,
+            true,
         )
         .await
     }
@@ -8241,12 +8268,15 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
+        supersede_existing: bool,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded(playback_id).await;
+        if supersede_existing {
+            self.reap_superseded(playback_id).await;
+        }
 
         let mut file = self
             .store
@@ -8810,6 +8840,7 @@ impl TranscodeManager {
             user_name,
             playback_id,
             false,
+            true,
         )
         .await
     }
@@ -8825,10 +8856,13 @@ impl TranscodeManager {
         user_name: &str,
         playback_id: &str,
         automatic: bool,
+        supersede_existing: bool,
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded(playback_id).await;
+        if supersede_existing {
+            self.reap_superseded(playback_id).await;
+        }
 
         let mut file = self
             .store
@@ -11558,6 +11592,21 @@ mod tests {
         );
         assert!(hdr10.intent_fingerprint("paul").contains("t1080+hdr10"));
         assert!(request.intent_fingerprint("paul").contains("\"t1080\""));
+        assert_ne!(
+            request.intent_fingerprint("old-name"),
+            request.intent_fingerprint("new-name"),
+            "the legacy process-local key keeps its global username scope"
+        );
+        assert_eq!(
+            request.durable_intent_fingerprint(7),
+            request.clone().durable_intent_fingerprint(7),
+            "the replicated key is scoped by immutable user id, not username"
+        );
+        assert_ne!(
+            request.durable_intent_fingerprint(7),
+            request.durable_intent_fingerprint(8),
+            "different durable users remain distinct"
+        );
     }
 
     #[test]

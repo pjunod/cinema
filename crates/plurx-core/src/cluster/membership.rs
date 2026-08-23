@@ -2318,12 +2318,16 @@ impl MembershipManager {
         if !self.admit_internal_read_replay(&auth.node_id, &auth.nonce)? {
             return Ok(false);
         }
+        if unix_ms()?.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+            return Ok(false);
+        }
         let observed = Instant::now();
         let refresh = {
             let mut authority = inner.internal_read_authority.lock().await;
             if let Some(entry) = authority.get(&auth.node_id) {
                 if entry.expires_at > observed {
-                    return Ok(true);
+                    return Ok(unix_ms()?.abs_diff(auth.timestamp_ms)
+                        <= INTERNAL_READ_AUTH_WINDOW_MS as u64);
                 }
                 Arc::clone(&entry.refresh)
             } else {
@@ -2346,6 +2350,14 @@ impl MembershipManager {
             }
         };
         let _refresh = refresh.lock().await;
+        // Queueing behind this sender's single-flight consumes both the proof
+        // window and heartbeat freshness. Re-sample wall time after the wait;
+        // never let the timestamp captured before signature verification
+        // authorize a later consensus read or cached-authority hit.
+        let authority_now = unix_ms()?;
+        if authority_now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+            return Ok(false);
+        }
         {
             // A waiter for this sender may find that the task ahead of it
             // already refreshed authority. Re-check without coupling any
@@ -2355,19 +2367,23 @@ impl MembershipManager {
                 .get(&auth.node_id)
                 .is_some_and(|entry| entry.expires_at > Instant::now())
             {
-                return Ok(true);
+                return Ok(
+                    unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64
+                );
             }
         }
         let live = self
-            .verify_live_activity_authority(&auth.node_id, now)
+            .verify_live_activity_authority(&auth.node_id, authority_now)
             .await?;
-        if live {
+        let proof_still_fresh =
+            unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64;
+        if live && proof_still_fresh {
             let mut authority = inner.internal_read_authority.lock().await;
             if let Some(entry) = authority.get_mut(&auth.node_id) {
                 entry.expires_at = Instant::now() + INTERNAL_READ_AUTHORITY_TTL;
             }
         }
-        Ok(live)
+        Ok(live && proof_still_fresh)
     }
 
     async fn activity_signature_is_valid(
@@ -2550,7 +2566,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
-                "SELECT node.raft_id \
+                "SELECT node.raft_id, node.last_seen_at \
                  FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
                    AND node.last_seen_at >= $2 \
@@ -2559,7 +2575,9 @@ impl MembershipManager {
                 params!(node_id, reachable_after),
             )
             .await?;
+        let verified_reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         Ok(rows.len() == 1
+            && rows[0].last_seen_at >= verified_reachable_after
             && metrics
                 .membership_config
                 .voter_ids()
@@ -3910,6 +3928,7 @@ impl From<&mut Row<'_>> for ActivityPublicKeyRow {
 
 struct ActivityAuthNodeRow {
     raft_id: u64,
+    last_seen_at: i64,
 }
 
 impl From<&mut Row<'_>> for ActivityAuthNodeRow {
@@ -3917,6 +3936,7 @@ impl From<&mut Row<'_>> for ActivityAuthNodeRow {
         let raft_id: i64 = row.get("raft_id");
         Self {
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            last_seen_at: row.get("last_seen_at"),
         }
     }
 }
