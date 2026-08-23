@@ -15299,6 +15299,7 @@ mod tests {
             .as_ref()
             .and_then(tokio::process::Child::id)
             .expect("placeholder process id");
+        let predecessor_generation = session.progress.generation();
         mgr.sessions
             .lock()
             .await
@@ -15344,10 +15345,14 @@ mod tests {
             "the retired session must remain unregistered"
         );
         let mut child = session.child.lock().await;
+        assert!(
+            child.is_some(),
+            "retirement must retain the reaped predecessor handle"
+        );
         assert_eq!(
-            child.as_ref().and_then(tokio::process::Child::id),
-            Some(predecessor_pid),
-            "fallback must not publish a successor process"
+            session.progress.generation(),
+            predecessor_generation,
+            "fallback must not begin or publish a successor process after retirement (predecessor pid {predecessor_pid})"
         );
         assert!(
             child

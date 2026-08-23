@@ -12,6 +12,8 @@ use plurx_core::store::{PublicationFence, PublicationStore, Store};
 
 const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
 const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
+const RELEASE_ATTEMPTS: usize = 5;
+const RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub(crate) struct ActiveJobLease {
     coordinator: StoreCoordinator,
@@ -147,7 +149,25 @@ impl ActiveJobLease {
         }
         let token = self.fence.snapshot().await;
         if let Some(token) = token {
-            if let Err(error) = self.coordinator.release(&token).await {
+            let mut attempt = 1;
+            let released = loop {
+                match self.coordinator.release(&token).await {
+                    Ok(value) => break Ok(value),
+                    Err(error) if attempt < RELEASE_ATTEMPTS => {
+                        tracing::warn!(
+                            resource = token.resource,
+                            fence = token.fence,
+                            attempt,
+                            error = %error,
+                            "cluster job lease release was transient; retrying"
+                        );
+                        tokio::time::sleep(RELEASE_RETRY_DELAY).await;
+                        attempt += 1;
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            if let Err(error) = released {
                 tracing::warn!(
                     resource = token.resource,
                     fence = token.fence,

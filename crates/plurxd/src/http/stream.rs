@@ -2000,23 +2000,26 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .take()
         .ok_or_else(|| ApiError::Internal("ffmpeg stdout unavailable".into()))?;
 
+    let owner_guard = guard.clone();
     let (process_guard, _process_owner) =
-        spawn_remux_process_owner(child, serving.clone(), admitted_generation, guard);
+        spawn_remux_process_owner(child, serving.clone(), admitted_generation, owner_guard);
 
-    // Stream ffmpeg stdout. The body carries only a cancellation guard; the
-    // detached owner above keeps polling serving authority and owns the child
-    // even when Hyper is not polling this body.
+    // Stream ffmpeg stdout. The body carries cancellation plus its own
+    // idempotent registry guard; the detached owner carries a clone so body
+    // drop deregisters synchronously while serving loss can do the same even
+    // when Hyper is not polling this body.
     let reader = tokio::io::BufReader::new(stdout);
     let state = (
         reader,
         tracked_stream,
         process_guard,
+        guard,
         serving,
         admitted_generation,
     );
     let stream = futures_util::stream::unfold(
         state,
-        |(mut reader, tracked, process_guard, mut serving, admitted_generation)| async move {
+        |(mut reader, tracked, process_guard, registry_guard, mut serving, admitted_generation)| async move {
             if serving
                 .borrow_and_update()
                 .authority_lost_since(admitted_generation)
@@ -2052,7 +2055,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
                     }
                     Some((
                         Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
-                        (reader, tracked, process_guard, serving, admitted_generation),
+                        (
+                            reader,
+                            tracked,
+                            process_guard,
+                            registry_guard,
+                            serving,
+                            admitted_generation,
+                        ),
                     ))
                 }
                 Err(e) => {
