@@ -341,11 +341,16 @@ impl MediaSessionStore for SqliteStore {
             let owner_current: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_sessions
                   WHERE owner_node_id = ?1 AND state = 'active'
-                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
+                    AND lease_expires_at_ms > ?2 AND incarnation_id != ?3
+                    AND incarnation_id != COALESCE((
+                      SELECT current_incarnation_id FROM media_playback_pointers
+                       WHERE user_id = ?4 AND playback_id = ?5), '')",
                 params![
                     activation.owner_node_id,
                     activation.now_ms,
                     activation.incarnation_id,
+                    activation.user_id,
+                    activation.playback_id,
                 ],
                 |row| row.get(0),
             )?;

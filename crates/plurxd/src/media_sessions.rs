@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{header, HeaderName, Response, StatusCode};
-use futures_util::TryStreamExt;
+use futures_util::{stream, StreamExt, TryStreamExt};
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{MediaSessionRenewal, MediaSessionRoute};
 use plurx_core::error::StoreError;
@@ -36,6 +36,8 @@ const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const LEASE_RENEWAL_BATCH: usize = 256;
+const LEASE_RENEWAL_FANOUT: usize = 16;
+const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -593,27 +595,47 @@ pub(crate) async fn lease_loop(state: AppState) {
             .iter()
             .filter(|route| live.contains(&route.session_id))
             .collect::<Vec<_>>();
-        for chunk in renewal_chunks(&active) {
-            let renewals = chunk
-                .iter()
-                .map(|route| MediaSessionRenewal {
-                    incarnation_id: route.incarnation_id.clone(),
-                    owner_epoch: route.owner_epoch,
-                })
-                .collect::<Vec<_>>();
-            match state
-                .store
-                .renew_media_sessions(
-                    &state.node_id,
-                    &renewals,
-                    now_ms,
-                    now_ms.saturating_add(LEASE_TTL_MS),
+        let renewal_deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
+        let renewal_batches = renewal_chunks(&active)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|route| (*route).clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let renewal_outcomes = stream::iter(renewal_batches.into_iter().map(|chunk| {
+            let store = Arc::clone(&state.store);
+            let owner_node_id = state.node_id.clone();
+            async move {
+                let renewals = chunk
+                    .iter()
+                    .map(|route| MediaSessionRenewal {
+                        incarnation_id: route.incarnation_id.clone(),
+                        owner_epoch: route.owner_epoch,
+                    })
+                    .collect::<Vec<_>>();
+                let outcome = tokio::time::timeout_at(
+                    renewal_deadline,
+                    store.renew_media_sessions(
+                        &owner_node_id,
+                        &renewals,
+                        now_ms,
+                        now_ms.saturating_add(LEASE_TTL_MS),
+                    ),
                 )
-                .await
-            {
-                Ok(renewed) => {
+                .await;
+                (chunk, outcome)
+            }
+        }))
+        .buffer_unordered(LEASE_RENEWAL_FANOUT)
+        .collect::<Vec<_>>()
+        .await;
+        for (chunk, outcome) in renewal_outcomes {
+            match outcome {
+                Ok(Ok(renewed)) => {
                     let renewed = renewed.into_iter().collect::<HashSet<_>>();
-                    for route in chunk {
+                    for route in &chunk {
                         if renewed.contains(&route.incarnation_id) {
                             known.insert(
                                 route.incarnation_id.clone(),
@@ -635,9 +657,25 @@ pub(crate) async fn lease_loop(state: AppState) {
                         }
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     tracing::debug!(%error, "media-session lease renewal chunk unavailable");
-                    for route in chunk {
+                    for route in &chunk {
+                        if route.lease_expires_at_ms <= now_ms {
+                            state
+                                .transcode
+                                .stop_session(&route.session_id, "cluster lease expired")
+                                .await;
+                            state
+                                .media_sessions
+                                .invalidate_route(&route.session_id)
+                                .await;
+                            known.remove(&route.incarnation_id);
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::debug!("media-session lease renewal fan-out exceeded its deadline");
+                    for route in &chunk {
                         if route.lease_expires_at_ms <= now_ms {
                             state
                                 .transcode
@@ -807,6 +845,11 @@ mod tests {
                 .map(|chunk| chunk.len())
                 .collect::<Vec<_>>(),
             vec![LEASE_RENEWAL_BATCH, LEASE_RENEWAL_BATCH, 1]
+        );
+        let admitted_owner = vec![(); LEASE_RENEWAL_BATCH * LEASE_RENEWAL_FANOUT];
+        assert_eq!(
+            renewal_chunks(&admitted_owner).count(),
+            LEASE_RENEWAL_FANOUT
         );
     }
 

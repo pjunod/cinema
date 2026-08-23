@@ -48,7 +48,7 @@ const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 /// diagnostics even though they look like ordinary identifiers.
 pub(crate) fn session_log_id(session_id: &str) -> String {
     let digest = Sha256::digest(session_id.as_bytes());
-    format!("s-{}", &hex::encode(digest)[..16])
+    format!("s-{}", hex::encode(digest))
 }
 
 fn capacity_error(message: impl AsRef<str>) -> String {
@@ -10849,7 +10849,7 @@ mod tests {
             redacted,
             session_log_id("00000000-0000-4000-8000-0000000000d2")
         );
-        assert_eq!(redacted.len(), 18);
+        assert_eq!(redacted.len(), 66);
         assert!(redacted.starts_with("s-"));
         assert!(!redacted.contains(raw));
     }

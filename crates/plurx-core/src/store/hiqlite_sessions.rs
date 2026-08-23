@@ -532,7 +532,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE owner_node_id = $6 AND state = 'active'
                             AND lease_expires_at_ms > $10
-                            AND incarnation_id != $1) < $15
+                            AND incarnation_id != $1
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE user_id = $3 AND playback_id = $4), '')) < $15
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                     lease_expires_at_ms = excluded.lease_expires_at_ms,
                     response_json = excluded.response_json,
