@@ -226,18 +226,25 @@ impl SharedCacheCoordinator {
                 return Err("single-voter canary changed while read".to_owned());
             }
         } else {
-            for peer in peers {
+            let mut proofs = Vec::with_capacity(peers.len());
+            for peer in &peers {
                 if !peer.reachable {
                     return Err(format!(
                         "shared-cache peer {} is not reachable",
                         peer.node_id
                     ));
                 }
-                let base = peer.http_base.ok_or_else(|| {
+                let base = peer.http_base.as_deref().ok_or_else(|| {
                     format!("shared-cache peer {} has no HTTP base", peer.node_id)
                 })?;
-                self.verify_peer(&config.storage_id, &canaries, &peer.node_id, &base)
-                    .await?;
+                proofs.push(self.verify_peer(&config.storage_id, &canaries, &peer.node_id, base));
+            }
+            // Every voter has the same bounded proof deadline. Running the
+            // independent canaries together keeps admission latency bounded
+            // by the slowest voter rather than multiplying it by cluster
+            // size.
+            for proof in futures_util::future::join_all(proofs).await {
+                proof?;
             }
         }
         self.store
