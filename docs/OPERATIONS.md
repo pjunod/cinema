@@ -590,8 +590,18 @@ deterministic one-node disaster-recovery drill remain the explicit M6 work in
 
 **Gracefully remove the node you are connected to.** Settings → Cluster →
 **Leave this cluster** calls the same admin-only operation. It resolves the
-node's offline work and, if this voter is the leader, elects and confirms a
-successor before committing its own removal. It then drains HTTP and exits.
+node's offline work and coordinates a safe membership change with the
+surviving quorum. A durable removal fence and a final pre-proposal sweep prevent
+new or stranded local work. For an even voter set, the current leader commits
+the joint then uniform removal directly, then drains so the new odd quorum can
+elect. For an odd voter set, it confirms a successor first. The daemon then
+drains HTTP and exits.
+Membership changes are refused before offline-work settlement, leadership
+handoff, or fencing while active nodes are on mixed versions; finish the
+rolling upgrade and retry. Replicated guards keep an older binary from deleting
+a newer removal fence if versions change during an already-started operation,
+and refuse an older coordinator's new fence write before it can submit a stale
+absolute voter set—even when that older process is still the Raft leader.
 The command-line equivalent must target one node directly (or use a sticky
 route) for both the roster read and leave POST. The body binds the destructive
 request to the backend that produced `local_node_id`, so a load balancer cannot
@@ -618,8 +628,13 @@ replicated database triggers, so a still-running or resumed process—including
 one on the preceding rolling-upgrade version—cannot publish background work
 after the membership change. Startup and an idempotent removal retry restore
 missing owner fences for older tombstones. A definitively rejected removal
-clears that owner fence, but the invalidated tokens remain stale and the node
-must acquire fresh ones.
+clears that owner fence only when no concurrent, ambiguous, or older-version
+attempt still owns the shared removal state. Otherwise the API returns
+`membership_removal_pending`, the roster labels the node **Removal pending**,
+and the fence stays authoritative. Finish upgrading every cluster node and
+retry that same removal; do not return the fenced node to service. Invalidated
+job tokens remain stale even after a clean rollback, and the node must acquire
+fresh ones.
 
 **Remove a follower from three or more voters.** Use the node id from the
 roster, not its Raft id. The request refuses the current leader and any change

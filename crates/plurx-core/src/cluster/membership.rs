@@ -56,6 +56,14 @@ const TRANSFER_ACTIVE_SECONDS: i64 = 60;
 /// before it refuses instead. Each round costs at most one [`PROBE_WAIT`], so
 /// this bounds the operator's wait as well as the loop.
 const OFFLINE_RESOLVE_ROUNDS: u32 = 3;
+/// Bound the required odd-voter handoff. Survivor probes run in parallel, so
+/// one unavailable voter cannot multiply this deadline.
+const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
+/// A committed self-removal must return to the HTTP layer promptly so the
+/// daemon can drain. The durable pending-removal row is already authoritative
+/// if this best-effort final tombstone write does not finish in time.
+const FINAL_TOMBSTONE_WAIT: Duration = Duration::from_secs(1);
+const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
 
 const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_membership_meta (\
@@ -83,6 +91,39 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_node_removals (\
          node_id TEXT PRIMARY KEY, \
          started_at INTEGER NOT NULL) STRICT",
+    // Each concurrent removal owns a distinct replicated reference to the
+    // shared admission fence. A definite pre-proposal failure releases only
+    // its own reference, while an ambiguous attempt deliberately keeps one.
+    "CREATE TABLE IF NOT EXISTS cluster_node_removal_attempts (\
+         node_id TEXT NOT NULL, \
+         attempt_id TEXT NOT NULL, \
+         PRIMARY KEY(node_id, attempt_id)) STRICT",
+    // Transaction-local proof that a fence insert belongs to the
+    // reference-aware coordinator. Replicated triggers use it to reject an
+    // older leader before that process can submit a stale absolute voter set.
+    "CREATE TABLE IF NOT EXISTS cluster_node_removal_intents (\
+         node_id TEXT PRIMARY KEY, \
+         attempt_id TEXT NOT NULL) STRICT",
+    // Coupled to the ordinary heartbeat in one Raft transaction. Equality with
+    // cluster_nodes.last_seen_at proves the currently running binary, rather
+    // than a previously upgraded process, understands attempt references.
+    "CREATE TABLE IF NOT EXISTS cluster_node_capabilities (\
+         node_id TEXT NOT NULL, \
+         capability TEXT NOT NULL, \
+         last_seen_at INTEGER NOT NULL, \
+         PRIMARY KEY(node_id, capability)) STRICT",
+    // A transaction-local marker lets replicated triggers distinguish this
+    // binary's heartbeat from an older statement without trusting wall-clock
+    // uniqueness. Every new heartbeat creates and consumes its marker in one
+    // transaction, so no stale intent is externally visible.
+    "CREATE TABLE IF NOT EXISTS cluster_node_heartbeat_intents (\
+         node_id TEXT PRIMARY KEY, \
+         last_seen_at INTEGER NOT NULL) STRICT",
+    // Redeem publishes a coordinator-side row before the joining process can
+    // heartbeat. Only this pre-heartbeat row is excluded from rollout
+    // readiness; the first old or new heartbeat consumes the marker.
+    "CREATE TABLE IF NOT EXISTS cluster_node_join_staging (\
+         node_id TEXT PRIMARY KEY) STRICT",
     // Kept separate from `cluster_nodes` so this patch is rolling-compatible
     // with M3 binaries that still write the original six-column row. Public
     // HTTP addressing belongs to the node rather than the logical server: it
@@ -124,6 +165,14 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          WHEN EXISTS (SELECT 1 FROM settings \
                       WHERE key = 'internal.cluster_job_owner_removed.' || NEW.owner_node_id) \
          BEGIN SELECT RAISE(ABORT, 'cluster job lease owner has been removed'); END",
+    // Older binaries do not know about attempt references and unconditionally
+    // delete the two shared fences on a rejected request. Replicated triggers
+    // make those legacy DELETEs harmless while any attempt reference exists.
+    PROTECT_REMOVAL_FENCE_DELETE_SQL,
+    PROTECT_REMOVAL_OWNER_FENCE_DELETE_SQL,
+    MARK_LEGACY_NODE_INSERT_DURING_REMOVAL_SQL,
+    MARK_LEGACY_NODE_HEARTBEAT_DURING_REMOVAL_SQL,
+    MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL,
 ];
 
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
@@ -150,6 +199,12 @@ pub enum MembershipError {
     InvalidHttpEndpoint,
     #[error("cluster HTTP endpoint is already owned by another active node")]
     HttpEndpointInUse,
+    #[error("finish upgrading every active cluster node before changing membership")]
+    MembershipUpgradeRequired,
+    #[error(
+        "node removal remains pending after the membership change was rejected: {0}; finish upgrading every cluster node and retry this removal"
+    )]
+    RemovalPending(String),
     #[error("node was not found in current cluster membership")]
     NodeNotFound,
     #[error("the current Raft leader cannot be removed; retry after leadership moves")]
@@ -184,6 +239,8 @@ impl MembershipError {
             Self::Incompatible => "join_incompatible",
             Self::InvalidHttpEndpoint => "cluster_http_endpoint_invalid",
             Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
+            Self::MembershipUpgradeRequired => "membership_upgrade_required",
+            Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
             Self::SelfRemovalRequiresLeave => "self_removal_requires_leave",
@@ -339,6 +396,10 @@ pub struct ClusterNodeRecord {
     pub is_leader: bool,
     pub reachable: bool,
     pub last_seen_at: i64,
+    /// A durable removal fence still owns this node. The voter can remain in
+    /// Raft membership after a rejected or indeterminate request, so expose
+    /// the fence instead of rendering the node as fully operational.
+    pub removal_pending: bool,
 }
 
 /// Internal addressing paired with the privacy-safe health projection.
@@ -437,6 +498,154 @@ pub struct MembershipStatus {
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaderSelfLeaveSequence {
+    HandoffThenCommit,
+    CommitDirectly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalRollbackOutcome {
+    RolledBack,
+    Pending,
+}
+
+const ROLLBACK_REMOVAL_OWNER_FENCE_SQL: &str = "DELETE FROM settings WHERE key = $1 \
+     AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts WHERE node_id = $2)";
+const ROLLBACK_REMOVAL_FENCE_SQL: &str = "DELETE FROM cluster_node_removals WHERE node_id = $1 \
+     AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts WHERE node_id = $1)";
+const BEGIN_REMOVAL_FENCE_SQL: &str = "INSERT INTO cluster_node_removals (node_id, started_at) \
+     SELECT $1, $2 WHERE EXISTS (\
+       SELECT 1 FROM cluster_node_removal_attempts \
+       WHERE node_id = $1 AND attempt_id = $3) \
+     ON CONFLICT(node_id) DO NOTHING";
+const BEGIN_REMOVAL_INTENT_SQL: &str = "INSERT INTO cluster_node_removal_intents \
+     (node_id, attempt_id) SELECT $1, $2 WHERE EXISTS (\
+       SELECT 1 FROM cluster_node_removal_attempts \
+       WHERE node_id = $1 AND attempt_id = $2) \
+     ON CONFLICT(node_id) DO UPDATE SET attempt_id = excluded.attempt_id";
+const CLEAR_REMOVAL_INTENT_SQL: &str = "DELETE FROM cluster_node_removal_intents \
+     WHERE node_id = $1 AND attempt_id = $2";
+const BEGIN_REMOVAL_OWNER_FENCE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+     SELECT $1, '1', $2 WHERE EXISTS (\
+       SELECT 1 FROM cluster_node_removal_attempts \
+       WHERE node_id = $3 AND attempt_id = $4) \
+     ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at";
+const BEGIN_REMOVAL_JOB_FENCE_SQL: &str = "UPDATE job_leases SET \
+       owner_node_id = 'internal.removed-job-owner:' || owner_node_id, \
+       expires_at_ms = CASE WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END, \
+       revision = CASE WHEN revision < 9223372036854775807 THEN revision + 1 ELSE revision END, \
+       updated_at_ms = $1 \
+     WHERE owner_node_id = $2 AND EXISTS (\
+       SELECT 1 FROM cluster_node_removal_attempts \
+       WHERE node_id = $2 AND attempt_id = $3)";
+const PROTECT_REMOVAL_FENCE_DELETE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_attempt_delete_guard \
+     BEFORE DELETE ON cluster_node_removals \
+     WHEN EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
+                  WHERE node_id = OLD.node_id) \
+     BEGIN SELECT RAISE(IGNORE); END";
+const PROTECT_REMOVAL_OWNER_FENCE_DELETE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_owner_delete_guard \
+     BEFORE DELETE ON settings \
+     WHEN EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
+                  WHERE OLD.key = 'internal.cluster_job_owner_removed.' || node_id) \
+     BEGIN SELECT RAISE(IGNORE); END";
+const BACKFILL_REMOVAL_ATTEMPT_REFS_SQL: &str =
+    "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+     SELECT node_id, 'internal.preexisting' FROM cluster_node_removals \
+     WHERE NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts AS attempt \
+       WHERE attempt.node_id = cluster_node_removals.node_id) \
+     ON CONFLICT(node_id, attempt_id) DO NOTHING";
+const REQUIRE_REMOVAL_INTENT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_insert_guard \
+     BEFORE INSERT ON cluster_node_removals \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_node_removal_intents AS intent \
+       JOIN cluster_node_removal_attempts AS attempt \
+         ON attempt.node_id = intent.node_id AND attempt.attempt_id = intent.attempt_id \
+       WHERE intent.node_id = NEW.node_id) \
+     BEGIN SELECT RAISE(ABORT, 'cluster membership removal requires current coordinator'); END";
+
+const CAPABILITY_READY_PREDICATE: &str = "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+       WHERE active.removed_at IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
+           WHERE staged.node_id = active.node_id) \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
+           WHERE capability.node_id = active.node_id \
+             AND capability.capability = 'membership_removal_attempt_refs_v1' \
+             AND capability.last_seen_at = active.last_seen_at))";
+
+fn begin_removal_attempt_sql() -> String {
+    format!(
+        "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE}"
+    )
+}
+
+fn rollback_removal_attempt_sql() -> String {
+    format!(
+        "DELETE FROM cluster_node_removal_attempts WHERE node_id = $1 AND attempt_id = $2 \
+         AND {CAPABILITY_READY_PREDICATE}"
+    )
+}
+
+const MARK_LEGACY_NODE_INSERT_DURING_REMOVAL_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_legacy_insert_guard \
+     AFTER INSERT ON cluster_nodes \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_node_heartbeat_intents \
+       WHERE node_id = NEW.node_id AND last_seen_at = NEW.last_seen_at) \
+     BEGIN \
+       DELETE FROM cluster_node_capabilities WHERE node_id = NEW.node_id; \
+       INSERT INTO cluster_node_join_staging (node_id) \
+       SELECT NEW.node_id WHERE EXISTS (SELECT 1 FROM cluster_join_tokens \
+         WHERE node_id = NEW.node_id AND state = 'redeeming') \
+       ON CONFLICT(node_id) DO NOTHING; \
+       DELETE FROM cluster_node_join_staging WHERE node_id = NEW.node_id \
+         AND NOT EXISTS (SELECT 1 FROM cluster_join_tokens \
+           WHERE node_id = NEW.node_id AND state = 'redeeming'); \
+       INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+       SELECT node_id, 'internal.legacy-writer' FROM cluster_node_removals \
+       WHERE NOT EXISTS (SELECT 1 FROM cluster_join_tokens \
+         WHERE node_id = NEW.node_id AND state = 'redeeming') \
+       ON CONFLICT(node_id, attempt_id) DO NOTHING; \
+     END";
+const MARK_LEGACY_NODE_HEARTBEAT_DURING_REMOVAL_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_legacy_heartbeat_guard \
+     AFTER UPDATE OF last_seen_at ON cluster_nodes \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_node_heartbeat_intents \
+       WHERE node_id = NEW.node_id AND last_seen_at = NEW.last_seen_at) \
+     BEGIN \
+       DELETE FROM cluster_node_capabilities WHERE node_id = NEW.node_id; \
+       DELETE FROM cluster_node_join_staging WHERE node_id = NEW.node_id; \
+       INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+       SELECT node_id, 'internal.legacy-writer' FROM cluster_node_removals WHERE 1 \
+       ON CONFLICT(node_id, attempt_id) DO NOTHING; \
+     END";
+const MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_legacy_finalize_guard \
+     AFTER UPDATE OF state ON cluster_join_tokens \
+     WHEN NEW.state = 'redeemed' \
+     BEGIN \
+       DELETE FROM cluster_node_join_staging WHERE node_id = NEW.node_id; \
+       INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+       SELECT removal.node_id, 'internal.legacy-writer' \
+       FROM cluster_node_removals AS removal \
+       WHERE NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
+         JOIN cluster_nodes AS node ON node.node_id = capability.node_id \
+         WHERE capability.node_id = NEW.node_id \
+           AND capability.capability = 'membership_removal_attempt_refs_v1' \
+           AND capability.last_seen_at = node.last_seen_at) \
+       ON CONFLICT(node_id, attempt_id) DO NOTHING; \
+     END";
+
+fn leader_self_leave_sequence(voter_count: usize) -> LeaderSelfLeaveSequence {
+    if voter_count.is_multiple_of(2) {
+        LeaderSelfLeaveSequence::CommitDirectly
+    } else {
+        LeaderSelfLeaveSequence::HandoffThenCommit
+    }
 }
 
 /// Short-lived proof that one admitted voter requested a node-local artwork
@@ -631,6 +840,19 @@ impl MembershipManager {
         for statement in MEMBERSHIP_SCHEMA {
             inner.client.execute(*statement, params!()).await?;
         }
+        // One replicated SQLite transaction closes both upgrade directions:
+        // fences written before this schema gain a durable legacy reference,
+        // and the trigger rejects every later old-coordinator insert. No Raft
+        // write can interleave between the backfill and trigger installation.
+        inner
+            .client
+            .txn(vec![
+                (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
+                (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         let current = inner
             .client
             .execute(
@@ -800,14 +1022,14 @@ impl MembershipManager {
             _ => return Err(MembershipError::InvalidToken),
         }
 
-        // Claiming the origin, reserving the token, and publishing the staged
-        // node are one Raft transaction. The first statement returns the
-        // claimed node id; every later statement consumes that output, so a
-        // duplicate origin produces no output and Hiqlite rolls the entire
-        // transaction back. No voter promotion can begin from a partial
-        // redemption.
+        // Claiming the origin, reserving the token, installing the rolling-
+        // upgrade guards, and publishing the staged node are one Raft
+        // transaction. The token reservation returns the claimed node id and
+        // every publication statement consumes that output. A duplicate
+        // origin or a lost token race therefore produces no dependency output
+        // and Hiqlite rolls the entire transaction back.
         let mut statements = Vec::new();
-        if let Some(http_base) = http_base.as_deref() {
+        let proof_statement_index = if let Some(http_base) = http_base.as_deref() {
             statements.push((
                 "INSERT INTO cluster_node_http (node_id, public_http_url) \
                  SELECT $1, $2 WHERE EXISTS (\
@@ -839,7 +1061,8 @@ impl MembershipManager {
             ));
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
-                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3"
+                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                 RETURNING node_id"
                     .to_owned(),
                 vec![
                     Param::StmtOutputNamed(0, "node_id".into()),
@@ -847,6 +1070,7 @@ impl MembershipManager {
                     Param::Integer(now),
                 ],
             ));
+            1
         } else {
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
@@ -855,8 +1079,28 @@ impl MembershipManager {
                     .to_owned(),
                 params!(request.node_id.as_str(), request.token_digest.as_str(), now),
             ));
-        }
+            0
+        };
         statements.extend([
+            (
+                "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
+                 VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                   last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Integer(now),
+                ],
+            ),
+            (
+                "INSERT INTO cluster_node_join_staging (node_id) VALUES ($1) \
+                 ON CONFLICT(node_id) DO NOTHING"
+                    .to_owned(),
+                vec![Param::StmtOutputNamed(
+                    proof_statement_index,
+                    "node_id".into(),
+                )],
+            ),
             (
                 "INSERT INTO cluster_nodes \
                  (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
@@ -867,7 +1111,7 @@ impl MembershipManager {
                    removed_at = NULL"
                     .to_owned(),
                 vec![
-                    Param::StmtOutputNamed(0, "node_id".into()),
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
                     Param::Integer(request.raft_id as i64),
                     Param::Text(request.raft_address.clone()),
                     Param::Text(request.api_address.clone()),
@@ -879,22 +1123,26 @@ impl MembershipManager {
                  ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname"
                     .to_owned(),
                 vec![
-                    Param::StmtOutputNamed(0, "node_id".into()),
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
                     Param::Text(membership_hostname(&request.hostname, &request.api_address)),
+                ],
+            ),
+            (
+                "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+                 AND last_seen_at = $2"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Integer(now),
                 ],
             ),
         ]);
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
-                let changed = results.into_iter().collect::<Result<Vec<_>, _>>()?;
-                if changed.iter().any(|count| *count != 1) {
-                    return Err(MembershipError::Internal(
-                        "join redemption transaction did not publish every row".to_owned(),
-                    ));
-                }
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
             }
-            Err(error) if error.to_string().contains("StmtIndex(0)") => {
+            Err(error) if error.to_string().contains("StmtIndex(") => {
                 let latest = self.token_record(&request.token_digest).await?;
                 return if latest.expires_at <= now {
                     Err(MembershipError::ExpiredToken)
@@ -983,21 +1231,55 @@ impl MembershipManager {
         let now = unix_ms()?;
         inner
             .client
-            .execute(
-                "INSERT INTO cluster_nodes \
-                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
-                 VALUES ($1, $2, $3, $4, $5, NULL) \
-                 ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, \
-                   removed_at = NULL WHERE cluster_nodes.removed_at IS NULL",
-                params!(
-                    inner.identity.node_id.as_str(),
-                    inner.identity.raft_id as i64,
-                    inner.local.raft_address.as_str(),
-                    inner.local.api_address.as_str(),
-                    now
+            .txn(vec![
+                (
+                    "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
+                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                        .to_owned(),
+                    params!(inner.identity.node_id.as_str(), now),
                 ),
-            )
-            .await?;
+                (
+                    "INSERT INTO cluster_nodes \
+                     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
+                     VALUES ($1, $2, $3, $4, $5, NULL) \
+                     ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, \
+                       removed_at = NULL WHERE cluster_nodes.removed_at IS NULL"
+                        .to_owned(),
+                    params!(
+                        inner.identity.node_id.as_str(),
+                        inner.identity.raft_id as i64,
+                        inner.local.raft_address.as_str(),
+                        inner.local.api_address.as_str(),
+                        now
+                    ),
+                ),
+                (
+                    "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                        .to_owned(),
+                    params!(
+                        inner.identity.node_id.as_str(),
+                        REMOVAL_ATTEMPT_CAPABILITY,
+                        now
+                    ),
+                ),
+                (
+                    "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
+                    params!(inner.identity.node_id.as_str()),
+                ),
+                (
+                    "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+                     AND last_seen_at = $2"
+                        .to_owned(),
+                    params!(inner.identity.node_id.as_str(), now),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 
@@ -1655,9 +1937,11 @@ impl MembershipManager {
             .collect::<BTreeSet<_>>();
         let rows = inner
             .client
-            .query_map::<NodeRow, _>(
+            .query_map::<MembershipNodeRow, _>(
                 "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, \
-                        COALESCE(h.hostname, '') AS hostname \
+                        COALESCE(h.hostname, '') AS hostname, \
+                        EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
+                          WHERE removal.node_id = n.node_id) AS removal_pending \
                  FROM cluster_nodes n \
                  LEFT JOIN cluster_node_hostnames h ON h.node_id = n.node_id \
                  WHERE n.removed_at IS NULL ORDER BY n.raft_id",
@@ -1680,6 +1964,7 @@ impl MembershipManager {
                 is_leader: metrics.current_leader == Some(row.raft_id as u64),
                 reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
                 last_seen_at: row.last_seen_at,
+                removal_pending: row.removal_pending,
             })
             .collect::<Vec<_>>();
         let availability = match voters.len() {
@@ -1703,9 +1988,8 @@ impl MembershipManager {
         let metrics = inner.client.metrics_db().await?;
         let target = inner
             .client
-            .query_consistent_map::<NodeRow, _>(
-                "SELECT node_id, raft_id, api_address, last_seen_at, '' AS hostname \
-                 FROM cluster_nodes WHERE node_id = $1",
+            .query_consistent_map::<TargetNodeRow, _>(
+                "SELECT raft_id FROM cluster_nodes WHERE node_id = $1",
                 params!(node_id),
             )
             .await?
@@ -1731,16 +2015,12 @@ impl MembershipManager {
         if voters.len() < 3 {
             return Err(MembershipError::QuorumLoss);
         }
+        self.require_removal_capability().await?;
         // Offline work is resolved before the membership change commits, never
         // after. A removal that half-commits leaves packages owned by a node
         // that no longer exists, which `CLUSTERING-PLAN.md` §6.7 calls an
         // activation blocker and which is strictly worse than refusing.
         let mut resolved = self.settle_offline_work(node_id).await?;
-        let remaining = voters
-            .iter()
-            .copied()
-            .filter(|id| *id != target_raft_id)
-            .collect::<BTreeSet<_>>();
         let leader_id = metrics
             .current_leader
             .ok_or_else(|| MembershipError::Internal("cluster has no current leader".to_owned()))?;
@@ -1755,16 +2035,38 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        self.begin_node_removal(node_id).await?;
-        match change_membership(&leader.addr_api, &inner.secrets.api, &remaining).await {
+        let removal_attempt = self.begin_node_removal(node_id).await?;
+        // Close the final admission race only after the durable removal fence
+        // exists. Package creation checks that fence atomically, so this is the
+        // last work that can still be owned by the departing node. Reusing the
+        // normal settlement path preserves the refusal for an active transfer.
+        // A definite pre-proposal failure rolls the fence back; any packages
+        // already resolved remain safely resolved for the retry.
+        match self.settle_offline_work(node_id).await {
+            Ok(report) => {
+                resolved.requeued += report.requeued;
+                resolved.failed += report.failed;
+            }
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await);
+            }
+        }
+        match request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(removal_error)) => {
-                self.rollback_node_removal(node_id).await?;
-                return Err(removal_error);
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, removal_error)
+                    .await);
             }
             Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(&inner.secrets.api, &remaining, &membership_nodes)
-                    .await
+                match reconcile_membership_change(
+                    &inner.secrets.api,
+                    target_raft_id,
+                    &membership_nodes,
+                )
+                .await
                 {
                     MembershipChangeOutcome::Removed => {
                         tracing::warn!(%removal_error, %node_id, "voter removal committed after an ambiguous HTTP result");
@@ -1778,18 +2080,6 @@ impl MembershipManager {
             }
         }
         self.finalize_node_removal(node_id).await;
-        // The membership change has committed, so refusing is no longer an
-        // available answer for anything that slipped through the last
-        // re-read. Fail it instead of leaving a row owned by a node that is
-        // now a tombstone.
-        match self.fail_offline_work_left_behind(node_id).await {
-            Ok(failed) => resolved.failed += failed,
-            Err(error) => tracing::error!(
-                %error,
-                "offline work created while a node removal committed is still owned by the \
-                 removed node and will hold its reservation until it expires"
-            ),
-        }
         if resolved.requeued + resolved.failed > 0 {
             tracing::info!(
                 requeued = resolved.requeued,
@@ -1804,8 +2094,10 @@ impl MembershipManager {
     ///
     /// Arbitrary leader removal remains refused by [`Self::remove_voter`]. A
     /// self-leave is different: the departing process is still alive to settle
-    /// its owned work, commit a membership that excludes itself, observe a
-    /// surviving leader, and then let the HTTP layer drain the daemon.
+    /// its owned work, commit a membership that excludes itself, and then let
+    /// the HTTP layer drain the daemon. An odd voter set confirms a surviving
+    /// leader before committing; an even voter set commits directly so the new
+    /// odd quorum can elect after OpenRaft steps this leader down.
     pub async fn leave_voter(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let node_id = inner.identity.node_id.clone();
@@ -1825,6 +2117,7 @@ impl MembershipManager {
         if voters.len() < 3 {
             return Err(MembershipError::QuorumLoss);
         }
+        self.require_removal_capability().await?;
 
         let mut resolved = self.settle_offline_work(&node_id).await?;
         let remaining = voters
@@ -1853,12 +2146,17 @@ impl MembershipManager {
             .collect::<Vec<_>>();
         let mut commit_leader_api = leader.addr_api.clone();
 
-        // OpenRaft 0.9 has no dedicated transfer-leader call. Triggering an
-        // election on a reachable survivor advances the term and makes this
-        // leader step down before its membership entry is removed. Candidates
-        // are tried with bounded I/O because a four-voter cluster can still
-        // safely change 4→3 while one nondeparting voter is unavailable.
-        if leader_id == inner.identity.raft_id {
+        // OpenRaft 0.9 has no dedicated transfer-leader call: its election
+        // trigger only queues one campaign. In an odd voter configuration the
+        // survivors can form the old quorum without this leader, so preserve
+        // the established handoff-before-commit path. In an even configuration
+        // with one survivor unavailable they cannot; the current leader must
+        // instead commit OpenRaft's joint then uniform membership change. The
+        // resulting odd survivor set can elect after OpenRaft steps the removed
+        // leader down.
+        let local_leader_sequence =
+            (leader_id == inner.identity.raft_id).then(|| leader_self_leave_sequence(voters.len()));
+        if local_leader_sequence == Some(LeaderSelfLeaveSequence::HandoffThenCommit) {
             if survivor_nodes.is_empty() {
                 return Err(MembershipError::Internal(
                     "cluster has no leadership successor".to_owned(),
@@ -1898,16 +2196,43 @@ impl MembershipManager {
         // Fence while this voter is still inside the old quorum. The separate
         // pending row survives a crash and keeps the operation retryable while
         // OpenRaft is in a joint or otherwise indeterminate configuration.
-        self.begin_node_removal(&node_id).await?;
-        match change_membership(&commit_leader_api, &inner.secrets.api, &remaining).await {
+        let removal_attempt = self.begin_node_removal(&node_id).await?;
+        // The fence prevents any later local ownership admission. Settle work
+        // that raced with the earlier pass before proposing removal, preserving
+        // the active-transfer refusal. A definite failure rolls the fence back
+        // so this still-admitted voter remains operational while the operator
+        // retries.
+        match self.settle_offline_work(&node_id).await {
+            Ok(report) => {
+                resolved.requeued += report.requeued;
+                resolved.failed += report.failed;
+            }
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, error)
+                    .await);
+            }
+        }
+        match request_voter_removal(
+            &commit_leader_api,
+            &inner.secrets.api,
+            inner.identity.raft_id,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(removal_error)) => {
-                self.rollback_node_removal(&node_id).await?;
-                return Err(removal_error);
+                return Err(self
+                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, removal_error)
+                    .await);
             }
             Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(&inner.secrets.api, &remaining, &membership_nodes)
-                    .await
+                match reconcile_membership_change(
+                    &inner.secrets.api,
+                    inner.identity.raft_id,
+                    &membership_nodes,
+                )
+                .await
                 {
                     MembershipChangeOutcome::Removed => {
                         tracing::warn!(%removal_error, %node_id, "self-removal committed after an ambiguous HTTP result");
@@ -1920,18 +2245,17 @@ impl MembershipManager {
                 }
             }
         }
-        self.finalize_node_removal(&node_id).await;
-
-        // Membership is committed and the durable fence was already verified, so
-        // cleanup failures must not keep this now-nonmember process serving.
-        // The HTTP layer drains after this method returns.
-        match self.fail_offline_work_left_behind(&node_id).await {
-            Ok(failed) => resolved.failed += failed,
-            Err(error) => tracing::error!(
-                %error,
+        if tokio::time::timeout(FINAL_TOMBSTONE_WAIT, self.finalize_node_removal(&node_id))
+            .await
+            .is_err()
+        {
+            // The pending-removal row is already the authoritative durable
+            // fence. Do not keep a committed nonmember serving while a final
+            // convenience tombstone write waits on the surviving quorum.
+            tracing::warn!(
                 %node_id,
-                "self-removal committed but late offline work could not be failed"
-            ),
+                "committed self-removal is draining before final tombstone materialization"
+            );
         }
         tracing::info!(
             %node_id,
@@ -1942,46 +2266,92 @@ impl MembershipManager {
         Ok(())
     }
 
-    async fn begin_node_removal(&self, node_id: &str) -> Result<(), MembershipError> {
+    async fn begin_node_removal(&self, node_id: &str) -> Result<String, MembershipError> {
         let inner = self.replicated_inner()?;
         let now = unix_ms()?;
+        let attempt_id = uuid::Uuid::new_v4().to_string();
         let owner_fence_key = removed_job_owner_key(node_id);
-        inner
+        let results = inner
             .client
             .txn(vec![
+                // Preserve a fence written by a binary that predates attempt
+                // references. It may protect an ambiguous proposal and must
+                // never become owned by this newer retry.
                 (
-                    "INSERT INTO cluster_node_removals (node_id, started_at) VALUES ($1, $2) \
-                     ON CONFLICT(node_id) DO NOTHING"
+                    "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+                     SELECT $1, 'internal.preexisting' \
+                     WHERE EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
+                         WHERE node_id = $1) \
+                     ON CONFLICT(node_id, attempt_id) DO NOTHING"
                         .to_owned(),
-                    params!(node_id, now),
+                    params!(node_id),
                 ),
                 (
-                    "INSERT INTO settings (key, value, updated_at) VALUES ($1, '1', $2) \
-                     ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at"
-                        .to_owned(),
-                    params!(owner_fence_key.as_str(), now / 1_000),
+                    begin_removal_attempt_sql(),
+                    params!(node_id, attempt_id.as_str()),
                 ),
                 (
-                    "UPDATE job_leases SET \
-                       owner_node_id = 'internal.removed-job-owner:' || owner_node_id, \
-                       expires_at_ms = CASE WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END, \
-                       revision = CASE WHEN revision < 9223372036854775807 \
-                         THEN revision + 1 ELSE revision END, \
-                       updated_at_ms = $1 \
-                     WHERE owner_node_id = $2"
-                        .to_owned(),
-                    params!(now, node_id),
+                    BEGIN_REMOVAL_INTENT_SQL.to_owned(),
+                    params!(node_id, attempt_id.as_str()),
+                ),
+                (
+                    BEGIN_REMOVAL_FENCE_SQL.to_owned(),
+                    params!(node_id, now, attempt_id.as_str()),
+                ),
+                (
+                    BEGIN_REMOVAL_OWNER_FENCE_SQL.to_owned(),
+                    params!(
+                        owner_fence_key.as_str(),
+                        now / 1_000,
+                        node_id,
+                        attempt_id.as_str()
+                    ),
+                ),
+                (
+                    BEGIN_REMOVAL_JOB_FENCE_SQL.to_owned(),
+                    params!(now, node_id, attempt_id.as_str()),
+                ),
+                (
+                    CLEAR_REMOVAL_INTENT_SQL.to_owned(),
+                    params!(node_id, attempt_id.as_str()),
                 ),
             ])
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        if results.get(1).copied() != Some(1) {
+            return Err(MembershipError::MembershipUpgradeRequired);
+        }
         if !self.node_is_tombstoned(node_id).await? {
             return Err(MembershipError::Internal(
                 "node removal fence did not become authoritative".to_owned(),
             ));
         }
-        Ok(())
+        Ok(attempt_id)
+    }
+
+    /// Reject before settling work or moving leadership when a rolling cluster
+    /// still contains a writer that does not protect reference-counted removal
+    /// fences. The atomic check in `begin_node_removal` remains authoritative
+    /// and closes a heartbeat/version race after this read-only preflight.
+    async fn require_removal_capability(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN {CAPABILITY_READY_PREDICATE} \
+                     THEN 1 ELSE 0 END AS count"
+                ),
+                params!(),
+            )
+            .await?;
+        if rows.first().is_some_and(|row| row.count == 1) {
+            Ok(())
+        } else {
+            Err(MembershipError::MembershipUpgradeRequired)
+        }
     }
 
     /// Restore the durable job-owner fence for state created before that
@@ -2056,30 +2426,55 @@ impl MembershipManager {
         Ok(())
     }
 
-    async fn rollback_node_removal(&self, node_id: &str) -> Result<(), MembershipError> {
+    async fn rollback_node_removal_after_failure(
+        &self,
+        node_id: &str,
+        attempt_id: &str,
+        cause: MembershipError,
+    ) -> MembershipError {
+        match self.rollback_node_removal(node_id, attempt_id).await {
+            Ok(RemovalRollbackOutcome::RolledBack) => cause,
+            Ok(RemovalRollbackOutcome::Pending) => {
+                MembershipError::RemovalPending(cause.to_string())
+            }
+            Err(rollback_error) => MembershipError::Internal(format!(
+                "{cause}; the membership proposal was not sent, but removal-fence rollback \
+                 failed: {rollback_error}"
+            )),
+        }
+    }
+
+    async fn rollback_node_removal(
+        &self,
+        node_id: &str,
+        attempt_id: &str,
+    ) -> Result<RemovalRollbackOutcome, MembershipError> {
         let inner = self.replicated_inner()?;
         let owner_fence_key = removed_job_owner_key(node_id);
-        inner
+        let results = inner
             .client
             .txn(vec![
+                (rollback_removal_attempt_sql(), params!(node_id, attempt_id)),
                 (
-                    "DELETE FROM cluster_node_removals WHERE node_id = $1".to_owned(),
-                    params!(node_id),
+                    ROLLBACK_REMOVAL_OWNER_FENCE_SQL.to_owned(),
+                    params!(owner_fence_key, node_id),
                 ),
-                (
-                    "DELETE FROM settings WHERE key = $1".to_owned(),
-                    params!(owner_fence_key),
-                ),
+                (ROLLBACK_REMOVAL_FENCE_SQL.to_owned(), params!(node_id)),
             ])
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        if self.node_is_tombstoned(node_id).await? {
-            return Err(MembershipError::Internal(
-                "node removal fence rollback could not be verified".to_owned(),
-            ));
+        if results.get(2).copied() != Some(1) {
+            tracing::warn!(
+                %node_id,
+                "removal remains pending because another or legacy attempt still owns the shared fence"
+            );
+            return Ok(RemovalRollbackOutcome::Pending);
         }
-        Ok(())
+        // If this attempt was released, the remaining statements see the exact
+        // same serialized reference set. They remove the shared fences only
+        // when no concurrent or ambiguous attempt still owns one.
+        Ok(RemovalRollbackOutcome::RolledBack)
     }
 
     async fn finalize_node_removal(&self, node_id: &str) {
@@ -2121,10 +2516,7 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
-    /// Wait long enough to distinguish a committed self-removal from a
-    /// cluster still electing. This is deliberately best-effort: once the
-    /// membership entry committed, keeping the removed daemon online because
-    /// an observation timed out is strictly less safe than draining it.
+    /// Require a stable successor for the pre-commit odd-voter handoff.
     async fn await_survivor_leader(
         &self,
         departed: u64,
@@ -2145,23 +2537,31 @@ impl MembershipManager {
         let required = remaining.len() / 2 + 1;
         let mut stable_rounds = 0_u8;
         let mut stable_leader = None;
-        for _ in 0..40 {
+        let deadline = Instant::now() + SURVIVOR_LEADER_WAIT;
+        loop {
             let mut confirmations = BTreeMap::<u64, usize>::new();
-            for (_, api) in survivor_nodes {
-                let response = client
-                    .get(format!("https://{api}/cluster/metrics/sqlite"))
-                    .header("X-API-SECRET", api_secret)
-                    .header(reqwest::header::ACCEPT, "application/json")
-                    .send()
-                    .await;
-                let leader = match response {
-                    Ok(response) => response
-                        .json::<LeaderMetrics>()
-                        .await
-                        .ok()
-                        .and_then(|metrics| metrics.current_leader),
-                    Err(_) => None,
-                };
+            let observations =
+                futures_util::future::join_all(survivor_nodes.iter().map(|(_, api)| {
+                    let client = client.clone();
+                    async move {
+                        let response = client
+                            .get(format!("https://{api}/cluster/metrics/sqlite"))
+                            .header("X-API-SECRET", api_secret)
+                            .header(reqwest::header::ACCEPT, "application/json")
+                            .send()
+                            .await;
+                        match response {
+                            Ok(response) => response
+                                .json::<LeaderMetrics>()
+                                .await
+                                .ok()
+                                .and_then(|metrics| metrics.current_leader),
+                            Err(_) => None,
+                        }
+                    }
+                }))
+                .await;
+            for leader in observations {
                 if let Some(leader) =
                     leader.filter(|leader| *leader != departed && remaining.contains(leader))
                 {
@@ -2186,6 +2586,9 @@ impl MembershipManager {
             } else {
                 stable_rounds = 0;
                 stable_leader = None;
+            }
+            if Instant::now() >= deadline {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -2237,42 +2640,6 @@ impl MembershipManager {
                 )));
             }
         }
-    }
-
-    /// The last narrow window: a package created between the final re-read and
-    /// the committed membership change.
-    ///
-    /// It cannot be requeued — no survivor was ever asked about its source, and
-    /// asking now would re-home on an unproven mount, which §6.7 forbids. So it
-    /// gets the same `node_removed` failure an unverifiable package gets, which
-    /// releases its reservation and lets the client ask again.
-    ///
-    /// This is the removal's last cleanup act for a package that committed
-    /// before the membership tombstone. The store's package-creation statement
-    /// checks both the durable removal intent and the tombstone atomically, so
-    /// later requests forwarded by a removed process are permanently refused.
-    async fn fail_offline_work_left_behind(&self, node_id: &str) -> Result<u64, MembershipError> {
-        let inner = self.replicated_inner()?;
-        let plan = inner
-            .store
-            .unresolved_offline_packages(node_id)
-            .await
-            .map_err(|error| MembershipError::Internal(error.to_string()))?
-            .into_iter()
-            .map(|package| OfflineRemovalPlanEntry {
-                package_id: package.id,
-                requeue_to: None,
-            })
-            .collect::<Vec<_>>();
-        if plan.is_empty() {
-            return Ok(0);
-        }
-        inner
-            .store
-            .resolve_offline_packages_for_removal(node_id, &plan, unix_seconds()?)
-            .await
-            .map(|report| report.failed)
-            .map_err(|error| MembershipError::Internal(error.to_string()))
     }
 
     /// Resolve every offline package the departing node owns, per §6.7.
@@ -2584,20 +2951,27 @@ enum MembershipChangeOutcome {
 
 enum MembershipChangeFailure {
     /// The request could not be constructed before any proposal was sent, so
-    /// the pending fence may be rolled back.
+    /// the caller can roll its pending removal fence back.
     Rejected(MembershipError),
     /// Transport failure or timeout after send. The proposal may still commit;
     /// the fence must remain until a retry proves the uniform new membership.
     Ambiguous(MembershipError),
 }
 
+#[derive(Serialize)]
+struct RemoveVoterRequest {
+    remove_voter: u64,
+}
+
 /// Resolve an ambiguous membership HTTP result from independent survivor
 /// observations. A response timeout is not a failed Raft commit, and an old
 /// membership observation cannot prove that an accepted proposal will not
-/// commit later. Only a uniform new-config quorum resolves the operation.
+/// commit later. The leader applies a node delta under Hiqlite's membership
+/// lock, so a uniform quorum that excludes the target proves removal even if a
+/// concurrently admitted voter changed the final set.
 async fn reconcile_membership_change(
     api_secret: &str,
-    remaining: &BTreeSet<u64>,
+    departed: u64,
     membership_nodes: &[(u64, String)],
 ) -> MembershipChangeOutcome {
     let Ok(client) = reqwest::Client::builder()
@@ -2608,7 +2982,6 @@ async fn reconcile_membership_change(
     else {
         return MembershipChangeOutcome::Indeterminate;
     };
-    let new_quorum = remaining.len() / 2 + 1;
     let mut stable_rounds = 0_u8;
     for _ in 0..40 {
         let observations =
@@ -2634,13 +3007,7 @@ async fn reconcile_membership_change(
                 }
             }))
             .await;
-        let new_confirmations = observations
-            .iter()
-            .filter(|(raft_id, observed)| {
-                remaining.contains(raft_id) && observed.as_ref() == Some(remaining)
-            })
-            .count();
-        if new_confirmations >= new_quorum {
+        if quorum_confirms_removal(departed, &observations) {
             stable_rounds += 1;
         } else {
             stable_rounds = 0;
@@ -2653,10 +3020,26 @@ async fn reconcile_membership_change(
     MembershipChangeOutcome::Indeterminate
 }
 
-async fn change_membership(
+fn quorum_confirms_removal(departed: u64, observations: &[(u64, Option<BTreeSet<u64>>)]) -> bool {
+    let mut confirmations = BTreeMap::<&BTreeSet<u64>, usize>::new();
+    for (observer, observed) in observations {
+        let Some(voters) = observed else {
+            continue;
+        };
+        if voters.contains(&departed) || !voters.contains(observer) {
+            continue;
+        }
+        *confirmations.entry(voters).or_default() += 1;
+    }
+    confirmations
+        .into_iter()
+        .any(|(voters, count)| count > voters.len() / 2)
+}
+
+async fn request_voter_removal(
     leader_api: &str,
     api_secret: &str,
-    voters: &BTreeSet<u64>,
+    remove_voter: u64,
 ) -> Result<(), MembershipChangeFailure> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -2670,7 +3053,7 @@ async fn change_membership(
         .post(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(voters)
+        .json(&RemoveVoterRequest { remove_voter })
         .send()
         .await
         .map_err(|error| {
@@ -2771,12 +3154,17 @@ impl From<&mut Row<'_>> for JoinTokenRow {
     }
 }
 
-struct NodeRow {
+struct TargetNodeRow {
+    raft_id: i64,
+}
+
+struct MembershipNodeRow {
     node_id: String,
     raft_id: i64,
     api_address: String,
     hostname: String,
     last_seen_at: i64,
+    removal_pending: bool,
 }
 
 struct ActivityPeerRow {
@@ -2902,7 +3290,15 @@ impl From<&mut Row<'_>> for ArtworkRepairLeaseRow {
     }
 }
 
-impl From<&mut Row<'_>> for NodeRow {
+impl From<&mut Row<'_>> for TargetNodeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            raft_id: row.get("raft_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for MembershipNodeRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             node_id: row.get("node_id"),
@@ -2910,6 +3306,7 @@ impl From<&mut Row<'_>> for NodeRow {
             api_address: row.get("api_address"),
             hostname: row.get("hostname"),
             last_seen_at: row.get("last_seen_at"),
+            removal_pending: row.get("removal_pending"),
         }
     }
 }
@@ -3175,6 +3572,537 @@ mod tests {
                 MembershipChangeFailure::Ambiguous(_)
             ));
         }
+    }
+
+    #[test]
+    fn removal_wire_request_is_a_node_delta() {
+        assert_eq!(
+            serde_json::to_value(RemoveVoterRequest { remove_voter: 7 })
+                .expect("serialize removal delta"),
+            serde_json::json!({"remove_voter": 7})
+        );
+    }
+
+    #[test]
+    fn a_uniform_new_quorum_proves_the_target_was_removed() {
+        let voters = BTreeSet::from([2, 3, 4]);
+        assert!(quorum_confirms_removal(
+            1,
+            &[
+                (2, Some(voters.clone())),
+                (3, Some(voters.clone())),
+                (1, Some(BTreeSet::from([1, 2, 3]))),
+            ]
+        ));
+        assert!(!quorum_confirms_removal(
+            1,
+            &[
+                (2, Some(voters.clone())),
+                (3, Some(BTreeSet::from([2, 3, 5]))),
+                (4, None),
+            ]
+        ));
+        assert!(!quorum_confirms_removal(
+            1,
+            &[
+                (2, Some(BTreeSet::from([1, 2, 3]))),
+                (3, Some(BTreeSet::from([1, 2, 3]))),
+            ]
+        ));
+    }
+
+    #[test]
+    fn even_voter_leaders_commit_without_a_pre_handoff() {
+        assert_eq!(
+            leader_self_leave_sequence(3),
+            LeaderSelfLeaveSequence::HandoffThenCommit
+        );
+        assert_eq!(
+            leader_self_leave_sequence(4),
+            LeaderSelfLeaveSequence::CommitDirectly
+        );
+        assert_eq!(
+            leader_self_leave_sequence(5),
+            LeaderSelfLeaveSequence::HandoffThenCommit
+        );
+        assert_eq!(
+            leader_self_leave_sequence(6),
+            LeaderSelfLeaveSequence::CommitDirectly
+        );
+    }
+
+    #[test]
+    fn one_attempt_cannot_roll_back_a_concurrent_removal_fence() {
+        fn rollback(connection: &mut rusqlite::Connection, node_id: &str, attempt_id: &str) {
+            let transaction = connection.transaction().expect("rollback transaction");
+            transaction
+                .execute(
+                    &rollback_removal_attempt_sql(),
+                    rusqlite::params![node_id, attempt_id],
+                )
+                .expect("release attempt when rollout permits");
+            transaction
+                .execute(
+                    ROLLBACK_REMOVAL_OWNER_FENCE_SQL,
+                    rusqlite::params![removed_job_owner_key(node_id), node_id],
+                )
+                .expect("conditionally release owner fence");
+            transaction
+                .execute(ROLLBACK_REMOVAL_FENCE_SQL, rusqlite::params![node_id])
+                .expect("conditionally release removal fence");
+            transaction.commit().expect("commit rollback");
+        }
+
+        let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY, started_at INTEGER); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_node_removal_intents (\
+                   node_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER, \
+                   last_seen_at INTEGER, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_heartbeat_intents (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
+                 CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
+                   revision INTEGER, updated_at_ms INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 1, 10, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('node-old', 2, 20, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('staged-join', 99, 30, NULL); \
+                 INSERT INTO cluster_node_join_staging VALUES ('staged-join'); \
+                 INSERT INTO cluster_join_tokens VALUES ('staged-join', 'redeeming'); \
+                 INSERT INTO cluster_node_capabilities VALUES (\
+                   'node-a', 'membership_removal_attempt_refs_v1', 10); \
+                 INSERT INTO cluster_node_removals VALUES ('node-a', 1); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-a', 'attempt-a'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-a', 'attempt-b'); \
+                 INSERT INTO settings VALUES (\
+                   'internal.cluster_job_owner_removed.node-a', '1', 0); \
+                 INSERT INTO job_leases VALUES ('blocked', 100, 1, 0);",
+            )
+            .expect("seed concurrent attempts");
+        connection
+            .execute_batch(PROTECT_REMOVAL_FENCE_DELETE_SQL)
+            .expect("install legacy removal guard");
+        connection
+            .execute_batch(PROTECT_REMOVAL_OWNER_FENCE_DELETE_SQL)
+            .expect("install legacy owner guard");
+        connection
+            .execute_batch(MARK_LEGACY_NODE_INSERT_DURING_REMOVAL_SQL)
+            .expect("install legacy insert marker");
+        connection
+            .execute_batch(MARK_LEGACY_NODE_HEARTBEAT_DURING_REMOVAL_SQL)
+            .expect("install legacy heartbeat marker");
+        connection
+            .execute_batch(MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL)
+            .expect("install legacy finalize marker");
+
+        // A rolling cluster refuses a fresh removal before it creates any
+        // attempt or shared fence. The staged join is excluded; node-old is
+        // the active finalized node that lacks the capability.
+        let transaction = connection
+            .transaction()
+            .expect("mixed-version begin transaction");
+        assert_eq!(
+            transaction
+                .execute(
+                    &begin_removal_attempt_sql(),
+                    rusqlite::params!["blocked", "blocked-attempt"],
+                )
+                .expect("gate mixed-version begin"),
+            0
+        );
+        transaction
+            .execute(
+                BEGIN_REMOVAL_INTENT_SQL,
+                rusqlite::params!["blocked", "blocked-attempt"],
+            )
+            .expect("guard mixed-version removal intent");
+        transaction
+            .execute(
+                BEGIN_REMOVAL_FENCE_SQL,
+                rusqlite::params!["blocked", 40, "blocked-attempt"],
+            )
+            .expect("guard mixed-version removal fence");
+        transaction
+            .execute(
+                BEGIN_REMOVAL_OWNER_FENCE_SQL,
+                rusqlite::params![
+                    "internal.cluster_job_owner_removed.blocked",
+                    40,
+                    "blocked",
+                    "blocked-attempt"
+                ],
+            )
+            .expect("guard mixed-version owner fence");
+        transaction
+            .execute(
+                BEGIN_REMOVAL_JOB_FENCE_SQL,
+                rusqlite::params![40, "blocked", "blocked-attempt"],
+            )
+            .expect("guard mixed-version job fence");
+        transaction
+            .execute(
+                CLEAR_REMOVAL_INTENT_SQL,
+                rusqlite::params!["blocked", "blocked-attempt"],
+            )
+            .expect("consume mixed-version removal intent");
+        transaction.commit().expect("commit refused begin");
+        let blocked_side_effects: i64 = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM cluster_node_removal_attempts \
+                     WHERE node_id = 'blocked') + \
+                   (SELECT COUNT(*) FROM cluster_node_removal_intents \
+                     WHERE node_id = 'blocked') + \
+                   (SELECT COUNT(*) FROM cluster_node_removals WHERE node_id = 'blocked') + \
+                   (SELECT COUNT(*) FROM settings \
+                     WHERE key = 'internal.cluster_job_owner_removed.blocked') + \
+                   (SELECT COUNT(*) FROM job_leases \
+                     WHERE owner_node_id != 'blocked' OR revision != 1)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count refused begin side effects");
+        assert_eq!(blocked_side_effects, 0);
+
+        // An old binary's unconditional rollback cannot erase a fence that a
+        // reference-aware attempt currently protects.
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM cluster_node_removals WHERE node_id = 'node-a'",
+                    [],
+                )
+                .expect("legacy removal delete"),
+            0
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM settings WHERE key = \
+                     'internal.cluster_job_owner_removed.node-a'",
+                    [],
+                )
+                .expect("legacy owner-fence delete"),
+            0
+        );
+
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ($1, $2, $3)",
+                rusqlite::params!["node-old", REMOVAL_ATTEMPT_CAPABILITY, 20],
+            )
+            .expect("finish capability rollout");
+
+        // The exact current heartbeat sequence carries a transaction-local
+        // intent, so the legacy trigger neither deletes its capability nor
+        // pins the active removal.
+        let transaction = connection
+            .transaction()
+            .expect("current heartbeat transaction");
+        transaction
+            .execute(
+                "INSERT INTO cluster_node_heartbeat_intents VALUES ($1, $2) \
+                 ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+                rusqlite::params!["node-a", 11],
+            )
+            .expect("publish heartbeat intent");
+        transaction
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 11 WHERE node_id = 'node-a'",
+                [],
+            )
+            .expect("apply current heartbeat");
+        transaction
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ($1, $2, $3) \
+                 ON CONFLICT(node_id, capability) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+                rusqlite::params!["node-a", REMOVAL_ATTEMPT_CAPABILITY, 11],
+            )
+            .expect("refresh current capability");
+        transaction
+            .execute(
+                "DELETE FROM cluster_node_join_staging WHERE node_id = 'node-a'",
+                [],
+            )
+            .expect("clear current staging marker");
+        transaction
+            .execute(
+                "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = 'node-a' \
+                 AND last_seen_at = 11",
+                [],
+            )
+            .expect("consume heartbeat intent");
+        transaction.commit().expect("commit current heartbeat");
+        let legacy_refs: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_node_removal_attempts \
+                 WHERE node_id = 'node-a' AND attempt_id = 'internal.legacy-writer'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count current-heartbeat legacy refs");
+        assert_eq!(legacy_refs, 0);
+
+        rollback(&mut connection, "node-a", "attempt-a");
+        let shared_fence: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cluster_node_removals WHERE node_id = 'node-a') + \
+                        (SELECT COUNT(*) FROM settings WHERE key = \
+                          'internal.cluster_job_owner_removed.node-a')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count concurrent shared fence");
+        assert_eq!(shared_fence, 2);
+        rollback(&mut connection, "node-a", "attempt-b");
+
+        let remaining_attempts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_node_removal_attempts WHERE node_id = 'node-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count remaining attempts");
+        let fences: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cluster_node_removals WHERE node_id = 'node-a') + \
+                        (SELECT COUNT(*) FROM settings WHERE key = \
+                          'internal.cluster_job_owner_removed.node-a')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count remaining fences");
+        assert_eq!(remaining_attempts, 0);
+        assert_eq!(fences, 0);
+
+        // If a legacy heartbeat appears after begin, the replicated trigger
+        // invalidates its capability and pins an unreleasable reference before
+        // that process can send an untracked removal proposal.
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_node_removals VALUES ('node-gap', 2); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gap', 'gap-attempt'); \
+                 INSERT INTO settings VALUES (\
+                   'internal.cluster_job_owner_removed.node-gap', '1', 0);",
+            )
+            .expect("seed capability-gap attempt");
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 21 WHERE node_id = 'node-old'",
+                [],
+            )
+            .expect("apply legacy heartbeat");
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ($1, $2, $3) \
+                 ON CONFLICT(node_id, capability) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+                rusqlite::params!["node-old", REMOVAL_ATTEMPT_CAPABILITY, 21],
+            )
+            .expect("upgrade legacy heartbeat writer");
+        rollback(&mut connection, "node-gap", "gap-attempt");
+
+        let remaining_attempts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_node_removal_attempts \
+                 WHERE node_id = 'node-gap'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count final attempts");
+        let fences: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM cluster_node_removals \
+                          WHERE node_id = 'node-gap') + \
+                        (SELECT COUNT(*) FROM settings WHERE key = \
+                          'internal.cluster_job_owner_removed.node-gap')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count final fences");
+        assert_eq!(remaining_attempts, 1);
+        assert_eq!(fences, 2);
+    }
+
+    #[test]
+    fn legacy_join_finalize_pins_an_active_removal_fence() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY, started_at INTEGER); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('legacy-join', 30, NULL); \
+                 INSERT INTO cluster_node_join_staging VALUES ('legacy-join'); \
+                 INSERT INTO cluster_join_tokens VALUES ('legacy-join', 'redeeming'); \
+                 INSERT INTO cluster_node_removals VALUES ('target', 1); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('target', 'attempt'); \
+                 INSERT INTO settings VALUES (\
+                   'internal.cluster_job_owner_removed.target', '1', 0);",
+            )
+            .expect("seed staged legacy finalize");
+        connection
+            .execute_batch(MARK_LEGACY_NODE_FINALIZE_DURING_REMOVAL_SQL)
+            .expect("install legacy finalize marker");
+
+        connection
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeemed' \
+                 WHERE node_id = 'legacy-join'",
+                [],
+            )
+            .expect("finalize staged legacy join");
+        let staging_and_legacy_ref: (i64, i64) = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM cluster_node_join_staging \
+                     WHERE node_id = 'legacy-join'), \
+                   (SELECT COUNT(*) FROM cluster_node_removal_attempts \
+                     WHERE node_id = 'target' \
+                       AND attempt_id = 'internal.legacy-writer')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read finalize protection");
+        assert_eq!(staging_and_legacy_ref, (0, 1));
+
+        let transaction = connection.transaction().expect("rollback transaction");
+        transaction
+            .execute(
+                &rollback_removal_attempt_sql(),
+                rusqlite::params!["target", "attempt"],
+            )
+            .expect("release normal attempt");
+        transaction
+            .execute(
+                ROLLBACK_REMOVAL_OWNER_FENCE_SQL,
+                rusqlite::params![removed_job_owner_key("target"), "target"],
+            )
+            .expect("retain shared owner fence");
+        transaction
+            .execute(ROLLBACK_REMOVAL_FENCE_SQL, rusqlite::params!["target"])
+            .expect("retain shared removal fence");
+        transaction.commit().expect("commit rollback");
+
+        let fences: i64 = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM cluster_node_removals \
+                     WHERE node_id = 'target') + \
+                   (SELECT COUNT(*) FROM settings WHERE key = \
+                     'internal.cluster_job_owner_removed.target')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pinned shared fences");
+        assert_eq!(fences, 2);
+    }
+
+    #[test]
+    fn replicated_guard_refuses_legacy_removal_and_backfills_existing_fences() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY, started_at INTEGER); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_node_removal_intents (\
+                   node_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('already-pending', 1);",
+            )
+            .expect("seed pre-upgrade removal fence");
+        let transaction = connection.transaction().expect("install guard transaction");
+        transaction
+            .execute(BACKFILL_REMOVAL_ATTEMPT_REFS_SQL, [])
+            .expect("backfill pre-upgrade attempt reference");
+        transaction
+            .execute_batch(REQUIRE_REMOVAL_INTENT_SQL)
+            .expect("install removal-intent guard");
+        transaction.commit().expect("commit guard installation");
+
+        let backfilled: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cluster_node_removal_attempts \
+                 WHERE node_id = 'already-pending' \
+                   AND attempt_id = 'internal.preexisting'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count backfilled reference");
+        assert_eq!(backfilled, 1);
+        assert!(connection
+            .execute(
+                "INSERT INTO cluster_node_removals VALUES ('legacy-new', 2)",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO cluster_node_removals VALUES ('already-pending', 2) \
+                 ON CONFLICT(node_id) DO NOTHING",
+                [],
+            )
+            .is_err());
+
+        let transaction = connection.transaction().expect("current begin transaction");
+        transaction
+            .execute(
+                "INSERT INTO cluster_node_removal_attempts VALUES ('current', 'uuid-attempt')",
+                [],
+            )
+            .expect("insert current attempt");
+        transaction
+            .execute(
+                BEGIN_REMOVAL_INTENT_SQL,
+                rusqlite::params!["current", "uuid-attempt"],
+            )
+            .expect("insert current intent");
+        transaction
+            .execute(
+                "INSERT INTO cluster_node_removals VALUES ('current', 3)",
+                [],
+            )
+            .expect("insert current removal fence");
+        transaction
+            .execute(
+                CLEAR_REMOVAL_INTENT_SQL,
+                rusqlite::params!["current", "uuid-attempt"],
+            )
+            .expect("consume current intent");
+        transaction.commit().expect("commit current begin");
+
+        let current_state: (i64, i64) = connection
+            .query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM cluster_node_removals \
+                     WHERE node_id = 'current'), \
+                   (SELECT COUNT(*) FROM cluster_node_removal_intents \
+                     WHERE node_id = 'current')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read current removal state");
+        assert_eq!(current_state, (1, 0));
     }
 
     fn payload() -> JoinPayload {

@@ -28,6 +28,13 @@ pub struct ClusterLeaveReq {
     pub stay_as_learner: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MembershipChangeReq {
+    RemoveVoter { remove_voter: NodeId },
+    SetVoters(BTreeSet<NodeId>),
+}
+
 #[tracing::instrument(skip_all)]
 pub(crate) async fn add_learner(
     state: AppStateExt,
@@ -235,15 +242,40 @@ pub(crate) async fn post_membership(
         return Err(Error::Config("Raft node has not been initialized".into()));
     }
 
-    let payload = get_payload::<BTreeSet<NodeId>>(&headers, body)?;
-    helpers::change_membership(&state, &raft_type, payload, false).await?;
+    let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
+    let _lock = state.raft_lock.lock().await;
+    are_we_leader(&state, &raft_type).await?;
+    match payload {
+        // Apply the delta against the membership OpenRaft sees while holding
+        // the same lock as learner promotion. Two sequential operations can no
+        // longer overwrite one another with client-snapshotted absolute sets.
+        MembershipChangeReq::RemoveVoter { remove_voter } => {
+            helpers::remove_voter(&state, &raft_type, remove_voter, false).await?;
+        }
+        // Older clients snapshotted an absolute set before this request reached
+        // the leader. Even under the lock, applying it after a learner
+        // promotion could eject that new voter. Accept only an already-applied
+        // idempotent set; every real removal must use the delta above.
+        MembershipChangeReq::SetVoters(voters) => {
+            let current = helpers::get_raft_metrics(&state, &raft_type)
+                .await
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            if voters != current {
+                return Err(Error::Error(
+                    "legacy absolute membership changes are refused; retry with the current node-delta protocol"
+                        .into(),
+                ));
+            }
+        }
+    }
 
-    // retain false removes current cluster members if they do not appear in the new list
     fmt_ok(headers, ())
 }
 
-/// Pre-emptively elect this voter. Authenticated on the private cluster API;
-/// callers use it to hand leadership away before a graceful self-removal.
+/// Queue a pre-emptive election on this voter. Authenticated on the private
+/// cluster API; callers must separately observe whether the campaign won.
 pub(crate) async fn elect(
     state: AppStateExt,
     headers: HeaderMap,

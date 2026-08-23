@@ -2231,35 +2231,24 @@ async fn run_leader_self_leave_case() -> Result<()> {
         .collect::<Vec<_>>();
     cluster.wait_for_voters(&remaining).await?;
 
-    let successor = cluster.leader().await?;
+    let successor = cluster.leader_among(&remaining).await?;
     if successor == departed || !remaining.contains(&successor) {
         bail!(
             "leader self-leave did not converge on a surviving successor: departed={departed}, successor={successor}, remaining={remaining:?}"
         );
     }
     let observer = remaining[0];
-    let status = match cluster.request(observer, Request::MembershipStatus).await? {
-        Response::MembershipStatus { status } => status,
-        response => bail!("unexpected post-leave membership status: {response:?}"),
-    };
-    if status.nodes.len() != 2
-        || status.nodes.iter().any(|node| node.raft_id == departed)
-        || status.nodes.iter().filter(|node| node.is_leader).count() != 1
-        || !status
-            .nodes
-            .iter()
-            .any(|node| node.raft_id == successor && node.is_leader)
-    {
-        bail!("leader self-leave did not publish the converged survivor roster: {status:?}");
-    }
+    cluster
+        .wait_for_membership_roster(observer, &remaining, successor)
+        .await?;
 
     cluster.shutdown_all().await?;
     Ok(())
 }
 
 /// Four voters still have a three-vote quorum with one nondeparting voter
-/// down. The leader must skip that dead handoff candidate, accept two stable
-/// survivor confirmations, and commit the safer odd 4→3 membership.
+/// down. The leader and two live survivors must commit the safer odd 4→3
+/// membership before the survivors elect and confirm their successor.
 async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("degraded four-voter leave data root")?;
@@ -2284,14 +2273,48 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
         .request(departed, Request::LeaveVoter)
         .await?
         .require_ok()?;
+    cluster
+        .request(
+            departed,
+            Request::HeartbeatPreservesTombstone {
+                node_id: format!("node-{departed}"),
+            },
+        )
+        .await?
+        .require_ok()?;
+    require_membership_error(
+        cluster
+            .request(
+                departed,
+                Request::ClaimArtworkRepair {
+                    item_id: 9_004,
+                    lease_ms: 100,
+                },
+            )
+            .await?,
+        "local_node_not_active",
+    )?;
     cluster.wait_for_voters(&remaining).await?;
 
-    let successor = cluster.leader().await?;
+    let live_survivors = remaining
+        .iter()
+        .copied()
+        .filter(|node_id| *node_id != unavailable)
+        .collect::<Vec<_>>();
+    let successor = cluster.leader_among(&live_survivors).await?;
     if successor == departed || successor == unavailable || !remaining.contains(&successor) {
         bail!(
             "degraded four-voter leave did not elect a live successor: departed={departed}, unavailable={unavailable}, successor={successor}, remaining={remaining:?}"
         );
     }
+    let observer = remaining
+        .iter()
+        .copied()
+        .find(|node_id| *node_id != unavailable)
+        .context("choose live degraded-leave observer")?;
+    cluster
+        .wait_for_membership_roster(observer, &remaining, successor)
+        .await?;
     cluster.shutdown_all().await?;
     Ok(())
 }
@@ -4119,10 +4142,23 @@ impl ClusterProcesses {
     }
 
     pub async fn leader(&mut self) -> Result<u64> {
+        let eligible = self.node_ids();
+        self.leader_among(&eligible).await
+    }
+
+    /// Wait for a leader reported and confirmed inside one eligible voter
+    /// set. A graceful self-leave harness keeps the removed protocol process
+    /// alive long enough to inspect its tombstone, so its stale self-report
+    /// must not satisfy successor convergence.
+    pub async fn leader_among(&mut self, eligible: &[u64]) -> Result<u64> {
         let deadline = Instant::now() + self.convergence_timeout;
         loop {
-            for node_id in 1..=self.nodes.len() as u64 {
-                if self.nodes[(node_id - 1) as usize].is_none() {
+            for node_id in eligible.iter().copied() {
+                if self
+                    .nodes
+                    .get((node_id - 1) as usize)
+                    .is_none_or(Option::is_none)
+                {
                     continue;
                 }
                 if let Ok(Response::Metrics {
@@ -4130,7 +4166,8 @@ impl ClusterProcesses {
                     ..
                 }) = self.request(node_id, Request::Metrics).await
                 {
-                    if self.nodes.get((leader - 1) as usize).is_some_and(Option::is_some)
+                    if eligible.contains(&leader)
+                        && self.nodes.get((leader - 1) as usize).is_some_and(Option::is_some)
                         && self
                             .request(leader, Request::Metrics)
                             .await
@@ -4143,7 +4180,51 @@ impl ClusterProcesses {
                 }
             }
             if Instant::now() >= deadline {
-                bail!("cluster did not report a leader");
+                bail!("eligible voters {eligible:?} did not report a leader");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait until the operator-facing roster catches up with the already
+    /// confirmed Raft leader. Metrics and the replicated heartbeat roster are
+    /// separate observations, so an immediate status read may legitimately
+    /// land between them during the successor's first heartbeat.
+    pub async fn wait_for_membership_roster(
+        &mut self,
+        observer: u64,
+        expected_voters: &[u64],
+        expected_leader: u64,
+    ) -> Result<MembershipStatus> {
+        let expected = expected_voters.iter().copied().collect::<BTreeSet<_>>();
+        let deadline = Instant::now() + self.convergence_timeout;
+        let mut last_status = None;
+        loop {
+            if let Ok(Response::MembershipStatus { status }) =
+                self.request(observer, Request::MembershipStatus).await
+            {
+                let roster = status
+                    .nodes
+                    .iter()
+                    .map(|node| node.raft_id)
+                    .collect::<BTreeSet<_>>();
+                let leader_count = status.nodes.iter().filter(|node| node.is_leader).count();
+                if roster == expected
+                    && leader_count == 1
+                    && status
+                        .nodes
+                        .iter()
+                        .any(|node| node.raft_id == expected_leader && node.is_leader)
+                {
+                    return Ok(status);
+                }
+                last_status = Some(status);
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "membership roster did not converge on voters {expected:?} with leader \
+                     {expected_leader}: {last_status:?}"
+                );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
