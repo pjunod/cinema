@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderName, Response, StatusCode};
 use futures_util::{stream, StreamExt, TryStreamExt};
 use plurx_core::cluster::membership::MembershipManager;
-use plurx_core::domain::{MediaSessionRenewal, MediaSessionRoute};
+use plurx_core::domain::{MediaSessionRenewal, MediaSessionRoute, OwnedMediaSessionLease};
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
 use plurx_core::transcode::OutputGrade;
@@ -985,12 +985,12 @@ fn stale_settlement_capacity(
 }
 
 fn take_stale_settlement_candidates(
-    routes: &[MediaSessionRoute],
+    routes: &[OwnedMediaSessionLease],
     live: &HashSet<String>,
     settling: &mut HashSet<String>,
     backoff: &mut HashMap<String, StaleSettlementBackoff>,
     now: tokio::time::Instant,
-) -> Vec<(MediaSessionRoute, u32)> {
+) -> Vec<(OwnedMediaSessionLease, u32)> {
     let mut candidates = Vec::new();
 
     // A due retry already owns one of the fixed slots. Convert that exact slot
@@ -1099,6 +1099,15 @@ mod tests {
             media_sequence: 0,
             discontinuity_sequence: 0,
             updated_at_ms: unix_ms(),
+        }
+    }
+
+    fn owned_lease(session_id: &str) -> OwnedMediaSessionLease {
+        OwnedMediaSessionLease {
+            incarnation_id: format!("incarnation-{session_id}"),
+            session_id: session_id.to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms().saturating_add(10_000),
         }
     }
 
@@ -1285,7 +1294,7 @@ mod tests {
 
         let mut settling = HashSet::from(["in-flight".to_owned()]);
         let candidates = take_stale_settlement_candidates(
-            &[media_route("fresh-first"), media_route("deferred-0")],
+            &[owned_lease("fresh-first"), owned_lease("deferred-0")],
             &HashSet::new(),
             &mut settling,
             &mut backoff,

@@ -4929,7 +4929,7 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,

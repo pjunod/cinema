@@ -695,10 +695,11 @@ impl MediaPool {
         if voter_count <= 1 || voter_count != peers.len().saturating_add(1) {
             return false;
         }
+        let snapshots = self.snapshots.read().await;
         remote_directory_ready(
             &peers,
             voter_count,
-            &self.snapshots.read().await,
+            std::ops::Deref::deref(&snapshots),
             tokio::time::Instant::now(),
         )
     }
