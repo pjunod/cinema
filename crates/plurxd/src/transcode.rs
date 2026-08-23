@@ -6252,9 +6252,7 @@ impl TranscodeManager {
         // publication. The short lookup pin bridges to the durable media
         // session pin installed before the route is exposed.
         let cache_lookup = if cache_location.storage_class == "shared" {
-            if prepared_shared.is_none() {
-                return None;
-            }
+            prepared_shared.as_ref()?;
             None
         } else {
             let Some(guard) = self.cache_readers.begin_lookup(&hash) else {
