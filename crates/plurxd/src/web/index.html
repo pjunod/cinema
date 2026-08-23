@@ -401,7 +401,18 @@
      never on screen together and had to be scrolled between and remembered.
      Capped against the viewport, so a narrow window still gets the old single
      column rather than a panel wider than the video. */
-  .statsov{position:absolute;top:64px;left:16px;width:min(780px,calc(100vw - 32px));max-height:calc(100dvh - 178px);
+  /* One corner, in every size. The panel used to anchor left and mini alone
+     anchored right, so changing size threw the readout across the picture and
+     the eye had to go find it again. Right-anchored throughout: the same
+     corner every time, and the left two thirds of the frame — where faces and
+     subtitles live — are never covered. */
+  .statsov{position:absolute;top:64px;right:20px;left:auto;width:min(780px,calc(100vw - 40px));
+    /* 64 above + 114 below. The transport bar is ~50px tall; the rest is the
+       gap that keeps the panel's edge clear of it. This is a bound, not a
+       promise of fit — the body scrolls inside it rather than growing over
+       the controls. positionStats() re-measures both bars on coarse pointers
+       and overrides top/max-height inline, which beats anything here. */
+    max-height:calc(100dvh - 178px);
     background:rgba(8,10,15,.88);border:1px solid rgba(255,255,255,.12);border-radius:9px;
     font:10.5px/1.34 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e8ea;
     display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(5px);z-index:5}
@@ -417,85 +428,171 @@
   .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:12px;line-height:1;cursor:pointer;padding:4px 6px;border-radius:5px}
   .statsx:hover{background:rgba(255,255,255,.1);color:#fff}
   /* The three levels intentionally match the native clients. Mini leaves the
-     picture legible, Standard is the glanceable Source/Playing/Server view,
-     and Debug retains the exhaustive browser readout below. */
-  .statsov[data-mode=mini]{left:auto;right:16px;width:min(650px,calc(100vw - 32px));max-height:none}
-  .statsov[data-mode=standard]{width:min(900px,calc(100vw - 32px))}
-  .statsov[data-mode=debug]{width:min(1040px,calc(100vw - 32px))}
-  .statsov[data-mode=mini] .statsbody,.statsov[data-mode=standard] .statsbody{columns:auto}
-  .statsmini{display:grid;grid-template-columns:minmax(140px,1.25fr) repeat(3,minmax(96px,1fr));gap:8px;align-items:center}
-  .statsmini .smethod{font:700 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#fff}
-  .statsmini .spos{margin-top:1px;color:rgba(255,255,255,.55)}
-  .statsmini .sfact{min-width:0}
-  .statsmini .slab{font:700 8px/1.1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;color:rgba(255,255,255,.4);text-transform:uppercase}
-  .statsmini .sval{margin-top:1px;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .statsstandard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-  .statsstandard .scard{padding:9px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:8px}
-  .statsstandard .scard h3{margin:0 0 6px;color:var(--accent);font:750 9px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}
-  .statsstandard .scard>div{display:grid;grid-template-columns:76px minmax(0,1fr);gap:6px;margin-top:3px;align-items:baseline}
-  .statsstandard .scard b{display:block;font:550 8.5px/1.2 ui-sans-serif,system-ui,sans-serif}
-  .statsstandard .scard span{display:block;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif;overflow-wrap:anywhere}
-  .statsstandard .sreason{grid-column:1/-1;color:rgba(255,255,255,.68);font:500 10px/1.3 ui-sans-serif,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+     picture legible, Standard is the glanceable Source/Now decoding/Server
+     ledger, and Debug is the same ledger with everything in it. */
+  /* Mini shrink-wraps its one line. A fixed 650px box around five short
+     values was mostly empty air over the picture; max-content is exactly as
+     wide as the sentence it holds, and no wider. */
+  .statsov[data-mode=mini]{width:max-content;max-width:calc(100vw - 40px);max-height:none}
+  .statsov[data-mode=standard]{width:min(900px,calc(100vw - 40px))}
+  .statsov[data-mode=debug]{width:min(1040px,calc(100vw - 40px))}
+  /* One ledger, one column's worth of width. These widths are sized for two
+     ledgers side by side; a direct-play session has only the client's half,
+     and at 1040px that was a 503px column of text beside 500px of nothing.
+     Higher specificity than the coarse-pointer width below on purpose — a
+     tablet has the same empty half. */
+  .statsov.onecol[data-mode=standard]{width:min(520px,calc(100vw - 40px))}
+  .statsov.onecol[data-mode=debug]{width:min(600px,calc(100vw - 40px))}
+  /* One line, one baseline, hairlines between the facts. The four-cell grid
+     this replaces stacked a caption over every value and reserved a column
+     width for the widest of them, so mini was three rows tall and half empty.
+     Reading order is the order you ask the questions in: what is playing,
+     where am I, what am I getting, how much is in hand, how fast is it
+     arriving, and is the far end healthy. */
+  /* `wrap`, and it costs nothing on a wide screen: the panel is `max-content`
+     wide, so the line is exactly as wide as it wants to be and there is never
+     a break opportunity to take. It only engages once `max-width` clamps the
+     balloon — on a phone — and then a break is strictly better than the
+     alternative, which was flexbox handing every cell a fraction of its own
+     text: at 390px the method cell was allotted 24px and rendered "T…". */
+  .statsmini{display:flex;flex-wrap:wrap;row-gap:2px;align-items:baseline;min-width:0;white-space:nowrap}
+  .statsmini > div{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .statsmini .sdiv{flex:0 0 auto;align-self:center;width:1px;height:11px;margin:0 9px;background:rgba(255,255,255,.2)}
+  .statsmini .smethod{flex:0 1 auto;font:700 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#fff}
+  .statsmini .spos{flex:0 0 auto;color:rgba(255,255,255,.55)}
+  .statsmini .sval{flex:0 1 auto;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif}
+  /* The buffer and the delivery rate are five characters each and never need
+     to give any of them up. They were shrinking anyway: `.spos` and `.spill`
+     are `flex:0 0 auto`, so the three `.sval`s shared the entire overflow, and
+     at 640px wide "12.5 s" ellipsized to "12…" and "38 Mb/s" to "38 …" — the
+     two numbers a glance is FOR, sacrificed to make room for a longer
+     neighbour. Only the resolution/grade cell shrinks now; it is the one with
+     a redundant half. */
+  .statsmini .sval.sfix{flex:0 0 auto}
+  /* The one thing on this line that is a verdict rather than a measurement,
+     so it is shaped like one. Same state the Server section names in full. */
+  .statsmini .spill{flex:0 0 auto;align-self:center;display:inline-flex;align-items:center;gap:5px;
+    padding:2px 8px 2px 6px;border-radius:999px;background:rgba(255,255,255,.08);
+    font:650 9.5px/1.2 ui-sans-serif,system-ui,sans-serif;color:rgba(255,255,255,.8)}
+  .statsmini .sdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
   .statsov .stat-good{color:#6ddb98!important}
   .statsov .stat-warn{color:#ffbd4a!important}
   .statsov .stat-bad{color:#ff6268!important}
   .statsov .stat-muted{color:rgba(255,255,255,.52)!important}
   @media(max-width:560px){
-    .statsmini{grid-template-columns:1fr 1fr}.statsmini .smethodwrap{grid-column:1/-1}
-    .statsstandard{grid-template-columns:1fr}
-    .statsstandard .sreason{grid-column:auto}
+    .statsmini .sdiv{margin:0 6px}
   }
-  /* Multi-column rather than a grid: the sections have very different
-     heights (Network is three rows, Now decoding can be ten), and grid rows
-     align to the tallest item in each row, which would reintroduce as much
-     empty space as the columns saved. `columns` takes a WIDTH, not a count,
-     so the number of columns follows the panel and no media query has to
-     guess it. The panel still scrolls if a session somehow outgrows even
-     this — the max-height above is a bound, not a promise.
-
-     Compact label tracks and denser type keep three useful columns visible
-     without turning long diagnostic values into a wall of wrapped text. */
-  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:7px 9px 8px;
-    columns:240px;column-gap:12px}
-  /* A section is the unit a column break may not fall inside — otherwise a
-     header lands at the foot of one column and its rows at the head of the
-     next, which reads as two unrelated sections. */
-  .stsec{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin-bottom:6px}
-  /* Playback spans the full width: Reason and Switched are sentences, and a
-     sentence in a 224px column is six short lines. Everything below it is
-     label-and-number, which is what columns are good at. */
-  .stsec.wide{column-span:none;margin-bottom:6px}
-  /* A short screen — a phone held sideways, which is how a phone watches
-     video — inverts the trade. There, vertical space is the scarce thing, and
-     a full-width Playback section spends the entire visible panel on two
-     sentences: measured, 4 of 28 rows reachable without scrolling. Letting it
-     flow with the rest and narrowing the columns puts 13 of 28 on the first
-     screen. It still scrolls (28 rows will not fit a 200px-tall panel however
-     they are arranged) — but what you see first is numbers beside their
-     labels rather than prose. */
-  @media(max-height:640px){
-    .stsec.wide{margin-bottom:6px}
-    .statsbody{columns:218px}
-    .stsec.wide > div{grid-template-columns:92px minmax(0,1fr)}
-  }
+  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:7px 9px 8px}
+  /* Two explicit tracks with a FIXED section→column assignment — Playback,
+     Source and Now decoding on the left; Network and Server on the right —
+     rather than the `columns:` reflow this replaces. Reflow chose sides on
+     the fly from the rendered height, and the panel re-renders once a second:
+     a section moved across the panel the moment a row appeared or a value got
+     a digit longer, under the eye of someone mid-sentence reading it. Which
+     side a thing is on is now a property of what it is.
+     The split is also the question people are actually asking: the left
+     column is this machine's account of the stream, the right column is the
+     far end's. Blame lives in the difference between the two, so they are
+     side by side rather than one after the other. */
+  /* `.statscols`, not `.cols`: this is one 12k-line global stylesheet shared by
+     the library, the admin pages and the player, and a name that generic was
+     one careless `class="cols"` in an unrelated view away from inheriting a
+     two-track grid it never asked for. Every selector here is stats-only, so
+     the name says so. */
+  .statscols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px;align-items:start}
+  .statscols > div{min-width:0}
+  /* A direct-play session has no server-side half at all — no health, no hls,
+     no cache — so Network and Server render nothing and the right track is
+     empty air for half the panel while the left one is squeezed. When
+     panelHtml sees one side come back empty it says so here, and the panel
+     narrows to the one ledger it actually has. */
+  .statscols.one{grid-template-columns:minmax(0,1fr)}
+  .stsec{margin-bottom:6px}
+  /* Sentences leave the grid. Reason, the auto-switch log, the codec lines
+     and the hitch verdict are prose, and prose in a half-panel column is six
+     short ragged lines that push every number below the fold. They collect
+     here instead: full width, at the foot of the panel, under a hairline, in
+     the order the sections that own them appear. The label keeps the same
+     gutter as every row above, and the sentence hangs off it — a wrapped
+     clause lines up under its own first word rather than under the label. */
+  .snotes{margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.13)}
+  /* Which section a sentence came from, when more than one contributed. Flat,
+     the strip read as one undifferentiated list and nothing said that Video
+     and Audio are facts about the FILE while Dynamic range and Hitches are
+     facts about this playback — the same distinction the two ledgers above
+     make by position, lost the moment a row left the grid.
+     Deliberately NOT styled like `.sechd`: muted grey, sentence case, no
+     accent and no extra tracking, because the word "Source" appearing twice
+     on one panel in two different weights reads as two different things. This
+     is a quiet backreference to a heading, not another heading. */
+  .snotegrp{color:rgba(255,255,255,.34);font-weight:600;font-size:9.5px;margin:5px 0 1px}
+  .snotes > .snotegrp:first-child{margin-top:0}
+  .snote{padding:1px 0 1px 112px;text-indent:-112px;overflow-wrap:anywhere;color:rgba(255,255,255,.72)}
+  .snote > b{display:inline-block;width:112px;box-sizing:border-box;padding-right:7px;text-indent:0;vertical-align:top}
   /* Two real columns rather than an inline-block label with a minimum width.
      That version had no gap of its own, so any label wider than the minimum
      touched its value ("Client estimate338 Mb/s"), and a value long enough to
      wrap — the Reason line, every time — came back to the left margin and read
      as a new field. A grid fixes both: the gap is the gutter, and wrapped text
      stays inside the value column. Each row is its own grid, so the width is
-     fixed rather than max-content; every label here fits 116px at this size.
-     Section headers opt out, being one item and not two. */
+     fixed rather than max-content: 112px, which every label here fits at this
+     size, and which the notes strip below reuses so a note's first word lands
+     on the same left edge as a value. Section headers opt out, being one item
+     and not two. */
   /* `anywhere`, because the values worth reading most are the ones with no
      break opportunity in them: a browser's own error text arrives as
      PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED, one unbreakable token
      wider than any column here, and it was being clipped at the panel edge —
      losing the end of the sentence that says what went wrong. */
-  .stsec > div{display:grid;grid-template-columns:92px minmax(0,1fr);gap:0 7px;align-items:baseline;
+  .stsec .r{display:grid;grid-template-columns:112px minmax(0,1fr);gap:0 7px;align-items:baseline;
     padding:1px 0;overflow-wrap:anywhere}
-  /* The full-width section can afford the wider label column it always had. */
-  .stsec.wide > div{grid-template-columns:96px minmax(0,1fr)}
-  .stsec > div.sechd{display:block}
+  .stsec .r > span{min-width:0}
+  /* A section aligns as a unit, decided from its own rendered rows: if nearly
+     all of them are numbers, the whole section's values go flush right on a
+     tabular figure grid, so digits stack in their places and a rate that
+     doubled is visible as a wider number without reading it. A section with
+     words in it stays flush left, where words belong. Mixing the two inside
+     one section was the worst of both — a ragged right edge that still looked
+     like it was trying to be a table. */
+  .stsec.num .r > span{text-align:right;font-variant-numeric:tabular-nums}
+  /* …with a per-row escape hatch, because the section verdict is a majority
+     vote and the minority is always the prose. "Now decoding" scores 4 of 5
+     numeric and goes flush right, which then right-ragged the Decoder
+     sentence over three wrapped lines and the frame-rate clause over two —
+     wrapped prose set flush right is the least readable thing on the panel,
+     and tabular figures inside a sentence space its digits like a table.
+     A row whose value is a sentence rather than a quantity keeps normal
+     figures and its left edge; the section keeps its column of numbers. */
+  .stsec.num .r.txt > span{text-align:left;font-variant-numeric:normal}
+  .stsec .sechd{display:block}
+  /* ---- responsive, and deliberately AFTER every base rule above ----------
+     These override `.statscols` and `.stsec .r` at the SAME specificity, so
+     they only win by source order. Sitting above the base rules (where the
+     narrow-viewport block used to live) they were simply dead: a 390px phone
+     in portrait still got two tracks, a 39px value column and a 1629px-tall
+     panel. Keep new breakpoints below this line. */
+  /* A short screen — a phone held sideways, which is how a phone watches
+     video — has no width to spend on two ledgers AND no height to waste, so
+     the columns stack and the label gutter narrows to buy value width. */
+  @media(max-height:640px){
+    .statscols{grid-template-columns:minmax(0,1fr)}
+    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
+    /* The notes strip borrows the rows' gutter so a sentence's first word
+       lands on the same left edge as a value. It has to borrow the narrowed
+       one too, or the promise only holds on a desktop. */
+    .snote{padding-left:92px;text-indent:-92px}
+    .snote > b{width:92px}
+  }
+  /* Too narrow for two ledgers side by side; the assignment survives, the
+     columns just stack in the order they are written. Same narrowed gutter as
+     the short-screen case above — a portrait phone is the tighter of the two,
+     not the looser one. */
+  @media(max-width:560px){
+    .statscols{grid-template-columns:minmax(0,1fr)}
+    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
+    .snote{padding-left:92px;text-indent:-92px}
+    .snote > b{width:92px}
+  }
   .statsov b{color:rgba(255,255,255,.5);font-weight:600}
   .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
   .pmenu{position:absolute;top:60px;right:20px;min-width:190px;max-width:300px;background:rgba(14,16,22,.97);border:1px solid rgba(255,255,255,.14);
@@ -521,7 +618,7 @@
        the width on a screen too narrow for 360px. Height is capped, not pinned
        to both edges — pinned made it as tall as the gap no matter how little it
        held; positionStats() caps it against the real bars instead. */
-    .statsov{top:calc(env(safe-area-inset-top,0px) + 96px);left:12px;right:auto;
+    .statsov{top:calc(env(safe-area-inset-top,0px) + 96px);right:12px;left:auto;
       width:min(880px,calc(100vw - 24px));
       max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 190px)}
     .pmenu{top:calc(env(safe-area-inset-top,0px) + 92px);right:12px;max-width:min(300px,calc(100vw - 24px));
@@ -532,7 +629,8 @@
     .player.statson .pinfo{display:none}
   }
   @media(pointer:coarse){
-    .statsov[data-mode=mini]{left:auto;right:12px}
+    /* Mini shrink-wraps here too; only its ceiling changes, to the touch inset. */
+    .statsov[data-mode=mini]{max-width:calc(100vw - 24px)}
   }
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
     padding:10px 16px;border-radius:10px;z-index:60;opacity:0;transition:opacity .2s;pointer-events:none}
@@ -8580,7 +8678,14 @@ function updateStats(){
   // A full buffer means nobody is fetching, and the last measured rate is then
   // a memory rather than a measurement. Rather than blank the line (the whole
   // complaint) or quietly lie, it says so.
-  let net='';
+  // Rows are DATA now, not html strings: {l:label, v:value html, c:tone class,
+  // a:extra attributes, note:true to send it to the notes strip}. The layout
+  // decisions below — which column a section sits in, whether its values are
+  // numbers worth right-aligning, whether it is short enough to run two-up,
+  // which values are sentences that belong out of the grid — are all made by
+  // counting and measuring the rows, and a string of html cannot be counted.
+  // Every value expression is unchanged from when they were strings.
+  const net=[];
   if(PLAYER.health && PLAYER.health.delivered_bps!=null){
     const h=PLAYER.health;
     const stale=!h.final && (h.delivered_idle_ms||0) > 8000;
@@ -8588,27 +8693,28 @@ function updateStats(){
     const why=h.final?'the stream finished — these are its last figures'
             :stale?'nothing has been fetched recently — a full buffer, not a slow link':'';
     const deliveryTone=h.final?"good":statsIdleTone(h.delivered_idle_ms,h.suspended);
-    net+=`<div><b>Delivery rate</b><span class="${statsToneClass(deliveryTone)}"${why?` style="opacity:.78" title="${why}"`:''}>`
-       + `${fmtMbps(h.delivered_bps)}${tag}</span></div>`;
+    net.push({l:"Delivery rate",c:statsToneClass(deliveryTone),
+      a:why?` style="opacity:.78" title="${why}"`:'',
+      v:`${fmtMbps(h.delivered_bps)}${tag}`});
   }
   if(PLAYER.hls){
-    if(PLAYER.hls.bandwidthEstimate) net+=`<div><b>Client estimate</b>${fmtMbps(PLAYER.hls.bandwidthEstimate)}</div>`;
+    if(PLAYER.hls.bandwidthEstimate) net.push({l:"Client estimate",v:`${fmtMbps(PLAYER.hls.bandwidthEstimate)}`});
     const lv=PLAYER.hls.levels&&PLAYER.hls.levels[PLAYER.hls.currentLevel];
-    if(lv&&lv.bitrate) net+=`<div><b>Stream rate</b>${fmtMbps(lv.bitrate)}</div>`;
+    if(lv&&lv.bitrate) net.push({l:"Stream rate",v:`${fmtMbps(lv.bitrate)}`});
   }
-  if(PLAYER.health && PLAYER.health.delivered_bytes) net+=`<div><b>Delivered</b>${fmtBytes(PLAYER.health.delivered_bytes)}</div>`;
+  if(PLAYER.health && PLAYER.health.delivered_bytes) net.push({l:"Delivered",v:`${fmtBytes(PLAYER.health.delivered_bytes)}`});
   // How the server side of this stream is doing. Until this existed, a
   // stutter had two indistinguishable explanations — the link can't carry it,
   // or the encoder can't make it fast enough — and the overlay could only
   // describe the client's half. `speed` under 1.0x names the second one
   // outright; "held" means the transcoder is deliberately parked because the
   // buffer ahead is already deep, which is health, not a problem.
-  let srv='';
+  const srv=[];
   if(PLAYER.vod){
     // A cache hit has no encoder, so it has no rate and no lead. Reporting the
     // usual figures would be actively misleading: "Server ahead 1:32:00" reads
     // as a runaway encoder rather than as a film that was finished yesterday.
-    srv+=`<div><b>Stream</b>already transcoded — served from the cache</div>`;
+    srv.push({l:"Stream",v:`already transcoded — served from the cache`,note:true});
   } else if(PLAYER.health){
     const h=PLAYER.health;
     // Prefer the recent rate over ffmpeg's cumulative one. A session that
@@ -8637,7 +8743,30 @@ function updateStats(){
                :paced?' — at the configured pace'
                :fed?' — throttled by a full client buffer':'';
       const rateTone=statsRateTone(rate,reserve,h.suspended,h.final);
-      srv+=`<div><b>Encode speed</b><span class="${statsToneClass(rateTone)}">${rate.toFixed(2)}×${label}${note}</span></div>`;
+      // WHERE a row lives is a property of the row, never of its value.
+      //
+      // This used to be `note:!!note`, and `note` is derived from live
+      // telemetry: at 0.92× the clause was "slower than realtime" and the row
+      // was a sentence in the notes strip; a second later at 1.00× against a
+      // readrate of 1.0 it was "at the configured pace" — still a note; a
+      // second after that at 1.40× the clause was empty and the row jumped
+      // back up into the Server ledger. The panel re-renders once a second, so
+      // "Encode speed" physically migrated between the right-hand column and
+      // the foot of the panel while someone was reading it, taking the
+      // section's row count — and therefore its numeric-alignment verdict for
+      // every OTHER row — with it. That is precisely the reflow instability
+      // the fixed section→column assignment above exists to eliminate, put
+      // back one row at a time.
+      //
+      // Now: the number is always a ledger row, and the clause is always a
+      // note. Both placements are constant; only the presence of the clause
+      // varies, which is what a clause is allowed to do. The row also carries
+      // the clause as a tooltip so the ledger alone answers "why 1.00×".
+      const clause=note?note.replace(/^\s*—\s*/,''):'';
+      srv.push({l:"Encode speed",c:statsToneClass(rateTone),
+        a:clause?` title="${esc(clause)}"`:'',
+        v:`${rate.toFixed(2)}×${label}`});
+      if(clause) srv.push({l:"Encode speed",c:statsToneClass(rateTone),note:true,v:`${esc(clause)}`});
     }
     if(h.ahead_seconds!=null){
       const release=!h.suspended?''
@@ -8648,16 +8777,17 @@ function updateStats(){
         :h.hold_reason==='global' && h.resume_below_bytes!=null
           ?` · global release ≤${fmtBytes(h.resume_below_bytes)}`:'';
       const transitions=h.suspend_count?` · ${h.suspend_count} suspend${h.suspend_count===1?'':'s'}`:'';
-      srv+=`<div><b>Server ahead</b><span class="${statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended))}">${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}</span></div>`;
+      srv.push({l:"Server ahead",c:statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended)),
+        v:`${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}`});
     }
     if(h.out_time_ms!=null && h.ahead_seconds==null){
       // A progressive stream has no published-media frontier to report; what
       // it can say is how much content ffmpeg has produced, which is the same
       // reserve seen from the other end.
-      srv+=`<div><b>Produced</b>${clockFromSec(h.out_time_ms/1000)}</div>`;
+      srv.push({l:"Produced",v:`${clockFromSec(h.out_time_ms/1000)}`});
     }
   }
-  if(PLAYER.ttffMs!=null) srv+=`<div><b>Started in</b>${(PLAYER.ttffMs/1000).toFixed(1)} s</div>`;
+  if(PLAYER.ttffMs!=null) srv.push({l:"Started in",v:`${(PLAYER.ttffMs/1000).toFixed(1)} s`});
   // Named by kind, because the two mean opposite things and the raw count sent
   // people to look at the wrong half of the system. `supply` ran out of
   // buffered video — a server or link problem. `decode` had video in hand and
@@ -8670,23 +8800,110 @@ function updateStats(){
     if(k.decode) parts.push(`${k.decode} decode`);
     // One <span> around the whole value, not a bare number plus a sibling:
     // the row is a two-column grid and a third child would drop into the next
-    // row's label column.
+    // row's label column. The renderer below now guarantees that shape for
+    // every row — a value with parts nests them INSIDE the one span.
     const stallTone=PLAYER.stalls>=3?"bad":"warn";
-    srv+=`<div><b>Stalls</b><span class="${statsToneClass(stallTone)}">${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}</span></div>`;
+    srv.push({l:"Stalls",c:statsToneClass(stallTone),
+      v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
   }
   const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
   const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
-  // Sections are WRAPPED now, not a flat run of siblings, because the panel
-  // lays them out in columns and a column break is free to fall between a
-  // header and its own rows. `break-inside:avoid` needs a box to avoid
-  // breaking inside of; this is that box.
-  const sec=(rows,title,cls)=> rows? `<div class="stsec${cls||''}">`+
-    `<div class="sechd">${title}</div>`+rows+`</div>` : '';
-  const autoLog=((PLAYER.abr&&PLAYER.abr.switches)||[]).map(entry=>
-    `<div><b>Auto log</b><span>${clockFromSec(entry.position)} · ${esc(entry.from)} → `+
-    `${esc(entry.to)} · ${esc(entry.reason)}</span></div>`).join("");
-  const debugHtml=
-    sec(
+  // The value as a reader sees it, with the markup taken back out — the two
+  // layout tests below are about the TEXT (does it start with a digit, is it
+  // short) and a tone class or a nested opacity span is not text.
+  const plainVal=html=>String(html).replace(/<[^>]*>/g,"").trim();
+  // "Carries a numeric value" means it reads as a quantity: it opens with a
+  // number. "1920×1080", "0 / 512 frames" and "12.4 Mb/s" all do; "hardware",
+  // "Direct play" and "MKV" do not. Opening, not containing, on purpose —
+  // "software — this machine has no GPU path" contains digits nowhere near
+  // the front and is a sentence.
+  const rowIsNumeric=row=>/^[+-]?[\d.,]/.test(plainVal(row.v));
+  // …and the minority report. The section verdict below is a majority vote,
+  // so a section that is four numbers and one sentence sets the sentence
+  // flush right too — "Now decoding" scores 4 of 5 and right-ragged the
+  // Decoder line over three wrapped lines, plus the frame-rate clause over
+  // two. A row opts out of the section's alignment when its value is not a
+  // bare quantity: either it does not open with a digit at all ("MKV",
+  // "hardware", "Direct play", a subtitle track name) or it is long enough
+  // that whatever follows the number is a clause rather than a unit.
+  // "Longer than ~16 characters" alone was too blunt a proxy for the second
+  // case: "12 / 51200 frames" is seventeen characters and is still a count.
+  // What actually marks a clause is a clause JOINT — " · ", " — " or an
+  // opening parenthesis — so that is the test, with a generous length cap
+  // behind it for anything that runs long without one. Quantities with units
+  // ("12 / 51200 frames", "12.4 Mb/s", "1920×1080", "3.9 GB") keep their
+  // place in the number column; "38.2 Mb/s · final", "42 s · 2 suspends" and
+  // "22.0 fps rendered · playing at 95.0% speed" leave it.
+  const rowIsProse=row=>{ const t=plainVal(row.v);
+    return !rowIsNumeric(row) || /\s[·—(]/.test(t) || t.length>24; };
+  // Exactly one <span> holds the whole value, always. The row is a two-cell
+  // grid, so a bare text node beside a span would be a THIRD grid item and
+  // would fall into the next row's label column — the bug this shape exists
+  // to make unrepresentable.
+  const rowHtml=row=>`<div class="r${rowIsProse(row)?' txt':''}"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
+  // A section carries its own alignment, computed from the rows that actually
+  // rendered — not from the rows it might have had. A section whose values are
+  // nearly all numbers aligns right on tabular figures.
+  //
+  // There is no `.dense` two-up variant any more. It required ten-plus rows in
+  // one section and the web panel's sections have a structural ceiling of five
+  // (Playback 4, Source 4, Now decoding 5, Network 4, Server 4) — the branch
+  // and its `@media(min-width:721px)` stylesheet block could never run. The
+  // Android panel's equivalent IS reachable and is untouched; it groups rows
+  // differently.
+  const sec=(title,rows)=>{
+    const shown=(rows||[]).filter(row=>row&&!row.note);
+    if(!shown.length) return '';
+    const numeric=shown.filter(rowIsNumeric).length;
+    const cls=(numeric/shown.length>=0.7?' num':'');
+    return `<div class="stsec${cls}"><div class="sechd">${title}</div>`+shown.map(rowHtml).join("")+`</div>`;
+  };
+  // The two columns are named, not filled in order: a section knows which
+  // side it belongs on, and a section that has nothing to say this second
+  // simply isn't there rather than shuffling the others across.
+  const LEFT_COL=["Playback","Source","Now decoding"], RIGHT_COL=["Network","Server"];
+  const panelHtml=sections=>{
+    const find=name=>{ const s=sections.find(x=>x.t===name); return s?sec(s.t,s.rows):''; };
+    const left=LEFT_COL.map(find).join(""), right=RIGHT_COL.map(find).join("");
+    // A direct-play session has no health, no hls and no cache entry, so both
+    // Network and Server come back empty — correctly, no orphan headings. But
+    // the grid still reserved their track, leaving half a 1040px panel blank
+    // while the ledger that DOES have something to say was squeezed into
+    // 503px. panelHtml is the one place that knows both answers, so it is the
+    // one place that can say "one column"; `.statscols.one` and the panel's
+    // `.onecol` width do the rest.
+    const one=!left||!right;
+    // Sentences, grouped by the section that owns them. Flat, the strip was
+    // `Reason / Switched / Auto log / Auto log / Video / Audio / Dynamic range
+    // / Hitches / Buffer target` with nothing saying that Video and Audio
+    // describe the FILE while Dynamic range and Hitches describe this
+    // playback — a distinction the ledgers above make by position and which
+    // is lost the moment a row leaves the grid. The label only appears when
+    // more than one section contributed; on a single-source strip it would be
+    // a heading over the whole thing, which is what the panel heading already
+    // is. Order follows the sections, so the strip reads in the same order as
+    // the columns it hangs under.
+    const groups=sections.map(s=>({t:s.t,rows:(s.rows||[]).filter(row=>row&&row.note)}))
+                         .filter(g=>g.rows.length);
+    const noteHtml=row=>`<div class="snote"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
+    const notes=groups.length
+      ? `<div class="snotes">`+groups.map(g=>
+          (groups.length>1?`<div class="snotegrp">${g.t}</div>`:'')+g.rows.map(noteHtml).join("")
+        ).join("")+`</div>`
+      : '';
+    return `<div class="statscols${one?' one':''}">`
+      + (left?`<div>${left}</div>`:'')
+      + (right?`<div>${right}</div>`:'')
+      + `</div>`
+      + notes;
+  };
+  // Each switch is its own note line: they are a log, and a log squashed into
+  // one cell is unreadable at the moment it matters.
+  const autoLog=((PLAYER.abr&&PLAYER.abr.switches)||[]).map(entry=>({l:"Auto log",note:true,
+    v:`${clockFromSec(entry.position)} · ${esc(entry.from)} → `+
+      `${esc(entry.to)} · ${esc(entry.reason)}`}));
+  const debugSections=[
+    {t:"Playback",rows:[
     // **Which build this is, in the place people photograph.**
     //
     // It lives on the admin-only System page and nowhere else, so the answer to
@@ -8698,55 +8915,56 @@ function updateStats(){
     // The page and the binary are the same artifact — index.html is
     // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
     // That is what makes one line able to answer for both.
-    `<div><b>Build</b><span class="stat-muted">${esc(buildLabel())}</span></div>`+
-    `<div><b>Method</b>${esc(method)}</div>`+
+    {l:"Build",c:"stat-muted",v:`${esc(buildLabel())}`},
+    {l:"Method",v:`${esc(method)}`},
     // Said outright, because the two transports are different code paths in
     // the browser and "which one ran" was previously only inferable from
     // which other rows happened to be missing. The wire container is named
     // honestly: a transcode ships MPEG-TS segments that hls.js transmuxes,
     // a copy ships fMP4 that goes to the SourceBuffer untouched — and that
     // difference mattered to the stutter investigation (STUTTER-4K.md §4).
-    `<div><b>Transport</b><span class="stat-muted">${
+    {l:"Transport",c:"stat-muted",v:`${
       PLAYER.hls ? (PLAYER.method==='transcode'
           ? "segmented MPEG-TS · MediaSource (hls.js transmuxes)"
           : "segmented fMP4 · MediaSource")
       : (PLAYER.copyHls||PLAYER.sessionId)
         ? `segmented ${PLAYER.method==='transcode'?'MPEG-TS':'fMP4'} · native HLS`
-        : "one continuous file · range requests"}</span></div>`+
-    ((PLAYER.reasons&&PLAYER.reasons.length)?`<div><b>Reason</b>${esc(PLAYER.reasons.join("; "))}</div>`:"")+
+        : "one continuous file · range requests"}`},
+    ((PLAYER.reasons&&PLAYER.reasons.length)?{l:"Reason",note:true,v:`${esc(PLAYER.reasons.join("; "))}`}:null),
     // A session the player moved off the original owes the viewer a standing
     // answer, not a toast that disappears. The Reason line above is the
     // server's verdict on the FILE and does not change when the client
     // switches, so it cannot carry this.
-    (PLAYER.rescuedNote?`<div><b>Switched</b><span class="stat-warn">${
-      esc(PLAYER.rescuedNote)}</span></div>`:"")+
-    autoLog+
-    `<div><b>Position</b>${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}</div>`
-    , "Playback")+
-    sec(
-    `<div><b>Video</b>${esc(srcVideo)}</div>`+
-    `<div><b>Resolution</b>${srcRes}</div>`+
-    `<div><b>Bitrate</b>${srcBr}</div>`+
-    `<div><b>Container</b>${esc(srcCont)}</div>`+
-    `<div><b>Audio</b>${esc(aLine)}</div>`+
-    `<div><b>AV offset</b><span>${(PLAYER.aoffset||0)+" ms"}${PLAYER.declared?` <span style="opacity:.6">(container ${PLAYER.declared>0?"+":""}${PLAYER.declared} ms)</span>`:''}</span></div>`
-    , "Source")+
-    sec(
-    `<div><b>Resolution</b>${tgtRes}</div>`+
+    (PLAYER.rescuedNote?{l:"Switched",c:"stat-warn",note:true,v:`${esc(PLAYER.rescuedNote)}`}:null),
+    ...autoLog,
+    {l:"Position",v:`${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}`}
+    ]},
+    {t:"Source",rows:[
+    {l:"Video",note:true,v:`${esc(srcVideo)}`},
+    {l:"Resolution",v:`${srcRes}`},
+    {l:"Bitrate",v:`${srcBr}`},
+    {l:"Container",v:`${esc(srcCont)}`},
+    {l:"Audio",note:true,v:`${esc(aLine)}`},
+    {l:"AV offset",v:`${(PLAYER.aoffset||0)+" ms"}${PLAYER.declared?` <span style="opacity:.6">(container ${PLAYER.declared>0?"+":""}${PLAYER.declared} ms)</span>`:''}`}
+    ]},
+    {t:"Now decoding",rows:[
+    {l:"Resolution",v:`${tgtRes}`},
     // The chip says it in three characters and an arrow; this says it in a
     // sentence, with the server's own reason. Same pure function, same parts —
     // the two can never drift into disagreeing. Absent for an SDR source:
     // there is no grade to have an opinion about.
     (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
-      return d?`<div><b>Dynamic range</b><span${d.off?' class="stat-muted"':''}>${esc(d.panel)}</span></div>`:''; })()+
-    `<div><b>Dropped</b><span class="${statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad')}">${dropped} frames</span></div>`+
+      return d?{l:"Dynamic range",note:true,c:d.off?"stat-muted":"",v:`${esc(d.panel)}`}:null; })(),
+    {l:"Dropped",c:statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad'),
+      v:`${dropped} frames`},
     (fps!=null?(()=>{
       const h=PLAYER.hitches, want=(v.playbackRate||1);
       const chased=h&&h.rate!=null&&Math.abs(h.rate-want)>0.02;
-      return `<div><b>Frame rate</b><span class="${fps<20?'stat-warn':''}">${fps.toFixed(1)} fps rendered</span>${
+      return {l:"Frame rate",c:(fps<20?'stat-warn':''),
+        v:`${fps.toFixed(1)} fps rendered${
         chased?` · <span class="stat-warn">playing at ${(h.rate*100).toFixed(1)}% speed${
-          want===1?" — the browser is rate-chasing":""}</span>`:''}</div>`;
-    })():'')+
+          want===1?" — the browser is rate-chasing":""}</span>`:''}`};
+    })():null),
     // The browser's own verdict on whether it is using the GPU for this. A
     // software 4K HEVC decode is a full buffer, few dropped frames and
     // constant judder — indistinguishable from a delivery problem on every
@@ -8757,18 +8975,25 @@ function updateStats(){
     // row would otherwise read as exoneration.
     (PLAYER.hitches&&!PLAYER.hitches.frames&&PLAYER.started
       &&PLAYER.hitchArmedAt&&(performance.now()-PLAYER.hitchArmedAt)>10000?
-      `<div><b>Hitches</b><span class="stat-muted">this browser gives the detector no frame callbacks — faults here are invisible, not absent</span></div>`:'')+
+      {l:"Hitches",c:"stat-muted",note:true,
+       v:`this browser gives the detector no frame callbacks — faults here are invisible, not absent`}:null),
+    // One note, not three rows. The counts, the last fault and the verdict on
+    // what caused it are one statement: they were split across a row and two
+    // LABEL-LESS continuation rows, which in a two-column ledger read as
+    // orphaned values belonging to whatever was above them.
     (PLAYER.hitches&&(PLAYER.hitches.back||PLAYER.hitches.held||PLAYER.hitches.late||PLAYER.hitches.drop||PLAYER.hitches.gap||PLAYER.hitches.slow)?
-      `<div><b>Hitches</b><span class="stat-warn">${
+      (()=>{
+        const tail=[PLAYER.hitches.last||'', hitchBlame()||''].filter(Boolean)
+          .map(part=>` · <span class="stat-muted" style="font-size:9.5px">${esc(part)}</span>`).join("");
+        return {l:"Hitches",c:"stat-warn",note:true,v:`${
         [PLAYER.hitches.back?`${PLAYER.hitches.back} back`:null,
          PLAYER.hitches.held?`${PLAYER.hitches.held} held`:null,
          PLAYER.hitches.late?`${PLAYER.hitches.late} late`:null,
          PLAYER.hitches.drop?`${PLAYER.hitches.drop} drop`:null,
          PLAYER.hitches.gap?`${PLAYER.hitches.gap} skip`:null,
          PLAYER.hitches.slow?`${PLAYER.hitches.slow} slow`:null].filter(Boolean).join(" · ")
-      }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}</span></div>`
-      +`<div><b></b><span class="stat-muted" style="font-size:9.5px">${esc(PLAYER.hitches.last||'')}</span></div>`
-      +(hitchBlame()?`<div><b></b><span class="stat-muted" style="font-size:9.5px">${esc(hitchBlame())}</span></div>`:''):'')+
+      }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}${tail}`};
+      })():null),
     (PLAYER.hls&&PLAYER.hls.config?(()=>{
       // The peak is the number that matters, and it was the number nobody was
       // looking at: the browser holds the forward buffer, the back buffer AND
@@ -8778,10 +9003,10 @@ function updateStats(){
       const t=PLAYER.bufTarget, q=(PLAYER.bufferLimits&&PLAYER.bufferLimits.quota)|0;
       const peak=(t&&t.budgeted)?` · peak ${Math.round(t.peakBytes/1e6)}MB of ~${
         Math.round(MSE_QUOTA_BYTES/1e6)}MB (+ a ${t.seg}s segment)`:'';
-      return `<div><b>Buffer target</b><span class="${q?'stat-warn':'stat-muted'}">${
+      return {l:"Buffer target",note:true,c:(q?'stat-warn':'stat-muted'),v:`${
         PLAYER.hls.config.maxBufferLength}s ahead · ${PLAYER.hls.config.backBufferLength}s behind${
-        peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}</span></div>`;
-    })():'')+
+        peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}`};
+    })():null),
     (PLAYER.decodeInfo?(()=>{
       // The measured margin, next to the browser's own claim — because the
       // claim was `powerEfficient: true` on the exact session whose median
@@ -8797,21 +9022,32 @@ function updateStats(){
         // gets healthier. A number that condemns every stream condemns none of
         // them, and dressing it in a warning colour is how it came to be
         // believed. Frames lost per minute is the row that means something —
-        // it is two lines up, under Hitches.
+        // it is in the notes below, under Hitches.
         margin=` · <span class="stat-muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
           `against a ${b.toFixed(0)}ms budget — latency, not load</span>`;
       }
-      return `<div><b>Decoder</b><span class="${PLAYER.decodeInfo.hw?'stat-good':'stat-warn'}">${
+      return {l:"Decoder",c:(PLAYER.decodeInfo.hw?'stat-good':'stat-warn'),v:`${
         PLAYER.decodeInfo.hw?'hardware':'software — this machine has no GPU path for this stream'}${
-        PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}</span>${margin}</div>`;
-    })():'')+
-    `<div><b>Buffer</b><span class="${statsToneClass(statsRunwayTone(bufSec,false))}">${buf}</span></div>`
-    , "Now decoding")+
-    sec(net, "Network")+
-    sec(srv, "Server");
+        PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}${margin}`};
+    })():null),
+    {l:"Buffer",c:statsToneClass(statsRunwayTone(bufSec,false)),v:`${buf}`}
+    ]},
+    {t:"Network",rows:net},
+    {t:"Server",rows:srv}
+  ];
+  const debugHtml=panelHtml(debugSections);
 
   const rangeBadge=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+  // Two forms, two audiences. `.panel` is the full sentence ("SDR — this
+  // browser did not expose HDR presentation") and it belongs in the standard
+  // and debug ledgers, where there is a column for a sentence. `.text` is the
+  // chip form ("DV P7 → SDR"): same fact, four words shorter, which is what
+  // mini's single line can carry. Mini used the sentence, and on any HDR or
+  // Dolby Vision source played to an ordinary display that one cell made the
+  // whole balloon 918px wide at 1440 — and squeezed the two numbers beside it
+  // until they ellipsized.
   const rangeText=rangeBadge?rangeBadge.panel:"—";
+  const rangeShort=rangeBadge?rangeBadge.text:"—";
   const selectedSub=PLAYER.curSub>=0
     ? subLabelFor((PLAYER.subs||[]).find(track=>track.index===PLAYER.curSub),PLAYER.curSub)
     : "Off";
@@ -8837,32 +9073,53 @@ function updateStats(){
   );
   const frameTone=droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad";
   const runwayTone=statsRunwayTone(bufSec,false);
-  const cardRow=(label,value,tone)=>`<div><b>${label}</b><span class="${statsToneClass(tone)}">${value}</span></div>`;
+  const cardRow=(label,value,tone)=>({l:label,c:statsToneClass(tone),v:value});
   const reason=(PLAYER.reasons&&PLAYER.reasons.length)?esc(PLAYER.reasons.join(" · ")):"";
-  const miniHtml=`<div class="statsmini">
-    <div class="smethodwrap"><div class="smethod">${esc(method)}</div>
-      <div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div></div>
-    <div class="sfact"><div class="slab">Playing</div><div class="sval ${statsToneClass(frameTone)}">${esc(tgtRes)} · ${esc(rangeText)}</div></div>
-    <div class="sfact"><div class="slab">Buffer</div><div class="sval ${statsToneClass(runwayTone)}">${esc(buf)}</div></div>
-    <div class="sfact"><div class="slab">Network</div><div class="sval ${statsToneClass(deliveryTone)}">${esc(clientRate)}</div></div>
-  </div>`;
-  const standardHtml=`<div class="statsstandard">
-    <section class="scard"><h3>Source</h3>
-      ${cardRow("Resolution",esc(srcRes))}${cardRow("Video",esc(srcVideo))}
-      ${cardRow("Container",esc(srcCont))}${cardRow("Bitrate",esc(srcBr))}${cardRow("Audio",esc(aLine))}</section>
-    <section class="scard"><h3>Playing</h3>
-      ${cardRow("Resolution",esc(tgtRes))}${cardRow("Dynamic range",esc(rangeText))}
-      ${cardRow("Buffer",esc(buf),runwayTone)}${cardRow("Dropped / total",esc(dropped+" frames"),frameTone)}
-      ${cardRow("Subtitles",esc(selectedSub))}</section>
-    <section class="scard"><h3>Server</h3>
-      ${cardRow("Status",esc(serverState),serverTone)}
-      ${(health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):""}
-      ${serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):""}
-      ${health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):""}
-      ${cardRow("Delivery",esc(clientRate),deliveryTone)}</section>
-    ${reason?`<div class="sreason">${reason}</div>`:""}
-  </div>`;
+  // The pill says in one word what the Server section's Status row says in
+  // three or four — same `serverState`, so the two can never disagree.
+  const healthWord=PLAYER.vod?"Cached":health?(health.suspended?"Held":"Active"):"Direct";
+  const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
+  const miniHtml=`<div class="statsmini">`
+    +`<div class="smethod">${esc(method)}</div>`+miniDiv
+    +`<div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div>`+miniDiv
+    +`<div class="sval ${statsToneClass(frameTone)}" title="${esc(rangeBadge?rangeBadge.full||rangeText:rangeText)}">${esc(tgtRes)} · ${esc(rangeShort)}</div>`+miniDiv
+    +`<div class="sval sfix ${statsToneClass(runwayTone)}">${esc(buf)}</div>`+miniDiv
+    +`<div class="sval sfix ${statsToneClass(deliveryTone)}">${esc(clientRate)}</div>`+miniDiv
+    +`<div class="spill ${statsToneClass(serverTone)}" title="${esc(serverState)}">`
+      +`<span class="sdot" aria-hidden="true"></span>${esc(healthWord)}</div>`
+    +`</div>`;
+  // Standard is the same ledger as debug, with fewer rows in it — it was three
+  // bordered cards with a stacked caption over every value, which is a third
+  // layout to hold in your head and half again the height for the same eleven
+  // facts. Its "Playing" card is debug's "Now decoding" section under the name
+  // debug already used; one name for one thing, in both sizes.
+  const standardHtml=panelHtml([
+    {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
+    {t:"Source",rows:[
+      cardRow("Resolution",esc(srcRes)),
+      Object.assign(cardRow("Video",esc(srcVideo)),{note:true}),
+      cardRow("Container",esc(srcCont)),
+      cardRow("Bitrate",esc(srcBr)),
+      Object.assign(cardRow("Audio",esc(aLine)),{note:true})]},
+    {t:"Now decoding",rows:[
+      cardRow("Resolution",esc(tgtRes)),
+      Object.assign(cardRow("Dynamic range",esc(rangeText)),{note:true}),
+      cardRow("Buffer",esc(buf),runwayTone),
+      cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
+      cardRow("Subtitles",esc(selectedSub))]},
+    {t:"Server",rows:[
+      cardRow("Status",esc(serverState),serverTone),
+      (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
+      serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
+      health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):null,
+      cardRow("Delivery",esc(clientRate),deliveryTone)]}
+  ]);
   body.innerHTML=STATS_MODE==="mini"?miniHtml:STATS_MODE==="debug"?debugHtml:standardHtml;
+  // The panel is sized for two ledgers; when panelHtml only had one to give,
+  // narrow it to match rather than framing a column of blank. Read back off
+  // the DOM instead of threading a flag out of panelHtml, because which of
+  // the three strings actually rendered is decided on the line above.
+  ov.classList.toggle("onecol", !!body.querySelector(".statscols.one"));
 }
 // Poll the session's server-side health while the stats overlay is open, and
 // only then: this is a diagnostic readout, not telemetry the server needs, and
