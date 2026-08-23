@@ -28,11 +28,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
+use hmac::{Hmac, Mac};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
 use plurx_core::cluster::membership::{
-    join_token_digest, ActivityPeerAuth, ArtworkPeerAuth, ClusterAvailability, ClusterPeer,
-    FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager,
-    MembershipStatus, PeerSigningKey, RedeemJoinRequest,
+    join_token_digest, ActivityPeerAuth, ActivitySigningKey, ArtworkPeerAuth, ClusterAvailability,
+    ClusterPeer, FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError,
+    MembershipManager, MembershipStatus, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -1196,8 +1197,11 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let impersonated_node = (1..=3)
         .find(|node_id| *node_id != target && *node_id != observer)
         .context("choose the other surviving voter")?;
-    let mut impersonated_activity_proof = removed_activity_proof.clone();
-    impersonated_activity_proof.node_id = format!("node-{impersonated_node}");
+    let impersonated_activity_proof = shared_secret_activity_proof(
+        &format!("node-{impersonated_node}"),
+        &format!("node-{observer}"),
+        removed_activity_now,
+    )?;
     match cluster
         .request(
             observer,
@@ -1221,21 +1225,6 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         Response::Flag { value: false } => {}
         response => bail!("a removed voter retained activity access: {response:?}"),
-    }
-    let mut impersonated_artwork_proof = departing_artwork_proof.clone();
-    impersonated_artwork_proof.node_id = format!("node-{impersonated_node}");
-    match cluster
-        .request(
-            observer,
-            Request::VerifyArtworkPeer {
-                filename: "poster.jpg".to_owned(),
-                auth: impersonated_artwork_proof,
-            },
-        )
-        .await?
-    {
-        Response::Flag { value: false } => {}
-        response => bail!("a removed voter impersonated a surviving artwork peer: {response:?}"),
     }
     match cluster
         .request(
@@ -3993,7 +3982,7 @@ async fn handle_request(
                     for statement in [
                         "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
                         "DELETE FROM cluster_node_http WHERE node_id = $1",
-                        "DELETE FROM cluster_node_peer_keys WHERE node_id = $1",
+                        "DELETE FROM cluster_node_activity_keys WHERE node_id = $1",
                         "DELETE FROM cluster_nodes WHERE node_id = $1",
                     ] {
                         client
@@ -4677,6 +4666,32 @@ fn membership_error_response(error: plurx_core::cluster::membership::MembershipE
     }
 }
 
+/// Reproduce the removed-node exploit from the shared-HMAC design: a daemon
+/// that retained the cluster API secret freshly claims a surviving sender.
+/// The per-node Ed25519 verifier must reject this proof; the former verifier
+/// accepted it because every voter possessed the same key.
+fn shared_secret_activity_proof(
+    claimed_node_id: &str,
+    target_node_id: &str,
+    timestamp_ms: i64,
+) -> Result<ActivityPeerAuth> {
+    let mut message = b"plurx-internal-activity-v1".to_vec();
+    for value in [claimed_node_id, target_node_id] {
+        message.extend_from_slice(&u64::try_from(value.len())?.to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct retained shared-secret proof: {error}"))?;
+    mac.update(&message);
+    Ok(ActivityPeerAuth {
+        node_id: claimed_node_id.to_owned(),
+        target_node_id: target_node_id.to_owned(),
+        timestamp_ms,
+        signature: hex::encode(mac.finalize().into_bytes()),
+    })
+}
+
 async fn membership_manager(
     client: &Client,
     store: Arc<HiqliteAuthStore>,
@@ -4747,8 +4762,8 @@ async fn membership_manager_with_identity_artwork_url(
             api: API_SECRET.to_owned(),
             credential_key: "00".repeat(32),
         },
-        PeerSigningKey::from_seed_hex(&hex::encode(Sha256::digest(format!(
-            "plurx-cluster-check-peer-key:{node_id}:{raft_id}"
+        ActivitySigningKey::from_seed_hex(&hex::encode(Sha256::digest(format!(
+            "plurx-cluster-check-activity-key:{node_id}:{raft_id}"
         ))))?,
         ActivationMarker {
             marker_version: 1,

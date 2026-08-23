@@ -16,6 +16,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hiqlite::macros::params;
 use hiqlite::{Client, Node, Row};
+use hmac::{Hmac, Mac};
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -95,10 +96,10 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_node_hostnames (\
          node_id TEXT PRIMARY KEY, \
          hostname TEXT NOT NULL) STRICT",
-    // Peer HTTP authority is node-specific. Unlike the shared Hiqlite API
+    // Activity HTTP authority is node-specific. Unlike the shared Hiqlite API
     // secret, a removed node's retained private key cannot impersonate a
     // surviving voter. Keys are immutable once published for a node id.
-    "CREATE TABLE IF NOT EXISTS cluster_node_peer_keys (\
+    "CREATE TABLE IF NOT EXISTS cluster_node_activity_keys (\
          node_id TEXT PRIMARY KEY, \
          public_key TEXT NOT NULL) STRICT",
     // Provider/source repair is a replicated side effect. The current Raft
@@ -127,8 +128,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
 
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
-const ARTWORK_AUTH_CONTEXT: &[u8] = b"plurx-internal-artwork-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
+const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
@@ -356,26 +357,27 @@ pub struct ActivityPeerAuth {
     pub signature: String,
 }
 
-/// Process-local Ed25519 authority for cluster-only HTTP calls.
+/// Process-local Ed25519 authority for the cluster activity HTTP route.
 ///
 /// The seed is persisted as an owner-only file by the migration coordinator;
 /// only the public half is replicated. Intentionally not `Clone` or `Debug`.
-pub struct PeerSigningKey {
+pub struct ActivitySigningKey {
     key_pair: Ed25519KeyPair,
 }
 
-impl PeerSigningKey {
+impl ActivitySigningKey {
     pub fn from_seed_hex(seed: &str) -> Result<Self, MembershipError> {
         let seed = hex::decode(seed).map_err(|_| {
-            MembershipError::Internal("peer signing seed is not hexadecimal".to_owned())
+            MembershipError::Internal("activity signing seed is not hexadecimal".to_owned())
         })?;
         if seed.len() != 32 {
             return Err(MembershipError::Internal(
-                "peer signing seed must be exactly 32 bytes".to_owned(),
+                "activity signing seed must be exactly 32 bytes".to_owned(),
             ));
         }
-        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed)
-            .map_err(|_| MembershipError::Internal("peer signing seed is invalid".to_owned()))?;
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed).map_err(|_| {
+            MembershipError::Internal("activity signing seed is invalid".to_owned())
+        })?;
         Ok(Self { key_pair })
     }
 
@@ -475,13 +477,20 @@ struct ReplicatedMembership {
     bootstrap_http: String,
     artwork_http: String,
     secrets: JoinSecrets,
-    peer_signing_key: PeerSigningKey,
+    activity_signing_key: ActivitySigningKey,
+    activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
+    activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
+}
+
+struct ActivityAuthAdmission {
+    window_started: Instant,
+    checks: u8,
 }
 
 #[derive(Clone)]
@@ -543,7 +552,7 @@ impl MembershipManager {
         bootstrap_http: String,
         artwork_http: String,
         secrets: JoinSecrets,
-        peer_signing_key: PeerSigningKey,
+        activity_signing_key: ActivitySigningKey,
         activation_marker: ActivationMarker,
     ) -> Result<Self, MembershipError> {
         let replication = ReplicationMonitor::replicated(client.clone());
@@ -561,7 +570,9 @@ impl MembershipManager {
                 bootstrap_http,
                 artwork_http,
                 secrets,
-                peer_signing_key,
+                activity_signing_key,
+                activity_public_keys: Mutex::new(BTreeMap::new()),
+                activity_auth_admission: Mutex::new(BTreeMap::new()),
                 activation_marker,
                 replication,
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -603,7 +614,8 @@ impl MembershipManager {
         }
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
-        self.publish_peer_signing_key().await?;
+        self.publish_activity_signing_key().await?;
+        self.refresh_activity_public_keys().await?;
         self.publish_http_url().await
     }
 
@@ -874,34 +886,73 @@ impl MembershipManager {
         Ok(())
     }
 
-    /// Publish the public half of this node's durable peer-HTTP authority.
+    /// Publish the public half of this node's durable activity authority.
     ///
     /// A key is immutable for a node id. Losing the private file is therefore
     /// a fail-closed recovery event, not permission to replace replicated
     /// authority; operators must recover the data directory or rejoin with a
     /// new node identity.
-    async fn publish_peer_signing_key(&self) -> Result<(), MembershipError> {
+    async fn publish_activity_signing_key(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        let public_key = inner.peer_signing_key.public_key_hex();
+        let public_key = inner.activity_signing_key.public_key_hex();
         let changed = inner
             .client
             .execute(
-                "INSERT INTO cluster_node_peer_keys (node_id, public_key) \
+                "INSERT INTO cluster_node_activity_keys (node_id, public_key) \
                  SELECT $1, $2 WHERE EXISTS (\
                    SELECT 1 FROM cluster_nodes node \
                    WHERE node.node_id = $1 AND node.removed_at IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
                        WHERE removal.node_id = node.node_id)) \
                  ON CONFLICT(node_id) DO UPDATE SET public_key = excluded.public_key \
-                 WHERE cluster_node_peer_keys.public_key = excluded.public_key",
+                 WHERE cluster_node_activity_keys.public_key = excluded.public_key",
                 params!(inner.identity.node_id.as_str(), public_key.as_str()),
             )
             .await?;
         if changed != 1 {
             return Err(MembershipError::Internal(
-                "local peer signing key does not match immutable cluster authority".to_owned(),
+                "local activity signing key does not match immutable cluster authority".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    /// Refresh the bounded local verifier set from replicated membership.
+    /// Invalid signatures never cross the consensus boundary; this cache is
+    /// only a cheap prefilter, while the final live-voter decision remains a
+    /// consistent read below.
+    async fn refresh_activity_public_keys(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_map::<ActivityPublicKeyRow, _>(
+                "SELECT key.node_id, key.public_key \
+                 FROM cluster_node_activity_keys key \
+                 JOIN cluster_nodes node ON node.node_id = key.node_id \
+                 WHERE node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $1",
+                params!(MAX_ACTIVITY_PEERS as i64),
+            )
+            .await?;
+        let keys = rows
+            .into_iter()
+            .filter_map(|row| {
+                let key = hex::decode(row.public_key).ok()?;
+                (key.len() == 32).then_some((row.node_id, key))
+            })
+            .collect::<BTreeMap<_, _>>();
+        inner
+            .activity_auth_admission
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("activity admission lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        *inner.activity_public_keys.lock().map_err(|_| {
+            MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+        })? = keys;
         Ok(())
     }
 
@@ -1183,25 +1234,30 @@ impl MembershipManager {
         Ok(rows.into_iter().map(|row| row.public_http_url).collect())
     }
 
-    /// Sign a one-file materialization request with this node's private key.
+    /// Sign one artwork request with the established rolling-compatible HMAC
+    /// wire. Activity uses separate per-node authority below; changing this
+    /// already-deployed protocol requires its own negotiated transition.
     pub fn artwork_peer_auth(&self, filename: &str) -> Result<ArtworkPeerAuth, MembershipError> {
         let inner = self.replicated_inner()?;
         let timestamp_ms = unix_ms()?;
         let message = artwork_auth_message(&inner.identity.node_id, timestamp_ms, filename);
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        mac.update(message.as_bytes());
         Ok(ArtworkPeerAuth {
             node_id: inner.identity.node_id.clone(),
             timestamp_ms,
-            signature: inner.peer_signing_key.sign_hex(&message),
+            signature: hex::encode(mac.finalize().into_bytes()),
         })
     }
 
-    /// Verify the per-node proof and the sender's live voter membership.
+    /// Verify the established artwork proof and the sender's live membership.
     pub async fn verify_artwork_peer_auth(
         &self,
         filename: &str,
         auth: &ArtworkPeerAuth,
     ) -> Result<bool, MembershipError> {
-        self.replicated_inner()?;
+        let inner = self.replicated_inner()?;
         let now = unix_ms()?;
         if now.abs_diff(auth.timestamp_ms) > ARTWORK_AUTH_WINDOW_MS as u64 {
             return Ok(false);
@@ -1211,8 +1267,24 @@ impl MembershipManager {
             Err(_) => return Ok(false),
         };
         let message = artwork_auth_message(&auth.node_id, auth.timestamp_ms, filename);
-        self.verify_live_peer_signature(&auth.node_id, now, &message, &signature)
-            .await
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        mac.update(message.as_bytes());
+        if mac.verify_slice(&signature).is_err() {
+            return Ok(false);
+        }
+        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes \
+                 WHERE node_id = $1 AND removed_at IS NULL AND last_seen_at >= $2 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
+                     WHERE node_id = $1)",
+                params!(auth.node_id.as_str(), reachable_after),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
     /// Resolve peer daemon endpoints without widening the public node status.
@@ -1268,7 +1340,7 @@ impl MembershipManager {
             node_id: inner.identity.node_id.clone(),
             target_node_id: target_node_id.to_owned(),
             timestamp_ms,
-            signature: inner.peer_signing_key.sign_hex(&message),
+            signature: inner.activity_signing_key.sign_hex(&message),
         })
     }
 
@@ -1291,35 +1363,81 @@ impl MembershipManager {
             Err(_) => return Ok(false),
         };
         let message = activity_auth_message(&auth.node_id, &auth.target_node_id, auth.timestamp_ms);
-        self.verify_live_peer_signature(&auth.node_id, now, &message, &signature)
+        if !self.activity_signature_is_known(&auth.node_id, &message, &signature)?
+            || !self.admit_activity_authority_check(&auth.node_id)?
+        {
+            return Ok(false);
+        }
+        self.verify_live_activity_authority(&auth.node_id, now)
             .await
     }
 
-    async fn verify_live_peer_signature(
+    fn activity_signature_is_known(
         &self,
         node_id: &str,
-        now: i64,
         message: &[u8],
         signature: &[u8],
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        let voters = inner
-            .client
-            .metrics_db()
-            .await?
+        let public_key = inner
+            .activity_public_keys
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+            })?
+            .get(node_id)
+            .cloned();
+        let Some(public_key) = public_key else {
+            return Ok(false);
+        };
+        Ok(UnparsedPublicKey::new(&ED25519, public_key)
+            .verify(message, signature)
+            .is_ok())
+    }
+
+    fn admit_activity_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut admission = inner.activity_auth_admission.lock().map_err(|_| {
+            MembershipError::Internal("activity admission lock was poisoned".to_owned())
+        })?;
+        let state = admission
+            .entry(node_id.to_owned())
+            .or_insert(ActivityAuthAdmission {
+                window_started: now,
+                checks: 0,
+            });
+        if now.saturating_duration_since(state.window_started) >= Duration::from_secs(1) {
+            state.window_started = now;
+            state.checks = 0;
+        }
+        if state.checks >= MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND {
+            return Ok(false);
+        }
+        state.checks += 1;
+        Ok(true)
+    }
+
+    async fn verify_live_activity_authority(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        if !metrics
             .membership_config
             .voter_ids()
-            .collect::<BTreeSet<_>>();
-        if !voters.contains(&inner.identity.raft_id) {
+            .any(|raft_id| raft_id == inner.identity.raft_id)
+        {
             return Ok(false);
         }
         let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         let rows = inner
             .client
-            .query_consistent_map::<PeerAuthNodeRow, _>(
-                "SELECT node.raft_id, peer.public_key \
+            .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "SELECT node.raft_id \
                  FROM cluster_nodes node \
-                 JOIN cluster_node_peer_keys peer ON peer.node_id = node.node_id \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
                    AND node.last_seen_at >= $2 \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
@@ -1327,18 +1445,11 @@ impl MembershipManager {
                 params!(node_id, reachable_after),
             )
             .await?;
-        let Some(sender) = rows
-            .first()
-            .filter(|sender| voters.contains(&sender.raft_id))
-        else {
-            return Ok(false);
-        };
-        let Ok(public_key) = hex::decode(&sender.public_key) else {
-            return Ok(false);
-        };
-        Ok(UnparsedPublicKey::new(&ED25519, public_key)
-            .verify(message, signature)
-            .is_ok())
+        Ok(rows.len() == 1
+            && metrics
+                .membership_config
+                .voter_ids()
+                .any(|raft_id| raft_id == rows[0].raft_id))
     }
 
     pub async fn heartbeat_loop(self) {
@@ -1347,8 +1458,18 @@ impl MembershipManager {
         }
         loop {
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-            if let Err(error) = self.heartbeat().await {
-                tracing::warn!(code = error.code(), "cluster node heartbeat failed");
+            match self.heartbeat().await {
+                Err(error) => {
+                    tracing::warn!(code = error.code(), "cluster node heartbeat failed");
+                }
+                Ok(()) => {
+                    if let Err(error) = self.refresh_activity_public_keys().await {
+                        tracing::warn!(
+                            code = error.code(),
+                            "cluster activity verifier refresh failed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1799,6 +1920,12 @@ impl MembershipManager {
         let Ok(inner) = self.replicated_inner() else {
             return;
         };
+        if let Ok(mut keys) = inner.activity_public_keys.lock() {
+            keys.remove(node_id);
+        }
+        if let Ok(mut admission) = inner.activity_auth_admission.lock() {
+            admission.remove(node_id);
+        }
         if let Err(error) = inner
             .client
             .execute(
@@ -2505,17 +2632,29 @@ impl From<&mut Row<'_>> for ActivityPeerRow {
     }
 }
 
-struct PeerAuthNodeRow {
-    raft_id: u64,
+struct ActivityPublicKeyRow {
+    node_id: String,
     public_key: String,
 }
 
-impl From<&mut Row<'_>> for PeerAuthNodeRow {
+impl From<&mut Row<'_>> for ActivityPublicKeyRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            node_id: row.get("node_id"),
+            public_key: row.get("public_key"),
+        }
+    }
+}
+
+struct ActivityAuthNodeRow {
+    raft_id: u64,
+}
+
+impl From<&mut Row<'_>> for ActivityAuthNodeRow {
     fn from(row: &mut Row<'_>) -> Self {
         let raft_id: i64 = row.get("raft_id");
         Self {
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
-            public_key: row.get("public_key"),
         }
     }
 }
@@ -2609,14 +2748,8 @@ impl From<&mut Row<'_>> for NodeRow {
     }
 }
 
-fn artwork_auth_message(node_id: &str, timestamp_ms: i64, filename: &str) -> Vec<u8> {
-    let mut message = ARTWORK_AUTH_CONTEXT.to_vec();
-    for value in [node_id, filename] {
-        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-        message.extend_from_slice(value.as_bytes());
-    }
-    message.extend_from_slice(&timestamp_ms.to_be_bytes());
-    message
+fn artwork_auth_message(node_id: &str, timestamp_ms: i64, filename: &str) -> String {
+    format!("plurx-artwork-v1\n{node_id}\n{timestamp_ms}\n{filename}")
 }
 
 /// Strip the listener port while preserving DNS names, IPv4, and bracketed

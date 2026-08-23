@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hiqlite-store")]
 use super::membership::{
-    decode_join_token, join_token_digest, ClusterPeer, FinalizeJoinRequest, JoinPayload,
-    JoinSecrets, LocalMembership, MembershipManager, PeerSigningKey, RedeemJoinRequest,
+    decode_join_token, join_token_digest, ActivitySigningKey, ClusterPeer, FinalizeJoinRequest,
+    JoinPayload, JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
 };
 
 pub const SQLITE_FILENAME: &str = "plurx.db";
@@ -70,7 +70,7 @@ const RAFT_SECRET_FILENAME: &str = "secret_raft";
 #[cfg(feature = "hiqlite-store")]
 const API_SECRET_FILENAME: &str = "secret_api";
 #[cfg(feature = "hiqlite-store")]
-const PEER_SIGNING_KEY_FILENAME: &str = "peer_http_signing_key";
+const ACTIVITY_SIGNING_KEY_FILENAME: &str = "activity_http_signing_key";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_DATABASE_FILENAME: &str = "plurx.db";
 #[cfg(feature = "hiqlite-store")]
@@ -532,7 +532,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
                 &config.cluster.credential_key_path(&config.storage.data_dir),
             )?,
         },
-        load_or_create_peer_signing_key(&config.storage.data_dir)?,
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         payload.activation_marker,
     )
     .await
@@ -1344,7 +1344,7 @@ async fn open_active_store_with_key(
             api: secrets.api,
             credential_key: credential_key_secret,
         },
-        load_or_create_peer_signing_key(&config.storage.data_dir)?,
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
     )
     .await
@@ -2139,9 +2139,10 @@ fn load_or_create_secret(data_dir: &Path, filename: &str) -> Result<String, Stor
 }
 
 #[cfg(feature = "hiqlite-store")]
-fn load_or_create_peer_signing_key(data_dir: &Path) -> Result<PeerSigningKey, StoreError> {
-    let seed = load_or_create_secret(data_dir, PEER_SIGNING_KEY_FILENAME)?;
-    PeerSigningKey::from_seed_hex(&seed).map_err(|error| StoreError::Identity(error.to_string()))
+fn load_or_create_activity_signing_key(data_dir: &Path) -> Result<ActivitySigningKey, StoreError> {
+    let seed = load_or_create_secret(data_dir, ACTIVITY_SIGNING_KEY_FILENAME)?;
+    ActivitySigningKey::from_seed_hex(&seed)
+        .map_err(|error| StoreError::Identity(error.to_string()))
 }
 
 #[cfg(feature = "hiqlite-store")]

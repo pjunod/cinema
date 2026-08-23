@@ -376,7 +376,7 @@ fn unix_ms() -> i64 {
 mod tests {
     use super::*;
     use std::convert::Infallible;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -562,15 +562,33 @@ mod tests {
             })
             .collect();
         let started = tokio::time::Instant::now();
-        let outcomes = collect_peer_outcomes(peers, Duration::from_millis(40), |_| async {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            PeerActivityOutcome::Unreachable
+        let timeout = Duration::from_millis(100);
+        let ninth_started_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let ninth = Arc::clone(&ninth_started_ms);
+        let outcomes = collect_peer_outcomes(peers, timeout, move |peer| {
+            if peer.node_id == "node-8" {
+                ninth.store(started.elapsed().as_millis() as u64, Ordering::SeqCst);
+            }
+            async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                PeerActivityOutcome::Unreachable
+            }
         })
         .await;
         assert_eq!(outcomes.len(), 9);
         assert!(outcomes
             .iter()
             .all(|(_, outcome)| *outcome == PeerActivityOutcome::TimedOut));
-        assert!(started.elapsed() < Duration::from_secs(1));
+        let ninth_started_ms = ninth_started_ms.load(Ordering::SeqCst);
+        let completed_ms = started.elapsed().as_millis() as u64;
+        assert!(
+            ninth_started_ms >= 80,
+            "the ninth peer started before the first concurrency window expired"
+        );
+        assert!(
+            completed_ms.saturating_sub(ninth_started_ms) < 50,
+            "the ninth peer received a fresh deadline: started at {ninth_started_ms}ms, \
+             completed at {completed_ms}ms"
+        );
     }
 }

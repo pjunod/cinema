@@ -445,6 +445,8 @@ exact 256 KiB serialized budget, wrong-node answers are invalid, and at most
 never-joined one-node installs have no peers, make no calls, and add no
 listener. `join_url` may retain a reverse-proxy path prefix such as
 `https://cluster.example/plurx`; `artwork_url` is deliberately an origin only.
+The existing artwork-recovery HMAC remains unchanged for mixed-version v4
+rollouts; the per-node signature applies only to the new activity route.
 
 **Mint one token into a protected file.** The default lifetime is 10 minutes;
 the API clamps requests to 60–3,600 seconds. It returns the token once, so do

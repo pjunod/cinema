@@ -425,6 +425,11 @@ budget as the consumer and returns only node identity and bounded
 active-delivery fields: no media paths, peer addresses, credentials, library
 rows, or settings.
 
+Artwork recovery predates that activity route and retains its v4 shared-HMAC
+wire during rolling upgrades. The activity key is not substituted into the
+artwork protocol without a future negotiated protocol transition; new and old
+v4 voters therefore continue to exchange artwork while a cluster rolls.
+
 The consequence is explicit: **anything past a network you fully trust belongs
 behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain
 HTTP the bearer token crosses the wire in the clear, so on an untrusted segment
