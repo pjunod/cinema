@@ -1130,6 +1130,17 @@ offline package/download pins also prevent deletion; pin acquisition racing GC
 has one winner; loss after startup disables shared classification; rolling
 rollback ignores node-local keys safely.
 
+**Delivered:** SQLite v26 and replicated schema v11 add storage/generation
+identity, verified storage membership, and typed consumer pins while retaining
+the legacy producer key for rolling writes. Every voter proves a configured
+mount with an authenticated two-way canary before direct reads or portable
+publication; manifest-fenced local generations remain ready if that copy fails.
+Media-session owner renewals extend exact pins, supersession/end/maintenance
+release them, offline package and download lifecycles pin transactionally, and
+lease-fenced GC serializes retirement against pin acquisition. Runtime shared
+I/O or integrity loss marks membership suspect and returns routing to verified
+node-local holders until a later canary succeeds.
+
 ### 8.8 P7 — implement web session takeover
 
 Extend the existing owner-liveness batch with frontiers/sequence state,
@@ -1224,8 +1235,8 @@ Configuration introduced by this plan:
 |---|---|---|---|
 | `cluster.media_pool_enabled` | replicated policy | `0` | Enable remote offer selection and start forwarding after every voter is compatible |
 | `cluster.session_takeover_enabled` | replicated policy | `0` | Enable owner lease expiry and replacement generation after the failover corpus passes |
-| `cluster.shared_cache_dir` | node-local TOML | empty | Optional completed-cache root mounted on multiple nodes |
-| `cluster.shared_cache_id` | node-local TOML | empty | Operator-chosen identity confirmed by the two-way canary; same path text is insufficient |
+| `cluster.shared_cache_dir` | node-local config | empty | Optional completed-cache root mounted on multiple nodes; `PLURX_SHARED_CACHE_DIR` is the environment equivalent |
+| `cluster.shared_cache_id` | node-local config | empty | Operator-chosen identity confirmed by the two-way canary; `PLURX_SHARED_CACHE_ID` is the environment equivalent and same path text is insufficient |
 
 Shared paths remain node-local configuration; secrets and filesystem layout
 never enter replicated settings.

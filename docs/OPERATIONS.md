@@ -791,6 +791,8 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Database, artwork, transcode cache (created if missing) |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
+| `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
+| `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
@@ -1673,9 +1675,58 @@ when the client happened to reach its holder. Enablement is still explicit:
 `PUT /api/v1/settings` with
 `{"cluster_media_pool_enabled": true}` succeeds only when every committed
 voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
-separates enabled, rollout-ready, and effective-ready state. Do not point
-multiple daemons at one cache directory to simulate a shared cache; verified
-shared roots and distributed reader pins are P6.
+separates enabled, rollout-ready, and effective-ready state.
+
+#### Optional verified shared cache
+
+P6 adds a direct shared-cache fast path without making it a cluster
+requirement. Local cache and P5 owner routing remain complete fallbacks. Use
+the shared path only when all participating voters mount the same writable
+filesystem; never point two daemons at one ordinary node-local cache directory.
+
+Configure both node-local values on every participating voter. Paths may differ
+between hosts, but the id must describe the same underlying filesystem:
+
+```toml
+[cluster]
+shared_cache_dir = "/srv/plurx-shared"
+shared_cache_id = "media-cache-a"
+```
+
+The equivalent container variables are `PLURX_SHARED_CACHE_DIR` and
+`PLURX_SHARED_CACHE_ID`. Create and mount the directory before starting plurx,
+and give the daemon uid permission to create, rename, read, and remove entries.
+The id is combined with the durable cluster identity, so the same operator name
+in two unrelated clusters does not alias replicated cache state.
+
+Startup does not trust matching configuration. Every committed voter must pass
+an authenticated two-way canary: each node writes unpredictable bytes, a peer
+reads them and writes a response, and the origin reads that response back. Only
+then does the node classify completed portable generations as shared. A
+one-voter cluster performs the same write/read proof locally. Missing mounts,
+read-only mounts, different filesystems, identity mismatches, and unreachable
+voters leave the fast path unavailable while P5 local-holder routing continues.
+
+Portable, manifest-fenced speculative generations are copied into immutable
+shared generation directories after local publication succeeds. A nonproducer
+may then serve the verified generation directly instead of proxying through its
+producer. Every requested manifest and object is still authenticated; the
+canary proves common writable storage at admission time, not permanent byte
+integrity.
+
+Media sessions, ready offline packages, and active offline downloads hold typed
+replicated pins for the exact storage/recipe/generation identity. Session pins
+renew in the existing owner-liveness batch rather than per segment. Shared GC
+requires the exact `shared-cache-gc:<storage_id>` lease and retires the pointer
+only when no unexpired pin exists in that same transaction; filesystem deletion
+follows pointer retirement.
+
+Any runtime shared-root `ENOENT`, I/O, manifest, or identity failure immediately
+marks this node's proof suspect and disables shared classification. Look for
+`shared cache proof lost; falling back to node-local holders`. The local ready
+generation remains usable when shared publication fails, and a later successful
+canary readmits the shared path. Rolling back is safe: both TOML keys live in the
+forward-compatible `[cluster]` section and older binaries ignore them.
 
 Operational evidence is available in Settings → Activity and Logs:
 
