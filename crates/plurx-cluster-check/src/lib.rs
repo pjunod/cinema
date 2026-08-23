@@ -19,8 +19,8 @@ use std::net::TcpListener;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -907,19 +907,7 @@ async fn run_serving_partition_case() -> Result<()> {
         reqwest::StatusCode::OK,
     )
     .await?;
-    let child = wait_serving_http(
-        &http,
-        &serving.http_base,
-        "/childz",
-        reqwest::StatusCode::OK,
-    )
-    .await?;
-    if !child.body.contains(r#""alive":true"#) {
-        bail!(
-            "serving-node media child was not alive before partition: {}",
-            child.body
-        );
-    }
+    admit_serving_media(&http, &serving.http_base).await?;
 
     for proxy in &proxies {
         proxy.partition();
@@ -1019,19 +1007,7 @@ async fn run_serving_partition_case() -> Result<()> {
     )
     .await?;
 
-    let child = wait_serving_http(
-        &http,
-        &serving.http_base,
-        "/spawn-child",
-        reqwest::StatusCode::OK,
-    )
-    .await?;
-    if !child.body.contains(r#""alive":true"#) {
-        bail!(
-            "serving-node could not admit a new-generation media child after recovery: {}",
-            child.body
-        );
-    }
+    admit_serving_media(&http, &serving.http_base).await?;
     for proxy in &proxies {
         proxy.partition();
     }
@@ -1090,6 +1066,25 @@ async fn run_serving_partition_case() -> Result<()> {
     cluster.shutdown_all().await
 }
 
+async fn admit_serving_media(client: &reqwest::Client, base: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        wait_serving_http(client, base, "/readyz", reqwest::StatusCode::OK).await?;
+        wait_serving_http(client, base, "/spawn-child", reqwest::StatusCode::OK).await?;
+        let child = wait_serving_http(client, base, "/childz", reqwest::StatusCode::OK).await?;
+        if child.body.contains(r#""alive":true"#) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "serving-node could not retain a current-generation media child: {}",
+                child.body
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn wait_for_local_setting(
     cluster: &mut ClusterProcesses,
     node_id: u64,
@@ -1122,20 +1117,45 @@ async fn wait_for_local_setting(
 struct MediaChild {
     child: Child,
     _input: ChildStdin,
+    admitted_generation: u64,
+    admission_id: u64,
 }
 
-async fn kill_media_child(
-    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
-    media_alive: &Arc<AtomicBool>,
-) {
-    let media_child = media.lock().await.take();
-    if let Some(MediaChild { mut child, _input }) = media_child {
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill().await;
-        }
-        let _ = child.wait().await;
+async fn reap_media_child(mut media_child: MediaChild) {
+    if media_child.child.try_wait().ok().flatten().is_none() {
+        let _ = media_child.child.kill().await;
     }
-    media_alive.store(false, AtomicOrdering::Release);
+    let _ = media_child.child.wait().await;
+}
+
+async fn kill_media_child(media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>) {
+    if let Some(media_child) = media.lock().await.take() {
+        reap_media_child(media_child).await;
+    }
+}
+
+async fn take_media_child_if_id(
+    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
+    admission_id: u64,
+) -> Option<MediaChild> {
+    let mut slot = media.lock().await;
+    if slot
+        .as_ref()
+        .is_some_and(|child| child.admission_id == admission_id)
+    {
+        slot.take()
+    } else {
+        None
+    }
+}
+
+async fn kill_media_child_if_id(
+    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
+    admission_id: u64,
+) {
+    if let Some(media_child) = take_media_child_if_id(media, admission_id).await {
+        reap_media_child(media_child).await;
+    }
 }
 
 /// The serving parent retains this process's stdin pipe. A normal shutdown or
@@ -1153,7 +1173,7 @@ async fn media_child() -> Result<()> {
     }
 }
 
-fn spawn_media_child_process() -> Result<MediaChild> {
+fn spawn_media_child_process(admitted_generation: u64, admission_id: u64) -> Result<MediaChild> {
     let executable = harness_executable()?;
     let mut command = Command::new(executable);
     command
@@ -1170,6 +1190,8 @@ fn spawn_media_child_process() -> Result<MediaChild> {
     Ok(MediaChild {
         child,
         _input: input,
+        admitted_generation,
+        admission_id,
     })
 }
 
@@ -1204,19 +1226,28 @@ async fn serving_node(launch: ServingLaunch) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let media = Arc::new(tokio::sync::Mutex::new(Some(spawn_media_child_process()?)));
-    let media_alive = Arc::new(AtomicBool::new(true));
+    let media: Arc<tokio::sync::Mutex<Option<MediaChild>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let next_media_id = Arc::new(AtomicU64::new(1));
     let mut serving_state = serving.subscribe();
     let fenced_media = Arc::clone(&media);
-    let fenced_media_alive = Arc::clone(&media_alive);
     let media_shutdown = shutdown.clone();
     let media_fence = tokio::spawn(async move {
-        let mut admitted_generation = serving_state.borrow_and_update().loss_generation;
         loop {
             let state = *serving_state.borrow_and_update();
-            if state.authority_lost_since(admitted_generation) {
-                kill_media_child(&fenced_media, &fenced_media_alive).await;
-                admitted_generation = state.loss_generation;
+            let media_child = {
+                let mut slot = fenced_media.lock().await;
+                if slot
+                    .as_ref()
+                    .is_some_and(|child| state.authority_lost_since(child.admitted_generation))
+                {
+                    slot.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(media_child) = media_child {
+                reap_media_child(media_child).await;
             }
             tokio::select! {
                 () = media_shutdown.cancelled() => break,
@@ -1261,19 +1292,19 @@ async fn serving_node(launch: ServingLaunch) -> Result<()> {
         let (stream, _) = accepted.context("accept serving-node HTTP")?;
         let connection_serving = serving.clone();
         let connection_media = Arc::clone(&media);
-        let connection_media_alive = Arc::clone(&media_alive);
+        let connection_next_media_id = Arc::clone(&next_media_id);
         tokio::spawn(async move {
             let _ = serve_serving_http(
                 stream,
                 connection_serving,
                 connection_media,
-                connection_media_alive,
+                connection_next_media_id,
             )
             .await;
         });
     }
 
-    kill_media_child(&media, &media_alive).await;
+    kill_media_child(&media).await;
     let _ = stdin_task.await;
     let _ = passive.await;
     let _ = monitor.await;
@@ -1285,7 +1316,7 @@ async fn serve_serving_http(
     mut stream: tokio::net::TcpStream,
     serving: ServingFence,
     media: Arc<tokio::sync::Mutex<Option<MediaChild>>>,
-    media_alive: Arc<AtomicBool>,
+    next_media_id: Arc<AtomicU64>,
 ) -> Result<()> {
     const MAX_REQUEST_BYTES: usize = 8 * 1024;
     let mut request = Vec::with_capacity(1024);
@@ -1333,16 +1364,13 @@ async fn serve_serving_http(
                     false,
                 ),
                 "/childz" => {
-                    if media_alive.load(AtomicOrdering::Acquire) {
-                        let mut media_child = media.lock().await;
-                        if let Some(child) = media_child.as_mut() {
-                            if !matches!(child.child.try_wait(), Ok(None)) {
-                                *media_child = None;
-                                media_alive.store(false, AtomicOrdering::Release);
-                            }
+                    let mut media_child = media.lock().await;
+                    if let Some(child) = media_child.as_mut() {
+                        if !matches!(child.child.try_wait(), Ok(None)) {
+                            *media_child = None;
                         }
                     }
-                    let alive = media_alive.load(AtomicOrdering::Acquire);
+                    let alive = media_child.is_some();
                     (
                         200,
                         "OK",
@@ -1352,10 +1380,43 @@ async fn serve_serving_http(
                     )
                 }
                 "/spawn-child" => {
+                    let admission = *serving.subscribe().borrow();
+                    if !admission.ready {
+                        return write_serving_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "application/json",
+                            production_serving_fence::SERVING_FENCED_JSON,
+                            true,
+                        )
+                        .await;
+                    }
                     let mut media_child = media.lock().await;
                     if media_child.is_none() {
-                        *media_child = Some(spawn_media_child_process()?);
-                        media_alive.store(true, AtomicOrdering::Release);
+                        let admission_id = next_media_id.fetch_add(1, AtomicOrdering::Relaxed);
+                        *media_child = Some(spawn_media_child_process(
+                            admission.loss_generation,
+                            admission_id,
+                        )?);
+                    }
+                    let (admitted_generation, admission_id) = media_child
+                        .as_ref()
+                        .map(|child| (child.admitted_generation, child.admission_id))
+                        .context("spawned media child disappeared")?;
+                    drop(media_child);
+                    let current = *serving.subscribe().borrow();
+                    if current.authority_lost_since(admitted_generation) {
+                        kill_media_child_if_id(&media, admission_id).await;
+                        return write_serving_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "application/json",
+                            production_serving_fence::SERVING_FENCED_JSON,
+                            true,
+                        )
+                        .await;
                     }
                     (
                         200,
@@ -1374,6 +1435,25 @@ async fn serve_serving_http(
                 ),
             }
         };
+    write_serving_http_response(
+        &mut stream,
+        status,
+        reason,
+        content_type,
+        &body,
+        retry_after,
+    )
+    .await
+}
+
+async fn write_serving_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &str,
+    retry_after: bool,
+) -> Result<()> {
     let retry = if retry_after {
         "Retry-After: 1\r\n"
     } else {
@@ -8216,6 +8296,46 @@ pub fn install_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_media_child(admission_id: u64) -> MediaChild {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn test media child");
+        let input = child.stdin.take().expect("retain test child stdin");
+        MediaChild {
+            child,
+            _input: input,
+            admitted_generation: 7,
+            admission_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_media_teardown_cannot_take_or_hide_its_replacement() {
+        let media = Arc::new(tokio::sync::Mutex::new(Some(test_media_child(1))));
+
+        let delayed_old = take_media_child_if_id(&media, 1)
+            .await
+            .expect("old admission owns its child");
+        *media.lock().await = Some(test_media_child(2));
+
+        assert!(take_media_child_if_id(&media, 1).await.is_none());
+        reap_media_child(delayed_old).await;
+
+        let mut slot = media.lock().await;
+        let replacement = slot.as_mut().expect("replacement remains registered");
+        assert_eq!(replacement.admission_id, 2);
+        assert!(matches!(replacement.child.try_wait(), Ok(None)));
+        drop(slot);
+
+        kill_media_child_if_id(&media, 2).await;
+        assert!(media.lock().await.is_none());
+    }
 
     #[test]
     fn voter_config_uses_the_production_wal_size() {
