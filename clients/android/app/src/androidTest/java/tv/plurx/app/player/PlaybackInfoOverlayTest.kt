@@ -1,8 +1,16 @@
-// Instrumentation: this suite needs a device or emulator, so CI never runs it
-// and it can rot unnoticed. It had drifted six assertions behind the overlay by
-// the time the ledger rewrite landed; those were repaired on this branch along
-// with the overlay changes, which is why it looks larger than the feature work
-// would suggest. Run it by hand (`connectedDebugAndroidTest`) before trusting it.
+// Instrumentation, and it is a PR gate: a diff touching the Android client sets
+// `android_device` in `validation/ci_scope.py`, which boots an emulator in
+// `.github/workflows/ci.yml` and runs `make android-instrumentation-run`. That
+// target invokes `am instrument` with no `-e class` filter, so every test in the
+// package runs — this one included. Treat the assertions below as blocking.
+//
+// The panel body is a plain `verticalScroll` container, not a lazy list: every
+// child stays composed whether or not it is on screen, but an off-screen child
+// is clipped and `assertIsDisplayed` fails on it. What this test is checking is
+// which facts the ledger routes to the grid and which to the notes strip, not
+// where the viewport happens to end on a given emulator — so grid content, which
+// sits at the top of the panel, is asserted as displayed, and everything in the
+// notes strip is asserted with `assertExists`.
 package tv.plurx.app.player
 
 import androidx.compose.ui.test.assertHasClickAction
@@ -54,21 +62,27 @@ class PlaybackInfoOverlayTest {
             }
         }
 
+        // Header: outside the scrolling body, so always on screen.
         compose.onNodeWithText("Playback info").assertIsDisplayed()
         compose.onNodeWithText("Direct play · 0:31:04 / 2:03:04").assertIsDisplayed()
+        // Standard has no Position row; the header subtitle carries it instead.
         compose.onAllNodesWithText("Position").assertCountEquals(0)
-        compose.onNodeWithText("Frames").assertIsDisplayed()
-        compose.onNodeWithText("12,340 rendered · 2 dropped (0.0%) · max streak 1").assertIsDisplayed()
+        // `videoHealth` is a note, so it is the last row of the strip: assert it
+        // is there, not that the viewport reaches it.
+        compose.onNodeWithText("Frames").assertExists()
+        compose.onNodeWithText("12,340 rendered · 2 dropped (0.0%) · max streak 1").assertExists()
         // SOURCE has grid rows again, so it heads a card and not just a notes group.
         compose.onAllNodesWithTag(PlaybackSectionHeadTag, useUnmergedTree = true)
             .filterToOne(hasText("SOURCE"))
             .assertExists()
-        compose.onNodeWithText("Example.2160p.mkv").assertIsDisplayed()
+        // The filename is prose, so it is a SOURCE note and lives in the strip.
+        compose.onNodeWithText("Example.2160p.mkv").assertExists()
         // The source video line is split: the codec/profile/resolution datum is
         // a grid row, the rest stays in the notes strip. Between them they still
         // spell out every fact `sourceVideo` carried.
         compose.onNodeWithText("HEVC · Main 10 · 3840×2160").assertIsDisplayed()
         compose.onNodeWithText("HDR10 · 10-bit · 48.2 Mbps").assertExists()
+        // Three facts, so `splitLedgerValue` leaves the audio line whole in the grid.
         compose.onNodeWithText("TRUEHD · 7.1 · English").assertIsDisplayed()
         // Two roles, not two headings: the card head and the notes-group hint.
         // Targeted by role rather than by a count, so a fixture where only one
@@ -80,8 +94,10 @@ class PlaybackInfoOverlayTest {
         compose.onAllNodesWithTag(PlaybackNotesGroupTag, useUnmergedTree = true)
             .filterToOne(hasText("NOW DECODING"))
             .assertExists()
-        compose.onNodeWithText("HEVC · 3840×2160 · HDR10 / PQ").assertIsDisplayed()
-        compose.onNodeWithText("English · 7.1 · TrueHD").assertIsDisplayed()
+        // NOW DECODING sends its whole video and audio lines to the strip.
+        compose.onNodeWithText("HEVC · 3840×2160 · HDR10 / PQ").assertExists()
+        compose.onNodeWithText("English · 7.1 · TrueHD").assertExists()
+        // SERVER's only row is a grid row, at the top of the right column.
         compose.onNodeWithText("No server-side session").assertIsDisplayed()
         val close = compose.onNodeWithContentDescription("Close playback info")
         compose.waitUntil(timeoutMillis = 2_000) {

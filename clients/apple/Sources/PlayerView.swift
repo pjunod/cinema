@@ -2229,9 +2229,9 @@ private struct PlaybackLedgerRow: Identifiable {
 
     var id: String { "\(section)·\(label)" }
 
-    /// Values that read as a sentence rather than a datum. These are routed
-    /// out of the grid by name; anything else long and multi-word follows the
-    /// same route by measurement.
+    /// Values that read as a sentence rather than a datum. Membership here is
+    /// the only thing that routes a row out of the grid, so a row's column is
+    /// fixed by what it is, not by what it happens to be carrying this second.
     static let noteLabels: Set<String> = [
         "Session",
         "Reason",
@@ -2243,10 +2243,17 @@ private struct PlaybackLedgerRow: Identifiable {
         "Last request",
     ]
 
-    static func resolvedPlacement(label: String, value: String) -> PlaybackLedgerPlacement {
-        if noteLabels.contains(label) { return .notes }
-        if value.count > 26 && value.contains(" ") { return .notes }
-        return .grid
+    /// Placement is decided by label alone. There is deliberately no length
+    /// test: a value that grows a clause — `Server ahead` picking up
+    /// `· held · bytes release ≤120 MB` the moment the session suspends —
+    /// would otherwise hop between the grid and the notes strip on every
+    /// two-second status poll and drag its section's alignment verdict with
+    /// it. Builders whose value is a short datum plus an optional long clause
+    /// split the two into a fixed grid row and a fixed note instead; see
+    /// `ledgerSplitRows`. Builders whose value is prose outright ask for
+    /// `ledgerNote` by construction.
+    static func resolvedPlacement(label: String) -> PlaybackLedgerPlacement {
+        noteLabels.contains(label) ? .notes : .grid
     }
 }
 
@@ -2292,9 +2299,12 @@ private struct PlaybackLedgerSection: Identifiable {
     }
 
     /// True when this section draws its own note rows inside its box instead
-    /// of sending them down to the shared strip.
+    /// of sending them down to the shared strip. Deliberately independent of
+    /// whether the section also has grid rows: one unrelated short row — a
+    /// selected subtitle track, say — arriving in SERVER must not evict the
+    /// cached-VOD sentence this flag exists to keep in the box.
     var ownsNotes: Bool {
-        keepsNotesInBox && gridRows.isEmpty && placeholder == nil && !noteRows.isEmpty
+        keepsNotesInBox && placeholder == nil && !noteRows.isEmpty
     }
 
     /// The note rows that reach the strip under the columns.
@@ -2952,32 +2962,42 @@ private struct PlaybackStatsView: View {
         #endif
     }
 
-    @ViewBuilder
+    /// Grid rows first, then — only for a section that owns its notes — the
+    /// notes it kept. The two are drawn from disjoint halves of the section
+    /// (`gridRows` and `noteRows` partition `rows` on placement) and a section
+    /// that owns its notes contributes none to the shared strip, so nothing
+    /// here can draw a row twice or leave one undrawn.
     private func ledgerSectionRows(_ section: PlaybackLedgerSection) -> some View {
         let rows = section.gridRows
-        if rows.isEmpty {
-            if let placeholder = section.placeholder {
-                Text(placeholder)
-                    .font(ledgerValueFont)
-                    .foregroundStyle(.white.opacity(0.48))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        return VStack(alignment: .leading, spacing: ledgerRowSpacing) {
+            if rows.isEmpty {
+                if let placeholder = section.placeholder {
+                    Text(placeholder)
+                        .font(ledgerValueFont)
+                        .foregroundStyle(.white.opacity(0.48))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // With no grid rows and no placeholder the box exists only
+                // because the section owns notes, which the block below draws.
+                // A section with neither never draws a box in the first place.
+            } else if ledgerAllowsDenseColumns && section.prefersDenseColumns {
+                let split = (rows.count + 1) / 2
+                HStack(alignment: .top, spacing: ledgerColumnGap) {
+                    ledgerRowStack(Array(rows.prefix(split)), section: section, dense: true)
+                    ledgerRowStack(Array(rows.dropFirst(split)), section: section, dense: true)
+                }
             } else {
-                // Reached only when the section owns its notes; a section with
-                // nothing at all never draws a box in the first place.
+                ledgerRowStack(rows, section: section, dense: false)
+            }
+
+            if section.ownsNotes {
                 ForEach(section.noteRows) { row in
                     ledgerNoteRow(row)
                 }
             }
-        } else if ledgerAllowsDenseColumns && section.prefersDenseColumns {
-            let split = (rows.count + 1) / 2
-            HStack(alignment: .top, spacing: ledgerColumnGap) {
-                ledgerRowStack(Array(rows.prefix(split)), section: section, dense: true)
-                ledgerRowStack(Array(rows.dropFirst(split)), section: section, dense: true)
-            }
-        } else {
-            ledgerRowStack(rows, section: section, dense: false)
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func ledgerRowStack(
@@ -3108,9 +3128,13 @@ private struct PlaybackStatsView: View {
     }
 
     private var debugPlaybackRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Build", buildLabel),
-            ledgerRow("Method", controller.methodLabel),
+        // The method label picks up qualifiers as the user works — a burned-in
+        // subtitle, a PGS overlay, a cached transcode — so the mode is the
+        // datum and the qualifiers are the clause.
+        let method = ledgerSeam(controller.methodLabel)
+        var rows: [PlaybackLedgerRow] = [ledgerRow("Build", buildLabel)]
+        rows.append(contentsOf: ledgerSplitRows("Method", method.datum, clause: method.clause))
+        rows.append(contentsOf: [
             ledgerRow(
                 "Transport",
                 controller.currentSessionId == nil
@@ -3122,7 +3146,7 @@ private struct PlaybackStatsView: View {
                 "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
             ),
             ledgerRow("File ID", controller.decision.map { "#\($0.fileId)" } ?? "—"),
-        ]
+        ])
         if let session = controller.currentSessionId {
             rows.append(ledgerRow("Session", session))
         }
@@ -3204,7 +3228,12 @@ private struct PlaybackStatsView: View {
             snapshot.accessStalls.map(String.init) ?? "—",
             tone: stallTone(snapshot.accessStalls)
         ))
-        rows.append(ledgerRow("Subtitles", selectedSubtitleDescription))
+        let subtitle = selectedSubtitleParts
+        rows.append(contentsOf: ledgerSplitRows(
+            "Subtitles",
+            subtitle.name,
+            clause: subtitle.delivery
+        ))
         return rows
     }
 
@@ -3234,7 +3263,7 @@ private struct PlaybackStatsView: View {
     private var debugServerRows: [PlaybackLedgerRow] {
         if controller.isVOD {
             return [
-                ledgerRow("Stream", "Already transcoded · served from cache", tone: .good)
+                ledgerNote("Stream", "Already transcoded · served from cache", tone: .good)
             ]
         }
         guard let status = controller.sessionStatus else {
@@ -3382,12 +3411,12 @@ private struct PlaybackStatsView: View {
         } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
             rows.append(ledgerRow("Stream bitrate", bitRate(Int(bitrate))))
         }
-        if let subtitle = controller.selectedSubtitle,
-           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-            rows.append(ledgerRow("Subtitles", subtitleDescription(track, index: subtitle)))
-        } else {
-            rows.append(ledgerRow("Subtitles", "Off"))
-        }
+        let subtitle = selectedSubtitleParts
+        rows.append(contentsOf: ledgerSplitRows(
+            "Subtitles",
+            subtitle.name,
+            clause: subtitle.delivery
+        ))
         return rows
     }
 
@@ -3414,12 +3443,16 @@ private struct PlaybackStatsView: View {
             ))
         }
         if let ahead = status.aheadSeconds {
+            // The hold clause appears and disappears every couple of seconds as
+            // the client buffer fills and drains, so it is a note of its own
+            // rather than a tail on the seconds — the seconds never move.
             let held = (status.suspended ?? false)
-                ? " · held\(holdReleaseDescription(status))"
-                : ""
-            rows.append(ledgerRow(
+                ? "held\(holdReleaseDescription(status))"
+                : nil
+            rows.append(contentsOf: ledgerSplitRows(
                 "Buffer ahead",
-                "\(max(0, ahead)) s\(held)",
+                "\(max(0, ahead)) s",
+                clause: held,
                 tone: runwayTone(Double(ahead), suspended: status.suspended ?? false)
             ))
         }
@@ -3447,13 +3480,20 @@ private struct PlaybackStatsView: View {
     }
 
     private var compactPlaybackRows: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Method", controller.methodLabel),
+        // Same seam as Debug: the mode is the datum, the qualifiers the user's
+        // choices add to it are the clause.
+        let method = ledgerSeam(controller.methodLabel)
+        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
+            "Method",
+            method.datum,
+            clause: method.clause
+        )
+        rows.append(
             ledgerRow(
                 "Position",
                 "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            ),
-        ]
+            )
+        )
         if let reasons = controller.decision?.reasons, !reasons.isEmpty {
             rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
         }
@@ -3472,10 +3512,15 @@ private struct PlaybackStatsView: View {
         ]
             .compactMap { $0 }
             .joined(separator: " · ")
-        var rows: [PlaybackLedgerRow] = [
-            ledgerRow("Source", "\(resolution) · \(video.isEmpty ? "—" : video)"),
-            ledgerRow("Container", source.container?.uppercased() ?? "—"),
-        ]
+        // Resolution is the datum; the codec facts hung off it run past what a
+        // grid row can show on an iPad, so they are a note rather than a tail
+        // the grid would have to truncate.
+        var rows: [PlaybackLedgerRow] = ledgerSplitRows(
+            "Source",
+            resolution,
+            clause: video.isEmpty ? "—" : video
+        )
+        rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
         if let bitrate = source.bitrate {
             rows.append(ledgerRow("Source rate", bitRate(bitrate)))
         }
@@ -3512,7 +3557,7 @@ private struct PlaybackStatsView: View {
     private var compactServerRows: [PlaybackLedgerRow] {
         var rows: [PlaybackLedgerRow] = []
         if controller.isVOD && controller.methodLabel.contains("cached") {
-            rows.append(ledgerRow("Server", "Already transcoded · served from cache"))
+            rows.append(ledgerNote("Server", "Already transcoded · served from cache"))
         } else if let status = controller.sessionStatus {
             if let encoder = status.encoder ?? controller.encoder {
                 rows.append(ledgerRow("Encoder", encoder))
@@ -3521,10 +3566,16 @@ private struct PlaybackStatsView: View {
                 rows.append(ledgerRow("Encode speed", String(format: "%.2f×", speed)))
             }
             if let ahead = status.aheadSeconds {
-                let release = holdReleaseDescription(status)
-                rows.append(ledgerRow(
+                // Same seam as the television: the seconds stay in the grid
+                // and the hold clause is a note that comes and goes with the
+                // hold, so neither half changes column as the server suspends.
+                let held = (status.suspended ?? false)
+                    ? "held\(holdReleaseDescription(status))"
+                    : nil
+                rows.append(contentsOf: ledgerSplitRows(
                     "Server ahead",
-                    "\(max(0, ahead)) s\((status.suspended ?? false) ? " · held\(release)" : "")"
+                    "\(max(0, ahead)) s",
+                    clause: held
                 ))
             }
             if let delivered = status.deliveredBps {
@@ -3536,7 +3587,12 @@ private struct PlaybackStatsView: View {
         }
         if let subtitle = controller.selectedSubtitle,
            let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-            rows.append(ledgerRow("Subtitles", subtitleDescription(track, index: subtitle)))
+            let parts = subtitleParts(track, index: subtitle)
+            rows.append(contentsOf: ledgerSplitRows(
+                "Subtitles",
+                parts.name,
+                clause: parts.delivery
+            ))
         }
         return rows
     }
@@ -3551,8 +3607,51 @@ private struct PlaybackStatsView: View {
             label: label,
             value: value,
             tone: tone,
-            placement: PlaybackLedgerRow.resolvedPlacement(label: label, value: value)
+            placement: PlaybackLedgerRow.resolvedPlacement(label: label)
         )
+    }
+
+    /// A row whose value is prose by construction rather than by label — the
+    /// cached-VOD sentence, which is a note wherever it appears even though
+    /// its label is not a note label anywhere else.
+    private func ledgerNote(
+        _ label: String,
+        _ value: String,
+        tone: PlaybackStatTone = .neutral
+    ) -> PlaybackLedgerRow {
+        PlaybackLedgerRow(label: label, value: value, tone: tone, placement: .notes)
+    }
+
+    /// A short datum with an optional trailing clause, split into two rows
+    /// that never trade places: the datum is always a grid row and the clause,
+    /// when there is one, is always a note under the same label. The clause
+    /// coming and going changes whether the note exists, never where either
+    /// half is drawn. Both halves carry the same tone so the pair still reads
+    /// as one fact.
+    private func ledgerSplitRows(
+        _ label: String,
+        _ datum: String,
+        clause: String?,
+        tone: PlaybackStatTone = .neutral
+    ) -> [PlaybackLedgerRow] {
+        var rows = [
+            PlaybackLedgerRow(label: label, value: datum, tone: tone, placement: .grid)
+        ]
+        if let clause, !clause.isEmpty {
+            rows.append(
+                PlaybackLedgerRow(label: label, value: clause, tone: tone, placement: .notes)
+            )
+        }
+        return rows
+    }
+
+    /// Cuts a separator-joined value at its first seam: the leading fact is
+    /// the datum, everything after it is the clause. Used where the value is
+    /// assembled elsewhere and only arrives here as one string.
+    private func ledgerSeam(_ value: String) -> (datum: String, clause: String?) {
+        guard let seam = value.range(of: " · ") else { return (value, nil) }
+        let clause = String(value[seam.upperBound...])
+        return (String(value[..<seam.lowerBound]), clause.isEmpty ? nil : clause)
     }
 
     // MARK: - Shared values
@@ -3569,11 +3668,14 @@ private struct PlaybackStatsView: View {
         ].compactMap { $0 }.joined(separator: " · ")
     }
 
-    private var selectedSubtitleDescription: String {
+    /// "Off" has no clause, so the note simply does not exist while subtitles
+    /// are off — the grid row stays put either way.
+    private var selectedSubtitleParts: (name: String, delivery: String?) {
         guard let index = controller.selectedSubtitle,
               let track = controller.subtitles.first(where: { $0.index == index })
-        else { return "Off" }
-        return subtitleDescription(track, index: index)
+        else { return ("Off", nil) }
+        let parts = subtitleParts(track, index: index)
+        return (parts.name, parts.delivery)
     }
 
     private func channelDescription(_ channels: Int) -> String {
@@ -3680,12 +3782,18 @@ private struct PlaybackStatsView: View {
         }
     }
 
-    private func subtitleDescription(_ track: SubtitleTrack, index: Int) -> String {
+    /// The track's name is the datum; how it is being delivered is the clause.
+    /// Kept apart so a ledger row can put the name in the grid and the
+    /// delivery in the notes without either moving when a track is swapped for
+    /// one with a longer name.
+    private func subtitleParts(
+        _ track: SubtitleTrack,
+        index: Int
+    ) -> (name: String, delivery: String) {
         let delivery = track.isPGSOverlay
             ? (controller.pgsOverlayStatus.label ?? "PGS overlay")
             : (track.isNativeHLS ? "native WebVTT" : "burned in")
-        return (track.title ?? track.language?.uppercased() ?? "Track \(index + 1)")
-            + " · \(delivery)"
+        return (track.title ?? track.language?.uppercased() ?? "Track \(index + 1)", delivery)
     }
 
     private func holdReleaseDescription(_ status: PlaybackSessionStatus) -> String {
