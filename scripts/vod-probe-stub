@@ -1,0 +1,1423 @@
+#!/usr/bin/env node
+/*
+ * Web half of the M0-P2 and M0-P3 probes in docs/VOD-PRESENTATION-PLAN.md §8 M0.
+ *
+ * P2 asks whether a VOD playlist whose `#EXTINF`s are the plan's nominal 2.0 s
+ * survives segments whose real durations jitter around that grid (§2.2,
+ * "transcode path"), because the answer picks ledger D6-A (nominal EXTINFs, a
+ * no-op to the encode pipeline) over D6-B (route the encode through the copy
+ * path's fMP4 segmenter so the cuts are exact). P3 asks how long each stack
+ * tolerates a *blocked* segment GET and what it does with the typed
+ * `segment_pending` 503 (§2.3), because those numbers are what
+ * `playback.vod_block_secs` and each client's `block_budget_secs` get set to.
+ *
+ * Deliberately dependency-free, and deliberately without a CDP/WebSocket layer:
+ * the page under test is the thing being measured, so it runs the scenario
+ * itself and POSTs its own numbers back. That removes an entire protocol from
+ * the failure surface — a probe that cannot start is worth less than no probe.
+ *
+ * The load-bearing evidence is the *server's* request log, not the page's
+ * account of itself. A page can only report what its own event handlers saw;
+ * the socket knows what was actually asked for and when. Every media request is
+ * therefore logged server-side with its offset from case start, its status, and
+ * the delay applied, and that log is what lands in the report.
+ *
+ * The device halves (Safari, AVPlayer, Media3) are separate runs per §8 M0's
+ * last bullet; this script speaks only for hls.js.
+ */
+"use strict";
+
+const fs = require("node:fs");
+const fsp = fs.promises;
+const http = require("node:http");
+const os = require("node:os");
+const path = require("node:path");
+const { spawn, spawnSync } = require("node:child_process");
+
+const ROOT = path.resolve(__dirname, "..");
+const DEFAULT_FIXTURE_DIR = path.join(ROOT, "target", "vod-probe", "web");
+const HLS_JS_PATH = path.join(ROOT, "crates", "plurxd", "src", "web", "hls.min.js");
+
+// The container's Chromium. It carries no proprietary codecs, which is why every
+// fixture below is VP9 + Opus: avc1/mp4a/hvc1 are not decodable here, and a
+// probe that silently fell back to "unsupported" would report a codec verdict
+// dressed up as a drift verdict.
+const DEFAULT_CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
+
+const FFMPEG = process.env.PLURX_FFMPEG || "/usr/bin/ffmpeg";
+const FFPROBE = process.env.PLURX_FFPROBE || "/usr/bin/ffprobe";
+
+// The plan's transcode grid: 2.0 s nominal entries, `ceil(duration / 2)` of
+// them, last entry the remainder (§2.2).
+const NOMINAL_SEGMENT_SECONDS = 2.0;
+const SOURCE_SECONDS = 60;
+const SOURCE_FPS = 24;
+
+// P2's seek targets. Chosen off the 2 s grid on purpose: a target that lands on
+// a segment boundary cannot distinguish "the stack honoured the request" from
+// "the stack snapped to the nearest boundary and got lucky".
+const SEEK_TARGETS = [13.0, 27.5, 41.0];
+
+// P2 plays the straight-through pass at 4x so a 60 s title costs 15 s of wall
+// clock; the seek measurements drop back to 1x because a fast rate changes what
+// the decoder is asked to do and would confound the number the ledger needs.
+const P2_PLAYBACK_RATE = 4;
+
+// P3 measures the stall at 1x — a blocked GET is a viewer-facing event and only
+// real-time playback reproduces the buffer drain honestly — then fast-forwards
+// the uninteresting tail once the stall has resolved.
+const P3_STALL_RATE = 1;
+const P3_TAIL_RATE = 4;
+
+const DEFAULTS = {
+  delays: "5,15,30,60",
+  delay_segment: 5,
+  expire_attempts: 2,
+  frag_timeout_ms: 65000,
+  timeout: 180,
+};
+
+function usage() {
+  process.stdout.write(`plurx VOD presentation probe stub (M0-P2 / M0-P3, web half)
+
+Usage:
+  scripts/vod-probe-stub [p2|p3|all] [options]
+
+Options:
+  --rebuild               Rebuild the fixtures even if the cache looks good.
+  --fixtures DIR          Fixture root (default target/vod-probe/web).
+  --chrome PATH           Chromium binary (default ${DEFAULT_CHROME}).
+  --delays 5,15,30,60     P3 block lengths in seconds; each is its own run.
+  --delay-segment N       P3 segment index to block (default ${DEFAULTS.delay_segment}).
+  --expire                P3 answers the blocked segment with the typed
+                          segment_pending 503 + Retry-After instead of blocking.
+  --expire-attempts N     How many 503s before the real bytes (default ${DEFAULTS.expire_attempts}).
+  --frag-timeout-ms N     Raised hls.js fragLoadingTimeOut for the second half of
+                          every P3 run pair (default ${DEFAULTS.frag_timeout_ms}).
+  --timeout SECONDS       Hard per-run deadline (default ${DEFAULTS.timeout}).
+  --json PATH             Write the machine-readable report.
+  --keep-runtime          Keep the Chromium profiles and the served page HTML.
+
+P2 serves one set of segment bytes under two playlists — nominal 2.000000
+EXTINFs (D6-A) and the real measured EXTINFs (D6-B's control) — and reports
+them side by side, plus the same pair over a drift-free grid rendition so the
+reader can see what the harness measures when there is nothing to measure.
+
+P3 blocks one segment for each --delays value and runs every length twice:
+once on hls.js defaults, once with fragLoadingTimeOut raised, so the report can
+name the config each block length needs rather than only whether it survived.
+
+A run that produces a NEGATIVE finding — hls.js does not survive a 60 s block —
+is a successful measurement. Only a harness failure exits non-zero.
+`);
+}
+
+function parseArgs(argv) {
+  const positional = [];
+  const options = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const raw = argv[index];
+    if (!raw.startsWith("--")) {
+      positional.push(raw);
+      continue;
+    }
+    const equals = raw.indexOf("=");
+    if (equals > 0) {
+      options[raw.slice(2, equals).replaceAll("-", "_")] = raw.slice(equals + 1);
+      continue;
+    }
+    const key = raw.slice(2).replaceAll("-", "_");
+    const next = argv[index + 1];
+    if (next === undefined || next.startsWith("--")) {
+      options[key] = true;
+      continue;
+    }
+    options[key] = next;
+    index += 1;
+  }
+  return { command: positional[0] || "all", options };
+}
+
+function positiveNumber(value, fallback, label) {
+  if (value === undefined) return fallback;
+  // `--timeout` with no value parses to `true`, and Number(true) is 1 — a
+  // one-second deadline that would fail every run and look like a real result.
+  if (typeof value === "boolean") throw new Error(`${label} needs a value`);
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${label} must be a positive number`);
+  return parsed;
+}
+
+function pathOption(value, label) {
+  if (value === undefined) return null;
+  if (typeof value === "boolean") throw new Error(`${label} needs a path`);
+  return String(value);
+}
+
+function parseDelays(spec) {
+  const parts = String(spec).split(",").map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) throw new Error("--delays needs at least one value, e.g. 5,15,30,60");
+  return parts.map((part) => {
+    const seconds = Number(part);
+    if (!Number.isFinite(seconds) || seconds <= 0) throw new Error(`--delays entry "${part}" must be positive`);
+    return seconds;
+  });
+}
+
+/* ------------------------------------------------------------------ fixtures */
+
+function ffprobeJson(file) {
+  const result = spawnSync(FFPROBE, [
+    "-v", "error", "-show_format", "-show_streams", "-of", "json", file,
+  ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (result.status !== 0) throw new Error(`ffprobe failed for ${file}: ${(result.stderr || "").trim()}`);
+  return JSON.parse(result.stdout);
+}
+
+function runFfmpeg(args, cwd) {
+  const result = spawnSync(FFMPEG, args, { encoding: "utf8", cwd, maxBuffer: 32 * 1024 * 1024 });
+  if (result.status !== 0) {
+    throw new Error(`ffmpeg failed (${result.status}): ${(result.stderr || result.error?.message || "").trim()}`);
+  }
+}
+
+/*
+ * The jitter pattern, in whole frames at 24 fps, so every forced keyframe is a
+ * real frame boundary and the encoder is never asked for a cut it cannot make.
+ * The deltas are a fixed sequence rather than a random draw because a probe
+ * whose fixture changes between runs cannot be re-run against a fix.
+ *
+ * Its partial sums wander instead of cancelling each cycle: an encoder whose
+ * error cancelled every ten segments would hide the failure mode D6-A actually
+ * risks, which is the *accumulated* offset between playlist time and media time
+ * after a few minutes of film.
+ */
+const JITTER_FRAME_DELTAS = [2, -1, 2, 0, -2, 1, 2, -1, 0, 2];
+
+function jitterKeyframeTimes() {
+  const framesPerSegment = Math.round(NOMINAL_SEGMENT_SECONDS * SOURCE_FPS);
+  const totalFrames = SOURCE_SECONDS * SOURCE_FPS;
+  const boundaries = [0];
+  let cursor = 0;
+  for (let index = 0; ; index += 1) {
+    const next = cursor + framesPerSegment + JITTER_FRAME_DELTAS[index % JITTER_FRAME_DELTAS.length];
+    if (next >= totalFrames) break;
+    boundaries.push(next);
+    cursor = next;
+  }
+  return boundaries.map((frame) => (frame / SOURCE_FPS).toFixed(6));
+}
+
+/*
+ * ffmpeg's HLS muxer is the only party that knows what it actually cut, so the
+ * playlist it writes is the measurement, not a prediction. Everything the probe
+ * later calls "real" comes from here.
+ */
+function parseWrittenPlaylist(text) {
+  const segments = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^#EXTINF:([0-9.]+),/.exec(lines[index].trim());
+    if (!match) continue;
+    const name = (lines[index + 1] || "").trim();
+    if (!name || name.startsWith("#")) throw new Error(`playlist EXTINF at line ${index + 1} has no segment URI`);
+    segments.push({ name, extinf: Number(match[1]) });
+  }
+  if (!segments.length) throw new Error("ffmpeg wrote a playlist with no segments");
+  return segments;
+}
+
+function sum(values) {
+  return values.reduce((total, value) => total + value, 0);
+}
+
+/*
+ * `grid` is the plan's own transcode recipe verbatim (-g 48 at 24 fps = a
+ * 2.000 s GOP). It turns out to produce EXTINFs of exactly 2.000000, so on this
+ * rendition the nominal and exact playlists are the same text and P2 has
+ * nothing to measure — which is why `jitter` exists. `jitter` is the same
+ * content with the keyframes forced onto a drifting grid, i.e. what the plan
+ * describes when it says real emitted durations jitter against the nominal
+ * EXTINF. Keeping both means the drift-free pair acts as the harness's own
+ * control: if the grid pair also shows a seek error, the error is the harness.
+ */
+const RENDITIONS = {
+  grid: {
+    id: "grid",
+    description: "2.000 s GOP on the nominal grid (the plan's transcode recipe verbatim)",
+    sourceArgs: ["-g", "48"],
+    // -hls_time 2 lands on the grid's own keyframes, so the cut times are the
+    // grid times.
+    segmentTime: "2",
+  },
+  jitter: {
+    id: "jitter",
+    description: "keyframes forced off the grid so real durations drift against nominal 2.0 s",
+    sourceArgs: null, // filled in below; the forced-keyframe list is computed.
+    // A hls_time below one frame makes every keyframe a segment boundary, which
+    // is the only way to hand the muxer a cut list it did not choose itself.
+    segmentTime: "0.1",
+  },
+};
+
+function renditionSourceArgs(rendition) {
+  if (rendition.id === "jitter") {
+    return ["-g", "9999", "-force_key_frames", jitterKeyframeTimes().join(","), "-auto-alt-ref", "0"];
+  }
+  return rendition.sourceArgs;
+}
+
+function buildRendition(rendition, root, rebuild) {
+  const directory = path.join(root, rendition.id);
+  const manifestPath = path.join(directory, "real.json");
+  if (!rebuild && fs.existsSync(manifestPath)) {
+    try {
+      const cached = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      verifyRendition(cached, directory);
+      return cached;
+    } catch (error) {
+      process.stdout.write(`BUILD  ${rendition.id} — rebuilding: ${error.message}\n`);
+    }
+  }
+
+  process.stdout.write(`BUILD  ${rendition.id} — ${rendition.description}\n`);
+  fs.rmSync(directory, { recursive: true, force: true });
+  fs.mkdirSync(directory, { recursive: true });
+  const source = path.join(directory, "source.mkv");
+
+  runFfmpeg([
+    "-y", "-v", "error",
+    "-f", "lavfi", "-i", `testsrc2=size=640x360:rate=${SOURCE_FPS}:duration=${SOURCE_SECONDS}`,
+    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${SOURCE_SECONDS}`,
+    "-c:v", "libvpx-vp9", "-b:v", "800k", "-deadline", "realtime", "-cpu-used", "8",
+    ...renditionSourceArgs(rendition),
+    "-c:a", "libopus", "-b:a", "96k",
+    "-pix_fmt", "yuv420p", "-ac", "2", "-shortest",
+    "-f", "matroska", source,
+  ]);
+
+  // -c copy: the segmenter must not re-encode, or the cut times stop being the
+  // encoder's own decisions and the fixture stops representing the pipeline.
+  runFfmpeg([
+    "-y", "-v", "error", "-i", source, "-c", "copy",
+    "-f", "hls", "-hls_time", rendition.segmentTime, "-hls_segment_type", "fmp4",
+    "-hls_playlist_type", "vod", "-hls_flags", "independent_segments",
+    "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", "seg%05d.m4s",
+    "index.m3u8",
+  ], directory);
+
+  const segments = parseWrittenPlaylist(fs.readFileSync(path.join(directory, "index.m3u8"), "utf8"));
+  const sourceProbe = ffprobeJson(source);
+  const manifest = {
+    id: rendition.id,
+    description: rendition.description,
+    built_at: new Date().toISOString(),
+    source_duration_seconds: Number(Number(sourceProbe.format.duration || 0).toFixed(6)),
+    segment_count: segments.length,
+    real_total_seconds: Number(sum(segments.map((segment) => segment.extinf)).toFixed(6)),
+    nominal_total_seconds: Number(
+      (NOMINAL_SEGMENT_SECONDS * (segments.length - 1) + segments[segments.length - 1].extinf).toFixed(6),
+    ),
+    max_drift_seconds: Number(
+      Math.max(...segments.slice(0, -1).map((segment) => Math.abs(segment.extinf - NOMINAL_SEGMENT_SECONDS)))
+        .toFixed(6),
+    ),
+    segments,
+  };
+  verifyRendition(manifest, directory);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
+/*
+ * Fail loudly rather than measure the wrong thing: a fixture that quietly lost
+ * its audio track, or came out short, would still play and would still produce
+ * a plausible-looking drift number.
+ */
+function verifyRendition(manifest, directory) {
+  const missing = ["init.mp4", "index.m3u8", ...manifest.segments.map((segment) => segment.name)]
+    .filter((name) => !fs.existsSync(path.join(directory, name)));
+  if (missing.length) throw new Error(`${manifest.id}: missing ${missing.slice(0, 3).join(", ")}`);
+
+  // The init segment carries the sample entries, so probing it proves the codecs
+  // of the bytes actually served rather than of some upstream source file.
+  const probe = ffprobeJson(path.join(directory, "init.mp4"));
+  const video = probe.streams.find((stream) => stream.codec_type === "video");
+  const audio = probe.streams.find((stream) => stream.codec_type === "audio");
+  const failures = [];
+  if (!video || video.codec_name !== "vp9") failures.push(`video ${video?.codec_name || "none"}, want vp9`);
+  if (!audio || audio.codec_name !== "opus") failures.push(`audio ${audio?.codec_name || "none"}, want opus`);
+  if (manifest.real_total_seconds < 55) failures.push(`total ${manifest.real_total_seconds.toFixed(3)}s, want >= 55s`);
+  if (failures.length) throw new Error(`${manifest.id}: ${failures.join("; ")}`);
+}
+
+function buildFixtures(options) {
+  const root = path.resolve(pathOption(options.fixtures, "--fixtures") || DEFAULT_FIXTURE_DIR);
+  fs.mkdirSync(root, { recursive: true });
+  const rebuild = Boolean(options.rebuild);
+  const built = {};
+  for (const rendition of Object.values(RENDITIONS)) {
+    const manifest = buildRendition(rendition, root, rebuild);
+    built[rendition.id] = { ...manifest, directory: path.join(root, rendition.id) };
+    process.stdout.write(
+      `PASS   ${rendition.id}: ${manifest.segment_count} segments · `
+      + `real ${manifest.real_total_seconds.toFixed(3)}s · nominal ${manifest.nominal_total_seconds.toFixed(3)}s · `
+      + `max |EXTINF-2.0| ${manifest.max_drift_seconds.toFixed(3)}s\n`,
+    );
+  }
+  return { root, renditions: built };
+}
+
+/* ----------------------------------------------------------------- playlists */
+
+/*
+ * §2.1's shape, written by hand so the EXTINF column can lie on purpose. A
+ * playlist generated from the plan is exactly what the daemon will emit, and
+ * the only thing this probe varies is whether that column is the plan's nominal
+ * value (D6-A) or the segmenter's measured one (D6-B).
+ */
+function writePlaylist(segments, durations) {
+  const target = Math.ceil(Math.max(...durations));
+  const lines = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:7",
+    "#EXT-X-PLAYLIST-TYPE:VOD",
+    "#EXT-X-MEDIA-SEQUENCE:0",
+    `#EXT-X-TARGETDURATION:${target}`,
+    "#EXT-X-INDEPENDENT-SEGMENTS",
+    '#EXT-X-MAP:URI="init.mp4"',
+  ];
+  segments.forEach((segment, index) => {
+    lines.push(`#EXTINF:${durations[index].toFixed(6)},`);
+    lines.push(segment.name);
+  });
+  lines.push("#EXT-X-ENDLIST");
+  return `${lines.join("\n")}\n`;
+}
+
+function nominalDurations(segments) {
+  // Every entry the plan's nominal 2.0 s, last entry the real remainder — the
+  // plan is honest about the tail because the probe already knows the file's
+  // duration (§2.2, "the final EXTINFs are honest upfront").
+  return segments.map((segment, index) => (
+    index === segments.length - 1 ? segment.extinf : NOMINAL_SEGMENT_SECONDS
+  ));
+}
+
+function exactDurations(segments) {
+  return segments.map((segment) => segment.extinf);
+}
+
+/* --------------------------------------------------------------------- pages */
+
+/*
+ * The page runs the scenario and reports on itself. Everything it needs arrives
+ * as one injected config object so the script bodies below stay plain text —
+ * template interpolation inside browser JS is where this kind of harness goes
+ * to die.
+ */
+const PAGE_PROLOGUE = `
+const CFG = window.__PROBE__;
+const OUT = {
+  posted: false,
+  page_started_at: Date.now(),
+  hls_version: (window.Hls && Hls.version) || null,
+  mse_video_vp9: false,
+  mse_audio_opus: false,
+  errors: [],
+  notes: [],
+};
+
+function post(reason) {
+  if (OUT.posted) return;
+  OUT.posted = true;
+  OUT.finished_reason = reason;
+  OUT.page_finished_at = Date.now();
+  fetch("/result", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(OUT),
+    keepalive: true,
+  }).catch(function () {
+    navigator.sendBeacon("/result", new Blob([JSON.stringify(OUT)], { type: "application/json" }));
+  });
+}
+
+window.addEventListener("error", function (event) {
+  OUT.notes.push("window error: " + (event.message || String(event.error)));
+});
+
+// The harness kills the browser at its own deadline; this fires first so a run
+// that never reaches the end still reports what it saw, which is usually the
+// whole finding.
+setTimeout(function () { post("page_watchdog"); }, CFG.page_watchdog_ms);
+
+function capabilities() {
+  OUT.mse_video_vp9 = window.MediaSource
+    ? MediaSource.isTypeSupported('video/mp4; codecs="vp09.00.10.08"') : false;
+  OUT.mse_audio_opus = window.MediaSource
+    ? MediaSource.isTypeSupported('audio/mp4; codecs="opus"') : false;
+}
+
+function bufferedRanges(video) {
+  const ranges = [];
+  for (let index = 0; index < video.buffered.length; index += 1) {
+    ranges.push({
+      start: Number(video.buffered.start(index).toFixed(4)),
+      end: Number(video.buffered.end(index).toFixed(4)),
+    });
+  }
+  return ranges;
+}
+
+function attachErrorLog(hls) {
+  hls.on(Hls.Events.ERROR, function (_event, data) {
+    OUT.errors.push({
+      at_ms: Date.now() - OUT.page_started_at,
+      type: data.type,
+      details: data.details,
+      fatal: Boolean(data.fatal),
+      frag_sn: data.frag ? data.frag.sn : null,
+      response_code: data.response ? data.response.code : null,
+      response_text: data.response ? String(data.response.text || "").slice(0, 200) : null,
+    });
+  });
+}
+`;
+
+/*
+ * P2. The straight-through pass answers "does it play at all"; the seek pass is
+ * the load-bearing half, because a nominal playlist over drifting media does not
+ * fail loudly — it silently maps the viewer's requested film time onto a
+ * different media time, and only a seek exposes by how much.
+ */
+const P2_SCRIPT = `${PAGE_PROLOGUE}
+const video = document.getElementById("v");
+
+function measureSeek(target) {
+  return new Promise(function (resolve) {
+    const requestedAt = Date.now();
+    const record = {
+      target: target,
+      seeked_ms: null,
+      current_time_at_seeked: null,
+      current_time_after_frames: null,
+      media_time_after_frames: null,
+      frames: [],
+      delta_at_seeked: null,
+      delta_after_frames: null,
+      // The one that decides D6. currentTime only ever echoes what was asked
+      // for, so it cannot say whether the stack found the right film frame;
+      // the first presented frame's own media timestamp can, and a drifting
+      // playlist is exactly a claim about which frame lives at a given time.
+      first_frame_media_time: null,
+      delta_first_frame: null,
+      timed_out: false,
+    };
+    let settled = false;
+    const finish = function () {
+      if (settled) return;
+      settled = true;
+      video.pause();
+      resolve(record);
+    };
+    const guard = setTimeout(function () { record.timed_out = true; finish(); }, CFG.seek_timeout_ms);
+
+    video.pause();
+    video.playbackRate = 1;
+    video.addEventListener("seeked", function onSeeked() {
+      video.removeEventListener("seeked", onSeeked);
+      record.seeked_ms = Date.now() - requestedAt;
+      record.current_time_at_seeked = Number(video.currentTime.toFixed(6));
+      record.delta_at_seeked = Number((video.currentTime - target).toFixed(6));
+      // A paused element presents no new frames, so the clock has to run for the
+      // "three frames rendered" half; rVFC's mediaTime is the presented frame's
+      // own timestamp, which is the only number that says what a viewer saw.
+      const useRvfc = typeof video.requestVideoFrameCallback === "function";
+      if (!useRvfc) {
+        OUT.notes.push("requestVideoFrameCallback unavailable; frame deltas omitted");
+        clearTimeout(guard);
+        finish();
+        return;
+      }
+      const tick = function (_now, metadata) {
+        record.frames.push({
+          media_time: Number(metadata.mediaTime.toFixed(6)),
+          current_time: Number(video.currentTime.toFixed(6)),
+        });
+        if (record.frames.length === 1) {
+          record.first_frame_media_time = record.frames[0].media_time;
+          record.delta_first_frame = Number((record.frames[0].media_time - target).toFixed(6));
+        }
+        if (record.frames.length >= 3) {
+          record.current_time_after_frames = Number(video.currentTime.toFixed(6));
+          record.media_time_after_frames = record.frames[2].media_time;
+          record.delta_after_frames = Number((video.currentTime - target).toFixed(6));
+          clearTimeout(guard);
+          finish();
+          return;
+        }
+        video.requestVideoFrameCallback(tick);
+      };
+      video.requestVideoFrameCallback(tick);
+      video.play().catch(function (error) { OUT.notes.push("seek play rejected: " + error); });
+    });
+    video.currentTime = target;
+  });
+}
+
+async function seekPass() {
+  OUT.seeks = [];
+  for (const target of CFG.seek_targets) {
+    OUT.seeks.push(await measureSeek(target));
+  }
+}
+
+function main() {
+  capabilities();
+  if (!window.Hls || !Hls.isSupported()) {
+    OUT.notes.push("hls.js reports no MSE support in this browser");
+    post("hls_unsupported");
+    return;
+  }
+  const hls = new Hls({ debug: false });
+  attachErrorLog(hls);
+  OUT.playback_rate = CFG.playback_rate;
+  OUT.waiting_events = 0;
+  OUT.stalled_events = 0;
+  OUT.reached_end = false;
+  OUT.max_clock_drift_seconds = 0;
+
+  hls.on(Hls.Events.LEVEL_LOADED, function (_event, data) {
+    // hls.js's own arithmetic over the EXTINF column, kept separate from the
+    // harness's sum so a parser disagreement shows up as a disagreement.
+    OUT.hls_total_duration = Number(data.details.totalduration.toFixed(6));
+    OUT.hls_fragment_count = data.details.fragments.length;
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED, function () {
+    video.playbackRate = CFG.playback_rate;
+    video.play().then(function () { OUT.play_started = true; }, function (error) {
+      OUT.notes.push("play() rejected: " + error);
+      post("play_rejected");
+    });
+  });
+
+  video.addEventListener("waiting", function () { OUT.waiting_events += 1; });
+  video.addEventListener("stalled", function () { OUT.stalled_events += 1; });
+
+  let clockAnchor = null;
+  const sampler = setInterval(function () {
+    if (video.paused || video.currentTime <= 0) return;
+    if (!clockAnchor) {
+      clockAnchor = { wall: Date.now(), media: video.currentTime };
+      return;
+    }
+    const expected = (Date.now() - clockAnchor.wall) / 1000 * CFG.playback_rate;
+    const actual = video.currentTime - clockAnchor.media;
+    OUT.max_clock_drift_seconds = Math.max(OUT.max_clock_drift_seconds, Math.abs(actual - expected));
+  }, 250);
+
+  video.addEventListener("ended", async function () {
+    if (OUT.reached_end) return;
+    clearInterval(sampler);
+    OUT.reached_end = true;
+    OUT.video_duration = Number(video.duration.toFixed(6));
+    OUT.current_time_at_end = Number(video.currentTime.toFixed(6));
+    OUT.seekable_end = video.seekable.length ? Number(video.seekable.end(video.seekable.length - 1).toFixed(6)) : null;
+    OUT.buffered_range_count = video.buffered.length;
+    OUT.buffered_ranges = bufferedRanges(video);
+    OUT.max_clock_drift_seconds = Number(OUT.max_clock_drift_seconds.toFixed(4));
+    OUT.playback_finished_at = Date.now();
+    try {
+      await seekPass();
+    } catch (error) {
+      OUT.notes.push("seek pass threw: " + error);
+    }
+    post("ended");
+  });
+
+  hls.loadSource(CFG.playlist);
+  hls.attachMedia(video);
+}
+
+main();
+`;
+
+/*
+ * P3. The page's job is narrow: play at 1x, notice the stall, and timestamp the
+ * first frame that actually comes out of the blocked segment. Everything about
+ * *why* it stalled — how many times the segment was asked for, what each attempt
+ * got, how long each waited — is the server's to tell.
+ */
+const P3_SCRIPT = `${PAGE_PROLOGUE}
+const video = document.getElementById("v");
+
+function main() {
+  capabilities();
+  if (!window.Hls || !Hls.isSupported()) {
+    OUT.notes.push("hls.js reports no MSE support in this browser");
+    post("hls_unsupported");
+    return;
+  }
+  const config = { debug: false };
+  // fragLoadingTimeOut is the deprecated spelling, but it is the one both the
+  // plan and the web player's own config speak, and hls.js 1.6 still folds it
+  // into fragLoadPolicy.default as BOTH maxLoadTimeMs and maxTimeToFirstByteMs —
+  // which is exactly the pair a blocked first byte trips.
+  if (CFG.frag_loading_timeout_ms) config.fragLoadingTimeOut = CFG.frag_loading_timeout_ms;
+  const hls = new Hls(config);
+  attachErrorLog(hls);
+
+  const policy = hls.config.fragLoadPolicy.default;
+  OUT.frag_load_policy = {
+    configured_frag_loading_timeout_ms: CFG.frag_loading_timeout_ms || null,
+    max_time_to_first_byte_ms: policy.maxTimeToFirstByteMs,
+    max_load_time_ms: policy.maxLoadTimeMs,
+    timeout_retry: policy.timeoutRetry ? { max: policy.timeoutRetry.maxNumRetry, delay_ms: policy.timeoutRetry.retryDelayMs } : null,
+    error_retry: policy.errorRetry ? { max: policy.errorRetry.maxNumRetry, delay_ms: policy.errorRetry.retryDelayMs } : null,
+  };
+
+  OUT.reached_end = false;
+  OUT.waiting_events = 0;
+  OUT.stalled_events = 0;
+  // Every "waiting" with its playhead position. The event fires once at startup
+  // before a single frame exists, and counting that as a stall would report a
+  // block the buffer actually absorbed as a viewer-visible one.
+  OUT.waits = [];
+  OUT.first_frame_past_block_at = null;
+  OUT.first_frame_past_block_media_time = null;
+  OUT.frag_events = [];
+
+  hls.on(Hls.Events.FRAG_LOADING, function (_event, data) {
+    if (data.frag.sn === CFG.delay_segment) {
+      OUT.frag_events.push({ at_ms: Date.now() - OUT.page_started_at, event: "loading", sn: data.frag.sn });
+    }
+  });
+  hls.on(Hls.Events.FRAG_LOADED, function (_event, data) {
+    if (data.frag.sn === CFG.delay_segment) {
+      OUT.frag_events.push({ at_ms: Date.now() - OUT.page_started_at, event: "loaded", sn: data.frag.sn });
+    }
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED, function () {
+    video.playbackRate = CFG.stall_rate;
+    video.play().then(function () { OUT.play_started = true; }, function (error) {
+      OUT.notes.push("play() rejected: " + error);
+      post("play_rejected");
+    });
+  });
+
+  video.addEventListener("waiting", function () {
+    OUT.waiting_events += 1;
+    OUT.waits.push({ at: Date.now(), current_time: Number(video.currentTime.toFixed(4)) });
+  });
+  video.addEventListener("stalled", function () { OUT.stalled_events += 1; });
+  video.addEventListener("playing", function () {
+    if (OUT.first_playing_at === undefined) OUT.first_playing_at = Date.now();
+  });
+
+  // The recovery clock stops at the first frame whose own media timestamp lies
+  // inside the blocked segment. "currentTime moved again" is not the same claim:
+  // it can advance across a hole the player skipped, which would report a
+  // recovery that the viewer never saw.
+  //
+  // The tolerance is 1 ms and not one frame on purpose: at 24 fps the last frame
+  // of the preceding segment sits 41 ms before the boundary, so any slack wide
+  // enough to be forgiving is wide enough to accept a frame that arrived before
+  // the block and report a 60 s block as instant.
+  if (typeof video.requestVideoFrameCallback === "function") {
+    const tick = function (_now, metadata) {
+      if (OUT.first_frame_past_block_at === null && metadata.mediaTime >= CFG.block_start_seconds - 0.001) {
+        OUT.first_frame_past_block_at = Date.now();
+        OUT.first_frame_past_block_media_time = Number(metadata.mediaTime.toFixed(6));
+        // The tail is not the measurement; run it out fast so a 60 s block still
+        // fits inside one deadline.
+        video.playbackRate = CFG.tail_rate;
+        OUT.tail_rate_applied = true;
+      }
+      video.requestVideoFrameCallback(tick);
+    };
+    video.requestVideoFrameCallback(tick);
+  } else {
+    OUT.notes.push("requestVideoFrameCallback unavailable; recovery timestamp omitted");
+  }
+
+  hls.on(Hls.Events.ERROR, function (_event, data) {
+    if (!data.fatal) return;
+    // A fatal error is the answer, not a reason to sit out the deadline. Give
+    // hls.js a short grace window in case it self-recovers, then report.
+    setTimeout(function () {
+      OUT.video_duration = Number.isFinite(video.duration) ? Number(video.duration.toFixed(6)) : null;
+      OUT.current_time_at_finish = Number(video.currentTime.toFixed(4));
+      OUT.buffered_ranges = bufferedRanges(video);
+      post("fatal_error");
+    }, CFG.fatal_grace_ms);
+  });
+
+  video.addEventListener("ended", function () {
+    OUT.reached_end = true;
+    OUT.video_duration = Number(video.duration.toFixed(6));
+    OUT.current_time_at_finish = Number(video.currentTime.toFixed(4));
+    OUT.buffered_range_count = video.buffered.length;
+    OUT.buffered_ranges = bufferedRanges(video);
+    post("ended");
+  });
+
+  hls.loadSource(CFG.playlist);
+  hls.attachMedia(video);
+}
+
+main();
+`;
+
+function renderPage(title, config, script) {
+  return `<!doctype html>
+<meta charset="utf-8">
+<title>${title}</title>
+<style>html,body{margin:0;background:#000}video{width:640px;height:360px}</style>
+<video id="v" muted playsinline></video>
+<script>window.__PROBE__ = ${JSON.stringify(config)};</script>
+<script src="/hls.min.js"></script>
+<script>${script}</script>
+`;
+}
+
+/* -------------------------------------------------------------------- server */
+
+const CONTENT_TYPES = {
+  ".m3u8": "application/vnd.apple.mpegurl",
+  ".mp4": "video/mp4",
+  ".m4s": "video/mp4",
+  ".js": "application/javascript",
+};
+
+/*
+ * One server per run. The alternative — a long-lived server keyed by case — buys
+ * nothing and costs the thing that makes the log readable: here every timestamp
+ * is an offset from this run's start, and the log holds this run's requests and
+ * no one else's.
+ */
+class ProbeServer {
+  constructor(spec) {
+    this.spec = spec;
+    this.log = [];
+    this.startedAt = Date.now();
+    this.result = null;
+    // The blocked segment materializes N seconds after it is FIRST asked for,
+    // not N seconds after each attempt. That is what §2.3 describes: a producer
+    // finishing at an absolute moment, with every waiter released together. A
+    // per-request delay would instead model a server that restarts the work on
+    // every retry, and would make any block longer than the client's timeout
+    // unsurvivable by construction — a result about the harness, not the stack.
+    this.blockedFirstRequestAt = null;
+    this.blockedAttempts = 0;
+    this.pendingTimers = new Set();
+    this.resolveResult = null;
+    this.resultPromise = new Promise((resolve) => { this.resolveResult = resolve; });
+    this.server = http.createServer((request, response) => this.handle(request, response));
+  }
+
+  async listen() {
+    await new Promise((resolve, reject) => {
+      this.server.once("error", reject);
+      this.server.listen(0, "127.0.0.1", resolve);
+    });
+    this.port = this.server.address().port;
+    this.baseUrl = `http://127.0.0.1:${this.port}`;
+    return this.baseUrl;
+  }
+
+  note(entry) {
+    this.log.push({ at_ms: Date.now() - this.startedAt, ...entry });
+  }
+
+  segmentIndex(name) {
+    const match = /^seg(\d{5})\.m4s$/.exec(name);
+    return match ? Number(match[1]) : null;
+  }
+
+  sendFile(response, file, name, extra) {
+    const body = fs.readFileSync(file);
+    response.writeHead(200, {
+      "content-type": CONTENT_TYPES[path.extname(name)] || "application/octet-stream",
+      "content-length": body.length,
+      // no-store everywhere on purpose: the server log is the evidence, and a
+      // browser cache hit is a request that happened and left no trace in it.
+      "cache-control": "no-store",
+      ...extra,
+    });
+    response.end(body);
+  }
+
+  handle(request, response) {
+    const url = new URL(request.url, "http://127.0.0.1");
+    const name = path.basename(url.pathname);
+
+    if (request.method === "POST" && url.pathname === "/result") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        response.writeHead(204);
+        response.end();
+        try {
+          this.result = JSON.parse(body);
+        } catch (error) {
+          this.result = { parse_error: String(error), raw: body.slice(0, 2000) };
+        }
+        this.resolveResult(this.result);
+      });
+      return;
+    }
+
+    if (url.pathname === "/hls.min.js") {
+      this.sendFile(response, HLS_JS_PATH, "hls.min.js");
+      return;
+    }
+
+    if (url.pathname === this.spec.pageUrl || url.pathname === `${this.spec.pageUrl}/`) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(this.spec.page);
+      return;
+    }
+
+    if (name === "index.m3u8") {
+      this.note({ path: url.pathname, kind: "playlist", status: 200 });
+      response.writeHead(200, {
+        "content-type": CONTENT_TYPES[".m3u8"],
+        "content-length": Buffer.byteLength(this.spec.playlist),
+        "cache-control": "no-store",
+      });
+      response.end(this.spec.playlist);
+      return;
+    }
+
+    const mediaFile = path.join(this.spec.mediaDir, name);
+    if (!fs.existsSync(mediaFile) || (name !== "init.mp4" && this.segmentIndex(name) === null)) {
+      this.note({ path: url.pathname, kind: "unknown", status: 404 });
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+
+    const index = this.segmentIndex(name);
+    if (this.spec.block && index === this.spec.block.segment) {
+      this.serveBlocked(request, response, mediaFile, name, url.pathname);
+      return;
+    }
+
+    this.note({ path: url.pathname, kind: name === "init.mp4" ? "init" : "segment", status: 200, delay_ms: 0 });
+    this.sendFile(response, mediaFile, name);
+  }
+
+  serveBlocked(request, response, mediaFile, name, pathname) {
+    const block = this.spec.block;
+    this.blockedAttempts += 1;
+    const attempt = this.blockedAttempts;
+    if (this.blockedFirstRequestAt === null) this.blockedFirstRequestAt = Date.now();
+
+    if (block.mode === "expire") {
+      // §2.3 case 2's deadline expiry: a typed, retryable refusal rather than an
+      // open-ended wait or a bare 404. What is being measured is whether hls.js
+      // retries a 503 at all, how many times, and how long it waits between
+      // attempts — the plan's shape is not in question, only its numbers.
+      if (attempt <= block.expireAttempts) {
+        const body = JSON.stringify({ error: "segment_pending" });
+        this.note({
+          path: pathname, kind: "segment", status: 503, attempt, delay_ms: 0,
+          retry_after: "1", body: "segment_pending",
+        });
+        response.writeHead(503, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          "retry-after": "1",
+          "cache-control": "no-store",
+        });
+        response.end(body);
+        return;
+      }
+      this.note({ path: pathname, kind: "segment", status: 200, attempt, delay_ms: 0 });
+      this.sendFile(response, mediaFile, name);
+      return;
+    }
+
+    const availableAt = this.blockedFirstRequestAt + block.delayMs;
+    const waitMs = Math.max(0, availableAt - Date.now());
+    const entry = {
+      at_ms: Date.now() - this.startedAt,
+      path: pathname,
+      kind: "segment",
+      attempt,
+      blocked: true,
+      wait_ms: waitMs,
+      status: null,
+    };
+    this.log.push(entry);
+    if (waitMs === 0) {
+      entry.status = 200;
+      entry.note = "materialized before this attempt arrived";
+      this.sendFile(response, mediaFile, name);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.pendingTimers.delete(timer);
+      if (response.writableEnded || response.destroyed) return;
+      entry.status = 200;
+      entry.released_at_ms = Date.now() - this.startedAt;
+      this.sendFile(response, mediaFile, name);
+    }, waitMs);
+    this.pendingTimers.add(timer);
+    // A client that walks away cancels the wait — §2.3's "a client disconnect
+    // cancels the server-side wait". Recording it is the whole point: an aborted
+    // attempt is how a client timeout announces itself to the server.
+    request.on("aborted", () => {
+      if (entry.status !== null) return;
+      entry.status = "client_aborted";
+      entry.aborted_at_ms = Date.now() - this.startedAt;
+      clearTimeout(timer);
+      this.pendingTimers.delete(timer);
+    });
+  }
+
+  async close() {
+    for (const timer of this.pendingTimers) clearTimeout(timer);
+    this.pendingTimers.clear();
+    await new Promise((resolve) => this.server.close(resolve));
+  }
+}
+
+/* ------------------------------------------------------------------- browser */
+
+function findChrome(explicit) {
+  // An explicit --chrome that does not exist is a typo, not a hint: falling back
+  // would run the probe against a different browser than the operator named and
+  // label the numbers with it.
+  if (explicit) {
+    if (!fs.existsSync(explicit)) throw new Error(`--chrome ${explicit} does not exist`);
+    return explicit;
+  }
+  const candidates = [DEFAULT_CHROME, "/usr/bin/chromium", "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"];
+  for (const candidate of candidates) if (fs.existsSync(candidate)) return candidate;
+  const found = spawnSync("sh", ["-c", "command -v chromium || command -v google-chrome"], { encoding: "utf8" });
+  const resolved = (found.stdout || "").trim().split("\n")[0];
+  return resolved || null;
+}
+
+async function launchChrome(executable, url, runtimeDir) {
+  const profile = await fsp.mkdtemp(path.join(runtimeDir, "chrome-profile-"));
+  const args = [
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--autoplay-policy=no-user-gesture-required",
+    "--mute-audio",
+    "--disable-dev-shm-usage",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    // Everything below only silences the browser's own housekeeping. The
+    // container routes egress through a proxy, so without --no-proxy-server
+    // Chromium spends the first seconds of every run failing TLS handshakes to
+    // the variations and component-update endpoints and drowning the log the
+    // reader actually needs.
+    "--no-proxy-server",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-features=Translate,MediaRouter,OptimizationHints",
+    url,
+  ];
+  // Its own process group, so one kill takes the zygote and the renderers with
+  // it; eight runs leaking renderers would quietly starve the box.
+  const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"], detached: true });
+  const stderrChunks = [];
+  child.stdout.on("data", () => {});
+  child.stderr.on("data", (chunk) => {
+    stderrChunks.push(chunk.toString());
+    if (stderrChunks.length > 200) stderrChunks.shift();
+  });
+  let exit = null;
+  child.on("exit", (code, signal) => { exit = { code, signal }; });
+  child.on("error", (error) => { exit = { error: String(error) }; });
+  return {
+    child,
+    profile,
+    executable,
+    stderr: () => stderrChunks.join(""),
+    exited: () => exit,
+    kill() {
+      try { process.kill(-child.pid, "SIGKILL"); } catch (_) { /* already gone */ }
+      try { child.kill("SIGKILL"); } catch (_) { /* already gone */ }
+    },
+  };
+}
+
+/* ----------------------------------------------------------------------- run */
+
+async function runOnce(spec, options, runtimeDir) {
+  const timeoutMs = spec.timeout_seconds * 1000;
+  const server = new ProbeServer(spec);
+  const baseUrl = await server.listen();
+  const pageUrl = `${baseUrl}${spec.pageUrl}`;
+  const startedAt = Date.now();
+  let browser = null;
+  let timedOut = false;
+  let pageResult = null;
+  let timer = null;
+  try {
+    if (options.keep_runtime) {
+      await fsp.writeFile(path.join(runtimeDir, `${spec.id.replaceAll("/", "_")}.html`), spec.page);
+    }
+    const executable = findChrome(pathOption(options.chrome, "--chrome"));
+    if (!executable) throw new Error(`Chromium not found; pass --chrome PATH (looked at ${DEFAULT_CHROME})`);
+    browser = await launchChrome(executable, pageUrl, runtimeDir);
+    pageResult = await Promise.race([
+      server.resultPromise,
+      new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(null); }, timeoutMs); }),
+    ]);
+  } finally {
+    // A listening socket keeps Node's event loop alive, so anything that throws
+    // between listen() and here would hang the whole probe after printing a
+    // perfectly good error message.
+    if (timer) clearTimeout(timer);
+    if (browser) {
+      browser.kill();
+      if (!options.keep_runtime) await fsp.rm(browser.profile, { recursive: true, force: true }).catch(() => {});
+    }
+    await server.close();
+  }
+
+  const exit = browser.exited();
+  return {
+    id: spec.id,
+    case: spec.case,
+    label: spec.label,
+    status: pageResult ? "measured" : "harness_failed",
+    wall_ms: Date.now() - startedAt,
+    timed_out: timedOut,
+    page_url: `${spec.pageUrl}`,
+    chrome: browser ? browser.executable : null,
+    chrome_exit: exit && exit.code !== undefined ? exit : null,
+    // Chromium's stderr only earns its place in the report when the run failed;
+    // on a good run it is pages of dbus complaints about a session bus that does
+    // not exist in a container.
+    chrome_stderr: pageResult ? null : browser.stderr().slice(-4000),
+    config: spec.config,
+    server_log: server.log,
+    page: pageResult,
+  };
+}
+
+/* ------------------------------------------------------------------------ P2 */
+
+function p2Specs(fixtures, options) {
+  const timeout = positiveNumber(options.timeout, DEFAULTS.timeout, "--timeout");
+  const variants = [
+    { variant: "nominal", rendition: "jitter", durations: nominalDurations, blurb: "D6-A: nominal 2.000000 EXTINF over drifting segments" },
+    { variant: "exact", rendition: "jitter", durations: exactDurations, blurb: "D6-B control: measured EXTINF over the same bytes" },
+    { variant: "grid-nominal", rendition: "grid", durations: nominalDurations, blurb: "harness control: nominal EXTINF over drift-free segments" },
+    { variant: "grid-exact", rendition: "grid", durations: exactDurations, blurb: "harness control: measured EXTINF over drift-free segments" },
+  ];
+  return variants.map((entry) => {
+    const rendition = fixtures.renditions[entry.rendition];
+    const durations = entry.durations(rendition.segments);
+    const pageUrl = `/p2/${entry.variant}`;
+    const config = {
+      playlist: `${pageUrl}/index.m3u8`,
+      playback_rate: P2_PLAYBACK_RATE,
+      seek_targets: SEEK_TARGETS,
+      seek_timeout_ms: 20000,
+      page_watchdog_ms: Math.max(15000, timeout * 1000 - 10000),
+      rendition: entry.rendition,
+      variant: entry.variant,
+      playlist_total_seconds: Number(sum(durations).toFixed(6)),
+      real_total_seconds: rendition.real_total_seconds,
+    };
+    return {
+      id: `p2/${entry.variant}`,
+      case: "p2",
+      label: entry.blurb,
+      timeout_seconds: timeout,
+      pageUrl,
+      mediaDir: rendition.directory,
+      playlist: writePlaylist(rendition.segments, durations),
+      page: renderPage(`p2 ${entry.variant}`, config, P2_SCRIPT),
+      block: null,
+      config,
+    };
+  });
+}
+
+function signed(value, digits) {
+  if (value === null || value === undefined) return "n/a";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function summariseP2(run) {
+  const page = run.page;
+  if (!page) return "no page result";
+  const seeks = (page.seeks || []).map((seek) => signed(seek.delta_first_frame, 3));
+  const fatal = (page.errors || []).filter((error) => error.fatal).length;
+  const declared = run.config.playlist_total_seconds;
+  const media = page.video_duration;
+  return `${page.reached_end ? "ended" : "did NOT end"} · `
+    + `media ${media === undefined ? "?" : media.toFixed(3)}s vs playlist ${declared.toFixed(3)}s `
+    + `(${signed(media === undefined ? null : media - declared, 3)}) vs real ${run.config.real_total_seconds.toFixed(3)}s · `
+    + `errors ${(page.errors || []).length}/${fatal} fatal · waiting ${page.waiting_events} · `
+    + `ranges ${page.buffered_range_count === undefined ? "?" : page.buffered_range_count} · `
+    + `drift ${page.max_clock_drift_seconds}s · frame Δ ${seeks.join(" ")}`;
+}
+
+/* ------------------------------------------------------------------------ P3 */
+
+function p3Specs(fixtures, options) {
+  const timeout = positiveNumber(options.timeout, DEFAULTS.timeout, "--timeout");
+  const rendition = fixtures.renditions.grid;
+  const delaySegment = Math.trunc(positiveNumber(
+    options.delay_segment === undefined ? DEFAULTS.delay_segment : options.delay_segment,
+    DEFAULTS.delay_segment, "--delay-segment",
+  ));
+  if (delaySegment >= rendition.segments.length) {
+    throw new Error(`--delay-segment ${delaySegment} is past the last segment (${rendition.segments.length - 1})`);
+  }
+  const fragTimeoutMs = positiveNumber(options.frag_timeout_ms, DEFAULTS.frag_timeout_ms, "--frag-timeout-ms");
+  const expireAttempts = Math.trunc(positiveNumber(
+    options.expire_attempts === undefined ? DEFAULTS.expire_attempts : options.expire_attempts,
+    DEFAULTS.expire_attempts, "--expire-attempts",
+  ));
+  const durations = exactDurations(rendition.segments);
+  const blockStart = sum(durations.slice(0, delaySegment));
+  const playlist = writePlaylist(rendition.segments, durations);
+
+  // Each block length runs twice — once on the shipped defaults, once with the
+  // timeout raised — because the report has to say what config survives a given
+  // block, not only whether the default did.
+  const configs = [
+    { id: "default", fragTimeout: null, blurb: "hls.js defaults" },
+    { id: `timeout-${fragTimeoutMs}ms`, fragTimeout: fragTimeoutMs, blurb: `fragLoadingTimeOut ${fragTimeoutMs} ms` },
+  ];
+
+  const blocks = options.expire
+    ? [{
+      id: `expire-${expireAttempts}`,
+      mode: "expire",
+      expireAttempts,
+      blurb: `${expireAttempts}x segment_pending 503 + Retry-After: 1, then bytes`,
+    }]
+    : parseDelays(options.delays === undefined ? DEFAULTS.delays : options.delays).map((seconds) => ({
+      id: `delay-${seconds}s`,
+      mode: "delay",
+      delayMs: seconds * 1000,
+      seconds,
+      blurb: `${seconds}s block on seg${String(delaySegment).padStart(5, "0")}.m4s`,
+    }));
+
+  const specs = [];
+  for (const block of blocks) {
+    for (const variant of configs) {
+      const pageUrl = "/p3";
+      const config = {
+        playlist: `${pageUrl}/index.m3u8`,
+        delay_segment: delaySegment,
+        block_start_seconds: Number(blockStart.toFixed(6)),
+        block_mode: block.mode,
+        block_seconds: block.seconds ?? null,
+        expire_attempts: block.mode === "expire" ? expireAttempts : null,
+        frag_loading_timeout_ms: variant.fragTimeout,
+        stall_rate: P3_STALL_RATE,
+        tail_rate: P3_TAIL_RATE,
+        fatal_grace_ms: 5000,
+        page_watchdog_ms: Math.max(20000, timeout * 1000 - 10000),
+      };
+      specs.push({
+        id: `p3/${block.id}/${variant.id}`,
+        case: "p3",
+        label: `${block.blurb} · ${variant.blurb}`,
+        timeout_seconds: timeout,
+        pageUrl,
+        mediaDir: rendition.directory,
+        playlist,
+        page: renderPage(`p3 ${block.id} ${variant.id}`, config, P3_SCRIPT),
+        block: { segment: delaySegment, ...block },
+        config,
+      });
+    }
+  }
+  return specs;
+}
+
+/*
+ * The numbers the ledger needs, pulled out of the two records that hold them:
+ * the server knows when the segment was first asked for, the page knows when a
+ * frame from it finally reached the screen.
+ */
+function p3Metrics(run) {
+  const page = run.page;
+  const attempts = run.server_log.filter((entry) => entry.blocked || entry.attempt !== undefined);
+  const first = attempts[0];
+  if (!page) {
+    return { attempts: attempts.length, first_request_at_ms: first ? first.at_ms : null };
+  }
+  // Both clocks are Date.now() on the same host, so page timestamps convert to
+  // the server's run-relative offsets by subtracting the run's start.
+  const toRunMs = (epoch) => (epoch ? epoch - run.started_epoch_ms : null);
+  const blockStart = run.config.block_start_seconds;
+  // The stall that belongs to the block is the one whose playhead had reached
+  // the blocked segment. Anything earlier is startup buffering, and anything
+  // later is a different problem that should be reported as itself.
+  const blockWait = (page.waits || []).find((wait) => wait.current_time >= blockStart - 2.0
+    && wait.current_time <= blockStart + 1.0);
+  const firstRequestAtMs = first ? first.at_ms : null;
+  const firstFrameAtMs = toRunMs(page.first_frame_past_block_at);
+  const stallStartMs = blockWait ? toRunMs(blockWait.at) : null;
+  return {
+    attempts: attempts.length,
+    aborted_attempts: attempts.filter((entry) => entry.status === "client_aborted").length,
+    // The gaps between attempts as the socket saw them. In --expire mode this is
+    // the whole answer to "does hls.js honour Retry-After": if the gaps track its
+    // own backoff rather than the header, the server cannot steer the retry and
+    // the budget has to be set on the client instead.
+    retry_gaps_ms: attempts.slice(1).map((entry, index) => entry.at_ms - attempts[index].at_ms),
+    first_request_at_ms: firstRequestAtMs,
+    // When the server actually handed over the bytes — the "producer finished"
+    // moment the block is modelling.
+    released_at_ms: (attempts.find((entry) => entry.status === 200) || {}).released_at_ms ?? null,
+    first_frame_past_block_at_ms: firstFrameAtMs,
+    request_to_first_frame_ms: firstRequestAtMs !== null && firstFrameAtMs !== null
+      ? firstFrameAtMs - firstRequestAtMs
+      : null,
+    // The viewer-facing number: how long the picture was frozen. Null means the
+    // buffer swallowed the block and nobody saw anything.
+    stalled: Boolean(blockWait),
+    stall_started_at_ms: stallStartMs,
+    stall_ms: stallStartMs !== null && firstFrameAtMs !== null ? firstFrameAtMs - stallStartMs : null,
+    startup_waits: (page.waits || []).filter((wait) => wait.current_time < 0.5).length,
+    error_details: [...new Set((page.errors || []).map((error) => error.details))],
+    fatal_details: [...new Set((page.errors || []).filter((error) => error.fatal).map((error) => error.details))],
+    fatal: (page.errors || []).some((error) => error.fatal),
+  };
+}
+
+function summariseP3(run) {
+  const page = run.page;
+  if (!page) return "no page result";
+  const metrics = run.metrics;
+  const stall = !metrics.stalled
+    ? "no stall (buffer absorbed the block)"
+    : (metrics.stall_ms === null ? "stalled and never recovered" : `stalled ${(metrics.stall_ms / 1000).toFixed(1)}s`);
+  const held = run.config.block_mode === "expire"
+    ? `retries at +[${metrics.retry_gaps_ms.join(",")}] ms`
+    : (metrics.released_at_ms !== null && metrics.first_request_at_ms !== null
+      ? `held ${((metrics.released_at_ms - metrics.first_request_at_ms) / 1000).toFixed(1)}s`
+      : "never released");
+  const recovered = metrics.first_frame_past_block_at_ms === null
+    ? "blocked segment NEVER presented"
+    : `first frame from it +${(metrics.request_to_first_frame_ms / 1000).toFixed(1)}s`;
+  return `${page.reached_end ? "reached end" : "did NOT reach end"} · ${held} · ${stall} · ${recovered} · `
+    + `${metrics.attempts} attempts (${metrics.aborted_attempts} aborted) · `
+    + `TTFB cap ${page.frag_load_policy.max_time_to_first_byte_ms} ms / load cap ${page.frag_load_policy.max_load_time_ms} ms · `
+    + `errors [${metrics.error_details.join(",") || "none"}]${metrics.fatal ? ` FATAL [${metrics.fatal_details.join(",")}]` : ""}`;
+}
+
+/* ---------------------------------------------------------------------- main */
+
+async function main() {
+  const { command, options } = parseArgs(process.argv.slice(2));
+  if (command === "help" || options.help) {
+    usage();
+    return 0;
+  }
+  if (!["p2", "p3", "all"].includes(command)) {
+    usage();
+    throw new Error(`unknown case "${command}"; choose p2, p3, or all`);
+  }
+  if (!fs.existsSync(HLS_JS_PATH)) {
+    throw new Error(`vendored hls.js not found at ${HLS_JS_PATH}`);
+  }
+
+  const fixtures = buildFixtures(options);
+  const specs = [];
+  if (command === "p2" || command === "all") specs.push(...p2Specs(fixtures, options));
+  if (command === "p3" || command === "all") specs.push(...p3Specs(fixtures, options));
+
+  const runtimeRoot = options.keep_runtime
+    ? path.join(fixtures.root, "runtime")
+    : await fsp.mkdtemp(path.join(os.tmpdir(), "vod-probe-stub-"));
+  await fsp.mkdir(runtimeRoot, { recursive: true });
+
+  const runs = [];
+  for (const spec of specs) {
+    process.stdout.write(`RUN    ${spec.id} — ${spec.label}\n`);
+    const startedEpoch = Date.now();
+    let run;
+    try {
+      run = await runOnce(spec, options, runtimeRoot);
+    } catch (error) {
+      run = {
+        id: spec.id,
+        case: spec.case,
+        label: spec.label,
+        status: "harness_failed",
+        error: String(error && error.message ? error.message : error),
+        config: spec.config,
+        server_log: [],
+        page: null,
+      };
+    }
+    run.started_epoch_ms = startedEpoch;
+    if (spec.case === "p3") run.metrics = p3Metrics(run);
+    run.finding = run.status === "measured"
+      ? (spec.case === "p2" ? summariseP2(run) : summariseP3(run))
+      : (run.error || (run.timed_out ? `no result within ${spec.timeout_seconds}s` : "browser produced no result"));
+    runs.push(run);
+    if (run.status === "measured") {
+      process.stdout.write(`PASS   ${spec.id}: ${run.finding}\n`);
+    } else {
+      process.stdout.write(`FAIL   ${spec.id}: ${run.finding}\n`);
+      if (run.chrome_stderr) {
+        for (const line of run.chrome_stderr.split("\n").filter(Boolean).slice(-8)) {
+          process.stdout.write(`CHROME       ${line}\n`);
+        }
+      }
+    }
+  }
+
+  if (!options.keep_runtime) await fsp.rm(runtimeRoot, { recursive: true, force: true }).catch(() => {});
+
+  const report = {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    command,
+    plan_section: "docs/VOD-PRESENTATION-PLAN.md §8 M0 (P2, P3)",
+    fixtures: {
+      root: fixtures.root,
+      renditions: Object.fromEntries(Object.entries(fixtures.renditions).map(([id, rendition]) => [id, {
+        description: rendition.description,
+        segment_count: rendition.segment_count,
+        real_total_seconds: rendition.real_total_seconds,
+        nominal_total_seconds: rendition.nominal_total_seconds,
+        max_drift_seconds: rendition.max_drift_seconds,
+        segments: rendition.segments,
+      }])),
+    },
+    cases: runs,
+  };
+
+  if (options.json && options.json !== true) {
+    const target = path.resolve(String(options.json));
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(target, `${JSON.stringify(report, null, 2)}\n`);
+    process.stdout.write(`REPORT ${target}\n`);
+  }
+
+  // A negative finding is a result. Only a run that produced no result at all —
+  // a browser that would not start, a page that never reported — is a failure of
+  // this harness, and only that is worth a non-zero exit.
+  const failed = runs.filter((run) => run.status !== "measured");
+  process.stdout.write(`DONE   ${runs.length - failed.length}/${runs.length} runs produced a result\n`);
+  return failed.length ? 1 : 0;
+}
+
+main().then((code) => { process.exitCode = code; }, (error) => {
+  process.stderr.write(`vod-probe-stub: ${error && error.stack ? error.stack : error}\n`);
+  process.exitCode = 1;
+});
