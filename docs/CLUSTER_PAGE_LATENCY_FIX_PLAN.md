@@ -353,10 +353,14 @@ by a small constant independent of `L`, the number of libraries.
 The browser's Home load becomes exactly three top-level requests:
 
 ```text
-/hubs ───────────────▶ first content
-/home/previews ──────▶ category/library sections
+/hubs ───────────────▶ hub regions ────────┐
+/home/previews ──────▶ preview regions ────┼─▶ first meaningful result is content
 /coming-soon ────────▶ optional rail, never blocks either result
 ```
+
+Hubs and previews commit independently; whichever produces meaningful content
+first advances the page to `content`. Buffering previews behind a slow hubs
+response would recreate the cross-region blocking this change removes.
 
 Each request performs its own authoritative authentication. That is three
 bounded decisions, not `3 + L`, and it preserves immediate revocation.
@@ -404,12 +408,13 @@ function setPagePhase(route, generation, phase) {
 Allowed phases are `shell` · `content` · `settled`. The named browser harness
 observes those attributes instead of guessing from text or screenshots.
 
-Home commits the existing shell immediately, `/hubs` as first content, preview
-sections when the batched response arrives, and Coming Soon independently.
-Activity keeps the last successful detail body during polls, marks it stale
-after a refresh failure, and replaces the whole body only on a first visit
-with no snapshot. A 401 still follows the existing global logout path rather
-than displaying cached protected data as current.
+Home commits the existing shell immediately, then commits hubs, preview
+sections, and Coming Soon independently. The first meaningful hubs or preview
+result advances the page to `content`; Coming Soon remains optional. Activity
+keeps the last successful detail body during polls, marks it stale after a
+refresh failure, and replaces the whole body only on a first visit with no
+snapshot. A 401 still follows the existing global logout path rather than
+displaying cached protected data as current.
 
 ## 4. Delivery order — one reviewable boundary per pull request
 
@@ -770,9 +775,9 @@ backends, and the Apple/Android API surface has no removed or changed field.
 Implement §3.5 and §3.6 in the embedded web app. Keep the existing generation
 counter as the single cancellation authority.
 
-**Home commit order:** shell now · `/hubs` first content · batched previews ·
-Coming Soon independently · settled when all nonfailed current-generation
-requests finish.
+**Home commit order:** shell now · hubs and batched previews independently ·
+the first meaningful one advances to content · Coming Soon independently ·
+settled when all current-generation requests finish.
 
 **Activity commit order:** prior snapshot or shell now · current detail first
 content · poll refresh in place · stale indicator on non-401 error · settled
@@ -785,8 +790,8 @@ tab's missing dependencies.
 Extend [`page-read-budget.test.js`](../tests/web/page-read-budget.test.js) with
 deferred promises that prove behavior, not elapsed milliseconds:
 
-1. a three-second Coming Soon promise cannot delay Home hubs;
-2. a delayed Home preview cannot erase or delay rendered hubs;
+1. a three-second Coming Soon promise cannot delay Home hubs or previews;
+2. hubs and previews can each paint first without erasing the other;
 3. Home makes exactly three top-level requests for one or fifty libraries;
 4. a stale Home response cannot commit any phase after navigation;
 5. Settings Libraries starts only three required endpoints;

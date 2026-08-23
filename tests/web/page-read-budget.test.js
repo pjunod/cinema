@@ -27,12 +27,6 @@ function shippedSource(name) {
   return (end === -1 ? rest : rest.slice(0, end)).trimEnd();
 }
 
-function shippedConstant(name) {
-  const match = SHIPPED_UI.match(new RegExp(`\\bconst\\s+${name}\\s*=\\s*([^;]+);`));
-  assert.ok(match, `index.html no longer declares ${name}`);
-  return { source: match[0], value: new Function(`${match[0]}; return ${name};`)() };
-}
-
 function shippedTopLevelSource(name) {
   const source = shippedSource(name);
   const end = source.indexOf("\n}");
@@ -55,96 +49,50 @@ function nextTurn() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-test("Home bounds preview concurrency, isolates failures, and preserves grouping", async () => {
+test("Home uses one fixed preview batch and preserves category grouping", async () => {
   const libraries = Array.from({ length: 14 }, (_, index) => ({
     id: index + 1,
     name: `Library ${index + 1}`,
     kind: index % 2 === 0 ? "movies" : "shows",
   }));
-  const started = [];
-  const releases = new Map();
-  let inFlight = 0;
-  let maxInFlight = 0;
-  const api = (url) => {
-    if (url === "/libraries") return Promise.resolve(libraries);
-    if (url === "/hubs") return Promise.resolve({ continue_watching: [] });
-    if (url === "/coming-soon") return Promise.resolve({ configured: false, entries: [] });
-    const match = /^\/libraries\/(\d+)\/items/.exec(url);
-    assert.ok(match, `unexpected request ${url}`);
-    const id = Number(match[1]);
-    started.push(id);
-    inFlight += 1;
-    maxInFlight = Math.max(maxInFlight, inFlight);
-    return new Promise((resolve, reject) => releases.set(id, {
-      resolve(value) { inFlight -= 1; releases.delete(id); resolve(value); },
-      reject(error) { inFlight -= 1; releases.delete(id); reject(error); },
-    }));
-  };
   const homeGroup = () => "category";
   const libCategory = (lib) => lib.kind === "movies"
     ? { key: "movie", name: "Movies" }
     : { key: "show", name: "TV Shows" };
   const catOrder = (key) => key === "movie" ? 0 : 1;
-  const loadHome = new Function(
-    "api", "homeGroup", "libCategory", "catOrder",
-    `${shippedConstant("HOME_PREVIEW_CONCURRENCY").source}
-     ${shippedSource("loadHomePreviews")};
-     ${shippedSource("loadHome")}; return loadHome;`,
-  )(api, homeGroup, libCategory, catOrder);
-
-  const pending = loadHome();
-  await nextTurn();
-  assert.deepEqual(started, [1, 2, 3, 4, 5, 6]);
-
-  // Finish requests in reverse order. Each completion admits one new request;
-  // the failed library must become an empty preview rather than reject Home.
-  while (releases.size) {
-    const id = Math.max(...releases.keys());
-    const release = releases.get(id);
-    if (id === 7) release.reject(new Error("one library is unavailable"));
-    else release.resolve({ items: [{ id: id * 10 }], total: 1 });
-    await nextTurn();
-  }
-  const page = await pending;
-  assert.equal(shippedConstant("HOME_PREVIEW_CONCURRENCY").value, 6);
-  assert.equal(maxInFlight, 6);
-  assert.deepEqual(started, libraries.map((library) => library.id));
+  const buildHomeSections = new Function(
+    "homeGroup", "libCategory", "catOrder",
+    `${shippedSource("buildHomeSections")}; return buildHomeSections;`,
+  )(homeGroup, libCategory, catOrder);
+  const page = buildHomeSections({ libraries: libraries.map((library) => ({
+    library, items: [{ id: library.id * 10 }], total: 1,
+  })) });
   assert.deepEqual(page.sections.map((section) => section.key), ["movie", "show"]);
-  assert.equal(page.sections[0].unavailable, true);
-  assert.equal(page.sections[0].total, null, "partial inventory is not reported as a true total");
-  assert.deepEqual(page.sections[0].items.map((item) => item.id), [10, 30, 50, 90, 110, 130]);
+  assert.equal(page.sections[0].total, 7);
+  assert.deepEqual(page.sections[0].items.map((item) => item.id), [10, 30, 50, 70, 90, 110, 130]);
   assert.deepEqual(page.sections[1].items.map((item) => item.id), [20, 40, 60, 80, 100, 120, 140]);
+  const source = shippedSource("viewHome");
+  assert.match(source, /api\("\/hubs"\)/);
+  assert.match(source, /api\("\/home\/previews"\)/);
+  assert.match(source, /api\("\/coming-soon"\)/);
+  assert.doesNotMatch(source, /\/libraries\/\$\{/);
 });
 
-test("Home stops the preview queue and rejects when authorization expires", async () => {
-  const libraries = Array.from({ length: 12 }, (_, index) => ({
-    id: index + 1, name: `Library ${index + 1}`, kind: "movies",
-  }));
-  const started = [];
-  const releases = new Map();
-  const api = (url) => {
-    if (url === "/libraries") return Promise.resolve(libraries);
-    if (url === "/hubs") return Promise.resolve({ continue_watching: [], recently_added: [] });
-    if (url === "/coming-soon") return Promise.resolve({ configured: false, entries: [] });
-    const id = Number(/^\/libraries\/(\d+)\/items/.exec(url)[1]);
-    started.push(id);
-    return new Promise((resolve, reject) => releases.set(id, { resolve, reject }));
-  };
-  const loadHome = new Function(
-    "api", "homeGroup", "libCategory", "catOrder",
-    `${shippedConstant("HOME_PREVIEW_CONCURRENCY").source}
-     ${shippedSource("loadHomePreviews")};
-     ${shippedSource("loadHome")}; return loadHome;`,
-  )(api, () => "category", () => ({ key: "movie", name: "Movies" }), () => 0);
-
-  const pending = loadHome();
-  await nextTurn();
-  assert.deepEqual(started, [1, 2, 3, 4, 5, 6]);
-  const unauthorized = new Error("unauthorized"); unauthorized.status = 401;
-  releases.get(1).reject(unauthorized);
-  await assert.rejects(pending, (error) => error === unauthorized);
-  await nextTurn();
-  assert.deepEqual(started, [1, 2, 3, 4, 5, 6], "no queued request starts after revocation");
+test("Home independently commits three regions and settles after all finish", async () => {
+  const source = shippedSource("viewHome");
+  assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /if\(error&&error\.status===401\) throw error/);
+  assert.match(source, /const meaningful=apply\(value\); commit\(name,meaningful\)/);
+  assert.match(source, /region\("soon"[\s\S]*return !!\(value\.entries\|\|\[\]\)\.length/);
+  assert.doesNotMatch(source, /commit\(true\)/,
+    "an empty optional response cannot claim meaningful content");
+  assert.match(source, /main\.querySelector\([\s\S]*old\.replaceWith\(next\)/,
+    "region completions replace only their stable mount");
+  assert.match(source, /if\(name==="previews"\) restoreScroll\(\)/,
+    "scroll restoration waits for the height-owning preview region");
+  assert.match(source, /keepPhotos=name==="previews"\?null:PHOTO_SET/,
+    "late optional regions cannot reset an open photo lightbox");
+  assert.match(source, /setPagePhase\(route,generation,"settled"\)/);
 });
 
 test("Activity suppresses duplicate and overlapping cluster polls", async () => {
@@ -276,13 +224,53 @@ test("Activity detail request guard executes one current request and releases", 
   assert.equal(requests.length, 2);
 });
 
+test("Activity keeps its last successful body on poll failures and never paints a 401", async () => {
+  const location = { hash: "#/activity" };
+  let stale = null;
+  const main = {
+    innerHTML: "last successful body",
+    prepend(node) { stale = node; },
+  };
+  const document = {
+    visibilityState: "visible",
+    getElementById: (id) => id === "main" ? main : id === "activity-stale" ? stale : null,
+    createElement: () => ({ id: "", className: "", textContent: "" }),
+  };
+  const requests = [];
+  const phases = [];
+  const api = () => new Promise((resolve, reject) => requests.push({ resolve, reject }));
+  const harness = new Function(
+    "document", "location", "api", "paintActivityBody", "esc", "setPagePhase", "setPageFailure",
+    `let PAGE_RENDER_GENERATION=1,ACTIVITY_DETAIL_BUSY=0,ACTIVITY_SNAPSHOT={marker:"old"};
+     ${shippedSource("renderActivityBody")};
+     return {renderActivityBody,clearSnapshot:()=>{ACTIVITY_SNAPSHOT=null;}};`,
+  )(
+    document, location, api, () => { throw new Error("failure must not repaint"); },
+    String, (_, generation, phase) => phases.push({ generation, phase }), () => {},
+  );
+  const failed = harness.renderActivityBody();
+  requests[0].reject(new Error("cluster timeout"));
+  await failed;
+  assert.equal(main.innerHTML, "last successful body");
+  assert.match(stale.textContent, /Showing the last update/);
+  assert.deepEqual(phases.map((entry) => entry.phase), ["content", "settled"]);
+
+  phases.length = 0; stale = null; harness.clearSnapshot();
+  const unauthorized = harness.renderActivityBody();
+  const error = new Error("unauthorized"); error.status = 401;
+  requests[1].reject(error);
+  await unauthorized;
+  assert.equal(stale, null);
+  assert.deepEqual(phases, [], "logout owns the 401 transition; Activity commits nothing");
+});
+
 test("Settings polls only the visible data panel and never overlaps", async () => {
   const tick = shippedSource("settingsTick");
-  assert.match(tick, /\|\|SETTINGS_TICKING\) return/);
+  assert.match(tick, /SETTINGS_TICKING\.generation===generation/);
   assert.match(tick, /if\(tab==="libraries"\)\{[\s\S]*api\("\/scan\/status"\)/);
   assert.match(tick, /if\(tab==="metadata"&&!TRAKT_EDIT\)\{[\s\S]*api\("\/trakt\/status"\)/);
   assert.match(tick, /await Promise\.all\(secondary\)/);
-  assert.match(tick, /finally\{ SETTINGS_TICKING=false; \}/);
+  assert.match(tick, /finally\{ if\(SETTINGS_TICKING===owner\) SETTINGS_TICKING=null; \}/);
 
   const location = { hash: "#/settings" };
   const document = { visibilityState: "visible", getElementById: () => null };
@@ -290,21 +278,23 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   let tab = "libraries";
   const api = (url) => new Promise((resolve) => requests.push({ url, resolve }));
   const harness = new Function(
-    "document", "location", "api", "settingsTab", "refreshLogs", "refreshClusterLogs", "paintTrakt",
-    `let SETTINGS_TICKING=false,TRAKT_EDIT=false,TRAKT=null;
+    "document", "location", "api", "settingsTab", "refreshLogs", "refreshClusterLogs", "paintTrakt", "settingsCurrent",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
+       SETTINGS_DATA={}; const SETTINGS_LOADED=new Set();
+     const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;return value;};
      ${tick}; return {settingsTick,busy:()=>SETTINGS_TICKING};`,
   )(
     document, location, api, () => tab,
-    async () => {}, async () => {}, () => {},
+    async () => {}, async () => {}, () => {}, (_, expected) => expected === tab,
   );
 
   const first = harness.settingsTick();
   const overlap = harness.settingsTick();
   assert.deepEqual(requests.map((request) => request.url), ["/scan/status"]);
-  assert.equal(harness.busy(), true);
+  assert.equal(!!harness.busy(), true);
   requests[0].resolve({});
   await Promise.all([first, overlap]);
-  assert.equal(harness.busy(), false);
+  assert.equal(harness.busy(), null);
 
   tab = "playback";
   await harness.settingsTick();
@@ -319,6 +309,30 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   assert.equal(requests.length, 2);
 });
 
+test("an old Settings tick cannot block or release a newer generation", async () => {
+  const location={hash:"#/settings"}, requests=[]; let tab="libraries";
+  const document={visibilityState:"visible",getElementById:()=>null};
+  const api=(url)=>new Promise(resolve=>requests.push({url,resolve}));
+  const harness=new Function(
+    "document","location","api","settingsTab","settingsCurrent","refreshLogs","refreshClusterLogs","paintTrakt",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,TRAKT=null,
+       SETTINGS_DATA={},SETTINGS_LOADED=new Set();
+     const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;return value;};
+     ${shippedSource("settingsTick")};
+     return {settingsTick,switchGeneration:()=>{PAGE_RENDER_GENERATION=2;},busy:()=>SETTINGS_TICKING};`,
+  )(
+    document,location,api,()=>tab,()=>true,async()=>{},async()=>{},()=>{},
+  );
+  const old=harness.settingsTick(1,"libraries");
+  tab="metadata"; harness.switchGeneration();
+  const current=harness.settingsTick(2,"metadata");
+  assert.deepEqual(requests.map(request=>request.url),["/scan/status","/trakt/status"]);
+  requests[0].resolve({}); await old;
+  assert.equal(harness.busy().generation,2,"old finally cannot release the current tick owner");
+  requests[1].resolve({configured:false}); await current;
+  assert.equal(harness.busy(),null);
+});
+
 test("Settings log refreshes coalesce across initial, manual, and timer callers", async () => {
   const boxes = {
     logbox: { scrollHeight: 0, scrollTop: 0, clientHeight: 0, innerHTML: "", textContent: "" },
@@ -331,10 +345,10 @@ test("Settings log refreshes coalesce across initial, manual, and timer callers"
   const api = (url) => new Promise((resolve) => requests.push({ url, resolve }));
   const harness = new Function(
     "document", "api", "esc", "fmtTs",
-    `let LOGS_PROMISE=null,LOGS_ACTIVE=null,LOGS_PENDING=null,
-       CLUSTER_LOGS_PROMISE=null,CLUSTER_LOGS_ACTIVE=null,CLUSTER_LOGS_PENDING=null;
+    `let AUTH_GENERATION=1,LOGS_RUN=null,CLUSTER_LOGS_RUN=null;
      ${shippedSource("sameLogRequest")};
      ${shippedSource("runLogRequest")};
+     ${shippedSource("refreshLogStream")};
      ${shippedSource("refreshLogs")};
      ${shippedSource("refreshClusterLogs")};
      return {refreshLogs,refreshClusterLogs};`,
@@ -371,62 +385,132 @@ test("Settings log refreshes coalesce across initial, manual, and timer callers"
   await later;
 });
 
+test("an old log run cannot consume or clear a new session's queue", async () => {
+  let box={scrollHeight:0,scrollTop:0,clientHeight:0,innerHTML:"",textContent:""};
+  const document={getElementById:(id)=>id==="logbox"?box:id==="loglvl"?{value:"info"}:null};
+  const requests=[];
+  const api=(url)=>new Promise((resolve,reject)=>requests.push({url,resolve,reject}));
+  const harness=new Function("document","api","esc","fmtTs",
+    `let AUTH_GENERATION=1,LOGS_RUN=null,CLUSTER_LOGS_RUN=null;
+     ${shippedSource("sameLogRequest")};${shippedSource("runLogRequest")};
+     ${shippedSource("refreshLogStream")};${shippedSource("refreshLogs")};
+     return {refreshLogs,newSession:()=>{AUTH_GENERATION++;LOGS_RUN=null;}};`,
+  )(document,api,String,String);
+  const old=harness.refreshLogs();
+  harness.newSession(); box={scrollHeight:0,scrollTop:0,clientHeight:0,innerHTML:"",textContent:""};
+  const current=harness.refreshLogs();
+  assert.equal(requests.length,2);
+  const unauthorized=new Error("unauthorized"); unauthorized.status=401;
+  requests[0].reject(unauthorized); await assert.rejects(old,/unauthorized/);
+  const overlap=harness.refreshLogs();
+  assert.equal(requests.length,2,"old finally leaves the new log run's coalescer intact");
+  requests[1].resolve([]); await Promise.all([current,overlap]);
+});
+
 test("Home render generations refuse out-of-order route completions", async () => {
-  const location = { hash: "" };
-  const main = { innerHTML: "" };
-  const document = { getElementById: () => main };
-  const loads = [];
+  const location = { hash: "#/" };
+  const main = {
+    slots: {},
+    get innerHTML() { return JSON.stringify(this.slots); },
+    set innerHTML(value) {
+      const page = JSON.parse(value);
+      for (const region of ["hubs", "previews", "soon"]) this.slots[region] = page;
+    },
+    querySelector(selector) {
+      const region = /data-home-region="([^"]+)"/.exec(selector)[1];
+      return { replaceWith: (next) => { this.slots[region] = next.page; } };
+    },
+  };
+  const document = {
+    getElementById: () => main,
+    createElement: () => {
+      let page;
+      return {
+        set innerHTML(value) { page = JSON.parse(value); },
+        content: { querySelectorAll(selector) {
+          const region = /data-home-region="([^"]+)"/.exec(selector)[1];
+          return [{ dataset: { homeSlot: region }, page }];
+        } },
+      };
+    },
+  };
+  const requests = [];
   const phases = [];
-  const loadHome = () => new Promise((resolve) => loads.push(resolve));
+  const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
-    "document", "location", "loadHome", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase",
-    `let PAGE_RENDER_GENERATION=0;
+    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase",
+    `let PAGE_RENDER_GENERATION=0,PHOTO_SET=[],LB_AT=-1;
      ${shippedTopLevelSource("viewHome")};
      return {viewHome,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
   )(
-    document, location, loadHome, () => {}, (_, page) => page.marker,
+    document, location, api, () => "share",
+    (batch, group) => ({ libs: batch.libraries.map((row) => row.library), group, sections: batch.libraries }),
+    (_, inner) => { main.innerHTML = inner; }, (_, page) => JSON.stringify(page),
     () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }),
   );
 
-  const old = harness.viewHome();
-  assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
-    "the shell phase commits before the delayed endpoint resolves");
-  harness.navigate("#/settings");
-  harness.navigate("");
   const current = harness.viewHome();
-  assert.deepEqual(phases.filter((entry) => entry.generation === 4), [
-    { generation: 4, phase: "shell" },
-  ]);
-  loads[1]({ marker: "current" });
+  assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
+    "the shell phase commits before any delayed endpoint resolves");
+  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon"]);
+  requests[1].resolve({ libraries: [{ library: { id: 7 }, items: [], total: 0 }] });
+  await nextTurn();
+  assert.match(main.innerHTML, /\"id\":7/);
+  requests[0].resolve({ continue_watching: [{ id: 9 }], next_up: [], recently_added: [] });
+  await nextTurn();
+  assert.match(main.innerHTML, /\"id\":7/);
+  assert.match(main.innerHTML, /\"id\":9/,
+    "a later region commit preserves the preview region already received");
+  requests[2].reject(new Error("optional dependency unavailable"));
   await current;
-  assert.equal(main.innerHTML, "current");
-  assert.deepEqual(phases.filter((entry) => entry.generation === 4), [
-    { generation: 4, phase: "shell" },
-    { generation: 4, phase: "content" },
-    { generation: 4, phase: "settled" },
-  ], "the delayed response produces ordered content and settled phases");
-  loads[0]({ marker: "stale" });
-  await old;
-  assert.equal(main.innerHTML, "current");
-  assert.deepEqual(phases.filter((entry) => entry.generation === 1), [
+  assert.deepEqual(phases, [
     { generation: 1, phase: "shell" },
-  ], "the stale delayed response cannot commit a later phase");
+    { generation: 1, phase: "content" },
+    { generation: 1, phase: "content" },
+    { generation: 1, phase: "settled" },
+  ]);
 
-  harness.navigate("#/unknown-fallback");
-  const fallback = harness.viewHome();
-  loads[2]({ marker: "fallback" });
-  await fallback;
-  assert.equal(main.innerHTML, "fallback");
+  const stale = harness.viewHome();
+  harness.navigate("#/settings");
+  harness.navigate("#/");
+  const latest = harness.viewHome();
+  requests.slice(6, 9).forEach((request) => request.resolve(
+    request.url === "/home/previews" ? { libraries: [{ library: { id: 42 }, items: [], total: 0 }] }
+      : request.url === "/hubs" ? { continue_watching: [{ id: 43 }], next_up: [], recently_added: [] }
+        : { configured: false, entries: [] },
+  ));
+  await latest;
+  const latestHtml = main.innerHTML;
+  requests.slice(3).forEach((request) => request.resolve(
+    request.url === "/home/previews" ? { libraries: [] }
+      : request.url === "/hubs" ? { continue_watching: [], next_up: [], recently_added: [] }
+        : { configured: false, entries: [] },
+  ));
+  await stale;
+  assert.equal(main.innerHTML, latestHtml,
+    "an old Home response cannot repaint a later Home generation after an A→B→A route race");
+
+  const before=requests.length, fifty=harness.viewHome();
+  const cohort=Array.from({length:50},(_,index)=>({library:{id:index+1},items:[],total:0}));
+  requests.slice(before).forEach((request) => request.resolve(
+    request.url === "/home/previews" ? {libraries:cohort}
+      : request.url === "/hubs" ? {continue_watching:[],next_up:[],recently_added:[]}
+        : {configured:false,entries:[]},
+  ));
+  await fifty;
+  assert.deepEqual(requests.slice(before).map((request)=>request.url),
+    ["/hubs","/home/previews","/coming-soon"],
+    "fifty libraries retain the same three-request Home budget as one library");
 });
 
-test("Activity and Settings stale loads cannot install the page timer", async () => {
+test("Activity stale loads cannot install the page timer", async () => {
   const activityLocation = { hash: "#/activity" };
   const activityLoads = [];
   const activityPhases = [];
   const timers = [];
   const activityHarness = new Function(
-    "location", "layoutChrome", "renderActivityBody", "setPageTimer", "setPagePhase",
-    `let PAGE_RENDER_GENERATION=0;
+    "location", "layoutChrome", "renderActivityBody", "setPageTimer", "setPagePhase", "paintActivityBody",
+    `let PAGE_RENDER_GENERATION=0,ACTIVITY_SNAPSHOT=null;
      ${shippedTopLevelSource("viewActivity")};
      return {viewActivity,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
   )(
@@ -434,6 +518,7 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
     (generation) => new Promise((resolve) => activityLoads.push({ generation, resolve })),
     (_, __, generation) => timers.push(generation),
     (_, generation, phase) => activityPhases.push({ generation, phase }),
+    () => {},
   );
   const oldActivity = activityHarness.viewActivity();
   assert.deepEqual(activityPhases, [{ generation: 1, phase: "shell" }],
@@ -447,82 +532,230 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
   activityLoads[1].resolve();
   await currentActivity;
   assert.equal(timers.length, 1);
-
-  const settingsLocation = { hash: "#/settings" };
-  const calls = [];
-  const commits = [];
-  const settingsTimers = [];
-  const api = (url) => new Promise((resolve) => calls.push({ url, resolve }));
-  const settingsHarness = new Function(
-    "location", "api", "layoutChrome", "forgetJoinToken", "renderSettings", "setPageTimer", "settingsTick", "setPagePhase",
-    `let ME={is_admin:true},PAGE_RENDER_GENERATION=0,SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,
-       CLUSTER_LOADED=false,SETTINGS_DATA=null;
-     ${shippedTopLevelSource("viewSettings")};
-     return {viewSettings,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;},
-       data:()=>SETTINGS_DATA};`,
-  )(
-    settingsLocation, api, () => {}, () => {}, () => commits.push("render"),
-    (_, __, generation) => settingsTimers.push(generation), () => {}, () => {},
-  );
-  const oldSettings = settingsHarness.viewSettings();
-  await nextTurn();
-  const expected = ["/libraries", "/settings", "/scan/status", "/system", "/users", "/trakt/status"];
-  assert.deepEqual(calls.slice(0, 6).map((call) => call.url), expected);
-  assert.match(calls[6].url, /^\/system\/playback-events\?/);
-  settingsHarness.navigate("#/");
-  settingsHarness.navigate("#/settings");
-  const currentSettings = settingsHarness.viewSettings();
-  await nextTurn();
-  const resolveWave = (wave, marker) => {
-    const offset = wave * 7;
-    const values = [[], { marker }, {}, {}, [], {}, []];
-    values.forEach((value, index) => calls[offset + index].resolve(value));
-  };
-  resolveWave(1, "current");
-  await currentSettings;
-  assert.equal(settingsHarness.data().settings.marker, "current");
-  assert.equal(commits.length, 1);
-  assert.equal(settingsTimers.length, 1);
-  resolveWave(0, "stale");
-  await oldSettings;
-  assert.equal(settingsHarness.data().settings.marker, "current");
-  assert.equal(commits.length, 1);
-  assert.equal(settingsTimers.length, 1);
 });
 
-test("Settings System content precedes its delayed visible-log settlement", async () => {
-  const location = { hash: "#/settings" };
-  const phases = [];
-  const timers = [];
-  let releaseLogs;
-  const logs = new Promise((resolve) => { releaseLogs = resolve; });
-  const api = (url) => Promise.resolve(
-    url === "/settings" ? {} : url === "/trakt/status" ? {} : [],
-  );
-  const harness = new Function(
-    "location", "api", "layoutChrome", "forgetJoinToken", "renderSettings",
-    "setPageTimer", "settingsTick", "setPagePhase",
-    `let ME={is_admin:true},PAGE_RENDER_GENERATION=0,SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,
-       CLUSTER_LOADED=false,SETTINGS_DATA=null;
-     ${shippedTopLevelSource("viewSettings")};
-     return {viewSettings};`,
+test("Activity paints its cached body before a slow current refresh", async () => {
+  const location={hash:"#/activity"}, phases=[], painted=[], timers=[];
+  let release;
+  const harness=new Function(
+    "location","layoutChrome","renderActivityBody","setPageTimer","setPagePhase","paintActivityBody",
+    `let PAGE_RENDER_GENERATION=1,ACTIVITY_SNAPSHOT={marker:"cached"};
+     ${shippedTopLevelSource("viewActivity")}; return {viewActivity};`,
   )(
-    location, api, () => {}, () => {}, () => logs,
-    (_, __, generation) => timers.push(generation), () => {},
-    (_, generation, phase) => phases.push({ generation, phase }),
+    location,()=>{},()=>new Promise(resolve=>{release=resolve;}),
+    (_,__,generation)=>timers.push(generation),(_,__,phase)=>phases.push(phase),
+    (value)=>painted.push(value.marker),
   );
+  const pending=harness.viewActivity(1);
+  assert.deepEqual(painted,["cached"]);
+  assert.deepEqual(phases,["shell","content"]);
+  assert.deepEqual(timers,[]);
+  release(); await pending;
+  assert.deepEqual(timers,[1]);
+});
 
-  const pending = harness.viewSettings();
-  await nextTurn();
-  assert.deepEqual(phases, [
-    { generation: 1, phase: "shell" },
-    { generation: 1, phase: "content" },
-  ]);
-  assert.deepEqual(timers, [1], "measurement does not delay normal timer installation");
-  await pending;
-  releaseLogs();
-  await nextTurn();
-  assert.deepEqual(phases.at(-1), { generation: 1, phase: "settled" });
+test("Settings loads only the active tab manifest", () => {
+  const declaration = SHIPPED_UI.match(/const SETTINGS_MANIFEST=({[\s\S]*?\n});/);
+  assert.ok(declaration, "Settings endpoint manifest remains explicit and testable");
+  const manifest = new Function(`${declaration[0]}; return SETTINGS_MANIFEST;`)();
+  assert.deepEqual(manifest, {
+    libraries: { required: ["settings", "libs", "status"], secondary: [] },
+    metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
+    playback: { required: ["settings"], secondary: [] },
+    users: { required: ["users"], secondary: [] },
+    system: { required: ["sys"], secondary: ["playbackEvents"] },
+    cluster: { required: ["cluster"], secondary: [] },
+  });
+  const view = shippedSource("viewSettings");
+  assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
+    "Settings no longer blocks every tab on a seven-endpoint page-wide wave");
+  assert.match(view, /layoutChrome\("settings",settingsShell\(tab\)\)/);
+  assert.ok(view.indexOf("await loadSettingsTab") < view.indexOf("setPageTimer"),
+    "polling starts only after the required tab load, never over the initial read");
+  const switchTab = shippedSource("setSettingsTab");
+  assert.match(switchTab, /if\(t===settingsTab\(\)\) return/);
+  assert.match(switchTab, /\+\+PAGE_RENDER_GENERATION/);
+  assert.match(switchTab, /viewSettings\(\+\+PAGE_RENDER_GENERATION,false\)/);
+  const loadTab = shippedSource("loadSettingsTab");
+  assert.match(loadTab, /manifest\.required/);
+  assert.match(loadTab, /patchSettingsSecondary/);
+  assert.match(loadTab, /settingsCurrent\(generation,tab\)/);
+  assert.match(loadTab, /patchSettingsSecondaryError/);
+  for (const endpoint of ["/libraries", "/settings", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
+    assert.match(SHIPPED_UI, new RegExp(`api\\(${JSON.stringify(endpoint).replace("/", "\\/")}`),
+      `Settings endpoint map includes ${endpoint}`);
+  }
+});
+
+test("Settings executes exact required and secondary waves for every tab", async () => {
+  const endpointDeclaration=SHIPPED_UI.match(/const SETTINGS_ENDPOINTS=({[\s\S]*?\n};)/);
+  const manifestDeclaration=SHIPPED_UI.match(/const SETTINGS_MANIFEST=({[\s\S]*?\n});/);
+  assert.ok(endpointDeclaration&&manifestDeclaration);
+  const cases={
+    libraries:{required:["/settings","/libraries","/scan/status"],secondary:[]},
+    metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
+    playback:{required:["/settings"],secondary:[]},
+    users:{required:["/users"],secondary:[]},
+    system:{required:["/system"],secondary:["playback-events","system-log"]},
+    cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
+  };
+  for(const [tab,expected] of Object.entries(cases)){
+    const requests=[], phases=[], logReleases=[];
+    const api=(url)=>new Promise((resolve,reject)=>requests.push({url,resolve,reject}));
+    const SETTINGS_ENDPOINTS=new Function("api",`${endpointDeclaration[0]};return SETTINGS_ENDPOINTS;`)(api);
+    const SETTINGS_MANIFEST=new Function(`${manifestDeclaration[0]};return SETTINGS_MANIFEST;`)();
+    const location={hash:"#/settings"};
+    const harness=new Function(
+      "location","SETTINGS_ENDPOINTS","SETTINGS_MANIFEST","settingsTab","renderSettings",
+      "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
+      "setPageFailure","setPagePhase","document",
+      `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
+         SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       ${shippedSource("settingsCurrent")};
+       ${shippedSource("cacheSettings")};
+       ${shippedSource("cacheTrakt")};
+       ${shippedSource("loadSettingsKey")};
+       ${shippedSource("loadSettingsTab")};
+       return {load:()=>loadSettingsTab(1,${JSON.stringify(tab)})};`,
+    )(
+      location,SETTINGS_ENDPOINTS,SETTINGS_MANIFEST,()=>tab,()=>phases.push("render"),
+      ()=>phases.push("secondary-patch"),()=>phases.push("secondary-error"),
+      ()=>new Promise(resolve=>logReleases.push({kind:"system-log",resolve})),
+      ()=>new Promise(resolve=>logReleases.push({kind:"cluster-log",resolve})),
+      ()=>{},(_,__,phase)=>phases.push(phase),{getElementById:()=>null},
+    );
+    const load=harness.load(); await nextTurn();
+    assert.deepEqual(requests.map(request=>request.url),expected.required,`${tab} required wave`);
+    for(const request of requests.slice()) request.resolve(
+      request.url==="/settings"?{}:request.url==="/trakt/status"?{}:
+        request.url==="/system"?{}:request.url==="/cluster/nodes"?{nodes:[]}:[],
+    );
+    await nextTurn();
+    assert.ok(phases.includes("content"),`${tab} commits content after only required data`);
+    const secondaryRequests=requests.slice(expected.required.length);
+    const secondary=[...secondaryRequests.map(request=>request.url.includes("playback-events")?"playback-events":request.url),
+      ...logReleases.map(release=>release.kind)];
+    assert.deepEqual(secondary,expected.secondary,`${tab} secondary wave`);
+    assert.equal(phases.includes("settled"),expected.secondary.length===0,
+      `${tab} cannot settle while visible secondary work is pending`);
+    for(const request of secondaryRequests) request.resolve([]);
+    for(const release of logReleases) release.resolve();
+    await load;
+    assert.ok(phases.includes("settled"),`${tab} settles after its complete visible wave`);
+  }
+});
+
+test("Settings cannot paint an old tab after a tab switch", async () => {
+  const requests=[], phases=[];
+  const SETTINGS_ENDPOINTS={
+    settings:()=>new Promise(resolve=>requests.push({key:"settings",resolve})),
+    libs:()=>new Promise(resolve=>requests.push({key:"libs",resolve})),
+    status:()=>new Promise(resolve=>requests.push({key:"status",resolve})),
+  };
+  const SETTINGS_MANIFEST={libraries:{required:["settings","libs","status"],secondary:[]}};
+  const location={hash:"#/settings"}; let tab="libraries";
+  const harness=new Function(
+    "location","SETTINGS_ENDPOINTS","SETTINGS_MANIFEST","settingsTab","renderSettings",
+    "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
+    "setPageFailure","setPagePhase","document",
+    `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
+       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+     ${shippedSource("settingsCurrent")};${shippedSource("cacheSettings")};${shippedSource("cacheTrakt")};
+     ${shippedSource("loadSettingsKey")};${shippedSource("loadSettingsTab")};
+     return {load:()=>loadSettingsTab(1,"libraries"),switchAway:()=>{PAGE_RENDER_GENERATION=2;}};`,
+  )(
+    location,SETTINGS_ENDPOINTS,SETTINGS_MANIFEST,()=>tab,()=>phases.push("render"),()=>{},()=>{},
+    async()=>{},async()=>{},()=>{},(_,__,phase)=>phases.push(phase),{getElementById:()=>null},
+  );
+  const old=harness.load(); await nextTurn();
+  tab="playback"; harness.switchAway();
+  for(const request of requests) request.resolve(request.key==="settings"?{}:[]);
+  await old;
+  assert.deepEqual(phases,[],"old required data cannot render, phase, or launch secondary work");
+});
+
+test("Settings coalesces shared transports while fencing each generation's commit", async () => {
+  const requests=[];
+  const deferred=()=>new Promise((resolve,reject)=>requests.push({resolve,reject}));
+  const endpoints={settings:deferred,sys:deferred};
+  const harness=new Function("SETTINGS_ENDPOINTS",
+    `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
+       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+     const cacheSettings=(value)=>{SETTINGS=value;SETTINGS_DATA.settings=value;SETTINGS_LOADED.add("settings");return value;};
+     const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;SETTINGS_LOADED.add("trakt");return value;};
+     ${shippedSource("loadSettingsKey")};
+     return {loadSettingsKey,setGeneration:(value)=>{PAGE_RENDER_GENERATION=value;},
+       reset:()=>{SETTINGS_DATA={};SETTINGS_LOADED.clear();SETTINGS_LOADS.clear();},data:()=>SETTINGS_DATA};`,
+  )(endpoints);
+
+  const old=harness.loadSettingsKey("settings",1);
+  harness.setGeneration(2);
+  const current=harness.loadSettingsKey("settings",2);
+  assert.equal(requests.length,1,"a fast tab switch shares the pending /settings transport");
+  requests[0].resolve({marker:"shared"});
+  await Promise.all([old,current]);
+  assert.equal(harness.data().settings.marker,"shared");
+
+  harness.reset(); harness.setGeneration(3);
+  const stale=harness.loadSettingsKey("sys",3);
+  harness.reset(); harness.setGeneration(5);
+  const fresh=harness.loadSettingsKey("sys",5);
+  assert.equal(requests.length,3,"logout-style cache reset starts a new credential transport");
+  requests[1].resolve({marker:"old"}); await stale;
+  assert.equal(harness.data().sys,undefined,"an old generation cannot repopulate cleared protected data");
+  requests[2].resolve({marker:"new"}); await fresh;
+  assert.equal(harness.data().sys.marker,"new");
+});
+
+test("stale authorization responses cannot revoke or feed a newer session", async () => {
+  const responses=[];
+  const fetch=()=>new Promise((resolve)=>responses.push(resolve));
+  const harness=new Function("fetch",
+    `let API="/api/v1",TOKEN="old",AUTH_GENERATION=1,logoutCount=0;
+     const PlaybackPolicy={parseStreamFailure:()=>null};
+     function logout(){logoutCount++;TOKEN=null;AUTH_GENERATION++;}
+     ${shippedSource("api")};
+     return {api,login:(token)=>{TOKEN=token;AUTH_GENERATION++;},state:()=>({TOKEN,AUTH_GENERATION,logoutCount})};`,
+  )(fetch);
+  const first=harness.api("/hubs"), second=harness.api("/home/previews");
+  responses[0]({status:401,ok:false});
+  await assert.rejects(first,/unauthorized/);
+  assert.equal(harness.state().logoutCount,1);
+  harness.login("new");
+  responses[1]({status:401,ok:false});
+  await assert.rejects(second,(error)=>error.staleAuth===true);
+  assert.deepEqual(harness.state(),{TOKEN:"new",AUTH_GENERATION:3,logoutCount:1});
+
+  const staleSuccess=harness.api("/system");
+  harness.login("newer");
+  responses[2]({status:200,ok:true,json:async()=>({secret:"old-user"})});
+  await assert.rejects(staleSuccess,(error)=>error.staleAuth===true);
+  assert.equal(harness.state().TOKEN,"newer");
+});
+
+test("logout clears every protected page cache before rendering auth", () => {
+  const main={innerHTML:"protected"}, removed=[];
+  const document={getElementById:(id)=>id==="main"?main:null,documentElement:{classList:{remove(){}}}};
+  const localStorage={removeItem:(key)=>removed.push(key)};
+  const harness=new Function("document","localStorage",
+    `let READER=null,TOKEN="token",AUTH_GENERATION=4,ME={id:1},NATIVE_READER_BOOT=false,
+       PAGE_RENDER_GENERATION=7,PAGE_TIMER=1,ACTIVITY_SNAPSHOT={secret:true},ACTIVITY_DETAIL_BUSY=7,
+       SETTINGS={secret:true},TRAKT={secret:true},TRAKT_EDIT=true,SETTINGS_TICKING={generation:7},
+       SETTINGS_DATA={secret:true},SETTINGS_LOADED=new Set(["settings"]),SETTINGS_LOADS=new Map([["settings",{}]]),
+       LOGS_RUN={},CLUSTER_LOGS_RUN={},CLUSTER_LOADED=true,CLUSTER_LEAVING=true,
+       CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0;
+     function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
+     function render(){rendered++;}
+     ${shippedSource("logout")};
+     return {logout,state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
+       SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
+       CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,main:document.getElementById("main").innerHTML})};`,
+  )(document,localStorage);
+  harness.logout();
+  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
+    ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
+    CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,main:""});
+  assert.deepEqual(removed,["plurx_token"]);
 });
 
 test("Page phases are generation-fenced, ordered, and wired to measured routes", () => {
@@ -575,12 +808,15 @@ test("Page phases are generation-fenced, ordered, and wired to measured routes",
   });
   assert.equal(marks.length, 1, "normal navigation keeps only the current phase marks");
 
-  for (const [name, route] of [["viewHome", "route"], ["viewSettings", "route"]]) {
-    const source = shippedTopLevelSource(name);
-    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"shell"\\)`));
-    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"content"\\)`));
-    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"settled"\\)`));
-  }
+  const home = shippedTopLevelSource("viewHome");
+  assert.match(home, /setPagePhase\(route,generation,"shell"\)/);
+  assert.match(home, /setPagePhase\(route,generation,"content"\)/);
+  assert.match(home, /setPagePhase\(route,generation,"settled"\)/);
+  const settingsView = shippedTopLevelSource("viewSettings");
+  assert.match(settingsView, /setPagePhase\(route,generation,"shell"\)/);
+  const settingsLoad = shippedSource("loadSettingsTab");
+  assert.match(settingsLoad, /setPagePhase\(route,generation,"content"\)/);
+  assert.match(settingsLoad, /setPagePhase\(route,generation,"settled"\)/);
   const activity = shippedSource("renderActivityBody");
   assert.match(activity, /setPagePhase\("#\/activity",generation,"content"\)/);
   assert.match(activity, /setPagePhase\("#\/activity",generation,"settled"\)/);

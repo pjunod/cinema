@@ -134,7 +134,7 @@ test("native reader bridge is outbound-only and clears authority before dismissa
   assert.match(INDEX, /window\.webkit\.messageHandlers\.cinemaReader/);
   assert.match(INDEX, /window\.CinemaNative\.postMessage\(JSON\.stringify\(payload\)\)/);
   const close = INDEX.slice(INDEX.indexOf("async function closeReader"), INDEX.indexOf("async function viewReader"));
-  assert.match(close, /TOKEN=null; ME=null; nativeReaderPost\("close"\)/);
+  assert.match(close, /TOKEN=null; AUTH_GENERATION\+\+; ME=null; nativeReaderPost\("close"\)/);
   assert.match(INDEX, /nativeReaderPost\("session-ended"\)/);
   assert.doesNotMatch(INDEX, /CinemaNative\.(token|bearer|credential)/);
 });
