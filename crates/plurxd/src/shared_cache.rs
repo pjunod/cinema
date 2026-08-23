@@ -287,9 +287,13 @@ impl SharedCacheCoordinator {
                 MAX_CANARY_RESPONSE_BYTES,
                 PeerAuthMode::ExactRequest,
             )
-            .await
-            .map_err(|error| format!("peer canary request failed: {error:?}"))?;
+            .await;
+        // The origin owns this probe file. Remove it on timeout/auth/network
+        // failure too, otherwise a degraded peer can accumulate one orphan
+        // every probe interval indefinitely.
         let _ = canaries.unlink_child(&canary_name).await;
+        let response =
+            response.map_err(|error| format!("peer canary request failed: {error:?}"))?;
         if !response.status.is_success() {
             return Err(format!("peer canary returned {}", response.status));
         }
