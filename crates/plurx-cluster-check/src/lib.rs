@@ -118,6 +118,9 @@ const SINGLETON_PROOF_KEY: &str = "cluster-check.singleton-provider";
 const SINGLETON_LEASE_TTL: Duration = Duration::from_secs(5);
 const SINGLETON_HEARTBEAT: Duration = Duration::from_secs(4);
 const SINGLETON_POST_BASELINE_COMMIT_BUDGET: u64 = 8;
+const SINGLETON_TRIAL_ATTEMPTS: u32 = 3;
+const SINGLETON_TRIAL_TIMEOUT: Duration = Duration::from_secs(120);
+const SINGLETON_UNSTABLE_MARKER: &str = "CLUSTER_SINGLETON_UNSTABLE";
 /// Incoming active-player heartbeats in the compacted-growth record.
 pub const GROWTH_INCOMING_BEATS: u64 = 10_000;
 /// Independent user/item streams represented by the growth load.
@@ -223,6 +226,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("membership") => run_membership_lifecycle_case().await,
         Some("singleton") => run_singleton_takeover_case().await,
+        Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
         Some("topology") => {
@@ -460,6 +464,90 @@ impl ProviderFixture {
 }
 
 async fn run_singleton_takeover_case() -> Result<()> {
+    let executable = harness_executable()?;
+    for attempt in 1..=SINGLETON_TRIAL_ATTEMPTS {
+        let output = run_singleton_trial_process(&executable).await?;
+        std::io::stdout().write_all(&output.stdout)?;
+        std::io::stderr().write_all(&output.stderr)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        if !singleton_trial_was_unstable(&output.stdout) {
+            bail!("singleton trial process exited with {}", output.status);
+        }
+        if attempt == SINGLETON_TRIAL_ATTEMPTS {
+            bail!("singleton topology changed across all {SINGLETON_TRIAL_ATTEMPTS} fresh trials");
+        }
+        eprintln!(
+            "cluster-check: singleton trial {attempt} had unrelated Raft topology churn; retrying a fresh cluster"
+        );
+    }
+    unreachable!("singleton trial loop returns success or its last error")
+}
+
+async fn run_singleton_trial_process(executable: &Path) -> Result<std::process::Output> {
+    let mut command = Command::new(executable);
+    command
+        .arg("singleton-attempt")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = command.spawn().context("spawn isolated singleton trial")?;
+    let pid = child.id().context("isolated singleton trial has no pid")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("capture singleton trial stdout")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("capture singleton trial stderr")?;
+    let stdout_reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let stderr_reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let status = match tokio::time::timeout(SINGLETON_TRIAL_TIMEOUT, child.wait()).await {
+        Ok(status) => status.context("wait for isolated singleton trial")?,
+        Err(_) => {
+            let kill_result = kill_process_group(pid, "singleton trial timeout");
+            let _ = child.wait().await;
+            let _ = stdout_reader.await;
+            let _ = stderr_reader.await;
+            kill_result?;
+            bail!(
+                "isolated singleton trial exceeded its {:?} hard timeout",
+                SINGLETON_TRIAL_TIMEOUT
+            );
+        }
+    };
+    let stdout = stdout_reader
+        .await
+        .context("join singleton stdout reader")??;
+    let stderr = stderr_reader
+        .await
+        .context("join singleton stderr reader")??;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn singleton_trial_was_unstable(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.starts_with(SINGLETON_UNSTABLE_MARKER))
+}
+
+async fn run_singleton_takeover_attempt() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("singleton takeover data root")?;
     let mut cluster = with_port_retry(|attempt| {
@@ -4935,6 +5023,21 @@ fn send_process_signal(pid: u32, signal: libc::c_int, label: &str) -> Result<()>
     Ok(())
 }
 
+fn kill_process_group(pid: u32, label: &str) -> Result<()> {
+    let process_group = libc::pid_t::try_from(pid).context("process group id overflowed pid_t")?;
+    // SAFETY: the singleton-attempt controller created a new process group
+    // whose id is its child pid. A negative pid targets that exact group, so
+    // timeout cleanup includes the voter grandchildren it spawned.
+    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error).with_context(|| format!("send SIGKILL for {label}"));
+        }
+    }
+    Ok(())
+}
+
 pub struct ClusterProcesses {
     nodes: Vec<Option<NodeProcess>>,
     root: PathBuf,
@@ -8335,6 +8438,19 @@ mod tests {
 
         kill_media_child_if_id(&media, 2).await;
         assert!(media.lock().await.is_none());
+    }
+
+    #[test]
+    fn singleton_retry_requires_the_explicit_trial_marker() {
+        assert!(singleton_trial_was_unstable(
+            b"startup\nCLUSTER_SINGLETON_UNSTABLE stage=after-resume\n"
+        ));
+        assert!(!singleton_trial_was_unstable(
+            b"Error: singleton proof changed leader/term during its measured interval\n"
+        ));
+        assert!(!singleton_trial_was_unstable(
+            b"diagnostic mentioned CLUSTER_SINGLETON_UNSTABLE but was not a verdict\n"
+        ));
     }
 
     #[test]
