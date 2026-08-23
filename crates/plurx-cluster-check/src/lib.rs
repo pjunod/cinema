@@ -21,6 +21,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +30,7 @@ use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
 use hmac::{Hmac, Mac};
-use plurx_core::cluster::coordination::{Lease, LeaseClaim};
+use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::cluster::membership::{
     join_token_digest, ActivityPeerAuth, ActivitySigningKey, ArtworkPeerAuth, ClusterAvailability,
     ClusterPeer, FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError,
@@ -45,6 +46,7 @@ use plurx_core::domain::{
     NewLibrary, NewOfflinePackage, OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent,
     PlaybackEventQuery, ProbeResult, TraktAuth,
 };
+use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
     ApiKeyStore, ArtworkRepairFence, ClusterCompatibility, CoordinationStore,
@@ -55,8 +57,9 @@ use plurx_core::store::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant as TokioInstant;
 
 // Compile the production daemon policy directly. This avoids a test-only
@@ -65,6 +68,13 @@ use tokio::time::Instant as TokioInstant;
 #[path = "../../plurxd/src/progress.rs"]
 mod production_progress;
 use production_progress::ProgressCoalescer;
+
+// Compile the production daemon lease lifecycle directly. A harness-only
+// heartbeat would not prove that a paused provider job self-fences in plurxd.
+#[allow(dead_code)] // Fixed production policy is used by plurxd; the harness injects a short one.
+#[path = "../../plurxd/src/job_lease.rs"]
+mod production_job_lease;
+use production_job_lease::ActiveJobLease;
 
 mod topology;
 pub use topology::{
@@ -97,6 +107,11 @@ const PORT_RETRY_ATTEMPTS: u32 = 5;
 const LISTENER_PROOF_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the convergence helpers retry before reporting failure.
 pub const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(45);
+const SINGLETON_RESOURCE: &str = "provider:cluster-check-takeover";
+const SINGLETON_PROOF_KEY: &str = "cluster-check.singleton-provider";
+const SINGLETON_LEASE_TTL: Duration = Duration::from_secs(5);
+const SINGLETON_HEARTBEAT: Duration = Duration::from_secs(4);
+const SINGLETON_POST_BASELINE_COMMIT_BUDGET: u64 = 8;
 /// Incoming active-player heartbeats in the compacted-growth record.
 pub const GROWTH_INCOMING_BEATS: u64 = 10_000;
 /// Independent user/item streams represented by the growth load.
@@ -107,6 +122,15 @@ pub const GROWTH_BEAT_INTERVAL_SECS: u64 = 5;
 pub const GROWTH_COMMIT_WINDOW_SECS: u64 = 10;
 /// Production hiqlite snapshot threshold used by the bounded gate.
 pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
+/// Fixed applied-log tail retained after each measured snapshot.
+///
+/// Snapshot construction is asynchronous. The load that triggers it can be a
+/// few entries past the snapshot index by the time the controller observes
+/// the new snapshot, which otherwise leaves a runner-speed-dependent SQLite
+/// WAL tail in the directory-size comparison. Filling both sides to the same
+/// post-snapshot index makes the physical comparison phase-identical without
+/// changing the byte budget or excluding a durable file.
+const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
 /// One extra commit window per stream above the deterministic cadence result.
@@ -192,6 +216,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             controller().await
         }
         Some("membership") => run_membership_lifecycle_case().await,
+        Some("singleton") => run_singleton_takeover_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
@@ -263,12 +288,511 @@ async fn controller() -> Result<()> {
     run_degraded_four_voter_leader_self_leave_case().await?;
     println!("cluster-check: rolling quorum-watermark stream compatibility");
     run_quorum_watermark_rolling_compatibility_case().await?;
+    println!("cluster-check: paused singleton provider takeover");
+    run_singleton_takeover_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
-    println!("cluster-check: all M1b/M1c/M1d/M3a failure contracts passed");
+    println!("cluster-check: all M1b/M1c/M1d/M3/M4 singleton contracts passed");
     Ok(())
+}
+
+struct ProviderFixture {
+    url: String,
+    calls: Arc<std::sync::atomic::AtomicU64>,
+    events: mpsc::UnboundedReceiver<u64>,
+    release_first: Arc<Notify>,
+    release_second: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ProviderFixture {
+    async fn start() -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind((LISTEN_ADDR, 0))
+            .await
+            .context("bind singleton provider fixture")?;
+        let url = format!("http://{}/provider", listener.local_addr()?);
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (event_tx, events) = mpsc::unbounded_channel();
+        let release_first = Arc::new(Notify::new());
+        let release_second = Arc::new(Notify::new());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task_calls = Arc::clone(&calls);
+        let task_release_first = Arc::clone(&release_first);
+        let task_release_second = Arc::clone(&release_second);
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    _ = task_shutdown.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut stream, _)) = accepted else {
+                    break;
+                };
+                let calls = Arc::clone(&task_calls);
+                let events = event_tx.clone();
+                let release_first = Arc::clone(&task_release_first);
+                let release_second = Arc::clone(&task_release_second);
+                tokio::spawn(async move {
+                    const MAX_REQUEST_BYTES: usize = 8 * 1024;
+                    let mut request = Vec::with_capacity(1024);
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        if request.len() == MAX_REQUEST_BYTES {
+                            let _ = stream
+                                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                .await;
+                            return;
+                        }
+                        let mut chunk = [0_u8; 1024];
+                        let remaining = MAX_REQUEST_BYTES - request.len();
+                        let read_capacity = remaining.min(chunk.len());
+                        let read = match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            stream.read(&mut chunk[..read_capacity]),
+                        )
+                        .await
+                        {
+                            Ok(Ok(read)) => read,
+                            _ => return,
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    let valid_request = std::str::from_utf8(&request)
+                        .ok()
+                        .and_then(|request| request.lines().next())
+                        .map(|line| {
+                            let mut parts = line.split_whitespace();
+                            parts.next() == Some("GET")
+                                && parts.next() == Some("/provider")
+                                && parts
+                                    .next()
+                                    .is_some_and(|version| version.starts_with("HTTP/1."))
+                        })
+                        .unwrap_or(false);
+                    if !valid_request {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    let ordinal = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let _ = events.send(ordinal);
+                    match ordinal {
+                        1 => release_first.notified().await,
+                        2 => release_second.notified().await,
+                        _ => {}
+                    }
+                    let (status, body) = match ordinal {
+                        1 => ("200 OK", "stale-owner".to_owned()),
+                        2 => ("200 OK", "successor".to_owned()),
+                        other => ("500 Internal Server Error", format!("unexpected-{other}")),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Ok(Self {
+            url,
+            calls,
+            events,
+            release_first,
+            release_second,
+            shutdown,
+            task,
+        })
+    }
+
+    async fn expect_call(&mut self, expected: u64) -> Result<()> {
+        let observed = tokio::time::timeout(Duration::from_secs(15), self.events.recv())
+            .await
+            .context("singleton provider call timed out")?
+            .context("singleton provider fixture stopped")?;
+        if observed != expected {
+            bail!("expected singleton provider call {expected}, observed {observed}");
+        }
+        Ok(())
+    }
+
+    fn call_count(&self) -> u64 {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn release_old_owner(&self) {
+        self.release_first.notify_one();
+    }
+
+    fn release_successor(&self) {
+        self.release_second.notify_one();
+    }
+
+    async fn shutdown(self) {
+        self.shutdown.cancel();
+        let _ = self.task.await;
+    }
+}
+
+async fn run_singleton_takeover_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("singleton takeover data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move { ClusterProcesses::start(&executable, &attempt_root, reservation?).await }
+    })
+    .await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+
+    let leader = cluster.leader().await?;
+    let old_owner = (1..=3)
+        .find(|node_id| *node_id != leader)
+        .context("choose singleton follower owner")?;
+    let peers = (1..=3)
+        .filter(|node_id| *node_id != old_owner)
+        .collect::<Vec<_>>();
+    let (stable_term, _) = raft_term_and_index(&mut cluster, leader).await?;
+    let mut provider = ProviderFixture::start().await?;
+
+    let initial = start_singleton_probe(&mut cluster, old_owner, &provider.url).await?;
+    if initial.owner_node_id != format!("node-{old_owner}") {
+        bail!("singleton owner identity drifted: {initial:?}");
+    }
+    provider.expect_call(1).await?;
+    for peer in &peers {
+        match cluster
+            .request(
+                *peer,
+                Request::StartSingletonProbe {
+                    provider_url: provider.url.clone(),
+                },
+            )
+            .await?
+        {
+            Response::SingletonProbeStart {
+                acquired: false,
+                lease,
+            } if lease.owner_node_id == initial.owner_node_id
+                && lease.fence == initial.fence
+                && lease.revision >= initial.revision => {}
+            response => bail!("peer {peer} did not observe the held singleton lease: {response:?}"),
+        }
+    }
+    if provider.call_count() != 1 {
+        bail!(
+            "initial singleton contention made {} physical provider calls instead of one",
+            provider.call_count()
+        );
+    }
+
+    let paused = cluster.pause(old_owner)?;
+    let authoritative_old = read_singleton_lease(&mut cluster, leader).await?;
+    if authoritative_old.owner_node_id != initial.owner_node_id
+        || authoritative_old.fence != initial.fence
+        || authoritative_old.revision < initial.revision
+    {
+        bail!(
+            "authoritative lease after SIGSTOP did not extend the initial owner: initial={initial:?} current={authoritative_old:?}"
+        );
+    }
+    wait_until_lease_expired(&mut cluster, leader, &authoritative_old).await?;
+    let (baseline_term, applied_before) = raft_term_and_index(&mut cluster, leader).await?;
+    if baseline_term != stable_term || cluster.leader().await? != leader {
+        bail!("pausing a follower changed leader/term before singleton takeover");
+    }
+
+    let (first_peer, second_peer) = (peers[0], peers[1]);
+    let (first_response, second_response) = cluster
+        .request_pair_concurrently(
+            first_peer,
+            Request::StartSingletonProbe {
+                provider_url: provider.url.clone(),
+            },
+            second_peer,
+            Request::StartSingletonProbe {
+                provider_url: provider.url.clone(),
+            },
+        )
+        .await?;
+    let contenders = [(first_peer, first_response), (second_peer, second_response)];
+    let winners = contenders
+        .iter()
+        .filter_map(|(node_id, response)| match response {
+            Response::SingletonProbeStart {
+                acquired: true,
+                lease,
+            } => Some((*node_id, lease.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if winners.len() != 1 {
+        bail!(
+            "singleton takeover had {} winners: {contenders:?}",
+            winners.len()
+        );
+    }
+    let (successor_node, successor) = &winners[0];
+    if successor.owner_node_id != format!("node-{successor_node}")
+        || successor.fence != authoritative_old.fence + 1
+        || successor.revision != authoritative_old.revision + 1
+    {
+        bail!(
+            "singleton takeover did not advance the exact generation: old={authoritative_old:?} successor={successor:?}"
+        );
+    }
+    for (node_id, response) in &contenders {
+        if node_id == successor_node {
+            continue;
+        }
+        match response {
+            Response::SingletonProbeStart {
+                acquired: false,
+                lease,
+            } if lease.owner_node_id == successor.owner_node_id
+                && lease.fence == successor.fence
+                && lease.revision >= successor.revision => {}
+            response => bail!(
+                "losing singleton contender {node_id} did not observe the successor fence: {response:?}"
+            ),
+        }
+    }
+    provider.expect_call(2).await?;
+    provider.release_successor();
+    wait_singleton_outcome(&mut cluster, *successor_node, &["published"]).await?;
+    require_singleton_value(&mut cluster, leader, "successor", false).await?;
+
+    paused.resume()?;
+    wait_singleton_outcome(&mut cluster, old_owner, &["lease_lost"]).await?;
+    provider.release_old_owner();
+    // SIGCONT can precede the resumed voter's remote Hiqlite client becoming
+    // usable. Poll the existing read-only readiness query first, then dispatch
+    // the stale mutation exactly once: retrying an ambiguous write timeout
+    // could leave its detached server task running behind a later rejection.
+    cluster.wait_for_ready(old_owner).await?;
+    match cluster
+        .request(
+            old_owner,
+            Request::ReplaySingletonLease {
+                lease: authoritative_old.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("authoritative stale singleton rejection not observed: {response:?}"),
+    }
+    wait_singleton_cleanup(&mut cluster, *successor_node).await?;
+    wait_singleton_cleanup(&mut cluster, old_owner).await?;
+
+    for node_id in 1..=3 {
+        require_singleton_value(&mut cluster, node_id, "successor", true).await?;
+    }
+    if provider.call_count() != 2 {
+        bail!(
+            "singleton pause/takeover made {} physical provider calls instead of two",
+            provider.call_count()
+        );
+    }
+    let (final_term, applied_after) = raft_term_and_index(&mut cluster, leader).await?;
+    if final_term != stable_term || cluster.leader().await? != leader {
+        bail!("singleton proof changed leader/term during its measured interval");
+    }
+    let delta = applied_after.saturating_sub(applied_before);
+    if delta > SINGLETON_POST_BASELINE_COMMIT_BUDGET {
+        bail!(
+            "singleton takeover consumed {delta} post-baseline Raft entries (budget {}): old={authoritative_old:?} successor={successor:?}",
+            SINGLETON_POST_BASELINE_COMMIT_BUDGET
+        );
+    }
+    println!(
+        "CLUSTER_SINGLETON provider_calls=2 old_owner={old_owner} successor={successor_node} old_fence={} successor_fence={} applied_index_delta={delta} commit_budget={}",
+        authoritative_old.fence,
+        successor.fence,
+        SINGLETON_POST_BASELINE_COMMIT_BUDGET
+    );
+    provider.shutdown().await;
+    cluster.shutdown_all().await
+}
+
+async fn start_singleton_probe(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    provider_url: &str,
+) -> Result<Lease> {
+    match cluster
+        .request(
+            node_id,
+            Request::StartSingletonProbe {
+                provider_url: provider_url.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::SingletonProbeStart {
+            acquired: true,
+            lease,
+        } => Ok(lease),
+        response => bail!("node {node_id} did not acquire singleton probe: {response:?}"),
+    }
+}
+
+async fn read_singleton_lease(cluster: &mut ClusterProcesses, node_id: u64) -> Result<Lease> {
+    match cluster
+        .request(node_id, Request::ReadSingletonLease)
+        .await?
+    {
+        Response::SingletonLease { lease: Some(lease) } => Ok(lease),
+        response => bail!("singleton lease row is absent: {response:?}"),
+    }
+}
+
+async fn wait_until_lease_expired(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    expected: &Lease,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let current = read_singleton_lease(cluster, node_id).await?;
+        if &current != expected {
+            bail!("paused owner changed its authoritative lease: expected={expected:?} current={current:?}");
+        }
+        let now_ms = unix_time_ms()?;
+        if now_ms >= current.expires_at_unix_ms {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("paused singleton lease did not reach its authoritative expiry");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_singleton_outcome(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    accepted: &[&str],
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match cluster
+            .request(node_id, Request::SingletonProbeStatus)
+            .await?
+        {
+            Response::SingletonProbeStatus { outcome, .. }
+                if accepted.contains(&outcome.as_str()) =>
+            {
+                return Ok(outcome);
+            }
+            Response::SingletonProbeStatus { outcome, .. }
+                if outcome == "provider_pending" || outcome == "publishing" =>
+            {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "singleton probe on voter {node_id} timed out in outcome {outcome}; expected one of {accepted:?}"
+                    );
+                }
+            }
+            response => bail!("singleton probe reached an unexpected outcome: {response:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_singleton_cleanup(cluster: &mut ClusterProcesses, node_id: u64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match cluster
+            .request(node_id, Request::SingletonProbeStatus)
+            .await?
+        {
+            Response::SingletonProbeStatus {
+                cleanup_error: Some(error),
+                ..
+            } => {
+                bail!("singleton probe cleanup on voter {node_id} was ambiguous: {error}");
+            }
+            Response::SingletonProbeStatus {
+                cleanup_done: true, ..
+            } => return Ok(()),
+            Response::SingletonProbeStatus {
+                outcome,
+                cleanup_done: false,
+                cleanup_error: None,
+            } => {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "singleton probe cleanup on voter {node_id} timed out after outcome {outcome}"
+                    );
+                }
+            }
+            response => bail!("unexpected singleton cleanup response: {response:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn require_singleton_value(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    expected: &str,
+    local: bool,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match cluster
+            .request(node_id, Request::ReadSingletonValue { local })
+            .await?
+        {
+            Response::SingletonValue { value } if value.as_deref() == Some(expected) => {
+                return Ok(());
+            }
+            Response::SingletonValue { .. } => {}
+            response => bail!("unexpected singleton setting response: {response:?}"),
+        }
+        if Instant::now() >= deadline {
+            bail!("voter {node_id} did not converge on singleton value {expected}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn raft_term_and_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<(u64, u64)> {
+    match cluster.request(node_id, Request::Metrics).await? {
+        Response::Metrics {
+            current_term,
+            applied_index: Some(applied_index),
+            ..
+        } => Ok((current_term, applied_index)),
+        response => bail!("singleton proof could not sample Raft position: {response:?}"),
+    }
+}
+
+fn unix_time_ms() -> Result<i64> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("cluster-check clock precedes unix epoch")?
+            .as_millis(),
+    )
+    .context("cluster-check unix millisecond clock overflowed")
 }
 
 /// Prove a new follower can talk to a leader that predates the watermark
@@ -1836,6 +2360,13 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         "baseline settle",
     )
     .await?;
+    settle_post_snapshot_tail(
+        &metrics_client,
+        store.as_ref(),
+        baseline_snapshot,
+        "baseline",
+    )
+    .await?;
     let data_dir = launch.root.join("node-1");
     let before_bytes = stable_directory_bytes(&data_dir).await?;
 
@@ -1903,11 +2434,18 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     // hiqlite's retained WAL segment alternates allocation across adjacent
     // compactions. Compare equally settled, two-cycle states so that rollover
     // is not reported as durable progress growth (or as a negative delta).
-    let _ = ensure_compaction_after(
+    let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         measured_snapshot,
         "coalesced settle",
+    )
+    .await?;
+    settle_post_snapshot_tail(
+        &metrics_client,
+        store.as_ref(),
+        settled_snapshot,
+        "coalesced",
     )
     .await?;
     let after_bytes = stable_directory_bytes(&data_dir).await?;
@@ -1942,13 +2480,14 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_measured_snapshot =
         ensure_compaction_after(&metrics_client, store.as_ref(), raw_snapshot, "raw control")
             .await?;
-    let _ = ensure_compaction_after(
+    let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         raw_measured_snapshot,
         "raw settle",
     )
     .await?;
+    settle_post_snapshot_tail(&metrics_client, store.as_ref(), raw_settled_snapshot, "raw").await?;
     let snapshot_metrics_after = snapshot_metrics.snapshot();
     let build_ok_delta = snapshot_metrics_after
         .build_ok
@@ -2129,6 +2668,34 @@ async fn wait_for_purge(client: &Client, snapshot: u64, phase: &str) -> Result<u
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn settle_post_snapshot_tail(
+    client: &Client,
+    store: &HiqliteAuthStore,
+    snapshot: u64,
+    phase: &str,
+) -> Result<()> {
+    let target = snapshot.saturating_add(GROWTH_SETTLED_LOG_TAIL);
+    let mut applied = applied_index(client).await?;
+    if applied > target {
+        bail!(
+            "{phase} snapshot was observed with a {}-entry tail, beyond the fixed {}-entry settling boundary",
+            applied.saturating_sub(snapshot),
+            GROWTH_SETTLED_LOG_TAIL
+        );
+    }
+    let marker = "cluster.growth.post_snapshot_tail";
+    while applied < target {
+        store
+            .put_setting(marker, &applied.saturating_sub(snapshot).to_string())
+            .await?;
+        applied = applied_index(client).await?;
+    }
+    if applied != target {
+        bail!("{phase} post-snapshot tail settled at {applied}, expected exact index {target}");
+    }
+    Ok(())
 }
 
 async fn stable_directory_bytes(root: &Path) -> Result<u64> {
@@ -2567,6 +3134,17 @@ pub enum Request {
         lease: Lease,
         observed_at_ms: Option<i64>,
     },
+    StartSingletonProbe {
+        provider_url: String,
+    },
+    ReadSingletonLease,
+    SingletonProbeStatus,
+    ReplaySingletonLease {
+        lease: Lease,
+    },
+    ReadSingletonValue {
+        local: bool,
+    },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
     },
@@ -2728,6 +3306,21 @@ pub enum Response {
     },
     JobLease {
         lease: Option<Lease>,
+    },
+    SingletonProbeStart {
+        acquired: bool,
+        lease: Lease,
+    },
+    SingletonLease {
+        lease: Option<Lease>,
+    },
+    SingletonProbeStatus {
+        outcome: String,
+        cleanup_done: bool,
+        cleanup_error: Option<String>,
+    },
+    SingletonValue {
+        value: Option<String>,
     },
     ArtworkFenceApply {
         setting: bool,
@@ -3234,6 +3827,49 @@ impl NodeProcess {
         }
         Ok(())
     }
+
+    fn pause(&mut self) -> Result<PausedProcessGuard> {
+        let pid = self
+            .child
+            .id()
+            .with_context(|| format!("voter {} has no process id", self.id))?;
+        send_process_signal(pid, libc::SIGSTOP, "SIGSTOP")?;
+        Ok(PausedProcessGuard { pid, armed: true })
+    }
+}
+
+struct PausedProcessGuard {
+    pid: u32,
+    armed: bool,
+}
+
+impl PausedProcessGuard {
+    fn resume(mut self) -> Result<()> {
+        send_process_signal(self.pid, libc::SIGCONT, "SIGCONT")?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PausedProcessGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best effort in Drop: the owning assertion error is more useful
+            // than a second panic, but CI must never retain a stopped child.
+            let _ = send_process_signal(self.pid, libc::SIGCONT, "SIGCONT cleanup");
+        }
+    }
+}
+
+fn send_process_signal(pid: u32, signal: libc::c_int, label: &str) -> Result<()> {
+    let pid = libc::pid_t::try_from(pid).context("voter process id overflowed pid_t")?;
+    // SAFETY: `pid` came from the live child handle and `signal` is one of the
+    // two fixed POSIX stop/continue constants supplied by the caller above.
+    let result = unsafe { libc::kill(pid, signal) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("send {label}"));
+    }
+    Ok(())
 }
 
 pub struct ClusterProcesses {
@@ -3329,6 +3965,50 @@ impl ClusterProcesses {
         self.node_mut(node_id)?.request(&request).await
     }
 
+    async fn request_pair_concurrently(
+        &mut self,
+        first_id: u64,
+        first_request: Request,
+        second_id: u64,
+        second_request: Request,
+    ) -> Result<(Response, Response)> {
+        if first_id == second_id {
+            bail!("concurrent requests require two distinct voters");
+        }
+        let first_index = usize::try_from(first_id.saturating_sub(1))?;
+        let second_index = usize::try_from(second_id.saturating_sub(1))?;
+        let (first, second) = if first_index < second_index {
+            let (before_second, from_second) = self.nodes.split_at_mut(second_index);
+            (
+                before_second
+                    .get_mut(first_index)
+                    .and_then(Option::as_mut)
+                    .with_context(|| format!("voter {first_id} is not running"))?,
+                from_second
+                    .first_mut()
+                    .and_then(Option::as_mut)
+                    .with_context(|| format!("voter {second_id} is not running"))?,
+            )
+        } else {
+            let (before_first, from_first) = self.nodes.split_at_mut(first_index);
+            (
+                from_first
+                    .first_mut()
+                    .and_then(Option::as_mut)
+                    .with_context(|| format!("voter {first_id} is not running"))?,
+                before_first
+                    .get_mut(second_index)
+                    .and_then(Option::as_mut)
+                    .with_context(|| format!("voter {second_id} is not running"))?,
+            )
+        };
+        let (first_response, second_response) = tokio::join!(
+            first.request(&first_request),
+            second.request(&second_request)
+        );
+        Ok((first_response?, second_response?))
+    }
+
     /// Add one real voter process to an already-running cluster.
     pub async fn spawn_node(&mut self, executable: &Path, launch: NodeLaunch) -> Result<()> {
         if launch.root != self.root {
@@ -3356,6 +4036,10 @@ impl ClusterProcesses {
             node.kill().await?;
         }
         Ok(())
+    }
+
+    fn pause(&mut self, node_id: u64) -> Result<PausedProcessGuard> {
+        self.node_mut(node_id)?.pause()
     }
 
     /// Stop every remaining voter in an orderly way. See
@@ -3773,6 +4457,19 @@ pub fn validate_known_dump(dump: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+struct SingletonProbe {
+    outcome: Arc<RwLock<String>>,
+    cleanup_done: Arc<AtomicBool>,
+    cleanup_error: Arc<RwLock<Option<String>>>,
+}
+
+#[derive(Default)]
+struct NodeMutableState {
+    store: Option<Arc<HiqliteAuthStore>>,
+    membership: Option<MembershipManager>,
+    singleton_probe: Option<SingletonProbe>,
+}
+
 /// Run one embedded voter: start hiqlite, announce readiness, then serve the
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
@@ -3818,8 +4515,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         .root
         .join(format!("node-{}", launch.node_id))
         .join("telemetry.db");
-    let mut store: Option<Arc<HiqliteAuthStore>> = None;
-    let mut membership: Option<MembershipManager> = None;
+    let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
     while let Some(line) = input.next_line().await? {
@@ -3831,8 +4527,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
                     &replication,
                     &launch,
                     &telemetry_path,
-                    &mut store,
-                    &mut membership,
+                    &mut state,
                 )
                 .await
             }
@@ -3858,9 +4553,13 @@ async fn handle_request(
     replication: &ReplicationMonitor,
     launch: &NodeLaunch,
     telemetry_path: &Path,
-    store: &mut Option<Arc<HiqliteAuthStore>>,
-    membership: &mut Option<MembershipManager>,
+    state: &mut NodeMutableState,
 ) -> Result<Response> {
+    let NodeMutableState {
+        store,
+        membership,
+        singleton_probe,
+    } = state;
     match request {
         Request::SeedLegacyArtworkUrls => {
             client
@@ -4388,6 +5087,140 @@ async fn handle_request(
                 Err(error) => Err(error.into()),
             }
         }
+        Request::StartSingletonProbe { provider_url } => {
+            if singleton_probe.is_some() {
+                bail!("this voter already owns a singleton probe generation");
+            }
+            let opened = store.clone().context("node store is not open")?;
+            let coordinator = StoreCoordinator::new(
+                opened.clone() as Arc<dyn plurx_core::store::Store>,
+                format!("node-{}", launch.node_id),
+            )?;
+            match coordinator
+                .acquire(SINGLETON_RESOURCE, SINGLETON_LEASE_TTL)
+                .await?
+            {
+                LeaseClaim::Held { .. } => Ok(Response::SingletonProbeStart {
+                    acquired: false,
+                    lease: read_job_lease(client, SINGLETON_RESOURCE)
+                        .await?
+                        .context("held singleton lease row disappeared")?,
+                }),
+                LeaseClaim::Acquired(lease) => {
+                    let active = ActiveJobLease::start_with_policy(
+                        coordinator,
+                        lease.clone(),
+                        SINGLETON_LEASE_TTL,
+                        SINGLETON_HEARTBEAT,
+                    )?;
+                    let outcome = Arc::new(RwLock::new("provider_pending".to_owned()));
+                    let cleanup_done = Arc::new(AtomicBool::new(false));
+                    let cleanup_error = Arc::new(RwLock::new(None));
+                    *singleton_probe = Some(SingletonProbe {
+                        outcome: Arc::clone(&outcome),
+                        cleanup_done: Arc::clone(&cleanup_done),
+                        cleanup_error: Arc::clone(&cleanup_error),
+                    });
+                    let probe_store = opened as Arc<dyn plurx_core::store::Store>;
+                    let _probe_task = tokio::spawn(async move {
+                        let loss = active.loss_token();
+                        let client = reqwest::Client::builder()
+                            .no_proxy()
+                            .connect_timeout(Duration::from_secs(5))
+                            .timeout(Duration::from_secs(30))
+                            .build();
+                        let terminal = match client {
+                            Err(error) => format!("failed:http_client:{error}"),
+                            Ok(client) => {
+                                let provider = async {
+                                    let response = client.get(provider_url).send().await?;
+                                    let response = response.error_for_status()?;
+                                    response.text().await
+                                };
+                                tokio::pin!(provider);
+                                tokio::select! {
+                                    _ = loss.cancelled() => "lease_lost".to_owned(),
+                                    result = &mut provider => match result {
+                                        Err(error) => format!("failed:provider:{error}"),
+                                        Ok(marker) => {
+                                            *outcome.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                                "publishing".to_owned();
+                                            match active.publisher(probe_store.as_ref())
+                                                .put_setting(SINGLETON_PROOF_KEY, &marker)
+                                                .await
+                                            {
+                                                Ok(()) => "published".to_owned(),
+                                                Err(StoreError::FenceRejected { .. }) =>
+                                                    "fence_rejected".to_owned(),
+                                                Err(error) => format!("failed:publish:{error}"),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        *outcome
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = terminal;
+                        // Publish the terminal verdict before cleanup so a
+                        // stuck retirement reports the exact completed phase.
+                        // The controller separately waits for cleanup before
+                        // sampling the bounded Raft-entry delta.
+                        if let Err(error) = active.release().await {
+                            *cleanup_error
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(error.to_string());
+                        }
+                        cleanup_done.store(true, AtomicOrdering::Release);
+                    });
+                    Ok(Response::SingletonProbeStart {
+                        acquired: true,
+                        lease,
+                    })
+                }
+            }
+        }
+        Request::ReadSingletonLease => Ok(Response::SingletonLease {
+            lease: read_job_lease(client, SINGLETON_RESOURCE).await?,
+        }),
+        Request::SingletonProbeStatus => {
+            let probe = singleton_probe
+                .as_ref()
+                .context("this voter has no acquired singleton probe")?;
+            Ok(Response::SingletonProbeStatus {
+                outcome: probe
+                    .outcome
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+                cleanup_done: probe.cleanup_done.load(AtomicOrdering::Acquire),
+                cleanup_error: probe
+                    .cleanup_error
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            })
+        }
+        Request::ReplaySingletonLease { ref lease } => {
+            let replacement = lease.publication_successor()?;
+            match store_ref(store)?
+                .put_setting_fenced(SINGLETON_PROOF_KEY, "raw-stale-owner", lease, &replacement)
+                .await
+            {
+                Ok(()) => Ok(Response::Flag { value: true }),
+                Err(StoreError::FenceRejected { .. }) => Ok(Response::Flag { value: false }),
+                Err(error) => Err(error.into()),
+            }
+        }
+        Request::ReadSingletonValue { local } => {
+            let value = if local {
+                read_local_setting(client, SINGLETON_PROOF_KEY).await?
+            } else {
+                store_ref(store)?.get_setting(SINGLETON_PROOF_KEY).await?
+            };
+            Ok(Response::SingletonValue { value })
+        }
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
             .retire_artwork_source_repair(fence)
             .await
@@ -4653,6 +5486,79 @@ async fn handle_request(
             Ok(Response::Ok)
         }
     }
+}
+
+#[derive(Debug)]
+struct SingletonLeaseRow {
+    resource: String,
+    owner_node_id: String,
+    fence: i64,
+    revision: i64,
+    expires_at_unix_ms: i64,
+}
+
+impl From<&mut Row<'_>> for SingletonLeaseRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            resource: row.get("resource"),
+            owner_node_id: row.get("owner_node_id"),
+            fence: row.get("fence"),
+            revision: row.get("revision"),
+            expires_at_unix_ms: row.get("expires_at_ms"),
+        }
+    }
+}
+
+impl SingletonLeaseRow {
+    fn into_lease(self) -> Result<Lease> {
+        Ok(Lease {
+            resource: self.resource,
+            owner_node_id: self.owner_node_id,
+            fence: u64::try_from(self.fence).context("singleton fence was not positive")?,
+            revision: u64::try_from(self.revision)
+                .context("singleton revision was not positive")?,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+        })
+    }
+}
+
+struct SingletonSettingRow {
+    value: String,
+}
+
+impl From<&mut Row<'_>> for SingletonSettingRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
+    let mut rows = client
+        .query_consistent_map::<SingletonLeaseRow, _>(
+            "SELECT resource, owner_node_id, fence, revision, expires_at_ms \
+             FROM job_leases WHERE resource = $1",
+            params!(resource),
+        )
+        .await?;
+    if rows.len() > 1 {
+        bail!("singleton lease primary key returned multiple rows");
+    }
+    rows.pop().map(SingletonLeaseRow::into_lease).transpose()
+}
+
+async fn read_local_setting(client: &Client, key: &str) -> Result<Option<String>> {
+    let mut rows = client
+        .query_map::<SingletonSettingRow, _>(
+            "SELECT value FROM settings WHERE key = $1",
+            params!(key),
+        )
+        .await?;
+    if rows.len() > 1 {
+        bail!("singleton setting primary key returned multiple rows");
+    }
+    Ok(rows.pop().map(|row| row.value))
 }
 
 struct MembershipTombstoneRow {

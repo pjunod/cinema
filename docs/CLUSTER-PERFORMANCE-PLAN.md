@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P2d landed; P2e staged for review · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P2e landed; M4 singleton process proof staged; P0c/P2f and P3–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -343,8 +343,8 @@ slices:
   percentile/unit tests, fresh independent three- and four-process semantic
   runs, a stable leader/term boundary, and per-voter local corpus validation
   proving that both runs use identical logical work;
-- **P0c — named-runner evidence:** after the remaining separate-process M4
-  takeover/partition proof, fresh
+- **P0c — named-runner evidence:** after the separate-process M4 singleton
+  takeover proof and the distinct serving-node partition proof, fresh
   independent clusters on the pinned four-machine runner, alternating run
   order, at least three paired runs continued until uncertainty is narrower
   than the acceptance budget, a pinned isolated load-generator placement,
@@ -385,11 +385,14 @@ accepts the change.
 
 The M4 core landed in #505: generic lease-fenced publications and coordinated
 scan, provider, genre, and candidate schedulers now share one production
-boundary. P0c remains blocked only on M4's retained real-process proof: pause
-the owner, force takeover and a partition, then bound physical provider calls
-and Raft commits while rejecting the stale owner. Until that proof lands, a
-limited diagnostic baseline may explicitly disable scheduler/provider loops,
-but it cannot support an ordinary-load performance claim.
+boundary. The singleton process slice compiles that exact production lease
+lifecycle into the three-process harness, pauses a follower owner past its
+authoritative TTL, admits one successor, bounds provider calls and Raft
+entries, and rejects the resumed token inside the publication transaction.
+That closes the duplication risk which could contaminate an ordinary-load
+baseline. M4's separate serving-node partition/readiness/capability proof
+remains before P0c; `SIGSTOP` is process unavailability and is not relabelled
+as a live network partition.
 
 **Acceptance:** CI's replicated-storage contract passes and validates that the
 artifact contains both voter counts, exact workload identity, quorum, commit
@@ -682,8 +685,9 @@ documented discontinuity behavior.
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
 
 `CLUSTERING-PLAN.md` M4's core implementation landed in #505. Its real-process
-pause/takeover/partition acceptance remains before P0c and before any PR in
-this table claims ordinary-load performance. Code instrumentation may be
+singleton pause/takeover proof is staged here; the serving-node partition
+acceptance remains before P0c and before any PR in this table claims
+ordinary-load performance. Code instrumentation may be
 prepared before the named-runner baseline, but P0c/P2f acceptance and tuning
 decisions remain blocked until that remaining singleton-work proof passes.
 

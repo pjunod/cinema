@@ -3388,9 +3388,9 @@ async fn bound_source_snapshot(
 #[derive(Clone)]
 pub struct PretranscodeFence {
     state: Arc<RwLock<Option<PretranscodeJob>>>,
+    revoked: Arc<AtomicBool>,
 }
 
-const PRETRANSCODE_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(3);
 type PretranscodeSettlementFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<bool, plurx_core::error::StoreError>> + Send + 'a>,
 >;
@@ -3399,6 +3399,7 @@ impl PretranscodeFence {
     pub fn new(job: PretranscodeJob) -> Self {
         Self {
             state: Arc::new(RwLock::new(Some(job))),
+            revoked: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3413,20 +3414,50 @@ impl PretranscodeFence {
         lease_expires_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
         let mut state = self.state.write().await;
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
         let Some(current) = state.clone() else {
             return Ok(false);
         };
-        match store
+        let renewed = store
             .renew_pretranscode_job(&current, now_unix_ms, lease_expires_ms)
-            .await
-        {
+            .await;
+        if self.revoked.load(Acquire) {
+            return match renewed {
+                Ok(Some(replacement)) => {
+                    // Retain an acknowledged replacement only so retirement
+                    // can return this now-unowned row to the queue.
+                    *state = Some(replacement);
+                    Ok(false)
+                }
+                Ok(None) => {
+                    *state = None;
+                    Ok(false)
+                }
+                Err(error) => {
+                    *state = None;
+                    Err(error)
+                }
+            };
+        }
+        match renewed {
             Ok(Some(replacement))
                 if renewal_response_is_authoritative(&current, &replacement, unix_ms()) =>
             {
                 *state = Some(replacement);
                 Ok(true)
             }
-            Ok(Some(_)) | Ok(None) => {
+            Ok(Some(replacement)) => {
+                // The backend renewed before the predecessor deadline but
+                // answered too late for continuous local authority. Keep the
+                // exact acknowledged token for deterministic retirement while
+                // synchronously blocking publication and settlement.
+                *state = Some(replacement);
+                self.revoke();
+                Ok(false)
+            }
+            Ok(None) => {
                 *state = None;
                 Ok(false)
             }
@@ -3437,6 +3468,10 @@ impl PretranscodeFence {
                 Err(error)
             }
         }
+    }
+
+    pub fn revoke(&self) {
+        self.revoked.store(true, Release);
     }
 
     pub async fn invalidate(&self, expected: &PretranscodeJob) -> bool {
@@ -3452,25 +3487,38 @@ impl PretranscodeFence {
     where
         F: FnOnce(PretranscodeJob, i64) -> PretranscodeSettlementFuture<'a>,
     {
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
         let mut state = self.state.write().await;
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
         let Some(job) = state.clone() else {
             return Ok(false);
         };
         let observed_at = unix_ms();
-        let result =
-            tokio::time::timeout(PRETRANSCODE_SETTLEMENT_TIMEOUT, operation(job, observed_at))
-                .await;
-        // Every settlement is terminal for this running token. On timeout the
-        // Raft/SQLite commit state is unknown, so self-fencing also prevents
-        // cleanup from deleting a result that may already have committed.
+        // The backend owns its deadline. An equal outer timeout can drop a
+        // still-committing Hiqlite request, while SQLite's blocking
+        // transaction cannot be cancelled safely at all.
+        let result = operation(job, observed_at).await;
+        // Every settlement is terminal for this running token.
         *state = None;
-        match result {
-            Ok(result) => result,
-            Err(_) => Err(plurx_core::error::StoreError::Task(
-                "speculative-transcode settlement timed out with an unknown commit state"
-                    .to_owned(),
-            )),
-        }
+        result
+    }
+
+    pub async fn retire(&self, store: &dyn Store) -> Result<(), plurx_core::error::StoreError> {
+        self.revoke();
+        let mut state = self.state.write().await;
+        let Some(job) = state.clone() else {
+            return Ok(());
+        };
+        let now_unix_ms = unix_ms();
+        let result = store
+            .yield_pretranscode_job(&job, now_unix_ms, now_unix_ms)
+            .await;
+        *state = None;
+        result.map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]

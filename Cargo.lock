@@ -2430,7 +2430,9 @@ dependencies = [
  "hiqlite",
  "hmac",
  "jsonschema",
+ "libc",
  "plurx-core",
+ "reqwest 0.12.28",
  "rusqlite",
  "rustls",
  "serde",
@@ -2438,6 +2440,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
