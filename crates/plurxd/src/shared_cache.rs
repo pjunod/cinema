@@ -60,10 +60,13 @@ pub(crate) struct SharedCacheCoordinator {
     admitted_generation: Arc<AtomicU64>,
     suspect_report_pending: Arc<AtomicBool>,
     verification_transition: Arc<tokio::sync::Mutex<()>>,
+    publication_commit: Arc<tokio::sync::RwLock<()>>,
     mount_io: Arc<tokio::sync::Semaphore>,
     mount_publications: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     publication_install_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    publication_commit_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     node_id: String,
     membership: MembershipManager,
     transport: PeerTransport,
@@ -110,12 +113,15 @@ impl SharedCacheCoordinator {
             admitted_generation: Arc::new(AtomicU64::new(u64::MAX)),
             suspect_report_pending: Arc::new(AtomicBool::new(false)),
             verification_transition: Arc::new(tokio::sync::Mutex::new(())),
+            publication_commit: Arc::new(tokio::sync::RwLock::new(())),
             mount_io: Arc::new(tokio::sync::Semaphore::new(MOUNT_IO_CONCURRENCY)),
             mount_publications: Arc::new(tokio::sync::Semaphore::new(
                 MOUNT_PUBLICATION_CONCURRENCY,
             )),
             #[cfg(test)]
             publication_install_pause: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            publication_commit_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
             transport: PeerTransport::new(membership.clone()),
             membership,
@@ -315,11 +321,17 @@ impl SharedCacheCoordinator {
             return;
         }
         let transition = Arc::clone(&self.verification_transition);
+        let publication_commit = Arc::clone(&self.publication_commit);
         let pending = Arc::clone(&self.suspect_report_pending);
         let store = Arc::clone(&self.store);
         let storage_id = config.storage_id.clone();
         let node_id = self.node_id.clone();
         tokio::spawn(async move {
+            // A node-scoped mount loss revokes local access immediately, but
+            // its durable suspect record must be ordered after any global
+            // generation whose completion already began. Healthy peers may
+            // continue serving those immutable bytes.
+            let _publication_commit = publication_commit.write().await;
             let _transition = transition.lock().await;
             let _ = tokio::time::timeout(
                 Duration::from_secs(3),
@@ -867,6 +879,7 @@ impl SharedCacheCoordinator {
             }
         };
 
+        let _publication_commit = self.publication_commit.read().await;
         if !self.generation_is_admitted(admitted_generation) {
             let _ = self
                 .abandon_publication(
@@ -883,6 +896,19 @@ impl SharedCacheCoordinator {
             return Ok(false);
         }
 
+        #[cfg(test)]
+        {
+            let pause = self
+                .publication_commit_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+
         let completion = self
             .store
             .complete_shared_cache_entry(
@@ -895,24 +921,7 @@ impl SharedCacheCoordinator {
             )
             .await;
         let completion_error = match completion {
-            Ok(true) if self.generation_is_admitted(admitted_generation) => return Ok(true),
-            Ok(true) => {
-                let _invalidated = self
-                    .store
-                    .invalidate_cache_entry(
-                        recipe_hash,
-                        &config.storage_id,
-                        "shared",
-                        &relative_dir,
-                        Some(&manifest.manifest_digest),
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                for name in [&staging_name, &final_name] {
-                    remove_shared_tree_if_present(&fanout, name, publication_entries).await?;
-                }
-                return Ok(false);
-            }
+            Ok(true) => return Ok(true),
             Ok(false) => "shared cache claim changed before completion".to_owned(),
             Err(error) => error.to_string(),
         };
@@ -946,29 +955,7 @@ impl SharedCacheCoordinator {
                         && current.manifest_digest.as_deref()
                             == Some(manifest.manifest_digest.as_str()) =>
                 {
-                    if self.generation_is_admitted(admitted_generation) {
-                        Ok(true)
-                    } else {
-                        self.store
-                            .invalidate_cache_entry(
-                                recipe_hash,
-                                &config.storage_id,
-                                "shared",
-                                &relative_dir,
-                                Some(&manifest.manifest_digest),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())?;
-                        for name in [&staging_name, &final_name] {
-                            remove_shared_tree_if_present(
-                                &fanout,
-                                name,
-                                publication_entries,
-                            )
-                            .await?;
-                        }
-                        Ok(false)
-                    }
+                    Ok(true)
                 }
                 Ok(_) => Err(completion_error),
                 Err(reconcile_error) => Err(format!(
@@ -1188,7 +1175,7 @@ impl SharedCacheCoordinator {
             LeaseClaim::Held { .. } => return Ok(()),
         };
         self.store
-            .prune_expired_cache_consumer_pins(now_ms, PIN_PRUNE_BATCH)
+            .prune_expired_cache_consumer_pins(&config.storage_id, now_ms, PIN_PRUNE_BATCH)
             .await
             .map_err(|error| error.to_string())?;
         let stale_claims = self
@@ -1403,6 +1390,7 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     use plurx_core::store::{SqliteStore, Store};
 
     fn coordinator(
@@ -1462,6 +1450,46 @@ mod tests {
         )
         .await
         .expect("source manifest")
+    }
+
+    async fn seed_media_files(store: &Arc<dyn Store>, count: usize) -> Vec<i64> {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shared Cache Publication Fixtures".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("publication fixture library");
+        let mut files = Vec::with_capacity(count);
+        for index in 0..count {
+            let item_id = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Shared Cache Fixture {index}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("publication fixture item");
+            files.push(
+                store
+                    .upsert_file(
+                        item_id,
+                        &format!("/shared-cache-fixture-{index}.mkv"),
+                        1,
+                        1,
+                        &ProbeResult::default(),
+                    )
+                    .await
+                    .expect("publication fixture file"),
+            );
+        }
+        files
     }
 
     #[test]
@@ -1633,6 +1661,7 @@ mod tests {
         let manifest_b = source_generation(&source_b, "generation-b").await;
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let files = seed_media_files(&store, 2).await;
         let shared_cache = coordinator(shared.path(), "media-a", "publisher", store);
         shared_cache
             .admit_local_for_test()
@@ -1645,15 +1674,17 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
         let publisher_a = Arc::clone(&shared_cache);
+        let file_a = files[0];
         let publication_a = tokio::spawn(async move {
             publisher_a
-                .publish_generation(&"a".repeat(64), 1, 1, &source_a, &manifest_a)
+                .publish_generation(&"a".repeat(64), file_a, 1, &source_a, &manifest_a)
                 .await
         });
         let publisher_b = Arc::clone(&shared_cache);
+        let file_b = files[1];
         let publication_b = tokio::spawn(async move {
             publisher_b
-                .publish_generation(&"b".repeat(64), 2, 1, &source_b, &manifest_b)
+                .publish_generation(&"b".repeat(64), file_b, 1, &source_b, &manifest_b)
                 .await
         });
         tokio::time::timeout(Duration::from_secs(3), pause.wait())
@@ -1688,6 +1719,7 @@ mod tests {
         let manifest = source_generation(&source, "generation-revoked").await;
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let file_id = seed_media_files(&store, 1).await[0];
         let shared_cache = coordinator(
             shared.path(),
             "media-a",
@@ -1709,7 +1741,7 @@ mod tests {
         let published_recipe = recipe_hash.clone();
         let publication = tokio::spawn(async move {
             publisher
-                .publish_generation(&published_recipe, 3, 1, &source, &manifest)
+                .publish_generation(&published_recipe, file_id, 1, &source, &manifest)
                 .await
         });
         tokio::time::timeout(Duration::from_secs(3), pause.wait())
@@ -1734,6 +1766,61 @@ mod tests {
             .await
             .expect("stale publication inventory")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn mount_loss_after_commit_begins_preserves_global_generation() {
+        let shared = tempfile::tempdir().expect("shared root");
+        let sources = tempfile::tempdir().expect("source roots");
+        let source = sources.path().join("generation");
+        let manifest = source_generation(&source, "generation-committing").await;
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let file_id = seed_media_files(&store, 1).await[0];
+        let shared_cache = coordinator(
+            shared.path(),
+            "media-a",
+            "committing-publisher",
+            Arc::clone(&store),
+        );
+        shared_cache
+            .admit_local_for_test()
+            .await
+            .expect("verified shared mount");
+        let storage_id = shared_cache.storage_id().expect("storage id").to_owned();
+        let recipe_hash = "d".repeat(64);
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *shared_cache
+            .publication_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let publisher = Arc::clone(&shared_cache);
+        let published_recipe = recipe_hash.clone();
+        let publication = tokio::spawn(async move {
+            publisher
+                .publish_generation(&published_recipe, file_id, 1, &source, &manifest)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), pause.wait())
+            .await
+            .expect("publication entered linearized completion");
+
+        shared_cache
+            .report_io_failure("test_post_commit_mount_loss")
+            .await;
+        assert!(!shared_cache.is_verified());
+        pause.wait().await;
+        assert!(tokio::time::timeout(Duration::from_secs(3), publication)
+            .await
+            .expect("committing publication finished")
+            .expect("publication task joined")
+            .expect("publication result"));
+        wait_for_suspect_member(&store, &storage_id, "committing-publisher").await;
+        assert!(store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .expect("shared cache lookup")
+            .is_some());
     }
 
     #[test]

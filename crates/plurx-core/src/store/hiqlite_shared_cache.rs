@@ -619,9 +619,11 @@ impl SharedCacheStore for HiqliteAuthStore {
 
     async fn prune_expired_cache_consumer_pins(
         &self,
+        storage_id: &str,
         now_ms: i64,
         limit: i64,
     ) -> Result<usize, StoreError> {
+        validate_id("storage id", storage_id)?;
         if now_ms < 0 || !(1..=4_096).contains(&limit) {
             return Err(StoreError::Task(
                 "expired cache pin prune inputs are invalid".to_owned(),
@@ -629,13 +631,14 @@ impl SharedCacheStore for HiqliteAuthStore {
         }
         let sql = "DELETE FROM cache_consumer_pins WHERE rowid IN (
                    SELECT rowid FROM cache_consumer_pins
-                    WHERE expires_at_ms <= $1
-                    ORDER BY expires_at_ms, storage_id, recipe_hash, generation_id,
+                    WHERE storage_id = $1 AND expires_at_ms <= $2
+                    ORDER BY expires_at_ms, recipe_hash, generation_id,
                              consumer_kind, consumer_id
-                    LIMIT $2)";
+                    LIMIT $3)";
         validate_sql(sql)?;
-        usize::try_from(self.client().execute(sql, params!(now_ms, limit)).await?)
-            .map_err(|error| StoreError::Database(format!("pin prune count overflow: {error}")))
+        self.client()
+            .execute(sql, params!(storage_id, now_ms, limit))
+            .await
     }
 
     async fn shared_cache_gc_candidates(

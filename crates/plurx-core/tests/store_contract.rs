@@ -10408,7 +10408,7 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: acquire crash bridge pin: {error}")));
         assert_eq!(
             store
-                .prune_expired_cache_consumer_pins(214, 8)
+                .prune_expired_cache_consumer_pins(&storage_id, 214, 8)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: early pin prune: {error}")),
             0,
@@ -10416,7 +10416,7 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .prune_expired_cache_consumer_pins(215, 8)
+                .prune_expired_cache_consumer_pins(&storage_id, 215, 8)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: expired pin prune: {error}")),
             1,
@@ -10499,8 +10499,14 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: wrong tombstone finalization: {error}"))
             .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
         lease = store
-            .renew_lease(&lease, 223, 2_100)
+            .renew_lease(&lease, renewal_now, renewal_expiry)
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew after wrong finalization: {error}"))
             .unwrap_or_else(|| panic!("{backend}: wrong finalization advanced the GC lease"));
@@ -10519,8 +10525,14 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: repeat finalization: {error}"))
             .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
         lease = store
-            .renew_lease(&lease, 224, 2_200)
+            .renew_lease(&lease, renewal_now, renewal_expiry)
             .await
             .unwrap_or_else(|error| panic!("{backend}: renew after repeat finalization: {error}"))
             .unwrap_or_else(|| panic!("{backend}: absent finalization advanced the GC lease"));
