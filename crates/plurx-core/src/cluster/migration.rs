@@ -465,7 +465,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             hostname: super::membership::system_short_hostname().unwrap_or_default(),
             raft_address: local.raft_address.clone(),
             api_address: local.api_address.clone(),
-            http_base: configured_join_url(config)?,
+            http_base: configured_artwork_url(config)?,
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
         },
@@ -1936,14 +1936,14 @@ fn configured_advertise_host(config: &Config) -> Result<String, StoreError> {
 
 #[cfg(feature = "hiqlite-store")]
 fn configured_join_url(config: &Config) -> Result<String, StoreError> {
-    let configured = config.cluster.join_url.trim().trim_end_matches('/');
+    let configured = config.cluster.join_url.trim();
     if !configured.is_empty() {
-        if !(configured.starts_with("http://") || configured.starts_with("https://")) {
-            return Err(StoreError::Migration(
-                "cluster.join_url must start with http:// or https://".to_owned(),
-            ));
-        }
-        return Ok(configured.to_owned());
+        return super::membership::normalize_internal_http_base(configured).ok_or_else(|| {
+            StoreError::Migration(
+                "cluster.join_url must be an http(s) origin without credentials or a path"
+                    .to_owned(),
+            )
+        });
     }
     Ok(format!(
         "http://{}",
@@ -1956,14 +1956,14 @@ fn configured_join_url(config: &Config) -> Result<String, StoreError> {
 
 #[cfg(feature = "hiqlite-store")]
 fn configured_artwork_url(config: &Config) -> Result<String, StoreError> {
-    let configured = config.cluster.artwork_url.trim().trim_end_matches('/');
+    let configured = config.cluster.artwork_url.trim();
     if !configured.is_empty() {
-        if !(configured.starts_with("http://") || configured.starts_with("https://")) {
-            return Err(StoreError::Migration(
-                "cluster.artwork_url must start with http:// or https://".to_owned(),
-            ));
-        }
-        return Ok(configured.to_owned());
+        return super::membership::normalize_internal_http_base(configured).ok_or_else(|| {
+            StoreError::Migration(
+                "cluster.artwork_url must be an http(s) origin without credentials or a path"
+                    .to_owned(),
+            )
+        });
     }
     Ok(format!(
         "http://{}",

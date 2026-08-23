@@ -119,7 +119,7 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          BEGIN SELECT RAISE(ABORT, 'cluster job lease owner has been removed'); END",
 ];
 
-const ACTIVITY_AUTH_WINDOW_SECONDS: i64 = 30;
+const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +136,8 @@ pub enum MembershipError {
     ReservedToken,
     #[error("joining binary is incompatible with this cluster")]
     Incompatible,
+    #[error("cluster HTTP endpoint must be an http(s) origin without credentials or a path")]
+    InvalidHttpEndpoint,
     #[error("node was not found in current cluster membership")]
     NodeNotFound,
     #[error("the current Raft leader cannot be removed; retry after leadership moves")]
@@ -168,6 +170,7 @@ impl MembershipError {
             Self::ReusedToken => "join_token_reused",
             Self::ReservedToken => "join_token_reserved",
             Self::Incompatible => "join_incompatible",
+            Self::InvalidHttpEndpoint => "cluster_http_endpoint_invalid",
             Self::NodeNotFound => "cluster_node_not_found",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
             Self::SelfRemovalRequiresLeave => "self_removal_requires_leave",
@@ -332,6 +335,37 @@ pub struct ActivityPeer {
     pub node_id: String,
     pub http_base: Option<String>,
     pub reachable: bool,
+}
+
+/// Route-scoped proof that one live voter requested another voter's activity
+/// projection. Naming both ends prevents a captured proof from being replayed
+/// against every daemon in the cluster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityPeerAuth {
+    pub node_id: String,
+    pub target_node_id: String,
+    pub timestamp_ms: i64,
+    pub signature: String,
+}
+
+/// Normalize one cluster-internal HTTP origin. Stored endpoints are treated
+/// as origins, never as arbitrary URLs: path, query, fragment, and userinfo
+/// would make route joining ambiguous or expose authority to another origin.
+#[must_use]
+pub fn normalize_internal_http_base(value: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(value.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    url.set_path("");
+    Some(url.as_str().trim_end_matches('/').to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,13 +722,15 @@ impl MembershipManager {
             )
             .await?;
         if !request.http_base.is_empty() {
+            let http_base = normalize_internal_http_base(&request.http_base)
+                .ok_or(MembershipError::InvalidHttpEndpoint)?;
             inner
                 .client
                 .execute(
                     "INSERT INTO cluster_node_http (node_id, public_http_url) VALUES ($1, $2) \
                      ON CONFLICT(node_id) DO UPDATE SET \
                      public_http_url = excluded.public_http_url",
-                    params!(request.node_id.as_str(), request.http_base.as_str()),
+                    params!(request.node_id.as_str(), http_base),
                 )
                 .await?;
         }
@@ -1129,7 +1165,9 @@ impl MembershipManager {
 
     /// Resolve peer daemon endpoints without widening the public node status.
     pub async fn activity_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
-        let inner = self.replicated_inner()?;
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
         let status = self.status().await?;
         let rows = inner
             .client
@@ -1154,37 +1192,73 @@ impl MembershipManager {
             .collect())
     }
 
-    /// Sign one short-lived internal activity request without putting the
-    /// shared cluster API secret on the HTTP wire.
-    pub fn sign_activity_request(&self, unix_seconds: i64) -> Result<String, MembershipError> {
+    /// Sign one short-lived, sender-and-target-bound activity request without
+    /// putting the shared cluster API secret on the HTTP wire.
+    pub fn sign_activity_request(
+        &self,
+        target_node_id: &str,
+        timestamp_ms: i64,
+    ) -> Result<ActivityPeerAuth, MembershipError> {
         let inner = self.replicated_inner()?;
-        Ok(hex::encode(hmac_sha256(
-            inner.secrets.api.as_bytes(),
-            &activity_auth_message(unix_seconds),
-        )))
+        let message = activity_auth_message(&inner.identity.node_id, target_node_id, timestamp_ms);
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        mac.update(&message);
+        Ok(ActivityPeerAuth {
+            node_id: inner.identity.node_id.clone(),
+            target_node_id: target_node_id.to_owned(),
+            timestamp_ms,
+            signature: hex::encode(mac.finalize().into_bytes()),
+        })
     }
 
-    #[must_use]
-    pub fn authorize_activity_request(&self, unix_seconds: i64, signature: &str) -> bool {
-        let Ok(inner) = self.replicated_inner() else {
-            return false;
-        };
-        let Ok(now) = unix_seconds_now() else {
-            return false;
-        };
-        if now.abs_diff(unix_seconds) > ACTIVITY_AUTH_WINDOW_SECONDS as u64 {
-            return false;
+    /// Authenticate the proof and confirm that its sender is still a live,
+    /// non-removed committed voter. Removed daemons retain the old shared
+    /// secret, so HMAC validity alone is never sufficient authority.
+    pub async fn authorize_activity_request(
+        &self,
+        auth: &ActivityPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if auth.target_node_id != inner.identity.node_id
+            || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
+            || auth.node_id == auth.target_node_id
+        {
+            return Ok(false);
         }
-        let Ok(candidate) = hex::decode(signature) else {
-            return false;
+        let signature = match hex::decode(&auth.signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
         };
-        constant_time_eq(
-            &candidate,
-            &hmac_sha256(
-                inner.secrets.api.as_bytes(),
-                &activity_auth_message(unix_seconds),
-            ),
-        )
+        let message = activity_auth_message(&auth.node_id, &auth.target_node_id, auth.timestamp_ms);
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        mac.update(&message);
+        if mac.verify_slice(&signature).is_err() {
+            return Ok(false);
+        }
+
+        let metrics = inner.client.metrics_db().await?;
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        if !voters.contains(&inner.identity.raft_id) {
+            return Ok(false);
+        }
+        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "SELECT raft_id FROM cluster_nodes WHERE node_id = $1 \
+                 AND removed_at IS NULL AND last_seen_at >= $2 \
+                 AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
+                   WHERE node_id = $1)",
+                params!(auth.node_id.as_str(), reachable_after),
+            )
+            .await?;
+        Ok(rows.len() == 1 && voters.contains(&rows[0].raft_id))
     }
 
     pub async fn heartbeat_loop(self) {
@@ -2346,6 +2420,19 @@ impl From<&mut Row<'_>> for ActivityEndpointRow {
     }
 }
 
+struct ActivityAuthNodeRow {
+    raft_id: u64,
+}
+
+impl From<&mut Row<'_>> for ActivityAuthNodeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
+        }
+    }
+}
+
 struct HttpUrlRow {
     public_http_url: String,
 }
@@ -2395,55 +2482,14 @@ impl From<&mut Row<'_>> for CountRow {
     }
 }
 
-fn activity_auth_message(unix_seconds: i64) -> Vec<u8> {
+fn activity_auth_message(node_id: &str, target_node_id: &str, timestamp_ms: i64) -> Vec<u8> {
     let mut message = ACTIVITY_AUTH_CONTEXT.to_vec();
-    message.extend_from_slice(&unix_seconds.to_be_bytes());
+    for value in [node_id, target_node_id] {
+        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
     message
-}
-
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut normalized = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        normalized[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        normalized[..key.len()].copy_from_slice(key);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= normalized[index];
-        outer_pad[index] ^= normalized[index];
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner.finalize());
-    outer.finalize().into()
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
-fn unix_seconds_now() -> Result<i64, MembershipError> {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| MembershipError::Internal(error.to_string()))?
-            .as_secs(),
-    )
-    .map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
 }
 
 impl From<&mut Row<'_>> for HttpUrlRow {

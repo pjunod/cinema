@@ -300,9 +300,11 @@ local login; optional OIDC (Google/Apple) code flow mapping to local accounts
 Cluster activity uses one separate, non-public application RPC:
 `/_internal/v1/activity-snapshot`. Membership retains explicitly advertised
 plurxd endpoints internally and signs each request with short-lived cluster
-authority; user/admin/Plex bearers are never forwarded. The response is a
-privacy-safe node-local session/delivery snapshot, and the two-second client
-surface distinguishes unhealthy, unreachable, and timed-out peers for the
+authority bound to the live sender and intended target; user/admin/Plex
+bearers and HLS capability ids are never forwarded. The response is a bounded,
+minimal node-local delivery snapshot. Fan-out is concurrent under one
+two-second deadline, rejects redirects and wrong-node responses, and
+distinguishes unhealthy, unreachable, invalid, and timed-out peers for the
 public aggregator. A SQLite or never-joined node has no peers and performs no
 fan-out.
 

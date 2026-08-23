@@ -410,13 +410,17 @@ self-signed and accepted without certificate verification; the shared secrets,
 not a certificate authority, authenticate membership requests.
 
 The read-only activity snapshot is the narrow application-level peer call. An
-explicit per-node `join_url` is retained behind membership (never projected in
-public status), and requests to `/_internal/v1/activity-snapshot` carry a
-30-second HMAC signature under cluster API authority. They never forward a
-login, admin, Plex, or scoped API-key bearer, and the shared cluster secret is
-not sent on the wire. Missing, stale, or invalid signatures receive 401. The
-snapshot contains only node identity and active session/delivery fields: no
-media paths, peer addresses, credentials, library rows, or settings.
+explicit per-node `artwork_url` origin is retained behind membership (never
+projected in public status), and requests to
+`/_internal/v1/activity-snapshot` carry a 30-second HMAC proof under cluster
+API authority. The proof names the current sender and intended target; the
+receiver also requires the sender to remain a live, non-removed voter. Calls
+refuse redirects and validate the returned node identity. They never forward a
+login, admin, Plex, scoped API-key bearer, or HLS session capability, and the
+shared cluster secret is not sent on the wire. Missing, stale, cross-target,
+removed-sender, or invalid proofs receive 401. The 256 KiB response contains
+only node identity and bounded active-delivery fields: no media paths, peer
+addresses, credentials, library rows, or settings.
 
 The consequence is explicit: **anything past a network you fully trust belongs
 behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain

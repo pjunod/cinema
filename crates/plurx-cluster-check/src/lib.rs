@@ -30,9 +30,9 @@ use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
 use plurx_core::cluster::membership::{
-    join_token_digest, ArtworkPeerAuth, ClusterAvailability, ClusterPeer, FinalizeJoinRequest,
-    IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager, MembershipStatus,
-    RedeemJoinRequest,
+    join_token_digest, ActivityPeerAuth, ArtworkPeerAuth, ClusterAvailability, ClusterPeer,
+    FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager,
+    MembershipStatus, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -498,49 +498,53 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         bail!("cluster-internal activity endpoints were incomplete: {activity_peers:?}");
     }
-    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
-    let signature = match cluster
-        .request(1, Request::SignActivityRequest { unix_seconds: now })
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let auth = match cluster
+        .request(
+            1,
+            Request::SignActivityRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: now,
+            },
+        )
         .await?
     {
-        Response::ActivitySignature { signature } => signature,
+        Response::ActivityAuth { auth } => auth,
         response => bail!("unexpected activity signature response: {response:?}"),
     };
     match cluster
-        .request(
-            2,
-            Request::AuthorizeActivityRequest {
-                unix_seconds: now,
-                signature: signature.clone(),
-            },
-        )
+        .request(2, Request::AuthorizeActivityRequest { auth: auth.clone() })
         .await?
     {
         Response::Flag { value: true } => {}
         response => bail!("peer rejected shared cluster activity authority: {response:?}"),
     }
-    let stale_time = now - 31;
-    let stale_signature = match cluster
+    match cluster
+        .request(3, Request::AuthorizeActivityRequest { auth: auth.clone() })
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("cross-target activity proof was accepted: {response:?}"),
+    }
+    let stale_time = now - 30_001;
+    let stale_auth = match cluster
         .request(
             1,
             Request::SignActivityRequest {
-                unix_seconds: stale_time,
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: stale_time,
             },
         )
         .await?
     {
-        Response::ActivitySignature { signature } => signature,
+        Response::ActivityAuth { auth } => auth,
         response => bail!("unexpected stale activity signature response: {response:?}"),
     };
+    let mut forged_auth = auth;
+    forged_auth.signature = "00".repeat(32);
     for request in [
-        Request::AuthorizeActivityRequest {
-            unix_seconds: now,
-            signature: "00".repeat(32),
-        },
-        Request::AuthorizeActivityRequest {
-            unix_seconds: stale_time,
-            signature: stale_signature,
-        },
+        Request::AuthorizeActivityRequest { auth: forged_auth },
+        Request::AuthorizeActivityRequest { auth: stale_auth },
     ] {
         match cluster.request(2, request).await? {
             Response::Flag { value: false } => {}
@@ -999,6 +1003,33 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
+    let observer_node_id = format!("node-{observer}");
+    let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let departing_activity_proof = match cluster
+        .request(
+            target,
+            Request::SignActivityRequest {
+                target_node_id: observer_node_id,
+                timestamp_ms: activity_now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("unexpected departing activity proof response: {response:?}"),
+    };
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: departing_activity_proof.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("a live voter's activity proof was refused: {response:?}"),
+    }
     let departing_artwork_proof = match cluster
         .request(
             target,
@@ -1147,6 +1178,33 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         )
         .await?
         .require_ok()?;
+    let removed_activity_now =
+        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let removed_activity_proof = match cluster
+        .request(
+            target,
+            Request::SignActivityRequest {
+                target_node_id: format!("node-{observer}"),
+                timestamp_ms: removed_activity_now,
+            },
+        )
+        .await?
+    {
+        Response::ActivityAuth { auth } => auth,
+        response => bail!("removed voter could not mint its retained-secret proof: {response:?}"),
+    };
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: removed_activity_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter retained activity access: {response:?}"),
+    }
     match cluster
         .request(
             observer,
@@ -2398,11 +2456,11 @@ pub enum Request {
     },
     MembershipStatus,
     SignActivityRequest {
-        unix_seconds: i64,
+        target_node_id: String,
+        timestamp_ms: i64,
     },
     AuthorizeActivityRequest {
-        unix_seconds: i64,
-        signature: String,
+        auth: ActivityPeerAuth,
     },
     ActivityPeers,
     ArtworkPeerUrls,
@@ -2549,8 +2607,8 @@ pub enum Response {
     Flag {
         value: bool,
     },
-    ActivitySignature {
-        signature: String,
+    ActivityAuth {
+        auth: ActivityPeerAuth,
     },
     ActivityPeers {
         peers: Vec<(String, Option<String>, bool)>,
@@ -3835,14 +3893,17 @@ async fn handle_request(
             .await
             .map(|status| Response::MembershipStatus { status })
             .or_else(|error| Ok(membership_error_response(error))),
-        Request::SignActivityRequest { unix_seconds } => Ok(Response::ActivitySignature {
-            signature: membership_ref(membership)?.sign_activity_request(unix_seconds)?,
+        Request::SignActivityRequest {
+            target_node_id,
+            timestamp_ms,
+        } => Ok(Response::ActivityAuth {
+            auth: membership_ref(membership)?
+                .sign_activity_request(&target_node_id, timestamp_ms)?,
         }),
-        Request::AuthorizeActivityRequest {
-            unix_seconds,
-            signature,
-        } => Ok(Response::Flag {
-            value: membership_ref(membership)?.authorize_activity_request(unix_seconds, &signature),
+        Request::AuthorizeActivityRequest { auth } => Ok(Response::Flag {
+            value: membership_ref(membership)?
+                .authorize_activity_request(&auth)
+                .await?,
         }),
         Request::ActivityPeers => Ok(Response::ActivityPeers {
             peers: membership_ref(membership)?

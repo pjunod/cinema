@@ -399,10 +399,11 @@ prerequisite for the existing cross-node protocols and comparable evidence.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
-`join_url` when the public API is reached through a different hostname, port,
-or HTTPS reverse proxy; this is the URL embedded in a token for redemption and
-retained internally as that node's explicit activity-snapshot endpoint. It is
-never returned by membership/status APIs.
+`join_url` when the public API used for cluster admission is reached through a
+different hostname, port, or HTTPS reverse proxy; this is the bootstrap URL
+embedded in a token for redemption. Set `artwork_url` to the current node's
+HTTP origin; membership retains that origin as the node's artwork and
+activity-snapshot endpoint, but never returns it from membership/status APIs.
 `advertise_host` is also the explicit opt-in that opens a never-joined voter's
 internal listeners beyond loopback. Leaving it empty preserves the old
 single-node network surface even though the configured bind defaults are
@@ -436,12 +437,12 @@ that public URL; the Raft/API secrets and credential-wrapping key do not cross
 the redemption or finalization request.
 
 Cluster activity fan-out calls `/_internal/v1/activity-snapshot` at those
-explicit URLs. The request carries a 30-second HMAC timestamp/signature made
-with cluster API authority, not a household user/admin/API-key bearer; the
-shared secret itself never crosses that HTTP request. Each call is capped at
-two seconds and reports unhealthy, unreachable, and timed-out peers as distinct
-outcomes. SQLite and never-joined one-node installs have no peers, make no
-calls, and add no listener.
+explicit origins. The request carries a 30-second HMAC proof naming the live
+sender and intended target, not a household user/admin/API-key bearer; the
+shared secret itself never crosses that HTTP request. Redirects are refused,
+responses are capped at 256 KiB, wrong-node answers are invalid, and all peer
+calls share one concurrent two-second deadline. SQLite and never-joined
+one-node installs have no peers, make no calls, and add no listener.
 
 **Mint one token into a protected file.** The default lifetime is 10 minutes;
 the API clamps requests to 60–3,600 seconds. It returns the token once, so do

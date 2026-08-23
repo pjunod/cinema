@@ -864,11 +864,14 @@ the process that answered the request.
 **M3e transport delivered.** Membership retains each node's explicitly
 configured plurxd URL in a cluster-internal table while the public status shape
 continues to omit every address. A narrow read-only activity snapshot route is
-authorized by a short-lived HMAC under the cluster API secret, never by a
-forwarded household bearer. The pre-wired client caps each peer at two seconds
-and returns answered, unhealthy, unreachable, or timed-out, so the aggregation
-above can degrade visibly without guessing ports or silently dropping nodes.
-SQLite and never-joined one-node paths construct no peer work.
+authorized by a short-lived sender/target-bound HMAC under the cluster API
+secret plus a current-voter check, never by a forwarded household bearer. The
+pre-wired client races bounded peer reads under one two-second deadline,
+refuses redirects, caps each response at 256 KiB, and returns answered,
+unhealthy, unreachable, invalid, or timed-out. The aggregation above can
+therefore degrade visibly without guessing ports or silently dropping nodes.
+SQLite and never-joined one-node paths construct no peer work. Snapshot rows
+deliberately omit HLS session capability ids.
 
 ### 6.8 M4 — transactional fences and materialization ownership
 
