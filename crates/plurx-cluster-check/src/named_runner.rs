@@ -199,18 +199,18 @@ pub async fn run_named_campaign(
         for voter_count in order {
             println!("cluster-check: named pair {pair_index} fresh {voter_count}-voter topology");
             runs.push(
-                run_remote_topology(
-                    &config,
+                run_remote_topology(RemoteTopologyRequest {
+                    config: &config,
                     pair_index,
                     voter_count,
-                    &workload,
-                    &workload_sha256,
-                    &cleanup_manifest,
-                    &image_digest,
+                    workload: &workload,
+                    workload_sha256: &workload_sha256,
+                    cleanup_manifest: &cleanup_manifest,
+                    image_digest: &image_digest,
                     owner_nonce,
-                    &build_sha,
-                    &deployment,
-                )
+                    build_sha: &build_sha,
+                    deployment: &deployment,
+                })
                 .await?,
             );
         }
@@ -318,18 +318,32 @@ fn campaign_metrics_ready(completed_pairs: usize) -> bool {
     completed_pairs >= 2
 }
 
-async fn run_remote_topology(
-    config: &NamedRunnerConfig,
+struct RemoteTopologyRequest<'a> {
+    config: &'a NamedRunnerConfig,
     pair_index: u64,
     voter_count: u64,
-    workload: &TopologyWorkload,
-    workload_sha256: &str,
-    cleanup_manifest: &Path,
-    image_digest: &str,
-    owner_nonce: &str,
-    build_sha: &str,
-    deployment: &DeploymentProof,
-) -> Result<TopologyRun> {
+    workload: &'a TopologyWorkload,
+    workload_sha256: &'a str,
+    cleanup_manifest: &'a Path,
+    image_digest: &'a str,
+    owner_nonce: &'a str,
+    build_sha: &'a str,
+    deployment: &'a DeploymentProof,
+}
+
+async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<TopologyRun> {
+    let RemoteTopologyRequest {
+        config,
+        pair_index,
+        voter_count,
+        workload,
+        workload_sha256,
+        cleanup_manifest,
+        image_digest,
+        owner_nonce,
+        build_sha,
+        deployment,
+    } = request;
     let selected = &config.voters[..usize::try_from(voter_count)?];
     let placement = verify_run_machine_placement(selected, build_sha, deployment).await?;
     let specs = selected
@@ -1705,11 +1719,14 @@ fn validate_image_digest(digest: &str) -> Result<()> {
     Ok(())
 }
 
+type MetricExtractor = fn(&TopologyRun) -> Result<f64>;
+type MetricSpec<'a> = (&'a str, &'a str, MetricExtractor);
+
 fn summarize_metrics(
     artifacts: &[ClusterTopologyArtifact],
     target_half_width_percent: f64,
 ) -> Result<Vec<PairedMetric>> {
-    let extractors: [(&str, &str, fn(&TopologyRun) -> Result<f64>); 4] = [
+    let extractors: [MetricSpec<'_>; 4] = [
         ("acknowledged_write_p99", "microseconds", |run| {
             Ok(run.acknowledged_write_round_trip_p99_us)
         }),
