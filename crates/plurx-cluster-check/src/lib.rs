@@ -6462,11 +6462,7 @@ struct NodeMutableState {
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
     let node_started = Instant::now();
-    // Arm this before hiqlite can spawn a listener, so a bind that lost its
-    // port is reported as a port collision rather than surviving as a voter
-    // that answers every later request with a durable-state symptom.
     let listeners = voter_listen_addrs(&launch)?;
-    install_bind_failure_guard(BindFailureChannel::Protocol, listeners.clone());
     let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
     let client = match hiqlite::start_node(node_config(&launch)?).await {
         Ok(client) => client,
@@ -9375,9 +9371,6 @@ async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
         let connection_address = connection_address.as_deref().unwrap_or(address);
         let deadline = TokioInstant::now() + LISTENER_PROOF_TIMEOUT;
         loop {
-            if let Some(failure) = BIND_FAILURE.get() {
-                bail!("{failure}");
-            }
             match tokio::net::TcpStream::connect(connection_address).await {
                 Ok(_) => break,
                 Err(error) if TokioInstant::now() >= deadline => {
