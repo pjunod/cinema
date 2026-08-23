@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
 
 #[cfg(feature = "sqlite")]
-pub use crate::client::{DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+pub use crate::client::{
+    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+    DB_LOCAL_READ_PROTOCOL_VERSION,
+};
 #[cfg(feature = "sqlite")]
 pub use crate::snapshot_metrics::{
     DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,

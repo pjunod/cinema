@@ -52,13 +52,22 @@ pub struct LocalDbRaftSnapshot {
 /// The term and leader identity describe the leadership proof, not the term
 /// that originally appended the committed entry. Callers must bind this tuple
 /// to a fresh local Raft observation before using it for a bounded read.
+///
+/// The protocol scalar advertises that the watermark source implements the
+/// same local-read contract as the receiver. A newer receiver therefore fails
+/// closed while an older leader is active during a rolling upgrade.
 #[cfg(feature = "sqlite")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DbQuorumWatermark {
     pub term: u64,
     pub leader_id: u64,
     pub committed_index: u64,
+    pub local_read_protocol_version: u64,
 }
+
+/// First protocol that binds one local database query to a quorum watermark.
+#[cfg(feature = "sqlite")]
+pub const DB_LOCAL_READ_PROTOCOL_VERSION: u64 = 1;
 
 /// Receiver for the in-process database Raft metrics watch channel.
 ///
@@ -128,6 +137,7 @@ pub(crate) async fn db_quorum_watermark_local(
         term: after.current_term,
         leader_id: state.id,
         committed_index: committed.index,
+        local_read_protocol_version: DB_LOCAL_READ_PROTOCOL_VERSION,
     })
 }
 
@@ -642,6 +652,7 @@ mod tests {
             term: u64::MAX,
             leader_id: u64::MAX - 1,
             committed_index: u64::MAX - 2,
+            local_read_protocol_version: super::DB_LOCAL_READ_PROTOCOL_VERSION,
         };
         let actual = crate::query::rows::RowOwned::from_db_quorum_watermark(expected)
             .into_db_quorum_watermark()

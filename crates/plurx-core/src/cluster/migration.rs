@@ -37,8 +37,8 @@ use crate::config::Config;
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest, SqliteStore,
-    Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    CatalogueReader, HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest,
+    SqliteStore, Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -190,6 +190,8 @@ pub struct SelectedStore {
     pub credential_key: Arc<CredentialKey>,
     pub backend: SelectedBackend,
     membership: MembershipManager,
+    replication: status::ReplicationMonitor,
+    catalogue: CatalogueReader,
     local_client: Option<Client>,
     _daemon_lock: File,
 }
@@ -199,18 +201,13 @@ impl SelectedStore {
     /// Read-only watch-state replication projection for the server API.
     #[must_use]
     pub fn replication_monitor(&self) -> status::ReplicationMonitor {
-        match self.backend {
-            SelectedBackend::Replicated => status::ReplicationMonitor::replicated(
-                self.local_client
-                    .as_ref()
-                    .expect("replicated backend must carry its local client")
-                    .clone(),
-            ),
-            SelectedBackend::SqliteRecovery => {
-                debug_assert!(self.local_client.is_none());
-                status::ReplicationMonitor::sqlite()
-            }
-        }
+        self.replication.clone()
+    }
+
+    /// Named consistency boundary for eligible catalogue requests.
+    #[must_use]
+    pub fn catalogue_reader(&self) -> CatalogueReader {
+        self.catalogue.clone()
     }
 
     /// Membership lifecycle and privacy-safe node health for the daemon API.
@@ -354,12 +351,15 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
         remove_abandoned_incoming(&config.storage.data_dir)?;
         remove_activation_attempt(&config.storage.data_dir)?;
         let legacy = super::open_store(config).await?;
+        let catalogue = CatalogueReader::authority(Arc::clone(&legacy.store));
         return Ok(SelectedStore {
             store: legacy.store,
             identity: legacy.identity,
             credential_key: legacy.credential_key,
             backend: SelectedBackend::SqliteRecovery,
             membership: MembershipManager::unavailable(),
+            replication: status::ReplicationMonitor::sqlite(),
+            catalogue,
             local_client: None,
             _daemon_lock: daemon_lock,
         });
@@ -517,7 +517,16 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     // graceful-shutdown handle, and no stop/rebind boundary is needed because
     // every durable file already lives at the final path.
     let credential_key = open_active_credential_key(config, &store).await?;
-    let store: Arc<dyn Store> = Arc::new(store);
+    let concrete_store = Arc::new(store);
+    let store: Arc<dyn Store> = concrete_store.clone();
+    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let catalogue = CatalogueReader::replicated(
+        Arc::clone(&store),
+        concrete_store,
+        replication.metrics_handle(),
+        config.cluster.bounded_replica_reads,
+        config.cluster.bounded_replica_max_lag_entries,
+    );
     let membership_manager = MembershipManager::replicated(
         client.clone(),
         Arc::clone(&store),
@@ -543,6 +552,8 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         credential_key,
         backend: SelectedBackend::Replicated,
         membership: membership_manager,
+        replication,
+        catalogue,
         local_client: Some(client),
         _daemon_lock: daemon_lock,
     };
@@ -1295,7 +1306,16 @@ async fn open_active_store_with_key(
             }
         },
     };
-    let store: Arc<dyn Store> = Arc::new(store);
+    let concrete_store = Arc::new(store);
+    let store: Arc<dyn Store> = concrete_store.clone();
+    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let catalogue = CatalogueReader::replicated(
+        Arc::clone(&store),
+        concrete_store,
+        replication.metrics_handle(),
+        config.cluster.bounded_replica_reads,
+        config.cluster.bounded_replica_max_lag_entries,
+    );
     let membership_file = match local_membership.take() {
         Some(mut membership) => {
             if membership.local != local {
@@ -1355,6 +1375,8 @@ async fn open_active_store_with_key(
         credential_key,
         backend: SelectedBackend::Replicated,
         membership,
+        replication,
+        catalogue,
         local_client: Some(client),
         _daemon_lock: daemon_lock,
     })
@@ -4049,15 +4071,15 @@ pub mod status {
         pub watermark: Option<QuorumWatermarkSample>,
         pub watermark_age_millis: Option<u64>,
         pub watermark_valid: bool,
+        /// The current watermark source implements this binary's bounded
+        /// local-read protocol. False keeps rolling upgrades on Authority.
+        pub watermark_local_reads_supported: bool,
         pub watermark_errors: u64,
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
     }
 
     /// Private, single-operation state retained across one local query.
     /// Callers never receive or replay this capability directly.
-    // P3a lands the proof boundary before P3b routes the first catalogue
-    // query through it. Remove this allowance with that production caller.
-    #[allow(dead_code)]
     struct BoundedReplicaPermit {
         metrics: PassiveRaftMetrics,
         current_term: u64,
@@ -4069,7 +4091,6 @@ pub mod status {
         max_apply_lag_entries: u64,
     }
 
-    #[allow(dead_code)]
     impl BoundedReplicaPermit {
         fn remains_valid(&self) -> bool {
             let elapsed = self.metrics.started_at.elapsed();
@@ -4097,7 +4118,6 @@ pub mod status {
         }
     }
 
-    #[allow(dead_code)]
     struct BoundedReplicaState {
         current_term: u64,
         leader_id: u64,
@@ -4128,6 +4148,7 @@ pub mod status {
         watermark_term: AtomicU64,
         watermark_leader: AtomicU64,
         watermark_committed_index: AtomicU64,
+        watermark_local_read_protocol_version: AtomicU64,
         watermark_started_nanos: AtomicU64,
         watermark_local_epoch: AtomicU64,
         watermark_errors: AtomicU64,
@@ -4192,7 +4213,6 @@ pub mod status {
         /// the proof expires, changes generation, or exceeds the entry budget
         /// while the query is running. Store code must then perform its named
         /// authority fallback.
-        #[allow(dead_code)] // Removed by P3b's first production catalogue caller.
         pub(crate) async fn run_bounded_replica<T, F, Fut>(
             &self,
             max_apply_lag_entries: u64,
@@ -4268,6 +4288,10 @@ pub mod status {
                 let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
                 let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
                 let committed_index = self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let local_read_protocol_version = self
+                    .inner
+                    .watermark_local_read_protocol_version
+                    .load(Ordering::Relaxed);
                 let watermark_started_nanos =
                     self.inner.watermark_started_nanos.load(Ordering::Relaxed);
                 let watermark_local_epoch =
@@ -4295,6 +4319,7 @@ pub mod status {
                 return (local_valid
                     && watermark_valid
                     && local_binding_valid
+                    && local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION
                     && apply_lag_entries <= max_apply_lag_entries)
                     .then_some(BoundedReplicaState {
                         current_term,
@@ -4342,6 +4367,10 @@ pub mod status {
                 let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
                 let watermark_committed_index =
                     self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let watermark_local_read_protocol_version = self
+                    .inner
+                    .watermark_local_read_protocol_version
+                    .load(Ordering::Relaxed);
                 let watermark_started_nanos =
                     self.inner.watermark_started_nanos.load(Ordering::Relaxed);
                 let watermark_local_epoch =
@@ -4395,6 +4424,9 @@ pub mod status {
                         }),
                         watermark_age_millis: watermark_age_nanos.map(|age| age / 1_000_000),
                         watermark_valid,
+                        watermark_local_reads_supported: watermark_published
+                            && watermark_local_read_protocol_version
+                                == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
                         watermark_errors,
                         snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
                     };
@@ -4555,6 +4587,9 @@ pub mod status {
             self.inner
                 .watermark_committed_index
                 .store(source.committed_index, Ordering::Relaxed);
+            self.inner
+                .watermark_local_read_protocol_version
+                .store(source.local_read_protocol_version, Ordering::Relaxed);
             self.inner
                 .watermark_started_nanos
                 .store(started_nanos, Ordering::Relaxed);
@@ -5085,10 +5120,25 @@ pub mod status {
         }
 
         fn watermark(term: u64, leader_id: u64, committed_index: u64) -> DbQuorumWatermark {
+            watermark_with_protocol(
+                term,
+                leader_id,
+                committed_index,
+                hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+            )
+        }
+
+        fn watermark_with_protocol(
+            term: u64,
+            leader_id: u64,
+            committed_index: u64,
+            local_read_protocol_version: u64,
+        ) -> DbQuorumWatermark {
             DbQuorumWatermark {
                 term,
                 leader_id,
                 committed_index,
+                local_read_protocol_version,
             }
         }
 
@@ -5160,6 +5210,39 @@ pub mod status {
             );
             assert!(permit.remains_valid_at(10, 10_999_999_999));
             assert!(!permit.remains_valid_at(11, 11_000_000_000));
+        }
+
+        #[test]
+        fn bounded_replica_permit_requires_the_watermark_sources_read_protocol() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark_with_protocol(7, 1, 42, 0),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            let view = metrics.snapshot_at_times(10, 10_200_000_000);
+            assert!(view.watermark_valid, "authority proof remains usable");
+            assert!(!view.watermark_local_reads_supported);
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_200_000_000, 0)
+                    .is_none(),
+                "rolling-upgrade mismatch must use Authority"
+            );
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_500_000_000, 0)
+                    .is_some(),
+                "matching source and receiver protocols may use the local replica"
+            );
         }
 
         #[tokio::test]

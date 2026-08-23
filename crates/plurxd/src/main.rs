@@ -358,6 +358,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let store = Arc::clone(&selected.store);
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
+        let catalogue = selected.catalogue_reader();
         let dirs = create_dirs(&config.storage.data_dir)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
@@ -376,6 +377,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             store,
             replication,
             membership,
+            catalogue,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
             dirs,
@@ -396,6 +398,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
 /// What a measured node hands to the server it is about to become.
 struct Boot {
     store: Arc<dyn plurx_core::store::Store>,
+    catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     identity: plurx_core::cluster::ClusterIdentity,
@@ -425,6 +428,7 @@ async fn boot(
         store,
         replication,
         membership,
+        catalogue,
         identity,
         credential_key,
         dirs,
@@ -441,6 +445,7 @@ async fn boot(
         credential_key,
         replication,
         membership,
+        catalogue,
         store,
         dirs,
         encoder_caps,
@@ -791,6 +796,7 @@ fn build_state(
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
+    catalogue: plurx_core::store::CatalogueReader,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
@@ -805,6 +811,7 @@ fn build_state(
             credential_key,
             replication,
             membership,
+            catalogue,
         },
         store,
         dirs,

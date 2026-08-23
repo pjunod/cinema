@@ -23,7 +23,10 @@ mod helpers;
 mod listen_notify;
 mod mgmt;
 #[cfg(feature = "sqlite")]
-pub use mgmt::{DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+pub use mgmt::{
+    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+    DB_LOCAL_READ_PROTOCOL_VERSION,
+};
 #[cfg(feature = "sqlite")]
 pub(crate) use mgmt::{
     DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER,

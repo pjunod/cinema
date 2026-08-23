@@ -101,6 +101,10 @@ impl RowOwned {
                     name: "committed_index".to_owned(),
                     value: ValueOwned::Text(watermark.committed_index.to_string()),
                 },
+                ColumnOwned {
+                    name: "local_read_protocol_version".to_owned(),
+                    value: ValueOwned::Text(watermark.local_read_protocol_version.to_string()),
+                },
             ],
         }
     }
@@ -116,10 +120,15 @@ impl RowOwned {
         let term = parse("term", self.try_get("term")?)?;
         let leader_id = parse("leader_id", self.try_get("leader_id")?)?;
         let committed_index = parse("committed_index", self.try_get("committed_index")?)?;
+        let local_read_protocol_version = parse(
+            "local_read_protocol_version",
+            self.try_get("local_read_protocol_version")?,
+        )?;
         Ok(crate::DbQuorumWatermark {
             term,
             leader_id,
             committed_index,
+            local_read_protocol_version,
         })
     }
 }
