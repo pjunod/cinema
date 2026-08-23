@@ -12,7 +12,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{PlaybackEvent, PretranscodeJob, PretranscodeWorkerCapabilities};
@@ -44,9 +44,47 @@ const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
+const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
+const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
+
+/// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
+/// authorize playback and therefore never belong in logs, traces, metrics, or
+/// diagnostics even though they look like ordinary identifiers.
+pub(crate) fn session_log_id(session_id: &str) -> String {
+    let digest = Sha256::digest(session_id.as_bytes());
+    format!("s-{}", hex::encode(digest))
+}
+
+/// Remove the bearer capability anywhere a child-process diagnostic echoed
+/// it. Structured fields already use [`session_log_id`], but ffmpeg repeats
+/// paths and complete arguments in stderr; sanitizing the message body keeps
+/// those unstructured surfaces under the same contract.
+fn session_log_text(text: &str, session_id: &str) -> String {
+    if session_id.is_empty() {
+        return text.to_owned();
+    }
+    text.replace(session_id, &session_log_id(session_id))
+}
+
+fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
+    format!("{label}: {}", session_log_text(&args.join(" "), session_id))
+}
+
+fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {
+    let line = session_log_text(line, session_id);
+    tracing::warn!(
+        session = %session_log_id(session_id),
+        encoder,
+        "transcode ffmpeg: {line}"
+    );
+}
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
+}
+
+fn replacement_deadline_error() -> String {
+    capacity_error("the replacement start expired before it could reap its predecessor")
 }
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
@@ -972,13 +1010,13 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(session = %sid, encoder = encoder_label, "transcode ffmpeg: {line}");
+                log_ffmpeg_stderr(&sid, encoder_label, &line);
             }
             // Stderr closing means the process ended. Logging it (with how long
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
             tracing::warn!(
-                session = %sid, encoder = encoder_label,
+                session = %session_log_id(&sid), encoder = encoder_label,
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1029,11 +1067,11 @@ fn spawn_ffmpeg_pipe(
                 if is_progress_line(&line) {
                     apply_progress_line(&progress, generation, &line);
                 } else {
-                    tracing::warn!(session = %sid, encoder = "copy", "transcode ffmpeg: {line}");
+                    log_ffmpeg_stderr(&sid, "copy", &line);
                 }
             }
             tracing::warn!(
-                session = %sid, encoder = "copy",
+                session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1261,7 +1299,7 @@ async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: Strin
             }
             WatchNext::Stall => {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(&sid),
                     stalled_s = session.progress.stalled_for().as_secs(),
                     produced_ms = session.progress.out_time_ms(),
                     "{}",
@@ -1482,6 +1520,9 @@ struct Session {
     item_id: i64,
     item_title: String,
     user_name: String,
+    /// Namespaced immutable user id for clustered sessions, or the legacy
+    /// username scope for process-local callers.
+    supersession_user: String,
     /// The player instance that owns this session — the supersession key.
     playback_id: String,
     /// Whether this session's height came from server Auto policy. A manual
@@ -2103,6 +2144,14 @@ impl SegmentDelivery {
         self.expected_bytes = self.expected_bytes.min(bytes);
     }
 
+    /// Mark a conditional or unsatisfiable response that intentionally has no
+    /// media body. Opening the authenticated object proved the capability;
+    /// the HTTP contract owes zero bytes and must not look like abandonment.
+    pub(crate) fn finish_without_body(&mut self) {
+        self.expected_bytes = 0;
+        self.finish();
+    }
+
     fn emit(&self, event: &str, reason: &str, ms: i64, mut extra: serde_json::Value) {
         // Stamped centrally rather than at each call site: an untagged
         // `segment_delivery_*` row is indistinguishable from a client fetch,
@@ -2120,7 +2169,7 @@ impl SegmentDelivery {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(self.session_id.clone()),
+                session_id: Some(session_log_id(&self.session_id)),
                 file_id: Some(self.session.file_id),
                 event: event.to_owned(),
                 method: Some(self.method.to_owned()),
@@ -2149,7 +2198,7 @@ impl SegmentDelivery {
         self.slow_read_reported = true;
         let waited_ms = elapsed.as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             waited_ms,
             delivered_bytes = self.delivered_bytes,
@@ -2178,7 +2227,7 @@ impl SegmentDelivery {
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2203,7 +2252,7 @@ impl SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::error!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2232,7 +2281,7 @@ impl Drop for SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2599,6 +2648,42 @@ pub struct StartInfo {
     pub vod: bool,
 }
 
+/// A cluster worker and the process-local replacement gate that must remain
+/// held until the ingress has durably accepted or rejected that worker.
+pub(crate) struct ClusterSessionStart {
+    pub(crate) info: StartInfo,
+    pub(crate) replacement: ClusterReplacementGuard,
+}
+
+/// Serializes replacement of one user's player on this worker. Holding this
+/// only through ffmpeg spawn is insufficient: a second start could otherwise
+/// broad-reap the unpublished first worker before its durable activation.
+pub(crate) struct ClusterReplacementGuard {
+    registry: Arc<ClusterReplacementGates>,
+    key: String,
+    permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for ClusterReplacementGuard {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        let Ok(mut entries) = self.registry.entries.lock() else {
+            return;
+        };
+        if entries
+            .get(&self.key)
+            .is_some_and(|gate| gate.upgrade().is_none())
+        {
+            entries.remove(&self.key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClusterReplacementGates {
+    entries: std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
@@ -2686,7 +2771,8 @@ pub struct DeliveryCandidate {
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
@@ -2731,7 +2817,8 @@ pub struct SessionRequest {
     pub hdr10: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionKind {
     Transcode {
         height: i64,
@@ -2746,7 +2833,7 @@ pub enum SessionKind {
 /// Why a client is replacing an existing session. This is deliberately typed
 /// even while `stall` is the only server-normalized cause: an unknown future
 /// value must be refused, not accidentally treated as ordinary create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
     Stall,
@@ -2769,6 +2856,7 @@ struct CopySessionOptions {
 #[derive(Clone, Copy)]
 struct SessionOwner<'a> {
     user_name: &'a str,
+    supersession_user: &'a str,
     playback_id: &'a str,
     automatic: bool,
 }
@@ -2785,7 +2873,7 @@ impl SessionRequest {
     /// For an Auto transcode the numeric height is excluded on purpose: a
     /// network-prior refresh between transport attempts may recompute it, but
     /// the same `request_id` must still recover the first persisted answer.
-    fn intent_fingerprint(&self, user_name: &str) -> String {
+    fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
             SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
             SessionKind::Transcode { height } => format!("t{height}"),
@@ -2820,6 +2908,21 @@ impl SessionRequest {
             self.reopen_reason.map(ReopenReason::as_str),
         ])
         .to_string()
+    }
+
+    fn intent_fingerprint(&self, user_name: &str) -> String {
+        self.intent_fingerprint_with_user_scope(Some(user_name))
+    }
+
+    /// Fixed-width durable identity used by the replicated session claim.
+    ///
+    /// Replicated request rows are already scoped by the immutable user id.
+    /// Exclude the mutable username so an account rename cannot turn an
+    /// otherwise identical idempotent replay into a conflict. The established
+    /// process-local identity above keeps the username scope it has always had.
+    pub(crate) fn durable_intent_fingerprint(&self, user_id: i64) -> String {
+        let durable = serde_json::json!([user_id, self.intent_fingerprint_with_user_scope(None),]);
+        hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }
 
@@ -2886,7 +2989,7 @@ impl RequestClaim<'_> {
             // to leave unsaid.
             debug_assert!(false, "completed claim lost its own reservation");
             tracing::warn!(
-                session = session_id,
+                session = %session_log_id(session_id),
                 "request claim vanished before completion; a replay may duplicate this session"
             );
         }
@@ -4286,6 +4389,7 @@ pub struct TranscodeManager {
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    cluster_replacement_gates: Arc<ClusterReplacementGates>,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
@@ -4448,6 +4552,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -5885,6 +5990,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title: item_title.to_owned(),
             user_name: owner.user_name.to_owned(),
+            supersession_user: owner.supersession_user.to_owned(),
             playback_id: owner.playback_id.to_owned(),
             automatic: owner.automatic,
             kind: SessionKind::Transcode {
@@ -5933,7 +6039,7 @@ impl TranscodeManager {
             return None;
         }
         tracing::info!(
-            %session_id, recipe = %hash, file = file.id,
+            session = %session_log_id(&session_id), recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
         );
         self.emit_session_event(
@@ -7173,10 +7279,90 @@ impl TranscodeManager {
     /// caller holding a session its twin's supersession had already killed.
     /// Now the second caller finds the reservation and waits for the first
     /// one's session instead.
+    #[cfg(test)]
     pub async fn create_session(
         &self,
         req: &SessionRequest,
         user_name: &str,
+    ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        self.create_session_inner(req, user_name, &supersession_user, None)
+            .await
+    }
+
+    /// Start a cluster-owned replacement while retaining its process-local
+    /// serialization gate for the ingress activation verdict.
+    pub async fn create_cluster_session(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterSessionStart, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the replacement start expired before it could reap its predecessor",
+            ));
+        }
+        let info = self
+            .create_session_inner(req, user_name, &supersession_user, Some(deadline))
+            .await?;
+        Ok(ClusterSessionStart { info, replacement })
+    }
+
+    async fn acquire_cluster_replacement_gate(
+        &self,
+        key: String,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterReplacementGuard, String> {
+        let gate = {
+            let mut entries = self
+                .cluster_replacement_gates
+                .entries
+                .lock()
+                .map_err(|_| "cluster replacement gate registry was poisoned".to_owned())?;
+            entries.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(gate) = entries.get(&key).and_then(Weak::upgrade) {
+                gate
+            } else {
+                if entries.len() >= MAX_CLUSTER_REPLACEMENT_GATES {
+                    return Err(capacity_error(
+                        "too many player replacements are active on this worker",
+                    ));
+                }
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                entries.insert(key.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let gate_deadline = std::cmp::min(
+            deadline,
+            tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
+        );
+        let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
+            .await
+            .map_err(|_| {
+                capacity_error("another replacement for this player is still being committed")
+            })?;
+        Ok(ClusterReplacementGuard {
+            registry: Arc::clone(&self.cluster_replacement_gates),
+            key,
+            permit: Some(permit),
+        })
+    }
+
+    async fn create_session_inner(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
     ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
@@ -7192,7 +7378,7 @@ impl TranscodeManager {
             ));
         }
         let claim = match req.request_id.as_deref() {
-            Some(key) => match self.claim_request(key, req, user_name).await? {
+            Some(key) => match self.claim_request(key, req, supersession_user).await? {
                 Claimed::Recovered(info) => return Ok(info),
                 Claimed::Mine(claim, normalized) => Some((claim, normalized)),
             },
@@ -7217,6 +7403,8 @@ impl TranscodeManager {
                     req.subtitle_burn,
                     req.audio_offset_ms,
                     user_name,
+                    supersession_user,
+                    replacement_deadline,
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
@@ -7237,6 +7425,8 @@ impl TranscodeManager {
                         preserve_dolby_vision,
                     },
                     user_name,
+                    supersession_user,
+                    replacement_deadline,
                     &req.playback_id,
                     req.automatic,
                 )
@@ -7261,9 +7451,9 @@ impl TranscodeManager {
         &self,
         key: &str,
         request: &SessionRequest,
-        user_name: &str,
+        supersession_user: &str,
     ) -> Result<Claimed<'_>, String> {
-        let intent_fingerprint = request.intent_fingerprint(user_name);
+        let intent_fingerprint = request.intent_fingerprint(supersession_user);
         let deadline = Instant::now() + INFLIGHT_WAIT;
         loop {
             // What the map says right now, decided under one lock so there is
@@ -7309,14 +7499,16 @@ impl TranscodeManager {
                         requests: &self.requests,
                         key: Some(key.to_owned()),
                     };
-                    let (normalized, target_height) =
-                        match self.normalize_claimed_request(request, user_name).await {
-                            Ok(normalized) => normalized,
-                            Err(error) => {
-                                drop(claim);
-                                return Err(error);
-                            }
-                        };
+                    let (normalized, target_height) = match self
+                        .normalize_claimed_request(request, supersession_user)
+                        .await
+                    {
+                        Ok(normalized) => normalized,
+                        Err(error) => {
+                            drop(claim);
+                            return Err(error);
+                        }
+                    };
                     {
                         let mut requests = self.requests.lock().expect("requests mutex");
                         let Some(entry) = requests.get_mut(key) else {
@@ -7333,7 +7525,7 @@ impl TranscodeManager {
                                 "request {key} resolved to a target that differs from its session"
                             ));
                         }
-                        tracing::debug!(%session_id, request_id = key, "idempotent create: same session");
+                        tracing::debug!(session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
                         return Ok(Claimed::Recovered(info));
                     }
                     // Its session is gone; the entry is stale, not
@@ -7367,7 +7559,7 @@ impl TranscodeManager {
     async fn normalize_claimed_request(
         &self,
         request: &SessionRequest,
-        user_name: &str,
+        supersession_user: &str,
     ) -> Result<(SessionRequest, Option<i64>), String> {
         let Some(previous_session_id) = request.previous_session_id.as_deref() else {
             let target_height = match request.kind {
@@ -7385,7 +7577,7 @@ impl TranscodeManager {
                 .get(previous_session_id)
                 .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
             (
-                previous.user_name.clone(),
+                previous.supersession_user.clone(),
                 previous.playback_id.clone(),
                 previous.file_id,
                 previous.target_height,
@@ -7393,7 +7585,7 @@ impl TranscodeManager {
                 previous.kind,
             )
         };
-        if previous_user != user_name
+        if previous_user != supersession_user
             || previous_playback != request.playback_id
             || previous_file != request.file_id
         {
@@ -8045,12 +8237,27 @@ impl TranscodeManager {
     /// automatic quality restarts would have turned that from a rare
     /// annoyance into a loop. A player instance restarts its own stream all
     /// the time and never anyone else's, which is exactly the scope wanted.
-    async fn reap_superseded(&self, playback_id: &str) {
+    async fn reap_superseded_until(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
         let doomed: Vec<(String, Arc<Session>)> = {
-            let sessions = self.sessions.lock().await;
+            let sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(replacement_deadline_error());
+            }
             sessions
                 .iter()
-                .filter(|(_, s)| s.playback_id == playback_id)
+                .filter(|(_, s)| {
+                    s.supersession_user == supersession_user && s.playback_id == playback_id
+                })
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect()
         };
@@ -8058,7 +8265,10 @@ impl TranscodeManager {
             // Retirement releases both admission pools before the caller goes
             // on to ask for a slot of its own. A player replacing its own
             // session must not queue behind the session it just replaced.
-            if !self.retire_session(&session_id, &session).await {
+            if !self
+                .retire_session_until(&session_id, &session, deadline)
+                .await?
+            {
                 continue;
             }
             self.emit_session_event(
@@ -8072,14 +8282,30 @@ impl TranscodeManager {
             )
             .await;
             tracing::info!(
-                %session_id, playback_id,
+                session = %session_log_id(&session_id),
+                playback = %session_log_id(playback_id),
                 "reaped superseded transcode session (this player started a new one)"
             );
         }
+        Ok(())
+    }
+
+    /// Preserve the cluster ingress deadline across request recovery and
+    /// normalization. Those awaits are necessary before supersession, but a
+    /// start that consumed its budget there must not kill a still-playable
+    /// predecessor and then fail before replacing it.
+    async fn reap_superseded_before(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
+        self.reap_superseded_until(deadline, supersession_user, playback_id)
+            .await
     }
 
     /// Start a transcode session for a file, superseding this viewer's previous
-    /// session on the same file (see [`Self::reap_superseded`]).
+    /// session on the same file (see [`Self::reap_superseded_before`]).
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub async fn start(
@@ -8092,6 +8318,7 @@ impl TranscodeManager {
         user_name: &str,
         playback_id: &str,
     ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -8100,6 +8327,8 @@ impl TranscodeManager {
             subtitle_override,
             0,
             user_name,
+            &supersession_user,
+            None,
             playback_id,
             false,
             false,
@@ -8227,6 +8456,8 @@ impl TranscodeManager {
         subtitle_override: Option<i64>,
         audio_offset_ms: i64,
         user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
@@ -8235,7 +8466,8 @@ impl TranscodeManager {
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded(playback_id).await;
+        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+            .await?;
 
         let mut file = self
             .store
@@ -8296,6 +8528,7 @@ impl TranscodeManager {
                 &item_title,
                 SessionOwner {
                     user_name,
+                    supersession_user,
                     playback_id,
                     automatic,
                 },
@@ -8350,7 +8583,10 @@ impl TranscodeManager {
         let sw_permit = admission.sw_permit;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let dir = self.work_dir.join(&session_id);
+        // The public UUID is a bearer capability. Keep it out of ffmpeg's
+        // argv and stderr entirely by giving the scratch directory an
+        // independent, process-private name.
+        let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
@@ -8390,11 +8626,11 @@ impl TranscodeManager {
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
         );
         tracing::info!(
-            %session_id, encoder = encoder.label(), pipeline = opts.pipeline.name(),
+            session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
             declined = declined.unwrap_or(""),
             build = crate::version::BUILD,
-            "transcode ffmpeg args: {}", args.join(" ")
+            "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
         let progress = Arc::new(Progress::new());
         let generation = progress.begin_attempt();
@@ -8414,7 +8650,7 @@ impl TranscodeManager {
         )?;
 
         tracing::info!(
-            %session_id, file_id, target_height, start_seconds,
+            session = %session_log_id(&session_id), file_id, target_height, start_seconds,
             encoder = encoder.label(), "started transcode session"
         );
 
@@ -8445,6 +8681,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title,
             user_name: user_name.to_owned(),
+            supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
             kind: SessionKind::Transcode {
@@ -8549,7 +8786,7 @@ impl TranscodeManager {
                             // says which. The speed says how much headroom it
                             // has while doing it.
                             tracing::info!(
-                                session = %sid,
+                                session = %session_log_id(&sid),
                                 speed = session.progress.speed(),
                                 "transcode producing segments (hardware path healthy)"
                             );
@@ -8580,7 +8817,7 @@ impl TranscodeManager {
                             if !suspended && !announced_slow {
                                 announced_slow = true;
                                 tracing::info!(
-                                    session = %sid,
+                                    session = %session_log_id(&sid),
                                     produced_ms = session.progress.out_time_ms(),
                                     speed = session.progress.speed(),
                                     "no finished segment yet, but the encoder is still \
@@ -8675,7 +8912,7 @@ impl TranscodeManager {
         if downgrade_pipeline {
             let Some(fallback) = opts.pipeline.fallback() else {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     pipeline = opts.pipeline.name(),
                     "renderer stalled and has no color-safe fallback; refusing to retry through a different color transform"
                 );
@@ -8693,7 +8930,7 @@ impl TranscodeManager {
             retry_opts.effective_rate_control = software_rate_control;
         }
         tracing::warn!(
-            session = %sid,
+            session = %session_log_id(sid),
             stalled_s = session.progress.stalled_for().as_secs(),
             pipeline = opts.pipeline.name(),
             retry_pipeline = retry_opts.pipeline.name(),
@@ -8760,14 +8997,14 @@ impl TranscodeManager {
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
                 tracing::info!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     encoder = retry_encoder.label(),
                     pipeline = retry_opts.pipeline.name(),
                     "fallback transcode started"
                 );
             }
             Err(e) => {
-                tracing::error!(session = %sid, "fallback transcode failed: {e}");
+                tracing::error!(session = %session_log_id(sid), "fallback transcode failed: {e}");
                 session.fail(PlaylistError::SessionFailed(
                     "the fallback encoder could not be started".into(),
                 ));
@@ -8793,6 +9030,7 @@ impl TranscodeManager {
         user_name: &str,
         playback_id: &str,
     ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
         self.start_copy_with_audio_offset(
             file_id,
             start_seconds,
@@ -8800,6 +9038,8 @@ impl TranscodeManager {
             0,
             options,
             user_name,
+            &supersession_user,
+            None,
             playback_id,
             false,
         )
@@ -8815,12 +9055,15 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         options: CopySessionOptions,
         user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded(playback_id).await;
+        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+            .await?;
 
         let mut file = self
             .store
@@ -8853,7 +9096,7 @@ impl TranscodeManager {
             .unwrap_or_else(|| "(unknown)".to_owned());
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let dir = self.work_dir.join(&session_id);
+        let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
@@ -8900,9 +9143,9 @@ impl TranscodeManager {
                 options.preserve_dolby_vision,
             );
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "segmenter",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
                 build = crate::version::BUILD,
-                "copy-video HLS ffmpeg args: {}", args.join(" ")
+                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
             );
             match spawn_ffmpeg_pipe(
                 &args,
@@ -8916,7 +9159,7 @@ impl TranscodeManager {
                     // Spawning failed before any of this was decided, so there
                     // is nothing to unwind: start the legacy path here.
                     tracing::warn!(
-                        %session_id,
+                        session = %session_log_id(&session_id),
                         "copy segmenter could not start ffmpeg ({e}); using the HLS muxer"
                     );
                     let args = legacy_args();
@@ -8935,9 +9178,9 @@ impl TranscodeManager {
         } else {
             let args = legacy_args();
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "legacy",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "legacy",
                 build = crate::version::BUILD,
-                "copy-video HLS ffmpeg args: {}", args.join(" ")
+                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
             );
             let child = spawn_ffmpeg(
                 &args,
@@ -8988,6 +9231,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title,
             user_name: user_name.to_owned(),
+            supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
             kind: SessionKind::Copy {
@@ -9062,7 +9306,7 @@ impl TranscodeManager {
                 match outcome {
                     copyseg::Outcome::Ran(counts) => {
                         tracing::info!(
-                            session = %sid, build = crate::version::BUILD,
+                            session = %session_log_id(&sid), build = crate::version::BUILD,
                             "{}", copyseg::summary(&counts)
                         );
                     }
@@ -9099,7 +9343,7 @@ impl TranscodeManager {
                             return;
                         };
                         tracing::warn!(
-                            session = %sid,
+                            session = %session_log_id(&sid),
                             "copy segmenter cannot read this stream ({reason}); \
                              falling back to ffmpeg's HLS muxer for this session"
                         );
@@ -9144,10 +9388,10 @@ impl TranscodeManager {
                                     dir.clone(),
                                     sid.clone(),
                                 );
-                                tracing::info!(session = %sid, "fallback copy started");
+                                tracing::info!(session = %session_log_id(&sid), "fallback copy started");
                             }
                             Err(e) => {
-                                tracing::error!(session = %sid, "fallback copy failed: {e}");
+                                tracing::error!(session = %session_log_id(&sid), "fallback copy failed: {e}");
                                 session.fail(PlaylistError::SessionFailed(
                                     "the fallback remux could not be started".into(),
                                 ));
@@ -9344,7 +9588,7 @@ impl TranscodeManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(session_id.to_owned()),
+                session_id: Some(session_log_id(session_id)),
                 file_id: Some(session.file_id),
                 event: event.to_owned(),
                 method: Some(method.to_owned()),
@@ -9372,15 +9616,39 @@ impl TranscodeManager {
     /// therefore complete before the other can act: a late replacement sees
     /// `retired`, while a late retirement kills the published successor.
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
+        self.retire_session_until(session_id, session, None)
+            .await
+            .expect("unbounded session retirement cannot expire")
+    }
+
+    async fn retire_session_until(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, String> {
         #[cfg(test)]
         session.retirement_started.store(true, Release);
-        let _transition = session.child_transition.lock().await;
+        let _transition = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
+                .await
+                .map_err(|_| replacement_deadline_error())?,
+            None => session.child_transition.lock().await,
+        };
         let removed = {
-            let mut sessions = self.sessions.lock().await;
+            let mut sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
             let still_live = sessions
                 .get(session_id)
                 .is_some_and(|active| Arc::ptr_eq(active, session));
             if still_live {
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(replacement_deadline_error());
+                }
                 session.retired.store(true, Release);
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
@@ -9388,13 +9656,13 @@ impl TranscodeManager {
             still_live
         };
         if !removed {
-            return false;
+            return Ok(false);
         }
         session.release_hardware();
         session.release_software();
         session.kill_child().await;
         session.discard_dir().await;
-        true
+        Ok(true)
     }
 
     /// Publish a newly spawned session only while the process-local serving
@@ -9447,8 +9715,40 @@ impl TranscodeManager {
             },
         )
         .await;
-        tracing::info!(%session_id, reason, "transcode session ended");
+        tracing::info!(session = %session_log_id(session_id), reason, "transcode session ended");
         true
+    }
+
+    /// Snapshot the live capability ids without holding the session map while
+    /// replicated lease I/O runs.
+    pub async fn active_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// Snapshot only workers still eligible for durable lease renewal. A
+    /// fenced worker remains in the map until teardown acquires its child
+    /// transition, but its lease authority must stop at the fencing verdict.
+    pub async fn renewable_session_ids(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, session)| !session.retired.load(Acquire))
+            .map(|(session_id, _)| session_id.clone())
+            .collect()
+    }
+
+    /// Make a set of sessions immediately unservable without waiting for
+    /// process teardown or recursive scratch cleanup. The detached cleanup
+    /// path later takes `child_transition`, removes the registry entries, and
+    /// reaps their resources; every serving path observes this monotonic bit.
+    pub async fn fence_sessions(&self, session_ids: &[String]) {
+        let sessions = self.sessions.lock().await;
+        for session_id in session_ids {
+            if let Some(session) = sessions.get(session_id) {
+                session.retired.store(true, Release);
+            }
+        }
     }
 
     async fn stop_all_sessions_for_serving_fence(&self) {
@@ -9459,12 +9759,21 @@ impl TranscodeManager {
             .iter()
             .map(|(id, session)| (id.clone(), Arc::clone(session)))
             .collect::<Vec<_>>();
+        for (_, session) in &sessions {
+            // Serving authority is lost now, not after a producer transition
+            // happens to unblock. Lease renewal and every media path observe
+            // this bit while detached teardown catches up.
+            session.retired.store(true, Release);
+        }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
                 if self.retire_session(&session_id, &session).await {
                     // Do not publish a Store-backed playback event here: quorum
                     // loss is exactly the condition that triggered teardown.
-                    tracing::warn!(%session_id, "transcode session self-fenced after quorum loss");
+                    tracing::warn!(
+                        session = %session_log_id(&session_id),
+                        "transcode session self-fenced after quorum loss"
+                    );
                 }
             },
         ))
@@ -9497,8 +9806,27 @@ impl TranscodeManager {
         }
     }
 
+    /// Abort a remote start only when the worker's process-local idempotency
+    /// record proves that this exact internal incarnation created the session.
+    pub async fn stop_session_for_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        reason: &'static str,
+    ) -> bool {
+        let matches = self.requests.lock().is_ok_and(|requests| {
+            requests.get(request_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+        });
+        matches && self.stop_session(session_id, reason).await
+    }
+
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
+        if session.retired.load(Acquire) {
+            return None;
+        }
         *session.last_request.lock().await = LastRequest::now(kind);
         Some(session)
     }
@@ -9569,7 +9897,7 @@ impl TranscodeManager {
             return false;
         }
         tracing::error!(
-            session = %session_id,
+            session = %session_log_id(session_id),
             %status,
             "HLS producer exited unsuccessfully before publishing a usable playlist; \
              failing the session"
@@ -9671,7 +9999,7 @@ impl TranscodeManager {
                                 .map(|duration| duration.as_secs() as i64)
                                 .unwrap_or(session.started_unix);
                             tracing::info!(
-                                session = %session_id,
+                                session = %session_log_id(session_id),
                                 first_retained_index,
                                 wall_seconds_since_start =
                                     now_unix.saturating_sub(session.started_unix),
@@ -9706,7 +10034,7 @@ impl TranscodeManager {
             }
             if session.cached {
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     "cached playlist was missing, empty, oversized, or failed its manifest"
                 );
                 self.fail_cached_session_integrity(
@@ -9733,7 +10061,7 @@ impl TranscodeManager {
             // recovery path must not be reported as terminal.
             if Instant::now() >= deadline {
                 tracing::warn!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "no usable HLS playlist within the startup budget; telling the client \
                      to retry rather than that the stream failed"
@@ -9803,7 +10131,7 @@ impl TranscodeManager {
         let first_retained = session.segments.lock().await.first_retained_index();
         if segment_was_pruned(idx, first_retained) {
             tracing::warn!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 segment = name,
                 first_retained_segment = ?first_retained,
                 "HLS segment request fell behind the retained playlist window"
@@ -9843,7 +10171,7 @@ impl TranscodeManager {
                 Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {
                     tracing::error!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         "cached object failed its generation manifest"
                     );
@@ -9900,7 +10228,7 @@ impl TranscodeManager {
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         waited_ms,
                         progress_idle_ms = session
@@ -9969,7 +10297,7 @@ impl TranscodeManager {
                 let failure = session.failure_reason();
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason = failure.code(),
@@ -10015,7 +10343,7 @@ impl TranscodeManager {
                     "producer_timeout"
                 };
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason,
@@ -10171,7 +10499,7 @@ impl TranscodeManager {
             *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count,
                 hold_reason = ?hold.map(|hold| hold.reason),
                 release_value = hold.map(|hold| hold.release_value),
@@ -10195,7 +10523,7 @@ impl TranscodeManager {
             let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
             let hold_reason = held.map(|(_, reason)| reason);
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
                 ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
                 "resuming transcode: the client caught up"
@@ -10339,7 +10667,7 @@ impl TranscodeManager {
                 )
                 .await;
                 tracing::info!(
-                    session_id = %id,
+                    session = %session_log_id(&id),
                     idle_seconds,
                     last_request,
                     "reaped idle transcode session"
@@ -10670,7 +10998,7 @@ fn one_rung_below(current: i64) -> i64 {
 }
 
 /// One advertised rung of the ladder.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rung {
     pub height: i64,
     /// The rung's nominal cost on the wire: video target + audio, in kb/s.
@@ -10977,6 +11305,7 @@ fn test_session(dir: PathBuf) -> Session {
         item_id: 1,
         item_title: "T".into(),
         user_name: "paul".into(),
+        supersession_user: serde_json::json!(["username", "paul"]).to_string(),
         playback_id: "pb-test".into(),
         // The steppable shape: server-chosen height, and a kind that agrees
         // with `method` and `target_height` below. A stall reopen bound to
@@ -11018,6 +11347,63 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_session_ids_are_stably_redacted_for_observability() {
+        let raw = "00000000-0000-4000-8000-0000000000d1";
+        let redacted = session_log_id(raw);
+        assert_eq!(redacted, session_log_id(raw));
+        assert_ne!(
+            redacted,
+            session_log_id("00000000-0000-4000-8000-0000000000d2")
+        );
+        assert_eq!(redacted.len(), 66);
+        assert!(redacted.starts_with("s-"));
+        assert!(!redacted.contains(raw));
+    }
+
+    #[test]
+    fn captured_ffmpeg_command_and_stderr_logs_redact_bearer_capabilities() {
+        use tracing_subscriber::prelude::*;
+
+        let raw = "00000000-0000-4000-8000-0000000000d1";
+        let capability_url = format!("/api/v1/hls/{raw}/index.m3u8");
+        let args = vec![
+            "-i".to_owned(),
+            capability_url.clone(),
+            format!("/var/lib/plurx/transcode/{raw}/index.m3u8"),
+        ];
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8));
+        let subscriber =
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                "{}",
+                ffmpeg_args_log_message("transcode ffmpeg args", &args, raw)
+            );
+            log_ffmpeg_stderr(
+                raw,
+                "qsv",
+                &format!("could not write {capability_url}: permission denied"),
+            );
+        });
+
+        let captured = logs.tail("trace", 8);
+        assert_eq!(captured.len(), 2, "{captured:?}");
+        for entry in captured {
+            assert!(!entry.message.contains(raw), "{}", entry.message);
+            assert!(
+                !entry.message.contains(&capability_url),
+                "{}",
+                entry.message
+            );
+            assert!(
+                entry.message.contains(&session_log_id(raw)),
+                "{}",
+                entry.message
+            );
+        }
+    }
 
     #[test]
     fn scratch_capacity_fails_closed_when_the_background_sample_expires() {
@@ -11565,6 +11951,21 @@ mod tests {
         );
         assert!(hdr10.intent_fingerprint("paul").contains("t1080+hdr10"));
         assert!(request.intent_fingerprint("paul").contains("\"t1080\""));
+        assert_ne!(
+            request.intent_fingerprint("old-name"),
+            request.intent_fingerprint("new-name"),
+            "the legacy process-local key keeps its global username scope"
+        );
+        assert_eq!(
+            request.durable_intent_fingerprint(7),
+            request.clone().durable_intent_fingerprint(7),
+            "the replicated key is scoped by immutable user id, not username"
+        );
+        assert_ne!(
+            request.durable_intent_fingerprint(7),
+            request.durable_intent_fingerprint(8),
+            "different durable users remain distinct"
+        );
     }
 
     #[test]
@@ -14609,7 +15010,7 @@ mod tests {
                 .expect("suspend row");
             assert_eq!(
                 suspend.session_id.as_deref(),
-                Some(info.session_id.as_str())
+                Some(session_log_id(&info.session_id).as_str())
             );
             assert_eq!(suspend.hold_reason.as_deref(), Some("time"));
             assert_eq!(suspend.readrate, Some(1.0));
@@ -15218,6 +15619,7 @@ mod tests {
             item_id: 1,
             item_title: "Watchdog Fixture".into(),
             user_name: "paul".into(),
+            supersession_user: serde_json::json!(["username", "paul"]).to_string(),
             playback_id: "pb-watchdog".into(),
             automatic: true,
             kind: SessionKind::Transcode { height: 1080 },
@@ -15790,6 +16192,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn fenced_session_is_not_renewable_while_teardown_is_blocked() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("fenced-renewal".into(), Arc::clone(&session));
+        let transition = session.child_transition.lock().await;
+
+        manager.fence_sessions(&["fenced-renewal".to_owned()]).await;
+        assert_eq!(
+            manager.active_session_ids().await,
+            vec!["fenced-renewal".to_owned()],
+            "the teardown barrier keeps the worker discoverable for cleanup"
+        );
+        assert!(
+            manager.renewable_session_ids().await.is_empty(),
+            "the same fenced worker must never be submitted for renewal"
+        );
+        drop(transition);
+        assert!(manager.stop_session("fenced-renewal", "test").await);
+    }
+
     /// The inverse transition ordering matters too: a hardware fallback can
     /// decide to downgrade immediately before the serving fence retires its
     /// session, then arrive at `child_transition` only after teardown. The
@@ -16348,6 +16784,7 @@ mod tests {
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
+                    supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
                 },
@@ -17362,6 +17799,7 @@ mod tests {
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
+                    supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
                 },
@@ -17942,7 +18380,7 @@ mod tests {
 
         let request = reopen_request(41, "shared-player", "stall-vs-seek", "stalled-session");
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("stall-vs-seek", &request, "paul")
+            .claim_request("stall-vs-seek", &request, r#"["username","paul"]"#)
             .await
             .expect("bound claim")
         else {
@@ -17960,6 +18398,157 @@ mod tests {
             "the target is stored before either session can be superseded"
         );
         drop(claim);
+    }
+
+    #[tokio::test]
+    async fn clustered_stall_reopen_survives_username_rename() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let previous_dir = tempfile::tempdir().expect("previous session");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let immutable_scope = serde_json::json!(["user_id", 42]).to_string();
+        let mut previous = test_session(previous_dir.path().to_path_buf());
+        previous.user_name = "name-before-rename".into();
+        previous.supersession_user = immutable_scope.clone();
+        previous.playback_id = "renamed-player".into();
+        previous.file_id = 42;
+        previous.target_height = 1080;
+        previous.automatic = true;
+        previous.kind = SessionKind::Transcode { height: 1080 };
+        mgr.sessions
+            .lock()
+            .await
+            .insert("renamed-session".into(), Arc::new(previous));
+
+        let request = reopen_request(42, "renamed-player", "renamed-reopen", "renamed-session");
+        let Claimed::Mine(claim, normalized) = mgr
+            .claim_request("renamed-reopen", &request, &immutable_scope)
+            .await
+            .expect("immutable user id still owns the renamed session")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(normalized.kind, SessionKind::Transcode { height: 720 });
+        drop(claim);
+
+        let foreign = SessionRequest {
+            request_id: Some("renamed-foreign".into()),
+            ..request
+        };
+        assert!(mgr
+            .claim_request(
+                "renamed-foreign",
+                &foreign,
+                &serde_json::json!(["user_id", 43]).to_string(),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_gate_refuses_a_wait_past_its_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let key = r#"[["user_id",42],"deadline-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key.clone(), tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("a timed-out replacement must never reach predecessor reap"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+
+        drop(held);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a live retry acquires the released gate");
+        drop(reacquired);
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_rechecks_deadline_before_predecessor_reap() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let predecessor_dir = tempfile::tempdir().expect("predecessor");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let immutable_scope = serde_json::json!(["user_id", 42]).to_string();
+        let mut predecessor = test_session(predecessor_dir.path().to_path_buf());
+        predecessor.supersession_user = immutable_scope.clone();
+        predecessor.playback_id = "deadline-player".into();
+        let predecessor = Arc::new(predecessor);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("still-playable".into(), Arc::clone(&predecessor));
+
+        let sessions_guard = mgr.sessions.lock().await;
+        let sessions_error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("session-map contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&sessions_error),
+            "{sessions_error}"
+        );
+        drop(sessions_guard);
+
+        let transition_guard = predecessor.child_transition.lock().await;
+        let transition_error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("child-transition contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&transition_error),
+            "{transition_error}"
+        );
+        drop(transition_guard);
+
+        assert!(
+            mgr.sessions.lock().await.contains_key("still-playable"),
+            "both expired lock acquisitions must leave the predecessor live"
+        );
     }
 
     /// Track intent is orthogonal to height normalization. A stall claim keeps
@@ -17999,7 +18588,7 @@ mod tests {
             ..reopen_request(52, "track-player", "stall-track", "track-stall")
         };
         let Claimed::Mine(stall_claim, normalized) = mgr
-            .claim_request("stall-track", &request, "paul")
+            .claim_request("stall-track", &request, r#"["username","paul"]"#)
             .await
             .expect("stall claim")
         else {
@@ -18018,7 +18607,7 @@ mod tests {
             ..request
         };
         let Claimed::Mine(track_claim, ordinary) = mgr
-            .claim_request("user-track-change", &track_change, "paul")
+            .claim_request("user-track-change", &track_change, r#"["username","paul"]"#)
             .await
             .expect("ordinary track claim")
         else {
@@ -18070,7 +18659,7 @@ mod tests {
         for attempt in ["floor-retry-1", "floor-retry-2", "floor-retry-3"] {
             let request = reopen_request(63, "floor-player", attempt, "floor-session");
             let Claimed::Mine(claim, normalized) = mgr
-                .claim_request(attempt, &request, "paul")
+                .claim_request(attempt, &request, r#"["username","paul"]"#)
                 .await
                 .expect("floor claim")
             else {
@@ -18146,7 +18735,7 @@ mod tests {
             let attempt = format!("sub-floor-retry-{height}");
             let request = reopen_request(64 + index as i64, &playback_id, &attempt, &session_id);
             let Claimed::Mine(claim, normalized) = mgr
-                .claim_request(&attempt, &request, "paul")
+                .claim_request(&attempt, &request, r#"["username","paul"]"#)
                 .await
                 .expect("sub-floor claim")
             else {
@@ -18223,7 +18812,7 @@ mod tests {
             "device-a-session",
         );
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("device-a-reopen", &request, "paul")
+            .claim_request("device-a-reopen", &request, r#"["username","paul"]"#)
             .await
             .expect("device A claim")
         else {
@@ -18238,7 +18827,7 @@ mod tests {
             ..request.clone()
         };
         let Claimed::Mine(device_b_claim, device_b_normalized) = mgr
-            .claim_request("device-b-reopen", &device_b, "paul")
+            .claim_request("device-b-reopen", &device_b, r#"["username","paul"]"#)
             .await
             .expect("device B claim")
         else {
@@ -18256,7 +18845,11 @@ mod tests {
             ..request
         };
         assert!(mgr
-            .claim_request("foreign-user-reopen", &foreign_user, "other-user")
+            .claim_request(
+                "foreign-user-reopen",
+                &foreign_user,
+                r#"["username","other-user"]"#,
+            )
             .await
             .is_err_and(|error| error.contains("does not belong")));
     }
@@ -18293,7 +18886,7 @@ mod tests {
         .await;
         let request = reopen_request(85, "manual-player", "manual-retry", "manual-session");
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("manual-retry", &request, "paul")
+            .claim_request("manual-retry", &request, r#"["username","paul"]"#)
             .await
             .expect("manual claim")
         else {

@@ -589,6 +589,67 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_session_requests",
+        columns: &[
+            "user_id",
+            "request_id",
+            "request_fingerprint",
+            "playback_id",
+            "state",
+            "claim_expires_at_ms",
+            "incarnation_id",
+            "owner_node_id",
+            "response_json",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, request_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "media_playback_pointers",
+        columns: &[
+            "user_id",
+            "playback_id",
+            "current_incarnation_id",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, playback_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "media_sessions",
+        columns: &[
+            "incarnation_id",
+            "session_id",
+            "user_id",
+            "playback_id",
+            "request_fingerprint",
+            "owner_node_id",
+            "owner_epoch",
+            "lease_expires_at_ms",
+            "state",
+            "recipe_json",
+            "response_json",
+            "produced_playable_through_ms",
+            "fetched_through_ms",
+            "media_origin_ms",
+            "media_sequence",
+            "discontinuity_sequence",
+            "updated_at_ms",
+        ],
+        order_by: "incarnation_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "pretranscode_jobs",
         columns: &[
             "id",
@@ -1869,7 +1930,10 @@ mod tests {
         assert!(!names.contains(&"playback_events"));
         assert!(!names.contains(&"items_fts"));
         assert!(!names.contains(&"offline_lease_guards"));
-        assert_eq!(names.len(), 20, "review every imported durable table");
+        assert!(names.contains(&"media_session_requests"));
+        assert!(names.contains(&"media_playback_pointers"));
+        assert!(names.contains(&"media_sessions"));
+        assert_eq!(names.len(), 23, "review every imported durable table");
     }
 
     #[test]

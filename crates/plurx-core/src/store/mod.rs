@@ -38,6 +38,8 @@ mod hiqlite_pretranscode;
 mod hiqlite_publication;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_reading;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sessions;
 
 pub mod replicated;
 
@@ -62,13 +64,14 @@ use async_trait::async_trait;
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheManifestCheck, CachedTranscode, HomePreviewPage, InProgressItem, Item,
-    ItemEdit, ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup,
-    WatchState,
+    ItemEdit, ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation,
+    MediaSessionActivationOutcome, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior, NetworkPriorObservation, NewItem,
+    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineActivityPackage,
+    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -140,6 +143,10 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Opt in to remote media-session placement only after every committed
+    /// voter is publishing the current media protocol. Absent is deliberately
+    /// off so rolling upgrades keep all starts local.
+    pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -1795,6 +1802,80 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
     ) -> Result<(), StoreError>;
 }
 
+/// Durable idempotency and routing for cluster-owned live HLS sessions.
+///
+/// Capability bytes stay in `session_id`; every mutation additionally fences
+/// on the never-reused incarnation plus owner epoch. Implementations bound
+/// client-controlled rows before inserting them.
+#[async_trait]
+pub trait MediaSessionStore: Send + Sync + 'static {
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+    ) -> Result<MediaSessionRequestClaim, StoreError>;
+
+    async fn assign_media_session_request_owner(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn activate_media_session(
+        &self,
+        activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    async fn fail_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn media_session_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn media_session_route_by_incarnation(
+        &self,
+        incarnation_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn renew_media_sessions(
+        &self,
+        owner_node_id: &str,
+        renewals: &[MediaSessionRenewal],
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Vec<String>, StoreError>;
+
+    async fn end_media_session(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError>;
+
+    async fn owned_media_sessions(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -1814,6 +1895,7 @@ pub trait Store:
     + NetworkPriorStore
     + CoordinationStore
     + FencedPublicationStore
+    + MediaSessionStore
     + Send
     + Sync
     + 'static
@@ -1838,6 +1920,7 @@ impl<T> Store for T where
         + NetworkPriorStore
         + CoordinationStore
         + FencedPublicationStore
+        + MediaSessionStore
         + Send
         + Sync
         + 'static

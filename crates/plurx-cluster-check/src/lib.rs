@@ -2337,11 +2337,18 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
 
     let isolated = loop {
         let observation = bounded_read(&mut cluster, follower, item_id).await?;
-        if observation.non_consistent_query_calls == 0 {
+        // Proof expiry and the production serving-fence poll are deliberately
+        // independent. The bounded reader can reject local SQL a few
+        // milliseconds before the common fence publishes not-ready; observe
+        // both states within the same 1.2 s contract instead of sampling the
+        // transient gap as a failure.
+        if observation.non_consistent_query_calls == 0 && !observation.serving_ready {
             break observation;
         }
         if partition_started.elapsed() >= Duration::from_millis(1_200) {
-            bail!("partitioned follower still executed local SQL after the watermark lease");
+            bail!(
+                "partitioned follower did not fully fail closed after the watermark lease: {observation:?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
@@ -2889,8 +2896,32 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let heartbeat_entries = after_heartbeats
         .committed_index
         .saturating_sub(before_heartbeats.committed_index);
-    if heartbeat_entries != 2 {
-        bail!("two liveness heartbeats consumed {heartbeat_entries} Raft entries instead of two");
+    if heartbeat_entries != 1 {
+        bail!(
+            "two duplicate liveness heartbeats consumed {heartbeat_entries} Raft entries instead of one"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    cluster
+        .request(leader, Request::Heartbeat)
+        .await?
+        .require_ok()?;
+    let after_heartbeat_window = quorum_watermark_observation(&mut cluster, leader).await?;
+    if after_heartbeat_window.leader_id != leader
+        || after_heartbeat_window.term != after_heartbeats.term
+    {
+        bail!(
+            "heartbeat window control crossed a leader term: before={after_heartbeats:?} \
+             after={after_heartbeat_window:?}"
+        );
+    }
+    let post_window_entries = after_heartbeat_window
+        .committed_index
+        .saturating_sub(after_heartbeats.committed_index);
+    if post_window_entries != 1 {
+        bail!(
+            "a heartbeat after the duplicate window consumed {post_window_entries} Raft entries instead of one"
+        );
     }
 
     // Four reconciliation loops must not turn one persistent miss into one
@@ -7189,7 +7220,9 @@ async fn handle_request(
             }
         }
         Request::HeartbeatPreservesTombstone { node_id } => {
-            membership_ref(membership)?.heartbeat().await?;
+            membership_ref(membership)?
+                .validation_force_heartbeat()
+                .await?;
             let rows = client
                 .query_consistent_map::<MembershipTombstoneRow, _>(
                     "SELECT COALESCE(removed_at, (SELECT started_at \
