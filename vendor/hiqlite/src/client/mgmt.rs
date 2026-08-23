@@ -240,11 +240,9 @@ impl Client {
         &self,
         url: String,
     ) -> Result<RaftMetrics<NodeId, Node>, Error> {
-        // This should never be called if we have a local client with its own replicated data
-        debug_assert!(
-            self.inner.state.is_none(),
-            "get_metrics_remote should never be called with local state"
-        );
+        // Ordinary local metrics remain in-process. Missing-leader recovery may
+        // deliberately query a configured peer while the resumed local watch
+        // has not republished the current leader.
         debug_assert!(
             self.inner.api_secret.is_some(),
             "api_secret should always exist for remote clients"

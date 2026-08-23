@@ -7,10 +7,20 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 use tokio::time;
 use tracing::{debug, error, warn};
 
 const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn first_some<T: Send + 'static>(mut probes: JoinSet<Option<T>>) -> Option<T> {
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(value)) = result {
+            return Some(value);
+        }
+    }
+    None
+}
 
 impl Client {
     #[inline(always)]
@@ -196,38 +206,53 @@ impl Client {
                         Err(err) => warn!("Find cache leader error: {}", err),
                     }
                 }
+            }
+
+            #[cfg(feature = "sqlite")]
+            let path = if Arc::ptr_eq(leader, &self.inner.leader_db) {
+                "/cluster/metrics/sqlite"
             } else {
-                for addr in &self.inner.nodes {
-                    let scheme = if self.inner.tls_config.is_some() {
-                        "https"
-                    } else {
-                        "http"
-                    };
-
-                    #[cfg(feature = "sqlite")]
-                    if Arc::ptr_eq(leader, &self.inner.leader_db) {
-                        let url = format!("{scheme}://{addr}/cluster/metrics/sqlite");
-                        match self.get_metrics_remote(url).await {
-                            Ok(metrics) => match Self::leader_from_metrics(metrics) {
-                                Ok(found) => return Ok(found),
-                                Err(err) => warn!("Find DB leader error: {}", err),
-                            },
-                            Err(err) => error!("Error looking up DB metrics: {}", err),
-                        }
-                    }
-
-                    #[cfg(feature = "cache")]
-                    if Arc::ptr_eq(leader, &self.inner.leader_cache) {
-                        let url = format!("{scheme}://{addr}/cluster/metrics/cache");
-                        match self.get_metrics_remote(url).await {
-                            Ok(metrics) => match Self::leader_from_metrics(metrics) {
-                                Ok(found) => return Ok(found),
-                                Err(err) => warn!("Find cache leader error: {}", err),
-                            },
-                            Err(err) => error!("Error looking up Cache metrics: {}", err),
-                        }
-                    }
+                #[cfg(feature = "cache")]
+                if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+                    "/cluster/metrics/cache"
+                } else {
+                    return Err(Error::Config("unknown Raft leader lock".into()));
                 }
+
+                #[cfg(not(feature = "cache"))]
+                return Err(Error::Config("unknown Raft leader lock".into()));
+            };
+            #[cfg(all(not(feature = "sqlite"), feature = "cache"))]
+            let path = if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+                "/cluster/metrics/cache"
+            } else {
+                return Err(Error::Config("unknown Raft leader lock".into()));
+            };
+            let scheme = if self.inner.tls_config.is_some() {
+                "https"
+            } else {
+                "http"
+            };
+            let mut probes = JoinSet::new();
+            for addr in &self.inner.nodes {
+                let client = self.clone();
+                let url = format!("{scheme}://{addr}{path}");
+                probes.spawn(async move {
+                    match client
+                        .get_metrics_remote(url)
+                        .await
+                        .and_then(Self::leader_from_metrics)
+                    {
+                        Ok(found) => Some(found),
+                        Err(error) => {
+                            warn!("Find configured leader error: {}", error);
+                            None
+                        }
+                    }
+                });
+            }
+            if let Some(found) = first_some(probes).await {
+                return Ok(found);
             }
             time::sleep(Duration::from_millis(100)).await;
         }
@@ -358,5 +383,23 @@ impl Client {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future;
+
+    #[tokio::test]
+    async fn configured_leader_probes_do_not_wait_for_the_first_peer() {
+        let mut probes = JoinSet::new();
+        probes.spawn(async { future::pending::<Option<u64>>().await });
+        probes.spawn(async { Some(42) });
+
+        let result = time::timeout(Duration::from_millis(100), first_some(probes))
+            .await
+            .expect("a later healthy peer must not wait for the first peer");
+        assert_eq!(result, Some(42));
     }
 }

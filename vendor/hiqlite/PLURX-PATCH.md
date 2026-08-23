@@ -46,12 +46,14 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   replace that boundary, so a proxy remains an enforceable routing, partition,
   and trust boundary after recovery.
 - A client receiving `ForwardToLeader(None, None)` treats it as a definitive
-  unaccepted request, runs leader discovery and stream reconnection in a
-  detached two-second recovery budget, and uses the existing single retry only
-  after recovery succeeds. This closes the resumed-follower interval in which
-  the local voter is healthy but has not yet republished the current leader
-  without allowing raw client calls to hang; proxy-mode clients reconnect
-  through their pinned proxy instead of escaping that trust boundary.
+  unaccepted request, probes its configured authenticated peers concurrently,
+  and reconnects in a detached two-second recovery budget before using the
+  existing single retry. Management clients never follow redirects, so their
+  custom API-secret header cannot leave the configured roster. This closes the
+  resumed-follower interval in which the local voter is healthy but has not yet
+  republished the current leader without allowing raw client calls to hang;
+  proxy-mode clients reconnect through their pinned proxy instead of escaping
+  that trust boundary.
 
 Remove this vendor when an upstream Hiqlite release contains all nine patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in

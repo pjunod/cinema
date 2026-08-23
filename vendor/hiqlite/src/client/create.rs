@@ -20,8 +20,9 @@ impl Client {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_local(
         state: Arc<AppState>,
+        nodes: Vec<String>,
         tls_config: Option<Arc<rustls::ClientConfig>>,
-        #[cfg(feature = "cache")] tls_no_verify: bool,
+        tls_no_verify: bool,
         #[cfg(feature = "sqlite")] tx_client_db: flume::Sender<ClientStreamReq>,
         #[cfg(feature = "sqlite")] rx_client_db: flume::Receiver<ClientStreamReq>,
         tx_shutdown: watch::Sender<bool>,
@@ -32,6 +33,7 @@ impl Client {
         let leader_addr = state.addr_api.clone();
 
         let secret = state.secret_api.as_bytes().to_vec();
+        let api_secret = state.secret_api.clone();
 
         #[cfg(feature = "cache")]
         let leader_cache = Arc::new(RwLock::new((leader_id, leader_addr.clone())));
@@ -53,10 +55,11 @@ impl Client {
             leader_cache,
             #[cfg(feature = "sqlite")]
             leader_db,
-            // TODO do we even still need this for a local client? -> all raft messages should use internal API ?
-            nodes: Vec::default(),
+            // Retain the authenticated roster for bounded recovery from a
+            // resumed follower whose local metrics do not know the leader yet.
+            nodes,
             proxy_mode: false,
-            client: None,
+            client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
             #[cfg(feature = "sqlite")]
@@ -64,7 +67,7 @@ impl Client {
             tls_config,
             #[cfg(feature = "cache")]
             tls_no_verify,
-            api_secret: None,
+            api_secret: Some(api_secret),
             request_id: AtomicUsize::new(0),
             tx_shutdown: Some(tx_shutdown),
             #[cfg(feature = "listen_notify_local")]
