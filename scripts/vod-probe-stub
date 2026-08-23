@@ -44,6 +44,8 @@ const HLS_JS_PATH = path.join(ROOT, "crates", "plurxd", "src", "web", "hls.min.j
 // dressed up as a drift verdict.
 const DEFAULT_CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
 
+const crypto = require("node:crypto");
+
 const FFMPEG = process.env.PLURX_FFMPEG || "/usr/bin/ffmpeg";
 const FFPROBE = process.env.PLURX_FFPROBE || "/usr/bin/ffprobe";
 
@@ -72,43 +74,79 @@ const P3_TAIL_RATE = 4;
 const DEFAULTS = {
   delays: "5,15,30,60",
   delay_segment: 5,
-  expire_attempts: 2,
+  // Above hls.js's errorRetry ceiling (1 + maxNumRetry 6 = 7 attempts) on
+  // purpose. An --expire-attempts the client can outlast measures the recovery
+  // path; only one it cannot measures where the client gives up, and that ceiling
+  // is the number `block_budget_secs` has to respect.
+  expire_attempts: 8,
+  // Not 1: hls.js's own first errorRetry backoff step is 1000 ms, so a
+  // `Retry-After: 1` is indistinguishable from the client ignoring the header.
+  retry_after: 3,
   frag_timeout_ms: 65000,
+  server_deadline_ms: 0,
   timeout: 180,
+};
+
+// The four §2.3 server shapes the P3 grid sweeps. `no-deadline` is a server that
+// blocks forever, which the plan explicitly rejects; `per-request` is a server
+// that restarts the work on every retry; the `deadline-*` pair is the plan's
+// actual contract — block, but end every request through one named path.
+const BLOCK_MODELS = {
+  "no-deadline": { deadlineMs: 0, perRequest: false },
+  "per-request": { deadlineMs: 0, perRequest: true },
 };
 
 function usage() {
   process.stdout.write(`plurx VOD presentation probe stub (M0-P2 / M0-P3, web half)
 
 Usage:
-  scripts/vod-probe-stub [p2|p3|all] [options]
+  scripts/vod-probe-stub [p2|p3|all|fixtures] [options]
+
+  fixtures builds and asserts the corpus without launching a browser.
 
 Options:
   --rebuild               Rebuild the fixtures even if the cache looks good.
   --fixtures DIR          Fixture root (default target/vod-probe/web).
   --chrome PATH           Chromium binary (default ${DEFAULT_CHROME}).
   --delays 5,15,30,60     P3 block lengths in seconds; each is its own run.
-  --delay-segment N       P3 segment index to block (default ${DEFAULTS.delay_segment}).
+  --delay-segment N       P3 segment index to block (default ${DEFAULTS.delay_segment}; 0 is
+                          legal and is the startup case).
+  --server-deadline-ms N  Hard per-request deadline (§2.3). Expiry answers the
+                          typed segment_pending 503 + Retry-After while the
+                          segment still materializes at first-request + delay.
+                          0 disables it (default ${DEFAULTS.server_deadline_ms}).
+  --per-request-delay     Restart the whole block on every request instead of
+                          materializing once. Models a server that redoes the
+                          work per retry.
+  --models LIST           Sweep several block models in one report, e.g.
+                          no-deadline,per-request,deadline-8000,deadline-15000.
+                          Overrides --server-deadline-ms / --per-request-delay.
+  --configs LIST          Which hls.js arms to run: default, raised, or both
+                          (default both).
   --expire                P3 answers the blocked segment with the typed
                           segment_pending 503 + Retry-After instead of blocking.
   --expire-attempts N     How many 503s before the real bytes (default ${DEFAULTS.expire_attempts}).
-  --frag-timeout-ms N     Raised hls.js fragLoadingTimeOut for the second half of
-                          every P3 run pair (default ${DEFAULTS.frag_timeout_ms}).
+  --retry-after N         Retry-After seconds on every 503 (default ${DEFAULTS.retry_after}).
+  --frag-timeout-ms N     The raised arm's fragLoadPolicy.default caps, in ms
+                          (default ${DEFAULTS.frag_timeout_ms}).
   --timeout SECONDS       Hard per-run deadline (default ${DEFAULTS.timeout}).
-  --json PATH             Write the machine-readable report.
+  --json PATH             Write the machine-readable report (rewritten after
+                          every run, so a sweep that dies mid-way still lands).
   --keep-runtime          Keep the Chromium profiles and the served page HTML.
 
-P2 serves one set of segment bytes under two playlists — nominal 2.000000
-EXTINFs (D6-A) and the real measured EXTINFs (D6-B's control) — and reports
-them side by side, plus the same pair over a drift-free grid rendition so the
-reader can see what the harness measures when there is nothing to measure.
+P2 serves each rendition's segment bytes under two playlists — the plan's
+nominal 2.0 s EXTINFs (D6-A) and the segmenter's measured ones (D6-B's control)
+— over three renditions: drift-free, realistically jittered, and an amplified
+2.25 s-per-2.0 s rendition whose declared timeline falls seconds behind the
+media. Identical playlist bytes are collapsed to one run.
 
-P3 blocks one segment for each --delays value and runs every length twice:
-once on hls.js defaults, once with fragLoadingTimeOut raised, so the report can
-name the config each block length needs rather than only whether it survived.
+P3 blocks one segment for each --delays value under each --models entry and each
+--configs arm, so the report can name the server contract AND the client config
+a given block length needs, rather than only whether one combination survived.
 
 A run that produces a NEGATIVE finding — hls.js does not survive a 60 s block —
-is a successful measurement. Only a harness failure exits non-zero.
+is a successful measurement. Only a harness failure or an inconclusive run
+(one with no evidence that the browser decoded anything) exits non-zero.
 `);
 }
 
@@ -148,10 +186,48 @@ function positiveNumber(value, fallback, label) {
   return parsed;
 }
 
+/*
+ * Zero is a legal answer for a segment index and for a disabled deadline, so
+ * these cannot go through positiveNumber — and the one place it mattered was
+ * `--delay-segment 0`, the startup block that sets the client's opening
+ * `block_budget_secs`.
+ */
+function nonNegativeInteger(value, fallback, label) {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") throw new Error(`${label} needs a value`);
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${label} must be a non-negative integer`);
+  return parsed;
+}
+
 function pathOption(value, label) {
   if (value === undefined) return null;
   if (typeof value === "boolean") throw new Error(`${label} needs a path`);
   return String(value);
+}
+
+function parseList(value, fallback, label) {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") throw new Error(`${label} needs a value`);
+  const parts = String(value).split(",").map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) throw new Error(`${label} needs at least one value`);
+  return parts;
+}
+
+/*
+ * A model name is either one of the two fixed shapes or `deadline-<ms>`, so the
+ * grid the plan actually needs — several deadlines against several block
+ * lengths — is one command and one report rather than four of each.
+ */
+function parseBlockModel(name) {
+  if (BLOCK_MODELS[name]) return { id: name, ...BLOCK_MODELS[name] };
+  const match = /^deadline-(\d+)$/.exec(name);
+  if (!match) {
+    throw new Error(`unknown block model "${name}"; use no-deadline, per-request, or deadline-<ms>`);
+  }
+  const deadlineMs = Number(match[1]);
+  if (deadlineMs <= 0) throw new Error(`block model "${name}" needs a positive deadline`);
+  return { id: name, deadlineMs, perRequest: false };
 }
 
 function parseDelays(spec) {
@@ -194,19 +270,44 @@ function runFfmpeg(args, cwd) {
  */
 const JITTER_FRAME_DELTAS = [2, -1, 2, 0, -2, 1, 2, -1, 0, 2];
 
-function jitterKeyframeTimes() {
+/*
+ * ffmpeg takes -force_key_frames as "the first frame at or after this time", so
+ * a boundary time that rounds even slightly *up* past its own frame's
+ * presentation time silently slides the cut one frame later. At 24 fps a third
+ * of the frame times are not exactly representable in six decimals
+ * (13/24 = 0.5416666..., which .toFixed(6) rounds up to 0.541667), so a
+ * naive rendering moved a third of the boundaries and the realised pattern was
+ * nothing like the coded one.
+ *
+ * Biasing a quarter of a frame early lands strictly inside the intended frame's
+ * own interval, which is unambiguous in either rounding direction.
+ */
+function frameBoundaryTimes(frames) {
+  return frames.map((frame) => (frame === 0 ? "0.000000000" : ((frame - 0.25) / SOURCE_FPS).toFixed(9)));
+}
+
+function boundaryFrames(deltas) {
   const framesPerSegment = Math.round(NOMINAL_SEGMENT_SECONDS * SOURCE_FPS);
   const totalFrames = SOURCE_SECONDS * SOURCE_FPS;
   const boundaries = [0];
   let cursor = 0;
   for (let index = 0; ; index += 1) {
-    const next = cursor + framesPerSegment + JITTER_FRAME_DELTAS[index % JITTER_FRAME_DELTAS.length];
+    const next = cursor + framesPerSegment + deltas[index % deltas.length];
     if (next >= totalFrames) break;
     boundaries.push(next);
     cursor = next;
   }
-  return boundaries.map((frame) => (frame / SOURCE_FPS).toFixed(6));
+  return boundaries;
 }
+
+/*
+ * The amplified rendition: every segment 54 frames (2.250 s) declared as 2.0 s.
+ * Nothing in the transcode pipeline drifts that hard, and that is the point — it
+ * separates "hls.js tolerates the plan's jitter" from "hls.js ignores the EXTINF
+ * column entirely", which the realistic rendition alone cannot distinguish
+ * because its worst divergence is smaller than one GOP.
+ */
+const AMPLIFIED_FRAME_DELTAS = [6];
 
 /*
  * ffmpeg's HLS muxer is the only party that knows what it actually cut, so the
@@ -245,6 +346,7 @@ const RENDITIONS = {
   grid: {
     id: "grid",
     description: "2.000 s GOP on the nominal grid (the plan's transcode recipe verbatim)",
+    deltas: null,
     sourceArgs: ["-g", "48"],
     // -hls_time 2 lands on the grid's own keyframes, so the cut times are the
     // grid times.
@@ -253,26 +355,139 @@ const RENDITIONS = {
   jitter: {
     id: "jitter",
     description: "keyframes forced off the grid so real durations drift against nominal 2.0 s",
-    sourceArgs: null, // filled in below; the forced-keyframe list is computed.
+    deltas: JITTER_FRAME_DELTAS,
     // A hls_time below one frame makes every keyframe a segment boundary, which
     // is the only way to hand the muxer a cut list it did not choose itself.
+    segmentTime: "0.1",
+  },
+  amplified: {
+    id: "amplified",
+    description: "every segment 2.250 s against a 2.0 s nominal — drift far past one GOP",
+    deltas: AMPLIFIED_FRAME_DELTAS,
     segmentTime: "0.1",
   },
 };
 
 function renditionSourceArgs(rendition) {
-  if (rendition.id === "jitter") {
-    return ["-g", "9999", "-force_key_frames", jitterKeyframeTimes().join(","), "-auto-alt-ref", "0"];
+  if (!rendition.deltas) return rendition.sourceArgs;
+  const times = frameBoundaryTimes(boundaryFrames(rendition.deltas));
+  return ["-g", "9999", "-force_key_frames", times.join(","), "-auto-alt-ref", "0"];
+}
+
+function sourceFfmpegArgs(rendition, source) {
+  return [
+    "-y", "-v", "error",
+    "-f", "lavfi", "-i", `testsrc2=size=640x360:rate=${SOURCE_FPS}:duration=${SOURCE_SECONDS}`,
+    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${SOURCE_SECONDS}`,
+    "-c:v", "libvpx-vp9", "-b:v", "800k", "-deadline", "realtime", "-cpu-used", "8",
+    ...renditionSourceArgs(rendition),
+    "-c:a", "libopus", "-b:a", "96k",
+    "-pix_fmt", "yuv420p", "-ac", "2", "-shortest",
+    "-f", "matroska", source,
+  ];
+}
+
+/*
+ * Everything that can change what the bytes are, hashed. Without this the cache
+ * key is the rendition's *name*, so editing the delta pattern or the fps and
+ * re-running quietly measures yesterday's fixture and reports it under today's
+ * description — the one failure mode a probe must never have.
+ */
+function recipeHash(rendition) {
+  const recipe = JSON.stringify({
+    deltas: rendition.deltas,
+    fps: SOURCE_FPS,
+    seconds: SOURCE_SECONDS,
+    nominal: NOMINAL_SEGMENT_SECONDS,
+    segment_time: rendition.segmentTime,
+    argv: sourceFfmpegArgs(rendition, "<out>"),
+  });
+  return crypto.createHash("sha256").update(recipe).digest("hex").slice(0, 16);
+}
+
+/*
+ * Read the cut pattern back out of the media. Per-segment EXTINFs each carry
+ * their own rounding, so the frame grid is recovered from the cumulative start
+ * times, which do not accumulate error.
+ */
+function realisedFrameDeltas(segments) {
+  const starts = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    starts.push(Math.round(cursor * SOURCE_FPS));
+    cursor += segment.extinf;
   }
-  return rendition.sourceArgs;
+  const framesPerSegment = Math.round(NOMINAL_SEGMENT_SECONDS * SOURCE_FPS);
+  return starts.slice(1).map((frame, index) => frame - starts[index] - framesPerSegment);
+}
+
+/*
+ * A fixture that did not come out the way it is described is worse than no
+ * fixture: the report would name a ±2-frame jitter and measure something else.
+ * The build refuses rather than the reader having to notice.
+ */
+function assertRealisedPattern(rendition, manifest) {
+  if (!rendition.deltas) {
+    if (manifest.realised_frame_deltas.some((delta) => delta !== 0)) {
+      throw new Error(`${rendition.id}: expected a drift-free grid, got deltas `
+        + `[${manifest.realised_frame_deltas.join(",")}]`);
+    }
+    return;
+  }
+  const expected = boundaryFrames(rendition.deltas);
+  if (manifest.segment_count !== expected.length) {
+    throw new Error(`${rendition.id}: recipe plans ${expected.length} segments, ffmpeg cut `
+      + `${manifest.segment_count}`);
+  }
+  const want = expected.slice(1).map((frame, index) => frame - expected[index]
+    - Math.round(NOMINAL_SEGMENT_SECONDS * SOURCE_FPS));
+  const got = manifest.realised_frame_deltas;
+  const mismatch = want.findIndex((delta, index) => delta !== got[index]);
+  if (mismatch >= 0) {
+    throw new Error(`${rendition.id}: segment ${mismatch + 1} cut at ${got[mismatch]} frames off the `
+      + `grid, recipe says ${want[mismatch]} (realised [${got.join(",")}])`);
+  }
+}
+
+/*
+ * The number D6-A actually risks. A total that happens to balance says nothing:
+ * what matters is how far the declared timeline has fallen behind the media at
+ * the worst point mid-title, because that is the offset a client carries when it
+ * decides which fragment covers a requested film time.
+ */
+function renditionDivergence(segments, sourceDuration) {
+  const nominal = nominalDurations(segments, sourceDuration);
+  let realCursor = 0;
+  let nominalCursor = 0;
+  let worst = 0;
+  let worstAt = 0;
+  segments.forEach((segment, index) => {
+    realCursor += segment.extinf;
+    nominalCursor += nominal[index];
+    if (Math.abs(realCursor - nominalCursor) > Math.abs(worst)) {
+      worst = realCursor - nominalCursor;
+      worstAt = index + 1;
+    }
+  });
+  return {
+    nominal_total_seconds: Number(sum(nominal).toFixed(6)),
+    nominal_tail_seconds: Number(nominal[nominal.length - 1].toFixed(6)),
+    max_drift_seconds: Number(Math.max(...segments.slice(0, -1)
+      .map((segment) => Math.abs(segment.extinf - NOMINAL_SEGMENT_SECONDS))).toFixed(6)),
+    // Signed: positive means the media runs ahead of what the playlist declared.
+    max_declared_divergence_seconds: Number(worst.toFixed(6)),
+    max_declared_divergence_at_segment: worstAt,
+  };
 }
 
 function buildRendition(rendition, root, rebuild) {
   const directory = path.join(root, rendition.id);
   const manifestPath = path.join(directory, "real.json");
+  const hash = recipeHash(rendition);
   if (!rebuild && fs.existsSync(manifestPath)) {
     try {
       const cached = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (cached.recipe_hash !== hash) throw new Error("recipe changed since this fixture was built");
       verifyRendition(cached, directory);
       return cached;
     } catch (error) {
@@ -285,16 +500,7 @@ function buildRendition(rendition, root, rebuild) {
   fs.mkdirSync(directory, { recursive: true });
   const source = path.join(directory, "source.mkv");
 
-  runFfmpeg([
-    "-y", "-v", "error",
-    "-f", "lavfi", "-i", `testsrc2=size=640x360:rate=${SOURCE_FPS}:duration=${SOURCE_SECONDS}`,
-    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${SOURCE_SECONDS}`,
-    "-c:v", "libvpx-vp9", "-b:v", "800k", "-deadline", "realtime", "-cpu-used", "8",
-    ...renditionSourceArgs(rendition),
-    "-c:a", "libopus", "-b:a", "96k",
-    "-pix_fmt", "yuv420p", "-ac", "2", "-shortest",
-    "-f", "matroska", source,
-  ]);
+  runFfmpeg(sourceFfmpegArgs(rendition, source));
 
   // -c copy: the segmenter must not re-encode, or the cut times stop being the
   // encoder's own decisions and the fixture stops representing the pipeline.
@@ -308,22 +514,22 @@ function buildRendition(rendition, root, rebuild) {
 
   const segments = parseWrittenPlaylist(fs.readFileSync(path.join(directory, "index.m3u8"), "utf8"));
   const sourceProbe = ffprobeJson(source);
+  const sourceDuration = Number(Number(sourceProbe.format.duration || 0).toFixed(6));
+  const realised = realisedFrameDeltas(segments);
   const manifest = {
     id: rendition.id,
     description: rendition.description,
+    recipe_hash: hash,
     built_at: new Date().toISOString(),
-    source_duration_seconds: Number(Number(sourceProbe.format.duration || 0).toFixed(6)),
+    source_duration_seconds: sourceDuration,
     segment_count: segments.length,
+    coded_frame_deltas: rendition.deltas,
+    realised_frame_deltas: realised,
     real_total_seconds: Number(sum(segments.map((segment) => segment.extinf)).toFixed(6)),
-    nominal_total_seconds: Number(
-      (NOMINAL_SEGMENT_SECONDS * (segments.length - 1) + segments[segments.length - 1].extinf).toFixed(6),
-    ),
-    max_drift_seconds: Number(
-      Math.max(...segments.slice(0, -1).map((segment) => Math.abs(segment.extinf - NOMINAL_SEGMENT_SECONDS)))
-        .toFixed(6),
-    ),
     segments,
   };
+  Object.assign(manifest, renditionDivergence(segments, sourceDuration));
+  assertRealisedPattern(rendition, manifest);
   verifyRendition(manifest, directory);
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
@@ -361,8 +567,10 @@ function buildFixtures(options) {
     built[rendition.id] = { ...manifest, directory: path.join(root, rendition.id) };
     process.stdout.write(
       `PASS   ${rendition.id}: ${manifest.segment_count} segments · `
-      + `real ${manifest.real_total_seconds.toFixed(3)}s · nominal ${manifest.nominal_total_seconds.toFixed(3)}s · `
-      + `max |EXTINF-2.0| ${manifest.max_drift_seconds.toFixed(3)}s\n`,
+      + `real ${manifest.real_total_seconds.toFixed(3)}s · nominal ${manifest.nominal_total_seconds.toFixed(3)}s `
+      + `(tail ${manifest.nominal_tail_seconds.toFixed(3)}s) · max |EXTINF-2.0| ${manifest.max_drift_seconds.toFixed(3)}s · `
+      + `worst declared divergence ${signed(manifest.max_declared_divergence_seconds, 3)}s `
+      + `@seg ${manifest.max_declared_divergence_at_segment} · deltas [${(manifest.realised_frame_deltas || []).join(",")}]\n`,
     );
   }
   return { root, renditions: built };
@@ -395,12 +603,20 @@ function writePlaylist(segments, durations) {
   return `${lines.join("\n")}\n`;
 }
 
-function nominalDurations(segments) {
-  // Every entry the plan's nominal 2.0 s, last entry the real remainder — the
-  // plan is honest about the tail because the probe already knows the file's
-  // duration (§2.2, "the final EXTINFs are honest upfront").
-  return segments.map((segment, index) => (
-    index === segments.length - 1 ? segment.extinf : NOMINAL_SEGMENT_SECONDS
+/*
+ * §2.2's transcode plan: 2.0 s entries with the last one the *remainder of the
+ * title*, derived from the probe's duration. Copying the segmenter's measured
+ * tail into this column instead would be D6-B wearing D6-A's name — the plan
+ * cannot know the measured tail, that is the entire thing D6-A gives up — and it
+ * silently balances the total, hiding the divergence the ledger is deciding on.
+ */
+function nominalDurations(segments, sourceDuration) {
+  const tail = sourceDuration - NOMINAL_SEGMENT_SECONDS * (segments.length - 1);
+  if (!(tail > 0)) {
+    throw new Error(`nominal plan for a ${sourceDuration}s source needs fewer than ${segments.length} entries`);
+  }
+  return segments.map((_segment, index) => (
+    index === segments.length - 1 ? tail : NOMINAL_SEGMENT_SECONDS
   ));
 }
 
@@ -426,6 +642,10 @@ const OUT = {
   mse_audio_opus: false,
   errors: [],
   notes: [],
+  // Proof the decoder ran at all. Without it a page that loads, throws, and
+  // POSTs an empty shell is indistinguishable from a clean measurement.
+  max_current_time: 0,
+  frame_callbacks: 0,
 };
 
 function post(reason) {
@@ -443,9 +663,24 @@ function post(reason) {
   });
 }
 
+// Both of these are hard failures upstream, not notes: a page that threw did not
+// measure anything, and the whole point of the classifier is that it stops
+// trusting the page's own cheerful summary.
 window.addEventListener("error", function (event) {
   OUT.notes.push("window error: " + (event.message || String(event.error)));
 });
+window.addEventListener("unhandledrejection", function (event) {
+  OUT.notes.push("window error: unhandled rejection: " + String(event.reason));
+});
+
+function watchProgress(video) {
+  const bump = function () {
+    if (video.currentTime > OUT.max_current_time) OUT.max_current_time = Number(video.currentTime.toFixed(4));
+  };
+  video.addEventListener("timeupdate", bump);
+  video.addEventListener("seeked", bump);
+  setInterval(bump, 250);
+}
 
 // The harness kills the browser at its own deadline; this fires first so a run
 // that never reaches the end still reports what it saw, which is usually the
@@ -457,6 +692,22 @@ function capabilities() {
     ? MediaSource.isTypeSupported('video/mp4; codecs="vp09.00.10.08"') : false;
   OUT.mse_audio_opus = window.MediaSource
     ? MediaSource.isTypeSupported('audio/mp4; codecs="opus"') : false;
+}
+
+/*
+ * Seconds of contiguous media ahead of the playhead. This is what actually
+ * decides whether a block is visible: stall_ms is otherwise just
+ * (block - first-byte cap) restated, and says nothing about how much runway the
+ * client had when the block started.
+ */
+function bufferedAhead(video) {
+  const now = video.currentTime;
+  for (let index = 0; index < video.buffered.length; index += 1) {
+    if (video.buffered.start(index) <= now + 0.1 && video.buffered.end(index) > now) {
+      return Number((video.buffered.end(index) - now).toFixed(4));
+    }
+  }
+  return 0;
 }
 
 function bufferedRanges(video) {
@@ -541,6 +792,7 @@ function measureSeek(target) {
         return;
       }
       const tick = function (_now, metadata) {
+        OUT.frame_callbacks += 1;
         record.frames.push({
           media_time: Number(metadata.mediaTime.toFixed(6)),
           current_time: Number(video.currentTime.toFixed(6)),
@@ -582,17 +834,46 @@ function main() {
   }
   const hls = new Hls({ debug: false });
   attachErrorLog(hls);
+  watchProgress(video);
   OUT.playback_rate = CFG.playback_rate;
   OUT.waiting_events = 0;
   OUT.stalled_events = 0;
   OUT.reached_end = false;
   OUT.max_clock_drift_seconds = 0;
+  // The mechanism behind the verdict. hls.js seeds each fragment's start from
+  // the EXTINF column, then OVERWRITES it with the PTS it measured while
+  // buffering. Recording both is the difference between reporting that D6-A
+  // survived and being able to say why — and it is the same overwrite that makes
+  // the declared/actual divergence harmless.
+  OUT.frag_starts = {};
+  video.addEventListener("loadedmetadata", function () {
+    OUT.duration_at_loadedmetadata = Number.isFinite(video.duration)
+      ? Number(video.duration.toFixed(6)) : null;
+  });
 
   hls.on(Hls.Events.LEVEL_LOADED, function (_event, data) {
     // hls.js's own arithmetic over the EXTINF column, kept separate from the
     // harness's sum so a parser disagreement shows up as a disagreement.
     OUT.hls_total_duration = Number(data.details.totalduration.toFixed(6));
     OUT.hls_fragment_count = data.details.fragments.length;
+    for (const sn of CFG.frag_start_probes) {
+      const fragment = data.details.fragments[sn];
+      if (fragment) {
+        OUT.frag_starts[sn] = {
+          declared_start: Number(fragment.start.toFixed(6)),
+          declared_duration: Number(fragment.duration.toFixed(6)),
+          measured_start: null,
+        };
+      }
+    }
+  });
+  hls.on(Hls.Events.FRAG_BUFFERED, function (_event, data) {
+    const record = OUT.frag_starts[data.frag.sn];
+    if (record && record.measured_start === null) {
+      record.measured_start = Number(data.frag.start.toFixed(6));
+      record.start_delta = Number((data.frag.start - record.declared_start).toFixed(6));
+      record.measured_duration = Number(data.frag.duration.toFixed(6));
+    }
   });
   hls.on(Hls.Events.MANIFEST_PARSED, function () {
     video.playbackRate = CFG.playback_rate;
@@ -660,21 +941,32 @@ function main() {
     return;
   }
   const config = { debug: false };
-  // fragLoadingTimeOut is the deprecated spelling, but it is the one both the
-  // plan and the web player's own config speak, and hls.js 1.6 still folds it
-  // into fragLoadPolicy.default as BOTH maxLoadTimeMs and maxTimeToFirstByteMs —
-  // which is exactly the pair a blocked first byte trips.
-  if (CFG.frag_loading_timeout_ms) config.fragLoadingTimeOut = CFG.frag_loading_timeout_ms;
+  // Not the deprecated fragLoadingTimeOut option. That shim writes one number
+  // into maxLoadTimeMs AND maxTimeToFirstByteMs, so raising the first-byte cap to
+  // survive a long block silently DROPS the whole-body cap from 120 s to the same
+  // value — a second, unasked-for change that would ride along in any
+  // recommendation this probe made.
+  if (CFG.frag_load_policy_ms) {
+    config.fragLoadPolicy = {
+      default: {
+        maxTimeToFirstByteMs: CFG.frag_load_policy_ms,
+        maxLoadTimeMs: Math.max(CFG.frag_load_policy_ms, CFG.stock_max_load_time_ms),
+        timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+        errorRetry: { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+      },
+    };
+  }
   const hls = new Hls(config);
   attachErrorLog(hls);
+  watchProgress(video);
 
   const policy = hls.config.fragLoadPolicy.default;
   OUT.frag_load_policy = {
-    configured_frag_loading_timeout_ms: CFG.frag_loading_timeout_ms || null,
+    configured_ms: CFG.frag_load_policy_ms || null,
     max_time_to_first_byte_ms: policy.maxTimeToFirstByteMs,
     max_load_time_ms: policy.maxLoadTimeMs,
-    timeout_retry: policy.timeoutRetry ? { max: policy.timeoutRetry.maxNumRetry, delay_ms: policy.timeoutRetry.retryDelayMs } : null,
-    error_retry: policy.errorRetry ? { max: policy.errorRetry.maxNumRetry, delay_ms: policy.errorRetry.retryDelayMs } : null,
+    timeout_retry: policy.timeoutRetry ? { max: policy.timeoutRetry.maxNumRetry, delay_ms: policy.timeoutRetry.retryDelayMs, max_delay_ms: policy.timeoutRetry.maxRetryDelayMs } : null,
+    error_retry: policy.errorRetry ? { max: policy.errorRetry.maxNumRetry, delay_ms: policy.errorRetry.retryDelayMs, max_delay_ms: policy.errorRetry.maxRetryDelayMs } : null,
   };
 
   OUT.reached_end = false;
@@ -690,7 +982,16 @@ function main() {
 
   hls.on(Hls.Events.FRAG_LOADING, function (_event, data) {
     if (data.frag.sn === CFG.delay_segment) {
-      OUT.frag_events.push({ at_ms: Date.now() - OUT.page_started_at, event: "loading", sn: data.frag.sn });
+      OUT.frag_events.push({
+        at_ms: Date.now() - OUT.page_started_at,
+        event: "loading",
+        sn: data.frag.sn,
+        buffered_ahead: bufferedAhead(video),
+        current_time: Number(video.currentTime.toFixed(4)),
+      });
+      if (OUT.buffered_ahead_at_first_request === undefined) {
+        OUT.buffered_ahead_at_first_request = bufferedAhead(video);
+      }
     }
   });
   hls.on(Hls.Events.FRAG_LOADED, function (_event, data) {
@@ -708,7 +1009,11 @@ function main() {
 
   video.addEventListener("waiting", function () {
     OUT.waiting_events += 1;
-    OUT.waits.push({ at: Date.now(), current_time: Number(video.currentTime.toFixed(4)) });
+    OUT.waits.push({
+      at: Date.now(),
+      current_time: Number(video.currentTime.toFixed(4)),
+      buffered_ahead: bufferedAhead(video),
+    });
   });
   video.addEventListener("stalled", function () { OUT.stalled_events += 1; });
   video.addEventListener("playing", function () {
@@ -726,6 +1031,7 @@ function main() {
   // the block and report a 60 s block as instant.
   if (typeof video.requestVideoFrameCallback === "function") {
     const tick = function (_now, metadata) {
+      OUT.frame_callbacks += 1;
       if (OUT.first_frame_past_block_at === null && metadata.mediaTime >= CFG.block_start_seconds - 0.001) {
         OUT.first_frame_past_block_at = Date.now();
         OUT.first_frame_past_block_media_time = Number(metadata.mediaTime.toFixed(6));
@@ -802,12 +1108,16 @@ class ProbeServer {
     this.log = [];
     this.startedAt = Date.now();
     this.result = null;
-    // The blocked segment materializes N seconds after it is FIRST asked for,
-    // not N seconds after each attempt. That is what §2.3 describes: a producer
-    // finishing at an absolute moment, with every waiter released together. A
-    // per-request delay would instead model a server that restarts the work on
-    // every retry, and would make any block longer than the client's timeout
-    // unsurvivable by construction — a result about the harness, not the stack.
+    // §2.3 is TWO facts composed, and modelling either alone gives the wrong
+    // answer. (1) The segment materializes at an absolute moment — first request
+    // + delay — because a producer finishes once and releases every waiter, not
+    // once per retry. (2) Each individual request still ends at a HARD deadline,
+    // and expiry answers a typed, retryable segment_pending 503 + Retry-After,
+    // never an open-ended wait. Model (1) alone and the client's own first-byte
+    // timer becomes the only deadline in the system; model (2) alone
+    // (--per-request-delay) and any block longer than that timer is unsurvivable
+    // by construction. Composed, a long block survives on stock clients, which is
+    // the entire point of the plan's design.
     this.blockedFirstRequestAt = null;
     this.blockedAttempts = 0;
     this.pendingTimers = new Set();
@@ -916,23 +1226,12 @@ class ProbeServer {
     if (this.blockedFirstRequestAt === null) this.blockedFirstRequestAt = Date.now();
 
     if (block.mode === "expire") {
-      // §2.3 case 2's deadline expiry: a typed, retryable refusal rather than an
-      // open-ended wait or a bare 404. What is being measured is whether hls.js
-      // retries a 503 at all, how many times, and how long it waits between
-      // attempts — the plan's shape is not in question, only its numbers.
+      // §2.3 case 2's deadline expiry in isolation: a typed, retryable refusal
+      // rather than an open-ended wait or a bare 404. What is being measured is
+      // whether hls.js retries a 503 at all, how many times, and how long it
+      // waits — the plan's shape is not in question, only its numbers.
       if (attempt <= block.expireAttempts) {
-        const body = JSON.stringify({ error: "segment_pending" });
-        this.note({
-          path: pathname, kind: "segment", status: 503, attempt, delay_ms: 0,
-          retry_after: "1", body: "segment_pending",
-        });
-        response.writeHead(503, {
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(body),
-          "retry-after": "1",
-          "cache-control": "no-store",
-        });
-        response.end(body);
+        this.sendPending(response, pathname, attempt, { deadline_ms: 0 });
         return;
       }
       this.note({ path: pathname, kind: "segment", status: 200, attempt, delay_ms: 0 });
@@ -940,35 +1239,55 @@ class ProbeServer {
       return;
     }
 
-    const availableAt = this.blockedFirstRequestAt + block.delayMs;
-    const waitMs = Math.max(0, availableAt - Date.now());
+    const now = Date.now();
+    // --per-request-delay restarts the block on every attempt; the default is the
+    // producer model, where the work finishes once.
+    const availableAt = block.perRequest ? now + block.delayMs : this.blockedFirstRequestAt + block.delayMs;
+    const waitMs = Math.max(0, availableAt - now);
     const entry = {
-      at_ms: Date.now() - this.startedAt,
+      at_ms: now - this.startedAt,
       path: pathname,
       kind: "segment",
       attempt,
       blocked: true,
       wait_ms: waitMs,
+      deadline_ms: block.deadlineMs || 0,
       status: null,
     };
     this.log.push(entry);
     if (waitMs === 0) {
       entry.status = 200;
+      // Recorded even on the fast path: without it a segment that was served the
+      // instant it was asked for reads as "never released" in the metrics.
+      entry.released_at_ms = Date.now() - this.startedAt;
       entry.note = "materialized before this attempt arrived";
       this.sendFile(response, mediaFile, name);
       return;
     }
+
+    // The composition. Whichever comes first — the bytes or the deadline — ends
+    // this request, and the deadline ends it through the plan's one named path.
+    const expires = block.deadlineMs > 0 && block.deadlineMs < waitMs;
+    const fireIn = expires ? block.deadlineMs : waitMs;
     const timer = setTimeout(() => {
       this.pendingTimers.delete(timer);
       if (response.writableEnded || response.destroyed) return;
+      if (expires) {
+        entry.status = 503;
+        entry.expired_at_ms = Date.now() - this.startedAt;
+        this.sendPending(response, pathname, attempt, { deadline_ms: block.deadlineMs, logged: true });
+        return;
+      }
       entry.status = 200;
       entry.released_at_ms = Date.now() - this.startedAt;
       this.sendFile(response, mediaFile, name);
-    }, waitMs);
+    }, fireIn);
     this.pendingTimers.add(timer);
     // A client that walks away cancels the wait — §2.3's "a client disconnect
     // cancels the server-side wait". Recording it is the whole point: an aborted
-    // attempt is how a client timeout announces itself to the server.
+    // attempt is how a client timeout announces itself to the server, and when
+    // the client's own timer is shorter than the server's deadline the server
+    // never gets to answer at all.
     request.on("aborted", () => {
       if (entry.status !== null) return;
       entry.status = "client_aborted";
@@ -976,6 +1295,24 @@ class ProbeServer {
       clearTimeout(timer);
       this.pendingTimers.delete(timer);
     });
+  }
+
+  sendPending(response, pathname, attempt, extra) {
+    const retryAfter = String(this.spec.block.retryAfterSeconds);
+    const body = JSON.stringify({ error: "segment_pending" });
+    if (!extra.logged) {
+      this.note({
+        path: pathname, kind: "segment", status: 503, attempt, delay_ms: 0,
+        retry_after: retryAfter, body: "segment_pending", ...extra,
+      });
+    }
+    response.writeHead(503, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      "retry-after": retryAfter,
+      "cache-control": "no-store",
+    });
+    response.end(body);
   }
 
   async close() {
@@ -1097,10 +1434,14 @@ async function runOnce(spec, options, runtimeDir) {
     page_url: `${spec.pageUrl}`,
     chrome: browser ? browser.executable : null,
     chrome_exit: exit && exit.code !== undefined ? exit : null,
-    // Chromium's stderr only earns its place in the report when the run failed;
-    // on a good run it is pages of dbus complaints about a session bus that does
-    // not exist in a container.
-    chrome_stderr: pageResult ? null : browser.stderr().slice(-4000),
+    // Chromium's stderr only earns its place in the report when something went
+    // wrong; on a good run it is pages of dbus complaints about a session bus
+    // that does not exist in a container. A watchdog finish counts as wrong: the
+    // browser was alive but stuck, and its stderr is the only place the reason
+    // can be.
+    chrome_stderr: pageResult && pageResult.finished_reason !== "page_watchdog"
+      ? null
+      : browser.stderr().slice(-4000),
     config: spec.config,
     server_log: server.log,
     page: pageResult,
@@ -1112,14 +1453,31 @@ async function runOnce(spec, options, runtimeDir) {
 function p2Specs(fixtures, options) {
   const timeout = positiveNumber(options.timeout, DEFAULTS.timeout, "--timeout");
   const variants = [
-    { variant: "nominal", rendition: "jitter", durations: nominalDurations, blurb: "D6-A: nominal 2.000000 EXTINF over drifting segments" },
-    { variant: "exact", rendition: "jitter", durations: exactDurations, blurb: "D6-B control: measured EXTINF over the same bytes" },
-    { variant: "grid-nominal", rendition: "grid", durations: nominalDurations, blurb: "harness control: nominal EXTINF over drift-free segments" },
-    { variant: "grid-exact", rendition: "grid", durations: exactDurations, blurb: "harness control: measured EXTINF over drift-free segments" },
+    { variant: "nominal", rendition: "jitter", nominal: true, blurb: "D6-A: plan-nominal 2.0 s EXTINF over realistically drifting segments" },
+    { variant: "exact", rendition: "jitter", nominal: false, blurb: "D6-B control: measured EXTINF over the same bytes" },
+    { variant: "amplified-nominal", rendition: "amplified", nominal: true, blurb: "D6-A under 12x drift: 2.250 s segments declared 2.0 s" },
+    { variant: "amplified-exact", rendition: "amplified", nominal: false, blurb: "D6-B control for the amplified rendition" },
+    { variant: "grid-nominal", rendition: "grid", nominal: true, blurb: "harness control: plan-nominal EXTINF over drift-free segments" },
+    { variant: "grid-exact", rendition: "grid", nominal: false, blurb: "harness null: measured EXTINF over drift-free segments" },
   ];
-  return variants.map((entry) => {
+  const specs = [];
+  // Two variants that render the same playlist text are the same experiment run
+  // twice. Keying on the bytes rather than on a hand-maintained list means a
+  // future duration rule that happens to collapse a pair cannot smuggle a
+  // duplicate row into the report as if it were a second measurement.
+  const seen = new Map();
+  for (const entry of variants) {
     const rendition = fixtures.renditions[entry.rendition];
-    const durations = entry.durations(rendition.segments);
+    const durations = entry.nominal
+      ? nominalDurations(rendition.segments, rendition.source_duration_seconds)
+      : exactDurations(rendition.segments);
+    const playlist = writePlaylist(rendition.segments, durations);
+    const key = `${entry.rendition} ${playlist}`;
+    if (seen.has(key)) {
+      process.stdout.write(`SKIP   p2/${entry.variant}: playlist is byte-identical to p2/${seen.get(key)}\n`);
+      continue;
+    }
+    seen.set(key, entry.variant);
     const pageUrl = `/p2/${entry.variant}`;
     const config = {
       playlist: `${pageUrl}/index.m3u8`,
@@ -1127,24 +1485,32 @@ function p2Specs(fixtures, options) {
       seek_targets: SEEK_TARGETS,
       seek_timeout_ms: 20000,
       page_watchdog_ms: Math.max(15000, timeout * 1000 - 10000),
+      // Sampled across the title so the LEVEL_LOADED-vs-FRAG_BUFFERED comparison
+      // covers the point where the declared and measured timelines are furthest
+      // apart, not only the opening where they still agree.
+      frag_start_probes: [0, 1, Math.floor(rendition.segment_count / 2), rendition.segment_count - 2],
       rendition: entry.rendition,
       variant: entry.variant,
+      declares: entry.nominal ? "plan-nominal" : "segmenter-exact",
       playlist_total_seconds: Number(sum(durations).toFixed(6)),
       real_total_seconds: rendition.real_total_seconds,
+      target_duration: Math.ceil(Math.max(...durations)),
+      max_declared_divergence_seconds: entry.nominal ? rendition.max_declared_divergence_seconds : 0,
     };
-    return {
+    specs.push({
       id: `p2/${entry.variant}`,
       case: "p2",
       label: entry.blurb,
       timeout_seconds: timeout,
       pageUrl,
       mediaDir: rendition.directory,
-      playlist: writePlaylist(rendition.segments, durations),
+      playlist,
       page: renderPage(`p2 ${entry.variant}`, config, P2_SCRIPT),
       block: null,
       config,
-    };
-  });
+    });
+  }
+  return specs;
 }
 
 function signed(value, digits) {
@@ -1159,7 +1525,12 @@ function summariseP2(run) {
   const fatal = (page.errors || []).filter((error) => error.fatal).length;
   const declared = run.config.playlist_total_seconds;
   const media = page.video_duration;
+  const overwrite = Object.values(page.frag_starts || {})
+    .map((record) => record.start_delta)
+    .filter((delta) => typeof delta === "number");
+  const worstOverwrite = overwrite.length ? overwrite.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a)) : null;
   return `${page.reached_end ? "ended" : "did NOT end"} · `
+    + `PTS overwrite ${signed(worstOverwrite, 3)}s · TARGETDURATION ${run.config.target_duration} · `
     + `media ${media === undefined ? "?" : media.toFixed(3)}s vs playlist ${declared.toFixed(3)}s `
     + `(${signed(media === undefined ? null : media - declared, 3)}) vs real ${run.config.real_total_seconds.toFixed(3)}s · `
     + `errors ${(page.errors || []).length}/${fatal} fatal · waiting ${page.waiting_events} · `
@@ -1172,77 +1543,119 @@ function summariseP2(run) {
 function p3Specs(fixtures, options) {
   const timeout = positiveNumber(options.timeout, DEFAULTS.timeout, "--timeout");
   const rendition = fixtures.renditions.grid;
-  const delaySegment = Math.trunc(positiveNumber(
-    options.delay_segment === undefined ? DEFAULTS.delay_segment : options.delay_segment,
-    DEFAULTS.delay_segment, "--delay-segment",
-  ));
+  const delaySegment = nonNegativeInteger(options.delay_segment, DEFAULTS.delay_segment, "--delay-segment");
   if (delaySegment >= rendition.segments.length) {
     throw new Error(`--delay-segment ${delaySegment} is past the last segment (${rendition.segments.length - 1})`);
   }
   const fragTimeoutMs = positiveNumber(options.frag_timeout_ms, DEFAULTS.frag_timeout_ms, "--frag-timeout-ms");
-  const expireAttempts = Math.trunc(positiveNumber(
-    options.expire_attempts === undefined ? DEFAULTS.expire_attempts : options.expire_attempts,
-    DEFAULTS.expire_attempts, "--expire-attempts",
-  ));
+  const expireAttempts = nonNegativeInteger(options.expire_attempts, DEFAULTS.expire_attempts, "--expire-attempts");
+  const retryAfterSeconds = nonNegativeInteger(options.retry_after, DEFAULTS.retry_after, "--retry-after");
   const durations = exactDurations(rendition.segments);
   const blockStart = sum(durations.slice(0, delaySegment));
   const playlist = writePlaylist(rendition.segments, durations);
 
-  // Each block length runs twice — once on the shipped defaults, once with the
-  // timeout raised — because the report has to say what config survives a given
-  // block, not only whether the default did.
-  const configs = [
-    { id: "default", fragTimeout: null, blurb: "hls.js defaults" },
-    { id: `timeout-${fragTimeoutMs}ms`, fragTimeout: fragTimeoutMs, blurb: `fragLoadingTimeOut ${fragTimeoutMs} ms` },
-  ];
+  // Each block length runs on the shipped defaults and again with the fragment
+  // load policy raised, because the report has to say what config survives a
+  // given block, not only whether the default did. The grid sweeps are often run
+  // with --configs default alone: the deadline models exist precisely to test
+  // whether a STOCK client survives, and doubling every cell would double a
+  // twenty-minute sweep for a column nobody reads.
+  const armNames = parseList(options.configs, ["default", "raised"], "--configs")
+    .flatMap((name) => (name === "both" ? ["default", "raised"] : [name]));
+  const arms = armNames.map((name) => {
+    if (name === "default") return { id: "default", policyMs: null, blurb: "hls.js stock defaults" };
+    if (name === "raised") {
+      return { id: `policy-${fragTimeoutMs}ms`, policyMs: fragTimeoutMs, blurb: `fragLoadPolicy TTFB ${fragTimeoutMs} ms` };
+    }
+    throw new Error(`unknown --configs entry "${name}"; use default, raised, or both`);
+  });
 
-  const blocks = options.expire
-    ? [{
+  const models = options.models === undefined
+    ? [parseBlockModel(options.per_request_delay
+      ? "per-request"
+      : (nonNegativeInteger(options.server_deadline_ms, DEFAULTS.server_deadline_ms, "--server-deadline-ms") > 0
+        ? `deadline-${nonNegativeInteger(options.server_deadline_ms, 0, "--server-deadline-ms")}`
+        : "no-deadline"))]
+    : parseList(options.models, null, "--models").map(parseBlockModel);
+
+  const blocks = [];
+  if (options.expire) {
+    blocks.push({
       id: `expire-${expireAttempts}`,
       mode: "expire",
+      model: { id: "expire-only", deadlineMs: 0, perRequest: false },
       expireAttempts,
-      blurb: `${expireAttempts}x segment_pending 503 + Retry-After: 1, then bytes`,
-    }]
-    : parseDelays(options.delays === undefined ? DEFAULTS.delays : options.delays).map((seconds) => ({
-      id: `delay-${seconds}s`,
-      mode: "delay",
-      delayMs: seconds * 1000,
-      seconds,
-      blurb: `${seconds}s block on seg${String(delaySegment).padStart(5, "0")}.m4s`,
-    }));
+      retryAfterSeconds,
+      blurb: `${expireAttempts}x segment_pending 503 + Retry-After: ${retryAfterSeconds}, then bytes`,
+    });
+  } else {
+    const delays = parseDelays(options.delays === undefined ? DEFAULTS.delays : options.delays);
+    for (const model of models) {
+      for (const seconds of delays) {
+        blocks.push({
+          id: `${model.id}/delay-${seconds}s`,
+          mode: "delay",
+          model,
+          deadlineMs: model.deadlineMs,
+          perRequest: model.perRequest,
+          delayMs: seconds * 1000,
+          seconds,
+          retryAfterSeconds,
+          blurb: `${seconds}s block on seg${String(delaySegment).padStart(5, "0")}.m4s · ${describeModel(model)}`,
+        });
+      }
+    }
+  }
 
   const specs = [];
   for (const block of blocks) {
-    for (const variant of configs) {
+    for (const arm of arms) {
       const pageUrl = "/p3";
       const config = {
         playlist: `${pageUrl}/index.m3u8`,
         delay_segment: delaySegment,
         block_start_seconds: Number(blockStart.toFixed(6)),
         block_mode: block.mode,
+        block_model: {
+          id: block.model.id,
+          description: describeModel(block.model),
+          server_deadline_ms: block.model.deadlineMs || 0,
+          per_request_delay: Boolean(block.model.perRequest),
+          materializes_at: block.model.perRequest ? "each request + delay" : "first request + delay",
+          retry_after_seconds: retryAfterSeconds,
+        },
         block_seconds: block.seconds ?? null,
         expire_attempts: block.mode === "expire" ? expireAttempts : null,
-        frag_loading_timeout_ms: variant.fragTimeout,
+        frag_load_policy_ms: arm.policyMs,
+        // Handed to the page so the raised arm can keep the stock body cap
+        // instead of silently lowering it to the first-byte cap.
+        stock_max_load_time_ms: 120000,
         stall_rate: P3_STALL_RATE,
         tail_rate: P3_TAIL_RATE,
         fatal_grace_ms: 5000,
         page_watchdog_ms: Math.max(20000, timeout * 1000 - 10000),
       };
       specs.push({
-        id: `p3/${block.id}/${variant.id}`,
+        id: `p3/${block.id}/${arm.id}`,
         case: "p3",
-        label: `${block.blurb} · ${variant.blurb}`,
+        label: `${block.blurb} · ${arm.blurb}`,
         timeout_seconds: timeout,
         pageUrl,
         mediaDir: rendition.directory,
         playlist,
-        page: renderPage(`p3 ${block.id} ${variant.id}`, config, P3_SCRIPT),
-        block: { segment: delaySegment, ...block },
+        page: renderPage(`p3 ${block.id} ${arm.id}`, config, P3_SCRIPT),
+        block: { segment: delaySegment, retryAfterSeconds, ...block },
         config,
       });
     }
   }
   return specs;
+}
+
+function describeModel(model) {
+  if (model.perRequest) return "per-request delay, no deadline";
+  if (model.deadlineMs > 0) return `materialize once, ${model.deadlineMs} ms deadline -> 503`;
+  return "materialize once, no deadline";
 }
 
 /*
@@ -1290,6 +1703,13 @@ function p3Metrics(run) {
     stalled: Boolean(blockWait),
     stall_started_at_ms: stallStartMs,
     stall_ms: stallStartMs !== null && firstFrameAtMs !== null ? firstFrameAtMs - stallStartMs : null,
+    // stall_ms alone is close to (block - first-byte cap) restated. The runway
+    // the client had when the block began is the independent half, and it is what
+    // says whether a longer block would have been visible at all.
+    buffered_ahead_at_first_request: page.buffered_ahead_at_first_request ?? null,
+    buffered_ahead_at_stall: blockWait ? blockWait.buffered_ahead ?? null : null,
+    pending_503s: attempts.filter((entry) => entry.status === 503).length,
+    served_200s: attempts.filter((entry) => entry.status === 200).length,
     startup_waits: (page.waits || []).filter((wait) => wait.current_time < 0.5).length,
     error_details: [...new Set((page.errors || []).map((error) => error.details))],
     fatal_details: [...new Set((page.errors || []).filter((error) => error.fatal).map((error) => error.details))],
@@ -1312,10 +1732,62 @@ function summariseP3(run) {
   const recovered = metrics.first_frame_past_block_at_ms === null
     ? "blocked segment NEVER presented"
     : `first frame from it +${(metrics.request_to_first_frame_ms / 1000).toFixed(1)}s`;
+  // A degenerate page must not take the whole sweep down with it — this line is
+  // the last thing between twenty minutes of measurement and an empty report.
+  const policy = page.frag_load_policy || {};
   return `${page.reached_end ? "reached end" : "did NOT reach end"} · ${held} · ${stall} · ${recovered} · `
-    + `${metrics.attempts} attempts (${metrics.aborted_attempts} aborted) · `
-    + `TTFB cap ${page.frag_load_policy.max_time_to_first_byte_ms} ms / load cap ${page.frag_load_policy.max_load_time_ms} ms · `
+    + `${metrics.attempts} attempts (${metrics.pending_503s} x 503, ${metrics.aborted_attempts} aborted) · `
+    + `buffer at block ${metrics.buffered_ahead_at_first_request ?? "?"}s · `
+    + `TTFB cap ${policy.max_time_to_first_byte_ms ?? "?"} ms / load cap ${policy.max_load_time_ms ?? "?"} ms · `
     + `errors [${metrics.error_details.join(",") || "none"}]${metrics.fatal ? ` FATAL [${metrics.fatal_details.join(",")}]` : ""}`;
+}
+
+/* ------------------------------------------------------------ classification */
+
+// A page that reported `ended` measured a playthrough; a P3 page that reported
+// `fatal_error` measured a refusal, which is just as much a result. Nothing else
+// is: `page_watchdog` means the run was still going when the clock ran out, and
+// what it would have done next is exactly the unknown the report would be
+// claiming to answer.
+const CONCLUSIVE_REASONS = { p2: ["ended"], p3: ["ended", "fatal_error"] };
+
+/*
+ * "The page POSTed" and "the browser decoded something" are different claims, and
+ * only the second is a measurement. With hls.js failing to load, or the Hls
+ * constructor throwing, the page still runs its watchdog and still POSTs a
+ * well-formed object full of initial values — and the old classifier called that
+ * PASS and exited 0. Every check below is a fact the harness can see for itself.
+ */
+function classifyRun(run, spec) {
+  const page = run.page;
+  if (!page) {
+    return {
+      status: "harness_failed",
+      reason: run.error || (run.timed_out ? `no result within ${spec.timeout_seconds}s` : "browser produced no result"),
+    };
+  }
+  const failures = [];
+  const pageErrors = (page.notes || []).filter((note) => String(note).startsWith("window error:"));
+  if (pageErrors.length) failures.push(pageErrors[0]);
+  if (!page.mse_video_vp9 || !page.mse_audio_opus) {
+    failures.push(`browser reports MSE support vp9=${page.mse_video_vp9} opus=${page.mse_audio_opus}`);
+  }
+  const served = (run.server_log || []).filter((entry) => entry.kind === "segment" && entry.status === 200).length;
+  if (served < 1) failures.push("server served no segment bytes");
+  if (page.frame_callbacks !== undefined && page.frame_callbacks === 0 && spec.case === "p2") {
+    failures.push("no video frame was ever presented");
+  }
+  if (spec.case === "p2" && !(page.max_current_time > 0)) failures.push("currentTime never advanced");
+  if (failures.length) return { status: "harness_failed", reason: failures.join("; ") };
+
+  const allowed = CONCLUSIVE_REASONS[spec.case] || ["ended"];
+  if (!allowed.includes(page.finished_reason)) {
+    return {
+      status: "inconclusive",
+      reason: `page finished as "${page.finished_reason}", not one of ${allowed.join("/")}`,
+    };
+  }
+  return { status: "measured", reason: null };
 }
 
 /* ---------------------------------------------------------------------- main */
@@ -1326,15 +1798,19 @@ async function main() {
     usage();
     return 0;
   }
-  if (!["p2", "p3", "all"].includes(command)) {
+  if (!["p2", "p3", "all", "fixtures"].includes(command)) {
     usage();
-    throw new Error(`unknown case "${command}"; choose p2, p3, or all`);
+    throw new Error(`unknown case "${command}"; choose p2, p3, all, or fixtures`);
   }
   if (!fs.existsSync(HLS_JS_PATH)) {
     throw new Error(`vendored hls.js not found at ${HLS_JS_PATH}`);
   }
 
   const fixtures = buildFixtures(options);
+  // Building and asserting the corpus is the half that fails loudest and costs
+  // least; being able to run it alone is what makes a recipe change cheap to
+  // check.
+  if (command === "fixtures") return 0;
   const specs = [];
   if (command === "p2" || command === "all") specs.push(...p2Specs(fixtures, options));
   if (command === "p3" || command === "all") specs.push(...p3Specs(fixtures, options));
@@ -1345,73 +1821,99 @@ async function main() {
   await fsp.mkdir(runtimeRoot, { recursive: true });
 
   const runs = [];
-  for (const spec of specs) {
-    process.stdout.write(`RUN    ${spec.id} — ${spec.label}\n`);
-    const startedEpoch = Date.now();
-    let run;
-    try {
-      run = await runOnce(spec, options, runtimeRoot);
-    } catch (error) {
-      run = {
-        id: spec.id,
-        case: spec.case,
-        label: spec.label,
-        status: "harness_failed",
-        error: String(error && error.message ? error.message : error),
-        config: spec.config,
-        server_log: [],
-        page: null,
-      };
-    }
-    run.started_epoch_ms = startedEpoch;
-    if (spec.case === "p3") run.metrics = p3Metrics(run);
-    run.finding = run.status === "measured"
-      ? (spec.case === "p2" ? summariseP2(run) : summariseP3(run))
-      : (run.error || (run.timed_out ? `no result within ${spec.timeout_seconds}s` : "browser produced no result"));
-    runs.push(run);
-    if (run.status === "measured") {
-      process.stdout.write(`PASS   ${spec.id}: ${run.finding}\n`);
-    } else {
-      process.stdout.write(`FAIL   ${spec.id}: ${run.finding}\n`);
-      if (run.chrome_stderr) {
-        for (const line of run.chrome_stderr.split("\n").filter(Boolean).slice(-8)) {
-          process.stdout.write(`CHROME       ${line}\n`);
-        }
-      }
-    }
-  }
-
-  if (!options.keep_runtime) await fsp.rm(runtimeRoot, { recursive: true, force: true }).catch(() => {});
-
-  const report = {
+  const jsonPath = options.json && options.json !== true ? path.resolve(String(options.json)) : null;
+  const buildReport = () => ({
     schema_version: 1,
     generated_at: new Date().toISOString(),
     command,
     plan_section: "docs/VOD-PRESENTATION-PLAN.md §8 M0 (P2, P3)",
+    complete: runs.length === specs.length,
+    planned_runs: specs.length,
     fixtures: {
       root: fixtures.root,
       renditions: Object.fromEntries(Object.entries(fixtures.renditions).map(([id, rendition]) => [id, {
         description: rendition.description,
+        recipe_hash: rendition.recipe_hash,
         segment_count: rendition.segment_count,
+        source_duration_seconds: rendition.source_duration_seconds,
         real_total_seconds: rendition.real_total_seconds,
         nominal_total_seconds: rendition.nominal_total_seconds,
+        nominal_tail_seconds: rendition.nominal_tail_seconds,
         max_drift_seconds: rendition.max_drift_seconds,
+        max_declared_divergence_seconds: rendition.max_declared_divergence_seconds,
+        max_declared_divergence_at_segment: rendition.max_declared_divergence_at_segment,
+        coded_frame_deltas: rendition.coded_frame_deltas,
+        realised_frame_deltas: rendition.realised_frame_deltas,
         segments: rendition.segments,
       }])),
     },
     cases: runs,
+  });
+  // Rewritten after every run. A twenty-minute sweep that dies on run 7 used to
+  // leave nothing at all on disk, which is the most expensive way for a harness
+  // to fail: the measurement really happened and was thrown away.
+  const flush = async () => {
+    if (!jsonPath) return;
+    await fsp.mkdir(path.dirname(jsonPath), { recursive: true });
+    await fsp.writeFile(jsonPath, `${JSON.stringify(buildReport(), null, 2)}\n`);
   };
 
-  if (options.json && options.json !== true) {
-    const target = path.resolve(String(options.json));
-    await fsp.mkdir(path.dirname(target), { recursive: true });
-    await fsp.writeFile(target, `${JSON.stringify(report, null, 2)}\n`);
-    process.stdout.write(`REPORT ${target}\n`);
+  try {
+    for (const spec of specs) {
+      process.stdout.write(`RUN    ${spec.id} — ${spec.label}\n`);
+      const startedEpoch = Date.now();
+      let run;
+      try {
+        run = await runOnce(spec, options, runtimeRoot);
+      } catch (error) {
+        run = {
+          id: spec.id,
+          case: spec.case,
+          label: spec.label,
+          status: "harness_failed",
+          error: String(error && error.message ? error.message : error),
+          config: spec.config,
+          server_log: [],
+          page: null,
+        };
+      }
+      run.started_epoch_ms = startedEpoch;
+      const verdict = classifyRun(run, spec);
+      run.status = verdict.status;
+      run.classification = verdict.reason;
+      // Every derivation below is guarded. A summary line is a convenience; the
+      // JSON is the deliverable, and a thrown TypeError formatting one run must
+      // not cost the other thirty.
+      try {
+        if (spec.case === "p3") run.metrics = p3Metrics(run);
+        run.finding = run.status === "measured"
+          ? (spec.case === "p2" ? summariseP2(run) : summariseP3(run))
+          : verdict.reason;
+      } catch (error) {
+        run.status = "harness_failed";
+        run.finding = `summary failed: ${error && error.message ? error.message : error}`;
+      }
+      runs.push(run);
+      await flush();
+      if (run.status === "measured") {
+        process.stdout.write(`PASS   ${spec.id}: ${run.finding}\n`);
+      } else {
+        process.stdout.write(`FAIL   [${run.status}] ${spec.id}: ${run.finding}\n`);
+        for (const line of String(run.chrome_stderr || "").split("\n").filter(Boolean).slice(-8)) {
+          process.stdout.write(`CHROME       ${line}\n`);
+        }
+      }
+    }
+  } finally {
+    await flush();
+    if (!options.keep_runtime) await fsp.rm(runtimeRoot, { recursive: true, force: true }).catch(() => {});
   }
 
-  // A negative finding is a result. Only a run that produced no result at all —
-  // a browser that would not start, a page that never reported — is a failure of
-  // this harness, and only that is worth a non-zero exit.
+  if (jsonPath) process.stdout.write(`REPORT ${jsonPath}\n`);
+
+  // A negative finding is a result: hls.js failing to survive a 60 s block is
+  // exactly what P3 is for. What is not a result is a run with no evidence the
+  // browser decoded anything, or one still going when the clock ran out.
   const failed = runs.filter((run) => run.status !== "measured");
   process.stdout.write(`DONE   ${runs.length - failed.length}/${runs.length} runs produced a result\n`);
   return failed.length ? 1 : 0;
