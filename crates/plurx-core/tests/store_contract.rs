@@ -641,6 +641,21 @@ async fn media_session_contract_runs_through_dyn_store() {
         let incarnation_a_retry = "00000000-0000-4000-8000-0000000000a2";
         let session_a = "00000000-0000-4000-8000-0000000000b1";
 
+        assert!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "uppercase-fingerprint",
+                    &"A".repeat(64),
+                    "00000000-0000-4000-8000-0000000000f1",
+                    1,
+                    2,
+                )
+                .await
+                .is_err(),
+            "{backend}: fingerprints must use one canonical lowercase encoding"
+        );
+
         let failed_incarnation = "00000000-0000-4000-8000-0000000000e1";
         let retried_incarnation = "00000000-0000-4000-8000-0000000000e2";
         assert!(matches!(
@@ -894,14 +909,14 @@ async fn media_session_contract_runs_through_dyn_store() {
             .is_empty());
 
         let owned_a = store
-            .owned_media_sessions("node-a")
+            .owned_media_sessions("node-a", 399)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list node-a sessions: {error}"));
         assert_eq!(owned_a.len(), 1, "{backend}");
         assert_eq!(owned_a[0].session_id, session_a2, "{backend}");
         assert_eq!(
             store
-                .owned_media_sessions("node-b")
+                .owned_media_sessions("node-b", 399)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: list node-b sessions: {error}"))
                 .len(),
@@ -916,7 +931,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: ended route exists"));
         assert_eq!(ended.session_id, session_a2, "{backend}");
         assert!(store
-            .owned_media_sessions("node-a")
+            .owned_media_sessions("node-a", 410)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list sessions after end: {error}"))
             .is_empty());
@@ -935,6 +950,37 @@ async fn media_session_contract_runs_through_dyn_store() {
             MediaSessionRequestClaim::Resolved(route)
                 if route.session_id == session_a && route.state == "ended"
         ));
+
+        let maintenance_now = 24 * 60 * 60 * 1_000 + 1_000;
+        store
+            .maintain_media_sessions(maintenance_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire active sessions: {error}"));
+        assert!(store
+            .owned_media_sessions("node-b", maintenance_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect expired inventory: {error}"))
+            .is_empty());
+        assert_eq!(
+            store
+                .media_session_route(session_b)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect expired route: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}: expired active routes must become terminal"
+        );
+
+        let prune_now = maintenance_now + 24 * 60 * 60 * 1_000 + 1;
+        store
+            .maintain_media_sessions(prune_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prune ended sessions: {error}"));
+        assert!(store
+            .media_session_route(session_b)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned route: {error}"))
+            .is_none());
     })
     .await;
 }

@@ -769,6 +769,17 @@ pub struct MediaSessionRenewal {
     pub owner_epoch: i64,
 }
 
+/// Lean owner inventory used by the liveness loop and removal barrier.
+/// Persisted recipes and responses are deliberately excluded from this hot
+/// path so renewal cost is independent of user-shaped JSON sizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedMediaSessionLease {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
+}
+
 /// Versioned, bounded filter attached to a queue row.
 ///
 /// This describes an output contract, not the candidate generator's own

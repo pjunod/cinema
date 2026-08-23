@@ -68,9 +68,9 @@ use crate::domain::{
     MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior, NetworkPriorObservation, NewItem,
     NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineActivityPackage,
     OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
-    OfflineRemovalPlanEntry, OfflineRemovalReport, PlaybackEvent, PlaybackEventQuery,
-    PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite,
-    RecentItem, TraktAuth, User, WatchRollup, WatchState,
+    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState,
+    ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -142,6 +142,10 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Opt in to remote media-session placement only after every committed
+    /// voter is publishing the current media protocol. Absent is deliberately
+    /// off so rolling upgrades keep all starts local.
+    pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -1861,10 +1865,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError>;
+
     async fn owned_media_sessions(
         &self,
         owner_node_id: &str,
-    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+        now_ms: i64,
+    ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
 }
 
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
