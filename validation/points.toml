@@ -233,7 +233,7 @@ timeout_seconds = 300
 
 [[checks]]
 id = "cluster-auth"
-title = "Three-voter replicated durable-state, import, and failure contract"
+title = "Three-voter replicated state, singleton takeover, and failure contract"
 command = "make cluster-check"
 profiles = ["commit", "full", "nightly"]
 platforms = ["darwin", "linux"]
@@ -343,7 +343,7 @@ depends_on = ["core.media"]
 [[points]]
 id = "cluster.auth"
 title = "Replicated durable state"
-contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
+contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; the real-process harness compiles the production lease heartbeat, stops a follower owner past the authoritative TTL, makes both survivors contest takeover, admits exactly one higher-fence successor while the loser observes that fence, makes exactly two provider calls, rejects the resumed token inside its former TTL, and stays within eight post-baseline Raft entries without a leader or term change; membership removal atomically invalidates the departing node's job tokens and permanently refuses that identity new leases; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
 paths = [
   "benchmarks/cluster-topology.schema.json",
   "crates/plurx-cluster-check/**",
@@ -362,7 +362,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/publication.rs",
   "crates/plurx-core/src/store/publication.rs",
   "crates/plurx-core/tests/store_contract.rs",
-  "crates/plurxd/src/{cachekeep,main,state,transcode}.rs",
+  "crates/plurxd/src/{cachekeep,job_lease,main,state,transcode}.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",

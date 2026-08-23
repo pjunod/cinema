@@ -80,7 +80,7 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	  single_voter_cost_stays_inside_the_m0_budget -- --ignored --exact --nocapture
 
 .PHONY: cluster-check
-cluster-check: ## Run WAL recovery plus M1b-M2 durable-state, import, growth, and failure contracts
+cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failure contracts
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
