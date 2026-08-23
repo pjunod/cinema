@@ -116,7 +116,9 @@ pub async fn finalize_join(
 fn api_error(error: MembershipError) -> ApiError {
     let status = match error {
         MembershipError::Unavailable => StatusCode::CONFLICT,
-        MembershipError::InvalidToken | MembershipError::Incompatible => StatusCode::BAD_REQUEST,
+        MembershipError::InvalidToken
+        | MembershipError::Incompatible
+        | MembershipError::InvalidHttpEndpoint => StatusCode::BAD_REQUEST,
         MembershipError::ExpiredToken => StatusCode::GONE,
         MembershipError::ReusedToken
         | MembershipError::ReservedToken
