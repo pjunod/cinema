@@ -13,6 +13,7 @@ use plurx_core::cluster::membership::{
 pub(crate) const NODE_HEADER: &str = "x-plurx-cluster-node";
 pub(crate) const TARGET_HEADER: &str = "x-plurx-cluster-target";
 pub(crate) const TIMESTAMP_HEADER: &str = "x-plurx-cluster-time-ms";
+pub(crate) const NONCE_HEADER: &str = "x-plurx-cluster-nonce";
 pub(crate) const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
 
 #[derive(Clone, Copy)]
@@ -81,6 +82,7 @@ impl PeerTransport {
                 .sign_internal_peer_request(
                     expected_node_id,
                     timestamp_ms,
+                    &uuid::Uuid::new_v4().to_string(),
                     method_name,
                     path,
                     &body,
@@ -121,6 +123,9 @@ trait PeerAuthHeaders {
     fn node_id(&self) -> &str;
     fn target_node_id(&self) -> &str;
     fn timestamp_ms(&self) -> i64;
+    fn nonce(&self) -> Option<&str> {
+        None
+    }
     fn signature(&self) -> &str;
 }
 
@@ -155,6 +160,10 @@ impl PeerAuthHeaders for InternalPeerAuth {
         self.timestamp_ms
     }
 
+    fn nonce(&self) -> Option<&str> {
+        Some(&self.nonce)
+    }
+
     fn signature(&self) -> &str {
         &self.signature
     }
@@ -164,21 +173,30 @@ fn signed_headers<T: PeerAuthHeaders>(
     request: reqwest::RequestBuilder,
     auth: &T,
 ) -> reqwest::RequestBuilder {
-    request
+    let request = request
         .header(NODE_HEADER, auth.node_id())
         .header(TARGET_HEADER, auth.target_node_id())
         .header(TIMESTAMP_HEADER, auth.timestamp_ms())
-        .header(SIGNATURE_HEADER, auth.signature())
+        .header(SIGNATURE_HEADER, auth.signature());
+    match auth.nonce() {
+        Some(nonce) => request.header(NONCE_HEADER, nonce),
+        None => request,
+    }
 }
 
 pub(crate) fn exact_auth_from_headers(headers: &axum::http::HeaderMap) -> Option<InternalPeerAuth> {
     let node_id = headers.get(NODE_HEADER)?.to_str().ok()?;
     let target_node_id = headers.get(TARGET_HEADER)?.to_str().ok()?;
+    let nonce = headers.get(NONCE_HEADER)?.to_str().ok()?;
     let signature = headers.get(SIGNATURE_HEADER)?.to_str().ok()?;
+    let nonce_is_canonical = nonce.len() == 36
+        && uuid::Uuid::parse_str(nonce)
+            .is_ok_and(|parsed| parsed.hyphenated().to_string() == nonce);
     if node_id.is_empty()
         || node_id.len() > 256
         || target_node_id.is_empty()
         || target_node_id.len() > 256
+        || !nonce_is_canonical
         || signature.len() != 128
         || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -188,6 +206,7 @@ pub(crate) fn exact_auth_from_headers(headers: &axum::http::HeaderMap) -> Option
         node_id: node_id.to_owned(),
         target_node_id: target_node_id.to_owned(),
         timestamp_ms: headers.get(TIMESTAMP_HEADER)?.to_str().ok()?.parse().ok()?,
+        nonce: nonce.to_owned(),
         signature: signature.to_owned(),
     })
 }
@@ -263,6 +282,28 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use futures_util::{stream, StreamExt};
+
+    #[test]
+    fn exact_header_parser_requires_a_canonical_signed_nonce() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(NODE_HEADER, "node-a".parse().expect("node"));
+        headers.insert(TARGET_HEADER, "node-b".parse().expect("target"));
+        headers.insert(TIMESTAMP_HEADER, "42".parse().expect("time"));
+        headers.insert(
+            NONCE_HEADER,
+            "123e4567-e89b-42d3-a456-426614174000"
+                .parse()
+                .expect("nonce"),
+        );
+        headers.insert(
+            SIGNATURE_HEADER,
+            "a".repeat(128).parse().expect("signature"),
+        );
+        assert!(exact_auth_from_headers(&headers).is_some());
+
+        headers.insert(NONCE_HEADER, "not-a-uuid".parse().expect("invalid nonce"));
+        assert!(exact_auth_from_headers(&headers).is_none());
+    }
 
     #[tokio::test]
     async fn client_refuses_redirects_and_both_declared_and_chunked_oversized_bodies() {

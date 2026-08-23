@@ -7,7 +7,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{stream, StreamExt};
@@ -15,7 +16,7 @@ use plurx_core::cluster::membership::{ActivityPeer, MembershipError, MembershipM
 use plurx_core::domain::MediaFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
@@ -244,40 +245,21 @@ struct RootReadability {
     observed_at: tokio::time::Instant,
 }
 
-#[derive(Debug)]
-struct RootProbeResult {
-    root: PathBuf,
-    readable: bool,
-}
-
-struct RootProbeRegistry {
-    pending: BTreeSet<PathBuf>,
-    results: mpsc::UnboundedSender<RootProbeResult>,
-}
-
 #[derive(Clone)]
 pub(crate) struct MediaPool {
     membership: MembershipManager,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
-    root_probes: Arc<Mutex<RootProbeRegistry>>,
-    root_probe_results: Arc<AsyncMutex<mpsc::UnboundedReceiver<RootProbeResult>>>,
 }
 
 impl MediaPool {
     pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
-        let (root_probe_tx, root_probe_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             transport: PeerTransport::new(membership.clone()),
             membership,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
-            root_probes: Arc::new(Mutex::new(RootProbeRegistry {
-                pending: BTreeSet::new(),
-                results: root_probe_tx,
-            })),
-            root_probe_results: Arc::new(AsyncMutex::new(root_probe_rx)),
         })
     }
 
@@ -355,102 +337,21 @@ impl MediaPool {
             .write()
             .await
             .retain(|root, _| roots.contains(root));
-        self.drain_ready_root_probes(&roots).await;
-
-        for root in &roots {
-            self.schedule_root_probe(root.clone());
-        }
-
-        // Collection is bounded, but the OS work is not cancelled. A hard
-        // mount can own at most one dedicated worker until that exact call
-        // really returns; subsequent refreshes never pile more work onto
-        // Tokio's shared blocking pool.
         let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
-        loop {
-            self.drain_ready_root_probes(&roots).await;
-            if !self.has_pending_root_probe(&roots) || tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            let result = {
-                let mut receiver = self.root_probe_results.lock().await;
-                tokio::time::timeout_at(deadline, receiver.recv()).await
-            };
-            match result {
-                Ok(Some(result)) => self.accept_root_probe(result, &roots).await,
-                Ok(None) | Err(_) => break,
-            }
-        }
-    }
-
-    fn schedule_root_probe(&self, root: PathBuf) {
-        let sender = {
-            let mut registry = self
-                .root_probes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !reserve_root_probe(&mut registry.pending, root.clone()) {
-                return;
-            }
-            registry.results.clone()
-        };
-        let thread_root = root.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("plurx-root-probe".to_owned())
-            .spawn(move || {
-                let readable = std::fs::read_dir(&thread_root)
-                    .and_then(|mut entries| entries.next().transpose())
-                    .is_ok();
-                let _ = sender.send(RootProbeResult {
-                    root: thread_root,
-                    readable,
-                });
-            })
-        {
-            self.root_probes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pending
-                .remove(&root);
-            tracing::debug!(%error, path = %root.display(), "could not start media root probe");
-        }
-    }
-
-    async fn drain_ready_root_probes(&self, roots: &BTreeSet<PathBuf>) {
-        loop {
-            let result = self.root_probe_results.lock().await.try_recv();
-            match result {
-                Ok(result) => self.accept_root_probe(result, roots).await,
-                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                    break;
-                }
-            }
-        }
-    }
-
-    async fn accept_root_probe(&self, result: RootProbeResult, roots: &BTreeSet<PathBuf>) {
-        self.root_probes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .remove(&result.root);
-        if roots.contains(&result.root) {
-            self.root_readability.write().await.insert(
-                result.root,
+        let outcomes = stream::iter(roots.into_iter().map(|root| async move {
+            let result = probe_library_root(&root, deadline).await;
+            (
+                root,
                 RootReadability {
                     readable: result.readable,
-                    observed_at: tokio::time::Instant::now(),
+                    observed_at: result.observed_at,
                 },
-            );
-        }
-    }
-
-    fn has_pending_root_probe(&self, roots: &BTreeSet<PathBuf>) -> bool {
-        self.root_probes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending
-            .iter()
-            .any(|root| roots.contains(root))
+            )
+        }))
+        .buffer_unordered(MAX_LIBRARY_ROOTS)
+        .collect::<BTreeMap<_, _>>()
+        .await;
+        *self.root_readability.write().await = outcomes;
     }
 
     async fn root_likely_readable(&self, path: &Path) -> bool {
@@ -656,6 +557,49 @@ async fn fetch_snapshot(
     accepted_snapshot(snapshot, &peer.node_id)
 }
 
+struct RootProbeObservation {
+    readable: bool,
+    observed_at: tokio::time::Instant,
+}
+
+/// Probe inside a disposable process rather than Tokio's shared blocking
+/// pool. A hard mount can make a filesystem syscall uncancellable; the child
+/// is an isolation boundary the daemon can signal and forget at the common
+/// deadline, so removed roots never retain in-process worker admission.
+async fn probe_library_root(root: &Path, deadline: tokio::time::Instant) -> RootProbeObservation {
+    let mut child = match tokio::process::Command::new("find")
+        .arg(root)
+        .args(["-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return RootProbeObservation {
+                readable: false,
+                observed_at: tokio::time::Instant::now(),
+            }
+        }
+    };
+    let readable = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            let _ = child.start_kill();
+            false
+        }
+    };
+    RootProbeObservation {
+        readable,
+        // Stamp completion, not channel consumption. The result is installed
+        // immediately by this same future, so its TTL cannot restart later.
+        observed_at: tokio::time::Instant::now(),
+    }
+}
+
 async fn fetch_offer(
     transport: &PeerTransport,
     peer: ActivityPeer,
@@ -859,13 +803,6 @@ fn has_reachable_media_peer(peers: &[ActivityPeer]) -> bool {
     peers
         .iter()
         .any(|peer| peer.reachable && peer.http_base.is_some())
-}
-
-fn reserve_root_probe(pending: &mut BTreeSet<PathBuf>, root: PathBuf) -> bool {
-    if pending.contains(&root) || pending.len() >= MAX_LIBRARY_ROOTS {
-        return false;
-    }
-    pending.insert(root)
 }
 
 const fn snapshot_fanout_concurrency() -> usize {
@@ -1204,6 +1141,17 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_bounds_reject_wrong_identity_and_protocol() {
+        let accepted = snapshot("peer-a", &["hevc"], 1080);
+        assert!(snapshot_is_bounded(&accepted, "peer-a"));
+        assert!(!snapshot_is_bounded(&accepted, "peer-b"));
+
+        let mut incompatible = accepted;
+        incompatible.protocol_version = PROTOCOL_VERSION.saturating_add(1);
+        assert!(!snapshot_is_bounded(&incompatible, "peer-a"));
+    }
+
+    #[test]
     fn verified_cache_beats_source_and_pressure() {
         let mut cached = offer("cache");
         cached.cache_hit = true;
@@ -1289,15 +1237,6 @@ mod tests {
         assert!(requested_tracks_exist(&file, Some(4), Some(7)));
         assert!(!requested_tracks_exist(&file, Some(3), Some(7)));
         assert!(!requested_tracks_exist(&file, Some(4), Some(6)));
-    }
-
-    #[test]
-    fn root_probe_registry_never_resubmits_an_outstanding_os_call() {
-        let root = PathBuf::from("/media/hard-mount");
-        let mut pending = BTreeSet::new();
-        assert!(reserve_root_probe(&mut pending, root.clone()));
-        assert!(!reserve_root_probe(&mut pending, root.clone()));
-        assert_eq!(pending, BTreeSet::from([root]));
     }
 
     #[test]

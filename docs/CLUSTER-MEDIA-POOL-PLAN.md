@@ -967,9 +967,10 @@ peer cannot exceed the 200 ms offer budget · heterogeneous fixtures reject an
 incapable idle node and prefer a byte-verified cache holder · scratch-full,
 stale-source, and saturated-egress nodes do not win.
 
-**Delivered:** voter requests now bind sender, target, timestamp, method,
-normalized route, and raw-body digest to the durable node key; a bounded
-per-sender window rejects replay of an already accepted exact proof. The daemon polls
+**Delivered:** voter requests now bind sender, target, timestamp, random nonce,
+method, normalized route, and raw-body digest to the durable node key; a
+bounded per-sender window rejects replay of an already accepted signed nonce
+without conflating identical concurrent requests. The daemon polls
 privacy-safe capability snapshots every ten seconds, gives each response only
 the remainder of its signed fifteen-second lifetime, and collects only reachable
 peers immediately under one common bounded transport deadline, so failed early
@@ -979,10 +980,12 @@ from memory and collects non-reserving offers under one common 200 ms deadline.
 Admin diagnostics expose the directory and ranked reasons, while the live start
 path remains unchanged. A cache advantage requires the exact complete
 generation's fenced manifest and verified VOD playlist. Cache scratch capacity
-is sampled by one non-accumulating background OS worker, keeping a hard cache
-mount out of the async offer deadline. When a reachable remote candidate exists,
-bounded background workers refresh the most-specific configured library-root
-readability without resubmitting an OS call that is still outstanding; offer
+is sampled by one non-accumulating background OS worker and expires fail-closed,
+keeping a hard cache mount and an indefinitely stale positive result out of the
+async offer deadline. When a reachable remote candidate exists, disposable
+child processes refresh the most-specific configured library-root readability
+under one common deadline; timed-out and removed roots cannot retain daemon
+worker admission. Offer
 fan-out consults only that age-limited signal, replicated media facts, recent
 file availability, local capacity, and local cache bytes, so an offer never
 opens a candidate source path. Requested audio and subtitle indices must exist

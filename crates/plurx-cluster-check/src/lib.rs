@@ -1211,6 +1211,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             Request::SignInternalPeerRequest {
                 target_node_id: "node-2".to_owned(),
                 timestamp_ms: now,
+                nonce: "123e4567-e89b-42d3-a456-426614174000".to_owned(),
                 method: "POST".to_owned(),
                 path: "/internal/v1/media/offers".to_owned(),
                 body: offer_body.clone(),
@@ -1242,6 +1243,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             Request::SignInternalPeerRequest {
                 target_node_id: "node-2".to_owned(),
                 timestamp_ms: stale_time,
+                nonce: "123e4567-e89b-42d3-a456-426614174001".to_owned(),
                 method: "POST".to_owned(),
                 path: "/internal/v1/media/offers".to_owned(),
                 body: offer_body.clone(),
@@ -3375,6 +3377,7 @@ pub enum Request {
     SignInternalPeerRequest {
         target_node_id: String,
         timestamp_ms: i64,
+        nonce: String,
         method: String,
         path: String,
         body: Vec<u8>,
@@ -5059,6 +5062,7 @@ async fn handle_request(
         Request::SignInternalPeerRequest {
             target_node_id,
             timestamp_ms,
+            nonce,
             method,
             path,
             body,
@@ -5066,6 +5070,7 @@ async fn handle_request(
             auth: membership_ref(membership)?.sign_internal_peer_request(
                 &target_node_id,
                 timestamp_ms,
+                &nonce,
                 &method,
                 &path,
                 &body,

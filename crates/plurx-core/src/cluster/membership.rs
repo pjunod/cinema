@@ -190,6 +190,7 @@ const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
+const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
 
@@ -447,6 +448,7 @@ pub struct InternalPeerAuth {
     pub node_id: String,
     pub target_node_id: String,
     pub timestamp_ms: i64,
+    pub nonce: String,
     pub signature: String,
 }
 
@@ -739,26 +741,23 @@ struct ActivityAuthAdmission {
 
 #[derive(Default)]
 struct InternalAuthReplayWindow {
-    accepted: VecDeque<(Vec<u8>, Instant)>,
+    accepted: VecDeque<(String, Instant)>,
 }
 
 impl InternalAuthReplayWindow {
-    fn admit(&mut self, signature: &[u8], now: Instant) -> bool {
+    fn admit(&mut self, nonce: &str, now: Instant) -> bool {
         while self.accepted.front().is_some_and(|(_, accepted_at)| {
             now.saturating_duration_since(*accepted_at)
                 > Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64)
         }) {
             self.accepted.pop_front();
         }
-        if self
-            .accepted
-            .iter()
-            .any(|(accepted, _)| accepted == signature)
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
             || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
         {
             return false;
         }
-        self.accepted.push_back((signature.to_vec(), now));
+        self.accepted.push_back((nonce.to_owned(), now));
         true
     }
 }
@@ -2056,6 +2055,7 @@ impl MembershipManager {
         &self,
         target_node_id: &str,
         timestamp_ms: i64,
+        nonce: &str,
         method: &str,
         path: &str,
         body: &[u8],
@@ -2065,6 +2065,7 @@ impl MembershipManager {
             &inner.identity.node_id,
             target_node_id,
             timestamp_ms,
+            nonce,
             method,
             path,
             body,
@@ -2074,6 +2075,7 @@ impl MembershipManager {
             node_id: inner.identity.node_id.clone(),
             target_node_id: target_node_id.to_owned(),
             timestamp_ms,
+            nonce: nonce.to_owned(),
             signature: inner.activity_signing_key.sign_hex(&message),
         })
     }
@@ -2093,6 +2095,7 @@ impl MembershipManager {
             || auth.node_id == auth.target_node_id
             || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
             || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || !canonical_internal_auth_nonce(&auth.nonce)
             || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
         {
             return Ok(false);
@@ -2101,6 +2104,7 @@ impl MembershipManager {
             &auth.node_id,
             &auth.target_node_id,
             auth.timestamp_ms,
+            &auth.nonce,
             method,
             path,
             body,
@@ -2117,11 +2121,12 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        // Ed25519 signatures are deterministic for this exact envelope. Keep
-        // the full admitted window so a captured proof can authorize at most
-        // one request, and reject rather than evict while the bounded cache is
-        // full. Forged proofs never reach this cache.
-        if !self.admit_internal_replay(&auth.node_id, &signature)?
+        // The signed random nonce lets legitimate identical concurrent
+        // requests remain distinct. Keep every admitted nonce for the full
+        // window so a captured proof can authorize at most one request, and
+        // reject rather than evict while the bounded cache is full. Forged
+        // proofs never reach this cache.
+        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)?
             || !self.admit_internal_authority_check(&auth.node_id)?
         {
             return Ok(false);
@@ -2256,11 +2261,7 @@ impl MembershipManager {
         Ok(state.admit(now, MAX_INTERNAL_AUTH_CHECKS_PER_SECOND))
     }
 
-    fn admit_internal_replay(
-        &self,
-        node_id: &str,
-        signature: &[u8],
-    ) -> Result<bool, MembershipError> {
+    fn admit_internal_replay(&self, node_id: &str, nonce: &str) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let now = Instant::now();
         let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
@@ -2269,7 +2270,7 @@ impl MembershipManager {
         Ok(replays
             .entry(node_id.to_owned())
             .or_default()
-            .admit(signature, now))
+            .admit(nonce, now))
     }
 
     async fn verify_live_activity_authority(
@@ -3708,11 +3709,13 @@ fn internal_peer_auth_message(
     node_id: &str,
     target_node_id: &str,
     timestamp_ms: i64,
+    nonce: &str,
     method: &str,
     path: &str,
     body: &[u8],
 ) -> Option<Vec<u8>> {
-    if method.is_empty()
+    if !canonical_internal_auth_nonce(nonce)
+        || method.is_empty()
         || method.len() > 16
         || !method.bytes().all(|byte| byte.is_ascii_uppercase())
         || !path.starts_with('/')
@@ -3725,13 +3728,18 @@ fn internal_peer_auth_message(
     }
     let body_digest = Sha256::digest(body);
     let mut message = INTERNAL_PEER_AUTH_CONTEXT.to_vec();
-    for value in [node_id, target_node_id, method, path] {
+    for value in [node_id, target_node_id, nonce, method, path] {
         message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
         message.extend_from_slice(value.as_bytes());
     }
     message.extend_from_slice(&timestamp_ms.to_be_bytes());
     message.extend_from_slice(&body_digest);
     Some(message)
+}
+
+fn canonical_internal_auth_nonce(nonce: &str) -> bool {
+    nonce.len() == INTERNAL_AUTH_NONCE_BYTES
+        && uuid::Uuid::parse_str(nonce).is_ok_and(|parsed| parsed.hyphenated().to_string() == nonce)
 }
 
 impl From<&mut Row<'_>> for HttpUrlRow {
@@ -4027,12 +4035,21 @@ mod tests {
         let started = Instant::now();
         let mut replays = InternalAuthReplayWindow::default();
 
-        assert!(replays.admit(b"a", started));
-        assert!(!replays.admit(b"a", started + Duration::from_secs(29)));
+        assert!(replays.admit("nonce-a", started));
+        assert!(!replays.admit("nonce-a", started + Duration::from_secs(29)));
         assert!(replays.admit(
-            b"a",
+            "nonce-a",
             started + Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64 + 1)
         ));
+    }
+
+    #[test]
+    fn exact_internal_replay_allows_distinct_nonces_at_the_same_timestamp() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+
+        assert!(replays.admit("nonce-a", started));
+        assert!(replays.admit("nonce-b", started));
     }
 
     #[test]
@@ -4040,10 +4057,10 @@ mod tests {
         let started = Instant::now();
         let mut replays = InternalAuthReplayWindow::default();
         for index in 0..MAX_INTERNAL_REPLAYS_PER_PEER {
-            assert!(replays.admit(format!("proof-{index}").as_bytes(), started));
+            assert!(replays.admit(&format!("nonce-{index}"), started));
         }
-        assert!(!replays.admit(b"overflow", started));
-        assert!(!replays.admit(b"proof-0", started));
+        assert!(!replays.admit("overflow", started));
+        assert!(!replays.admit("nonce-0", started));
     }
 
     #[test]
@@ -4759,10 +4776,12 @@ mod tests {
 
     #[test]
     fn exact_internal_authority_binds_method_path_and_raw_body() {
+        let nonce = "123e4567-e89b-42d3-a456-426614174000";
         let message = internal_peer_auth_message(
             "node-a",
             "node-b",
             42,
+            nonce,
             "POST",
             "/internal/v1/media/offers",
             b"{}",
@@ -4773,6 +4792,7 @@ mod tests {
                 "node-c",
                 "node-b",
                 42,
+                nonce,
                 "POST",
                 "/internal/v1/media/offers",
                 b"{}",
@@ -4781,6 +4801,7 @@ mod tests {
                 "node-a",
                 "node-b",
                 42,
+                nonce,
                 "GET",
                 "/internal/v1/media/offers",
                 b"{}",
@@ -4789,6 +4810,7 @@ mod tests {
                 "node-a",
                 "node-b",
                 42,
+                nonce,
                 "POST",
                 "/internal/v1/media/snapshot",
                 b"{}",
@@ -4797,9 +4819,19 @@ mod tests {
                 "node-a",
                 "node-b",
                 42,
+                nonce,
                 "POST",
                 "/internal/v1/media/offers",
                 b"{ }",
+            ),
+            internal_peer_auth_message(
+                "node-a",
+                "node-b",
+                42,
+                "123e4567-e89b-42d3-a456-426614174001",
+                "POST",
+                "/internal/v1/media/offers",
+                b"{}",
             ),
         ] {
             assert_ne!(message, changed.expect("valid mutation"));
@@ -4808,6 +4840,7 @@ mod tests {
             "node-a",
             "node-b",
             42,
+            nonce,
             "post",
             "/internal/v1/media/offers",
             b"{}"
@@ -4817,8 +4850,19 @@ mod tests {
             "node-a",
             "node-b",
             42,
+            nonce,
             "POST",
             "/internal/v1/media/offers?credential=secret",
+            b"{}"
+        )
+        .is_none());
+        assert!(internal_peer_auth_message(
+            "node-a",
+            "node-b",
+            42,
+            "NOT-A-CANONICAL-UUID",
+            "POST",
+            "/internal/v1/media/offers",
             b"{}"
         )
         .is_none());

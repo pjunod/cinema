@@ -41,6 +41,7 @@ const SESSION_IDLE_SECS: u64 = 60;
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
@@ -4245,6 +4246,10 @@ pub struct TranscodeManager {
     /// a hard network mount and therefore belongs to one non-accumulating
     /// background worker, never the async media-serving runtime.
     scratch_bytes_free: AtomicI64,
+    /// Wall-clock completion time of the free-space sample. A previously
+    /// positive sample fails closed once it is too old, including while a
+    /// later `statvfs` call remains stuck on a hard mount.
+    scratch_sampled_at_unix_ms: AtomicI64,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -4398,6 +4403,7 @@ impl TranscodeManager {
             admissions: Admissions::new(),
             cache: None,
             scratch_bytes_free: AtomicI64::new(0),
+            scratch_sampled_at_unix_ms: AtomicI64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             sessions: Mutex::new(HashMap::new()),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -4521,7 +4527,7 @@ impl TranscodeManager {
     /// Only one OS call exists at a time. If a dead mount never returns, this
     /// loop consumes interval ticks without submitting another call, while
     /// request paths keep using the last completed (or fail-closed zero)
-    /// sample.
+    /// sample only until its maximum age.
     pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
         let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
             return;
@@ -4544,7 +4550,9 @@ impl TranscodeManager {
                 tokio::select! {
                     sample = &mut receiver => {
                         let sample = sample.ok().flatten().unwrap_or(0).max(0);
+                        self.scratch_sampled_at_unix_ms.store(0, Release);
                         self.scratch_bytes_free.store(sample, Release);
+                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Release);
                         break;
                     }
                     _ = interval.tick() => {
@@ -4587,7 +4595,11 @@ impl TranscodeManager {
             // explicit fallback), but an operator can still disable mapping.
             tone_map: self.pipeline.handles(Some("hdr10")) && tone_map_pref() != ToneMap::None,
             output_grades: vec!["sdr".to_owned()],
-            scratch_bytes: self.scratch_bytes_free.load(Acquire).max(0),
+            scratch_bytes: fresh_scratch_bytes(
+                self.scratch_bytes_free.load(Acquire),
+                self.scratch_sampled_at_unix_ms.load(Acquire),
+                unix_ms(),
+            ),
         }
     }
 
@@ -10233,6 +10245,18 @@ fn unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn fresh_scratch_bytes(bytes: i64, sampled_at_unix_ms: i64, now_unix_ms: i64) -> i64 {
+    let max_age_ms = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).unwrap_or(i64::MAX);
+    if sampled_at_unix_ms > 0
+        && now_unix_ms >= sampled_at_unix_ms
+        && now_unix_ms.saturating_sub(sampled_at_unix_ms) <= max_age_ms
+    {
+        bytes.max(0)
+    } else {
+        0
+    }
+}
+
 fn bitrate_for_height(height: i64) -> u32 {
     match height {
         h if h >= 2160 => 20_000,
@@ -10737,6 +10761,23 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_capacity_fails_closed_when_the_background_sample_expires() {
+        let sampled_at = 10_000;
+        let max_age = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).expect("age fits i64");
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at), 4096);
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age),
+            4096
+        );
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age + 1),
+            0
+        );
+        assert_eq!(fresh_scratch_bytes(4096, 0, sampled_at), 0);
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at - 1), 0);
+    }
 
     #[tokio::test]
     async fn metrics_session_snapshot_does_not_wait_for_the_session_map() {
