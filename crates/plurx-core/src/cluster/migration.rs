@@ -4053,6 +4053,60 @@ pub mod status {
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
     }
 
+    /// Private, single-operation state retained across one local query.
+    /// Callers never receive or replay this capability directly.
+    // P3a lands the proof boundary before P3b routes the first catalogue
+    // query through it. Remove this allowance with that production caller.
+    #[allow(dead_code)]
+    struct BoundedReplicaPermit {
+        metrics: PassiveRaftMetrics,
+        current_term: u64,
+        leader_id: u64,
+        committed_index: u64,
+        applied_index: u64,
+        local_observation_epoch: u64,
+        watermark_started_nanos: u64,
+        max_apply_lag_entries: u64,
+    }
+
+    #[allow(dead_code)]
+    impl BoundedReplicaPermit {
+        fn remains_valid(&self) -> bool {
+            let elapsed = self.metrics.started_at.elapsed();
+            self.remains_valid_at(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn remains_valid_at(&self, elapsed_seconds: u64, elapsed_nanos: u64) -> bool {
+            let original_deadline_valid = elapsed_nanos
+                .saturating_sub(self.watermark_started_nanos)
+                < duration_nanos(QUORUM_WATERMARK_LEASE);
+            original_deadline_valid
+                && self
+                    .metrics
+                    .bounded_replica_state_at(
+                        elapsed_seconds,
+                        elapsed_nanos,
+                        self.max_apply_lag_entries,
+                    )
+                    .is_some_and(|current| {
+                        current.current_term == self.current_term
+                            && current.leader_id == self.leader_id
+                            && current.local_observation_epoch == self.local_observation_epoch
+                            && current.applied_index >= self.applied_index
+                    })
+        }
+    }
+
+    #[allow(dead_code)]
+    struct BoundedReplicaState {
+        current_term: u64,
+        leader_id: u64,
+        committed_index: u64,
+        applied_index: u64,
+        local_observation_epoch: u64,
+        watermark_started_nanos: u64,
+    }
+
     #[derive(Default)]
     struct PassiveRaftMetricsAtomics {
         sequence: AtomicU64,
@@ -4128,6 +4182,129 @@ pub mod status {
         pub fn snapshot(&self) -> PassiveRaftMetricsView {
             let elapsed = self.started_at.elapsed();
             self.snapshot_at_times(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        /// Run exactly one local read between bounded-replica issue and
+        /// revalidation boundaries.
+        ///
+        /// Remote-only serving processes and SQLite backends always return
+        /// `None` without invoking `local_read`. A result is discarded when
+        /// the proof expires, changes generation, or exceeds the entry budget
+        /// while the query is running. Store code must then perform its named
+        /// authority fallback.
+        #[allow(dead_code)] // Removed by P3b's first production catalogue caller.
+        pub(crate) async fn run_bounded_replica<T, F, Fut>(
+            &self,
+            max_apply_lag_entries: u64,
+            local_read: F,
+        ) -> Option<T>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = T>,
+        {
+            let elapsed = self.started_at.elapsed();
+            let permit = self.try_bounded_replica_at(
+                elapsed.as_secs(),
+                duration_nanos(elapsed),
+                max_apply_lag_entries,
+            )?;
+            let result = local_read().await;
+            permit.remains_valid().then_some(result)
+        }
+
+        fn try_bounded_replica_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+            max_apply_lag_entries: u64,
+        ) -> Option<BoundedReplicaPermit> {
+            let state = self.bounded_replica_state_at(
+                elapsed_seconds,
+                elapsed_nanos,
+                max_apply_lag_entries,
+            )?;
+            Some(BoundedReplicaPermit {
+                metrics: self.clone(),
+                current_term: state.current_term,
+                leader_id: state.leader_id,
+                committed_index: state.committed_index,
+                applied_index: state.applied_index,
+                local_observation_epoch: state.local_observation_epoch,
+                watermark_started_nanos: state.watermark_started_nanos,
+                max_apply_lag_entries,
+            })
+        }
+
+        fn bounded_replica_state_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+            max_apply_lag_entries: u64,
+        ) -> Option<BoundedReplicaState> {
+            if !self.local_source
+                || !self.watermark_source
+                || !self.watermark_requires_local_binding
+            {
+                return None;
+            }
+            loop {
+                let before = self.inner.sequence.load(Ordering::Acquire);
+                if before & 1 != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let published = self.inner.published.load(Ordering::Relaxed);
+                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+                let current_term = self.inner.current_term.load(Ordering::Relaxed);
+                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
+                let applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
+                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
+                let current_leader_present =
+                    self.inner.current_leader_present.load(Ordering::Relaxed);
+                let leader_id = self.inner.current_leader.load(Ordering::Relaxed);
+                let local_observation_epoch =
+                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
+                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
+                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
+                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+                let committed_index = self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let watermark_started_nanos =
+                    self.inner.watermark_started_nanos.load(Ordering::Relaxed);
+                let watermark_local_epoch =
+                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+                let watermark_invalidated =
+                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let after = self.inner.sequence.load(Ordering::Acquire);
+                if before != after {
+                    continue;
+                }
+                let local_valid = published
+                    && elapsed_seconds.saturating_sub(sampled_elapsed)
+                        <= PASSIVE_METRICS_FRESHNESS_SECS;
+                let watermark_valid = watermark_published
+                    && elapsed_nanos.saturating_sub(watermark_started_nanos)
+                        < duration_nanos(QUORUM_WATERMARK_LEASE)
+                    && !watermark_invalidated;
+                let local_binding_valid = last_applied_present
+                    && leader_known
+                    && current_leader_present
+                    && current_term == watermark_term
+                    && leader_id == watermark_leader
+                    && local_observation_epoch == watermark_local_epoch;
+                let apply_lag_entries = committed_index.saturating_sub(applied_index);
+                return (local_valid
+                    && watermark_valid
+                    && local_binding_valid
+                    && apply_lag_entries <= max_apply_lag_entries)
+                    .then_some(BoundedReplicaState {
+                        current_term,
+                        leader_id,
+                        committed_index,
+                        applied_index,
+                        local_observation_epoch,
+                        watermark_started_nanos,
+                    });
+            }
         }
 
         #[cfg(test)]
@@ -4349,15 +4526,23 @@ pub mod status {
                     && self.inner.current_term.load(Ordering::Relaxed) == source.term
                     && self.inner.current_leader.load(Ordering::Relaxed) == source.leader_id);
             let prior_published = self.inner.watermark_published.load(Ordering::Relaxed);
+            let prior_term = self.inner.watermark_term.load(Ordering::Relaxed);
+            let prior_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+            let successor_or_conflicting_generation = prior_published
+                && (source.term > prior_term
+                    || (source.term == prior_term && source.leader_id != prior_leader));
             let regressed = prior_published
-                && (source.term < self.inner.watermark_term.load(Ordering::Relaxed)
+                && (source.term < prior_term
                     || source.committed_index
                         < self.inner.watermark_committed_index.load(Ordering::Relaxed)
-                    || (source.term == self.inner.watermark_term.load(Ordering::Relaxed)
-                        && source.leader_id
-                            != self.inner.watermark_leader.load(Ordering::Relaxed)));
+                    || (source.term == prior_term && source.leader_id != prior_leader));
             if expired || !local_matches || regressed {
                 saturating_increment(&self.inner.watermark_errors);
+                if successor_or_conflicting_generation {
+                    self.inner
+                        .watermark_invalidated
+                        .store(true, Ordering::Relaxed);
+                }
                 self.end_write(sequence);
                 return false;
             }
@@ -4945,6 +5130,207 @@ pub mod status {
                     .snapshot_at_times(12, 12_000_000_000)
                     .watermark_errors,
                 1
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_requires_both_fresh_proofs_and_the_entry_budget() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_200_000_000, 2)
+                    .is_none(),
+                "three unapplied entries exceed a two-entry budget"
+            );
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 3)
+                .expect("fresh local and quorum proofs");
+            assert_eq!(permit.committed_index, 45);
+            assert_eq!(permit.applied_index, 42);
+            assert_eq!(
+                permit.committed_index.saturating_sub(permit.applied_index),
+                3
+            );
+            assert!(permit.remains_valid_at(10, 10_999_999_999));
+            assert!(!permit.remains_valid_at(11, 11_000_000_000));
+        }
+
+        #[tokio::test]
+        async fn bounded_replica_wrapper_issues_before_and_revalidates_after_one_local_read() {
+            let metrics = PassiveRaftMetrics::new(true);
+            let calls = Arc::new(AtomicU64::new(0));
+            let unavailable_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica(0, move || {
+                        unavailable_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 41 }
+                    })
+                    .await,
+                None
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+            assert!(metrics.publish(&local_sample(7, Some(45), Some(1))));
+            let started_nanos = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(7, 1, 45), started_nanos));
+            let available_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica(0, move || {
+                        available_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 42 }
+                    })
+                    .await,
+                Some(42)
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn bounded_replica_permit_deadline_is_not_extended_by_a_newer_watermark() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("initial permit");
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_600_000_000,
+                10_700_000_000,
+            ));
+            assert!(permit.remains_valid_at(10, 10_999_999_999));
+            assert!(
+                !permit.remains_valid_at(11, 11_000_000_000),
+                "a refresh must not extend a capability issued from the older request"
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_rejects_remote_authority_and_generation_changes() {
+            let remote = PassiveRaftMetrics::remote_authority();
+            assert!(remote.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(
+                remote
+                    .try_bounded_replica_at(10, 10_200_000_000, u64::MAX)
+                    .is_none(),
+                "a remote serving process has no local replica proof"
+            );
+
+            let local = PassiveRaftMetrics::new(true);
+            assert!(local.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(local.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = local
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("initial permit");
+
+            assert!(local.publish_at(&local_sample(8, Some(46), Some(2)), 10));
+            assert!(local.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_500_000_000),
+                "a fresh proof in a new term cannot revive an old permit"
+            );
+        }
+
+        #[test]
+        fn successor_watermark_revokes_old_permit_before_the_local_watch_catches_up() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("old-generation permit");
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(6, 9, 44),
+                10_250_000_000,
+                10_300_000_000,
+            ));
+            assert!(
+                permit.remains_valid_at(10, 10_350_000_000),
+                "a genuinely delayed older generation must not revoke the retained proof"
+            );
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_600_000_000),
+                "a successful successor proof must immediately revoke the old capability"
+            );
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_600_000_000, u64::MAX)
+                    .is_none(),
+                "the stale local observation cannot negotiate a new permit"
+            );
+
+            assert!(metrics.publish_at(&local_sample(8, Some(46), Some(2)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_650_000_000,
+                10_700_000_000,
+            ));
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_800_000_000, 0)
+                    .is_some(),
+                "matching local and quorum successor proofs recover eligibility"
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_is_revoked_when_the_latest_entry_gap_grows() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("zero-lag permit");
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_500_000_000),
+                "the second phase must enforce the configured lag budget too"
             );
         }
 
