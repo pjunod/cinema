@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["809fc52b"]
+commits = ["05be18ba"]
 points = ["cluster.auth"]
 checks = ["rust-gate"]
 reason = "The workspace lint gate compiles the named campaign helper under denied Clippy warnings. Reverting the correction restores excessive-argument and type-complexity diagnostics, while the request object and metric aliases preserve the runner's cleanup and evidence inputs one-for-one."

@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["8cd04ec4"]
+commits = ["ea09476c"]
 points = ["validation.framework"]
 checks = ["history-regressions"]
 reason = "The history-regressions audit classifies regression-map metadata against the validation framework point and requires every classified commit to have one unique mapping. This row records the metadata-only lint-map commit without claiming runtime cluster behavior."
