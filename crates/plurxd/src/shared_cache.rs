@@ -36,6 +36,7 @@ const GC_MIN_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const STALE_PUBLICATION_MS: i64 = 60 * 60 * 1_000;
 const MOUNT_IO_DEADLINE: Duration = Duration::from_secs(10);
 const MOUNT_IO_CONCURRENCY: usize = 8;
+const MOUNT_PUBLICATION_CONCURRENCY: usize = 2;
 
 #[derive(Clone, Debug)]
 struct SharedConfig {
@@ -55,8 +56,11 @@ pub(crate) struct SharedCacheCoordinator {
     verified_root: Arc<tokio::sync::RwLock<Option<VerifiedRoot>>>,
     verified: Arc<AtomicBool>,
     loss_generation: Arc<AtomicU64>,
+    admitted_generation: Arc<AtomicU64>,
+    suspect_report_pending: Arc<AtomicBool>,
     verification_transition: Arc<tokio::sync::Mutex<()>>,
     mount_io: Arc<tokio::sync::Semaphore>,
+    mount_publications: Arc<tokio::sync::Semaphore>,
     node_id: String,
     membership: MembershipManager,
     transport: PeerTransport,
@@ -100,8 +104,13 @@ impl SharedCacheCoordinator {
             verified_root: Arc::new(tokio::sync::RwLock::new(None)),
             verified: Arc::new(AtomicBool::new(false)),
             loss_generation: Arc::new(AtomicU64::new(0)),
+            admitted_generation: Arc::new(AtomicU64::new(u64::MAX)),
+            suspect_report_pending: Arc::new(AtomicBool::new(false)),
             verification_transition: Arc::new(tokio::sync::Mutex::new(())),
             mount_io: Arc::new(tokio::sync::Semaphore::new(MOUNT_IO_CONCURRENCY)),
+            mount_publications: Arc::new(tokio::sync::Semaphore::new(
+                MOUNT_PUBLICATION_CONCURRENCY,
+            )),
             node_id,
             transport: PeerTransport::new(membership.clone()),
             membership,
@@ -117,6 +126,8 @@ impl SharedCacheCoordinator {
 
     pub(crate) fn is_verified(&self) -> bool {
         self.verified.load(Ordering::Acquire)
+            && self.admitted_generation.load(Ordering::Acquire)
+                == self.loss_generation.load(Ordering::Acquire)
     }
 
     /// Run mount-backed work behind a fixed permit pool and a hard caller
@@ -240,6 +251,9 @@ impl SharedCacheCoordinator {
         if self.loss_generation.load(Ordering::Acquire) != attempted_generation {
             return Err("shared cache proof was superseded by a newer I/O failure".to_owned());
         }
+        if self.suspect_report_pending.load(Ordering::Acquire) {
+            return Err("shared cache loss is still being recorded".to_owned());
+        }
         self.store
             .put_cache_storage_member(&CacheStorageMember {
                 storage_id: config.storage_id.clone(),
@@ -250,16 +264,26 @@ impl SharedCacheCoordinator {
             })
             .await
             .map_err(|error| error.to_string())?;
+        if self.loss_generation.load(Ordering::Acquire) != attempted_generation
+            || self.suspect_report_pending.load(Ordering::Acquire)
+        {
+            return Err("shared cache proof was superseded while publishing".to_owned());
+        }
         *self.verified_root.write().await = Some(VerifiedRoot { path, identity });
+        self.admitted_generation
+            .store(attempted_generation, Ordering::Release);
         self.verified.store(true, Ordering::Release);
         Ok(())
     }
 
     pub(crate) async fn report_io_failure(&self, reason: &'static str) {
-        // Invalidate in-flight proofs before waiting for the serialized state
-        // transition. An older proof may never re-enable the mount afterward.
+        // Revoke local serving authority before any lock or Store wait. The
+        // admitted generation is part of every `is_verified` verdict, so an
+        // older proof cannot reopen the race even if it completes after this
+        // increment. Durable membership telemetry is serialized in a bounded
+        // background task; a wedged Store can never extend a media caller's
+        // mount-I/O deadline or make callers pile up behind the transition.
         self.loss_generation.fetch_add(1, Ordering::AcqRel);
-        let _transition = self.verification_transition.lock().await;
         let was_verified = self.verified.swap(false, Ordering::AcqRel);
         let Some(config) = self.config.as_ref() else {
             return;
@@ -271,10 +295,27 @@ impl SharedCacheCoordinator {
                 "shared cache proof lost; falling back to node-local holders"
             );
         }
-        let _ = self
-            .store
-            .mark_cache_storage_suspect(&config.storage_id, &self.node_id, unix_ms())
+        if self
+            .suspect_report_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let transition = Arc::clone(&self.verification_transition);
+        let pending = Arc::clone(&self.suspect_report_pending);
+        let store = Arc::clone(&self.store);
+        let storage_id = config.storage_id.clone();
+        let node_id = self.node_id.clone();
+        tokio::spawn(async move {
+            let _transition = transition.lock().await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                store.mark_cache_storage_suspect(&storage_id, &node_id, unix_ms()),
+            )
             .await;
+            pending.store(false, Ordering::Release);
+        });
     }
 
     pub(crate) async fn run(self: Arc<Self>, shutdown: tokio_util::sync::CancellationToken) {
@@ -544,22 +585,29 @@ impl SharedCacheCoordinator {
         source_dir: &Path,
         manifest: &plurx_core::transcode::manifest::GenerationManifest,
     ) -> Result<bool, String> {
+        // Whole-title publication is intentionally not a request-sized mount
+        // operation: a correct multi-gigabyte copy may take far longer than
+        // ten seconds. Keep it in its own small pool so two slow publications
+        // cannot consume the permits reserved for playlist, segment, offer,
+        // canary, and GC latency boundaries.
+        let permit = match Arc::clone(&self.mount_publications).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(false),
+        };
         let coordinator = self.clone();
         let recipe_hash = recipe_hash.to_owned();
         let source_dir = source_dir.to_owned();
         let manifest = manifest.clone();
-        self.run_mount_io("shared_publish_timeout", async move {
-            coordinator
-                .publish_generation_inner(
-                    &recipe_hash,
-                    file_id,
-                    recipe_version,
-                    &source_dir,
-                    &manifest,
-                )
-                .await
-        })
-        .await
+        let _permit = permit;
+        coordinator
+            .publish_generation_inner(
+                &recipe_hash,
+                file_id,
+                recipe_version,
+                &source_dir,
+                &manifest,
+            )
+            .await
     }
 
     async fn publish_generation_inner(
@@ -898,7 +946,7 @@ impl SharedCacheCoordinator {
         root: &SecureDirectory,
         generation: &plurx_core::domain::SharedCacheGeneration,
         lease: &plurx_core::cluster::coordination::Lease,
-    ) -> Result<(), String> {
+    ) -> Result<Option<plurx_core::cluster::coordination::Lease>, String> {
         let components = shared_generation_components(&generation.relative_dir)
             .ok_or_else(|| "shared GC generation has an invalid relative path".to_owned())?;
         let generation_name = components.last().expect("bounded non-empty components");
@@ -911,12 +959,12 @@ impl SharedCacheCoordinator {
                     if generation.cleanup_pending
                         && error.kind() == std::io::ErrorKind::NotFound =>
                 {
-                    let _ = self
+                    let successor = self
                         .store
                         .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
                         .await
                         .map_err(|error| error.to_string())?;
-                    return Ok(());
+                    return Ok(successor);
                 }
                 Err(error) => return Err(format!("opening shared GC parent: {error}")),
             };
@@ -935,12 +983,12 @@ impl SharedCacheCoordinator {
                     Err(quarantine_error)
                         if quarantine_error.kind() == std::io::ErrorKind::NotFound =>
                     {
-                        let _ = self
+                        let successor = self
                             .store
                             .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
                             .await
                             .map_err(|error| error.to_string())?;
-                        return Ok(());
+                        return Ok(successor);
                     }
                     Err(quarantine_error) => {
                         return Err(format!("opening shared GC quarantine: {quarantine_error}"));
@@ -957,16 +1005,19 @@ impl SharedCacheCoordinator {
             .identity()
             .await
             .map_err(|error| format!("identifying shared GC generation: {error}"))?;
-        if !self
+        let Some(successor) = self
             .store
             .retire_shared_cache_generation(generation, unix_ms(), lease)
             .await
             .map_err(|error| error.to_string())?
-        {
-            return Ok(());
-        }
+        else {
+            return Ok(None);
+        };
 
         if !already_quarantined {
+            if successor.expires_at_unix_ms <= unix_ms() || !self.is_verified() {
+                return Ok(None);
+            }
             match parent
                 .rename_child_noreplace(generation_name, &quarantine)
                 .await
@@ -987,6 +1038,9 @@ impl SharedCacheCoordinator {
                 return Err("shared GC quarantine identity changed".to_owned());
             }
         }
+        if successor.expires_at_unix_ms <= unix_ms() || !self.is_verified() {
+            return Ok(None);
+        }
         parent
             .remove_child_tree(
                 &quarantine,
@@ -995,12 +1049,12 @@ impl SharedCacheCoordinator {
             )
             .await
             .map_err(|error| format!("deleting quarantined shared generation: {error}"))?;
-        let _ = self
+        let finalized = self
             .store
-            .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
+            .finalize_retired_shared_cache_generation(generation, unix_ms(), &successor)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(finalized)
     }
 
     async fn gc_once(&self) -> Result<(), String> {
@@ -1020,7 +1074,7 @@ impl SharedCacheCoordinator {
         };
         let now_ms = unix_ms();
         let resource = format!("shared-cache-gc:{}", config.storage_id);
-        let lease = match self
+        let mut lease = match self
             .store
             .acquire_lease(
                 &resource,
@@ -1070,18 +1124,22 @@ impl SharedCacheCoordinator {
             .into_iter()
             .filter(|generation| generation.cleanup_pending || generation.last_used_at <= cutoff)
         {
-            if let Err(error) = self
+            match self
                 .reclaim_retired_generation(&root, &generation, &lease)
                 .await
             {
-                self.report_io_failure("gc_reclamation_failed").await;
-                tracing::warn!(
-                    storage_id = %generation.storage_id,
-                    recipe = %generation.recipe_hash,
-                    %error,
-                    "shared cache GC reclamation remains retryable"
-                );
-                break;
+                Ok(Some(successor)) => lease = successor,
+                Ok(None) => break,
+                Err(error) => {
+                    self.report_io_failure("gc_reclamation_failed").await;
+                    tracing::warn!(
+                        storage_id = %generation.storage_id,
+                        recipe = %generation.recipe_hash,
+                        %error,
+                        "shared cache GC reclamation remains retryable"
+                    );
+                    break;
+                }
             }
         }
         let _ = self.store.release_lease(&lease, unix_ms()).await;
@@ -1260,6 +1318,24 @@ mod tests {
         )
     }
 
+    async fn wait_for_suspect_member(store: &Arc<dyn Store>, storage_id: &str, node_id: &str) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if store
+                    .cache_storage_member(storage_id, node_id)
+                    .await
+                    .expect("suspect member")
+                    .is_some_and(|member| member.verification_state == "suspect")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded suspect membership publication");
+    }
+
     #[test]
     fn storage_identity_is_cluster_scoped_and_canary_names_are_single_components() {
         assert_eq!(
@@ -1349,14 +1425,12 @@ mod tests {
         shared_cache.report_io_failure("test_mount_loss").await;
         assert!(!shared_cache.is_verified());
         assert!(shared_cache.root().await.is_none());
-        assert_eq!(
-            store
-                .cache_storage_member(shared_cache.storage_id().expect("storage id"), "reader",)
-                .await
-                .expect("suspect member")
-                .map(|member| member.verification_state),
-            Some("suspect".to_owned())
-        );
+        wait_for_suspect_member(
+            &store,
+            shared_cache.storage_id().expect("storage id"),
+            "reader",
+        )
+        .await;
 
         shared_cache
             .admit_local_for_test()
@@ -1394,14 +1468,12 @@ mod tests {
 
         assert!(shared_cache.gc_once().await.is_err());
         assert!(!shared_cache.is_verified());
-        assert_eq!(
-            store
-                .cache_storage_member(shared_cache.storage_id().expect("storage id"), "gc-node",)
-                .await
-                .expect("suspect member")
-                .map(|member| member.verification_state),
-            Some("suspect".to_owned())
-        );
+        wait_for_suspect_member(
+            &store,
+            shared_cache.storage_id().expect("storage id"),
+            "gc-node",
+        )
+        .await;
     }
 
     #[tokio::test]

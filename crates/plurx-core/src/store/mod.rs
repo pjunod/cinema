@@ -1379,13 +1379,14 @@ pub trait SharedCacheStore: Send + Sync + 'static {
 
     /// Retire the exact generation only when the supplied GC lease is still
     /// current and no live typed consumer pin exists. Filesystem deletion may
-    /// happen only after this returns true.
+    /// happen only after this returns a fresh successor lease and the caller
+    /// confirms that successor is still live.
     async fn retire_shared_cache_generation(
         &self,
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<Lease>, StoreError>;
 
     /// Remove an exact GC tombstone only after its deterministic final and
     /// quarantine paths have been removed under the same live GC lease.
@@ -1394,7 +1395,7 @@ pub trait SharedCacheStore: Send + Sync + 'static {
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError>;
+    ) -> Result<Option<Lease>, StoreError>;
 }
 
 /// Durable distributed work for speculative whole-title transcodes.

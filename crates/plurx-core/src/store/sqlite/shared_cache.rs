@@ -5,6 +5,7 @@
 //! generation identities.
 
 use std::path::{Component, Path};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension};
@@ -573,7 +574,7 @@ impl SharedCacheStore for SqliteStore {
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<Lease>, StoreError> {
         validate_generation(
             &generation.recipe_hash,
             &generation.storage_id,
@@ -582,16 +583,22 @@ impl SharedCacheStore for SqliteStore {
         )?;
         let expected_resource = format!("shared-cache-gc:{}", generation.storage_id);
         if lease.resource != expected_resource || lease.expires_at_unix_ms <= now_ms {
-            return Ok(false);
+            return Ok(None);
         }
+        let successor = lease.publication_successor()?;
         let fence = i64::try_from(lease.fence)
             .map_err(|error| StoreError::Task(format!("GC lease fence is invalid: {error}")))?;
         let revision = i64::try_from(lease.revision)
             .map_err(|error| StoreError::Task(format!("GC lease revision is invalid: {error}")))?;
         let generation = generation.clone();
         let lease = lease.clone();
+        let returned_successor = successor.clone();
+        let submitted_at = Instant::now();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let execution_now_ms = now_ms.saturating_add(
+                i64::try_from(submitted_at.elapsed().as_millis()).unwrap_or(i64::MAX),
+            );
             let retired = tx.execute(
                 "UPDATE transcode_cache_locations SET complete = 3
                   WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
@@ -619,11 +626,37 @@ impl SharedCacheStore for SqliteStore {
                     fence,
                     revision,
                     lease.expires_at_unix_ms,
-                    now_ms
+                    execution_now_ms
                 ],
             )?;
+            if retired != 1 {
+                return Ok(None);
+            }
+            let renewed = tx.execute(
+                "UPDATE job_leases
+                    SET revision = ?1, expires_at_ms = ?2, updated_at_ms = ?3
+                  WHERE resource = ?4 AND owner_node_id = ?5 AND fence = ?6
+                    AND revision = ?7 AND expires_at_ms = ?8
+                    AND expires_at_ms > ?9",
+                params![
+                    i64::try_from(successor.revision).map_err(|error| {
+                        StoreError::Task(format!("GC successor revision is invalid: {error}"))
+                    })?,
+                    successor.expires_at_unix_ms,
+                    now_ms,
+                    lease.resource,
+                    lease.owner_node_id,
+                    fence,
+                    revision,
+                    lease.expires_at_unix_ms,
+                    execution_now_ms,
+                ],
+            )?;
+            if renewed != 1 {
+                return Ok(None);
+            }
             tx.commit()?;
-            Ok(retired == 1)
+            Ok(Some(returned_successor))
         })
         .await
     }
@@ -633,7 +666,7 @@ impl SharedCacheStore for SqliteStore {
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<Lease>, StoreError> {
         validate_generation(
             &generation.recipe_hash,
             &generation.storage_id,
@@ -642,16 +675,22 @@ impl SharedCacheStore for SqliteStore {
         )?;
         let expected_resource = format!("shared-cache-gc:{}", generation.storage_id);
         if lease.resource != expected_resource || lease.expires_at_unix_ms <= now_ms {
-            return Ok(false);
+            return Ok(None);
         }
+        let successor = lease.publication_successor()?;
         let fence = i64::try_from(lease.fence)
             .map_err(|error| StoreError::Task(format!("GC lease fence is invalid: {error}")))?;
         let revision = i64::try_from(lease.revision)
             .map_err(|error| StoreError::Task(format!("GC lease revision is invalid: {error}")))?;
         let generation = generation.clone();
         let lease = lease.clone();
+        let returned_successor = successor.clone();
+        let submitted_at = Instant::now();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let execution_now_ms = now_ms.saturating_add(
+                i64::try_from(submitted_at.elapsed().as_millis()).unwrap_or(i64::MAX),
+            );
             let finalized = tx.execute(
                 "DELETE FROM transcode_cache_locations
                   WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
@@ -675,7 +714,7 @@ impl SharedCacheStore for SqliteStore {
                     fence,
                     revision,
                     lease.expires_at_unix_ms,
-                    now_ms
+                    execution_now_ms
                 ],
             )?;
             if finalized == 1 {
@@ -695,9 +734,35 @@ impl SharedCacheStore for SqliteStore {
                             SELECT 1 FROM transcode_cache_locations WHERE recipe_hash = ?1)",
                     params![generation.recipe_hash],
                 )?;
+                let renewed = tx.execute(
+                    "UPDATE job_leases
+                        SET revision = ?1, expires_at_ms = ?2, updated_at_ms = ?3
+                      WHERE resource = ?4 AND owner_node_id = ?5 AND fence = ?6
+                        AND revision = ?7 AND expires_at_ms = ?8
+                        AND expires_at_ms > ?9",
+                    params![
+                        i64::try_from(successor.revision).map_err(|error| {
+                            StoreError::Task(format!("GC successor revision is invalid: {error}"))
+                        })?,
+                        successor.expires_at_unix_ms,
+                        now_ms,
+                        lease.resource,
+                        lease.owner_node_id,
+                        fence,
+                        revision,
+                        lease.expires_at_unix_ms,
+                        execution_now_ms,
+                    ],
+                )?;
+                if renewed != 1 {
+                    return Ok(None);
+                }
+            }
+            if finalized != 1 {
+                return Ok(None);
             }
             tx.commit()?;
-            Ok(finalized == 1)
+            Ok(Some(returned_successor))
         })
         .await
     }

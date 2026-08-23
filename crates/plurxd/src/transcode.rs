@@ -6088,6 +6088,30 @@ impl TranscodeManager {
                         "shared cache generation retired before it could be pinned".to_owned()
                     );
                 }
+                // This random session-id pin is only the lookup-to-activation
+                // bridge. The activated route acquires its durable
+                // incarnation/epoch pin separately. Always retire the bridge
+                // at its hard lifetime even when activation succeeds or its
+                // caller is cancelled; otherwise a permanently hot generation
+                // accumulates one expired durable row per playback forever.
+                let cleanup_store = Arc::clone(&store);
+                let cleanup_pin = pin.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(
+                        u64::try_from(SHARED_LOOKUP_PIN_MS).unwrap_or(u64::MAX),
+                    ))
+                    .await;
+                    let _ = cleanup_store
+                        .release_cache_consumer_pin(
+                            &cleanup_pin.storage_id,
+                            &cleanup_pin.recipe_hash,
+                            &cleanup_pin.generation_id,
+                            cleanup_pin.consumer_kind,
+                            &cleanup_pin.consumer_id,
+                            cleanup_pin.consumer_epoch,
+                        )
+                        .await;
+                });
                 let prepared = async {
                     let dir =
                         crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir)

@@ -1117,10 +1117,11 @@ async fn media_session_contract_runs_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: pin active media session: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&shared_generation, 199, &shared_gc_lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}"))
+            .is_none());
 
         assert_eq!(
             store
@@ -1138,10 +1139,11 @@ async fn media_session_contract_runs_through_dyn_store() {
             vec![incarnation_a2.to_owned()],
             "{backend}"
         );
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}"))
+            .is_none());
         assert!(store
             .renew_media_sessions(
                 "node-a",
@@ -1200,7 +1202,8 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!(
                 "{backend}: retire generation after session end: {error}"
-            )));
+            ))
+            .is_some());
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -7589,7 +7592,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 216, "review the Store method count");
+    assert_eq!(declared.len(), 220, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -10299,7 +10302,7 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             "{backend}: shared cache uses millisecond timestamps"
         );
 
-        let lease = match store
+        let mut lease = match store
             .acquire_lease(
                 &format!("shared-cache-gc:{storage_id}"),
                 "gc-owner",
@@ -10342,10 +10345,11 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: pinned GC candidates: {error}"))
             .is_empty());
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&generation, 200, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}"))
+            .is_none());
         assert_eq!(
             store
                 .renew_cache_consumer_pins(
@@ -10412,7 +10416,8 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: racing retirement: {error}"))
         };
-        let (pin_won, gc_won) = tokio::join!(pin_future, retire_future);
+        let (pin_won, gc_successor) = tokio::join!(pin_future, retire_future);
+        let gc_won = gc_successor.is_some();
         assert_ne!(
             pin_won, gc_won,
             "{backend}: pin acquisition and retirement must choose exactly one winner"
@@ -10429,10 +10434,13 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: release racing pin: {error}")));
-            assert!(store
+            lease = store
                 .retire_shared_cache_generation(&generation, 221, &lease)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}")));
+                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: race survivor was not retired"));
+        } else {
+            lease = gc_successor.expect("GC race winner successor");
         }
         assert!(store
             .shared_cache_hit(&recipe_hash, &storage_id)
@@ -10445,10 +10453,11 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
         assert_eq!(cleanup_candidates.len(), 1, "{backend}");
         assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
-        assert!(store
+        lease = store
             .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retired generation was not finalized"));
         assert!(store
             .shared_cache_gc_candidates(&storage_id, 224, 10)
             .await
@@ -10508,10 +10517,11 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: acquire offline pin: {error}")));
         }
         for pin in &offline_pins {
-            assert!(!store
+            assert!(store
                 .retire_shared_cache_generation(&offline_generation, 251, &lease)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}")));
+                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}"))
+                .is_none());
             assert!(store
                 .release_cache_consumer_pin(
                     &pin.storage_id,
@@ -10524,12 +10534,13 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: release offline pin: {error}")));
         }
-        assert!(store
+        lease = store
             .retire_shared_cache_generation(&offline_generation, 252, &lease)
             .await
-            .unwrap_or_else(|error| panic!(
-                "{backend}: retire unpinned offline generation: {error}"
-            )));
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire unpinned offline generation: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: offline generation was not retired"));
 
         assert!(store
             .mark_cache_storage_suspect(&storage_id, &member.node_id, 300)
@@ -10563,7 +10574,7 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
-        let lease = match store
+        let mut lease = match store
             .acquire_lease(
                 &format!("shared-cache-gc:{storage_id}"),
                 "offline-gc-owner",
@@ -10630,20 +10641,22 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: ready shared package: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&package_generation, 140, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}"))
+            .is_none());
         assert!(store
             .delete_offline_package(&package.id, user_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: delete shared package: {error}")));
-        assert!(store
+        lease = store
             .retire_shared_cache_generation(&package_generation, 150, &lease)
             .await
-            .unwrap_or_else(|error| panic!(
-                "{backend}: retire generation after package deletion: {error}"
-            )));
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire generation after package deletion: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: package generation was not retired"));
 
         let download_recipe = format!("offline-download-pin-{backend}");
         let download_generation_id = "offline-download-generation";
@@ -10717,10 +10730,11 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: isolate download pin: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&download_generation, 190, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}"))
+            .is_none());
         assert!(store
             .delete_offline_package(&download.id, user_id)
             .await
@@ -10730,7 +10744,8 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!(
                 "{backend}: retire generation after download deletion: {error}"
-            )));
+            ))
+            .is_some());
     })
     .await;
 }
