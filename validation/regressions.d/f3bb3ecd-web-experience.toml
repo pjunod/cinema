@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f3bb3ecd"]
+points = ["web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The shipped-source suite fixes Home at three independent requests, generation-fences partial Home, Activity, and Settings commits, retains cached Activity content, limits Settings reads to the active tab, and fences authorization and timer ownership; the browser layout sweep proves the stable regional containers render without console, page, focus-order, request-shape, or structural regressions."

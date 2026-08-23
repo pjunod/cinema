@@ -779,10 +779,9 @@ const STORE_VERDICTS: [&str; 4] = [
 /// Start one voter with `held` already bound by somebody else and return how
 /// its startup failed.
 ///
-/// Expect a hiqlite bind panic on stderr while this runs. That panic is the
-/// defect's mechanism, not a test failure: the voter's listener task is what
-/// dies, and the whole point of the assertion below is that the parent now
-/// hears about it.
+/// Hiqlite must return the occupied-listener error before this voter can
+/// announce readiness. The parent classifies that exact startup result and can
+/// safely allocate a new complete port set.
 async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
     let root = tempfile::tempdir().expect("port collision test root");
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
@@ -836,13 +835,11 @@ enum Occupied {
 /// never as a durable-state fault.
 ///
 /// `free_port` can only observe a port free and then release it, so the voter
-/// binds a port another process may already have claimed. hiqlite serves both
-/// listeners from detached tasks that `.unwrap()` the serve future, so that
-/// bind failure used to panic a background task and nothing else: `start_node`
-/// returned `Ok`, the local-database health probe passed, and the voter
-/// announced `Ready` with a dead listener. The collision then reached the gate
-/// as whatever the crippled voter failed at next — for a raft-port collision,
-/// `no such table: cluster_meta`, which reads as an un-migrated store.
+/// binds a port another process may already have claimed. Hiqlite used to bind
+/// both listeners inside detached tasks, letting `start_node` return `Ok` even
+/// when one bind failed. It now pre-binds both exact sockets synchronously, so
+/// either collision is the voter's startup verdict and no durable-state query
+/// can run through a crippled node.
 ///
 /// Both listeners are asserted because they fail differently: a raft collision
 /// used to bootstrap "successfully" and misreport much later, while an API

@@ -6,8 +6,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use chrono::Utc;
 use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::str::FromStr;
+use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::net::TcpListener;
@@ -83,6 +82,13 @@ where
         (api_addr, addr_raft)
     };
 
+    // Bind both externally advertised sockets before starting either detached
+    // server task. A successful `start_node` must mean this exact process owns
+    // both listeners; otherwise a late bind failure can be hidden in a spawned
+    // task while callers publish the node as ready.
+    let listener_raft = bind_listener(&rpc_addr, "Raft")?;
+    let listener_api = bind_listener(&api_addr, "API")?;
+
     #[cfg(feature = "sqlite")]
     let (tx_client_stream, rx_client_stream) = flume::bounded(1);
 
@@ -145,20 +151,18 @@ where
     let shutdown = shutdown_signal(rx_shutdown.clone());
     if let Some(config) = &node_config.tls_raft {
         let config = config.server_config(&node_config.listen_addr_raft).await;
+        let server = axum_server::from_tcp_rustls(listener_raft, config)?;
         task::spawn(Box::pin(async move {
-            let addr = SocketAddr::from_str(&rpc_addr).expect("valid RPC socket address");
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
-            axum_server::bind_rustls(addr, config)
+            server
                 .serve(router_internal.into_make_service())
                 .await
                 .unwrap();
         }));
     } else {
+        let listener = TcpListener::from_std(listener_raft)?;
         task::spawn(Box::pin(async move {
-            let listener = TcpListener::bind(rpc_addr)
-                .await
-                .expect("valid RPC socket address");
             axum::serve(listener, router_internal.into_make_service())
                 .with_graceful_shutdown(shutdown)
                 .await
@@ -229,20 +233,18 @@ where
     info!("api external listening on {api_addr}");
     if let Some(config) = &node_config.tls_api {
         let config = config.server_config(&node_config.listen_addr_api).await;
+        let server = axum_server::from_tcp_rustls(listener_api, config)?;
         task::spawn(Box::pin(async move {
-            let addr = SocketAddr::from_str(&api_addr).expect("valid RPC socket address");
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
-            axum_server::bind_rustls(addr, config)
+            server
                 .serve(router_api.into_make_service())
                 .await
                 .unwrap();
         }));
     } else {
+        let listener = TcpListener::from_std(listener_api)?;
         task::spawn(Box::pin(async move {
-            let listener = TcpListener::bind(api_addr)
-                .await
-                .expect("valid RPC socket address");
             axum::serve(listener, router_api.into_make_service())
                 .with_graceful_shutdown(shutdown_signal(rx_shutdown))
                 .await
@@ -320,6 +322,15 @@ where
     );
 
     Ok(client)
+}
+
+fn bind_listener(addr: &str, role: &str) -> Result<StdTcpListener, Error> {
+    let listener = StdTcpListener::bind(addr)
+        .map_err(|error| Error::Connect(format!("bind {role} listener {addr}: {error}")))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| Error::Connect(format!("configure {role} listener {addr}: {error}")))?;
+    Ok(listener)
 }
 
 /// The port will be split off from the `node_addr`
