@@ -8,6 +8,30 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **Playback info is a top-right ledger on every client.** The panel anchored
+  to a different place in each mode and laid its sections out by measured
+  height, so the reading order was a side effect of how long the values
+  happened to be and shifted while it was open; sentence-shaped values such as
+  the transcode reason sat in the grid and stretched their column, which is
+  what left the ragged gaps between sections. Mini, Standard and Debug now all
+  anchor to the top-right corner — the only corner clear of the transport bar
+  and the subtitle band on every surface — so changing mode grows the block
+  downward from a fixed point instead of moving it. Standard and Debug lay out
+  two fixed columns, the media chain on the left and the delivery chain on the
+  right; a row's column is a property of the row and never of its value, so
+  nothing migrates under the reader's eye on the refresh tick. Sentences move
+  to a notes strip grouped by the section they came from, sections align as a
+  unit with tabular figures where the values are quantities, and Mini collapses
+  to a single line. On Apple TV the full Debug set now fits without scrolling,
+  and every section and the notes strip are focusable so the fallback is
+  reachable by remote — Debug also takes initial focus on Done, which it never
+  did before. On Android the panel sits inside the safe drawing area, so a
+  display cutout in landscape can no longer clip it, and a section renders only
+  when it has a row, which retires the empty SOURCE and NETWORK headings that
+  appeared on direct play.
+
 ### Added
 
 - **Cluster topology guidance and comparable three-versus-four-voter evidence
@@ -103,10 +127,9 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - **Apple TV playback diagnostics are readable from the couch.** Playback info
-  now opens as a large three-column Source, Playing, and Server dashboard with
-  the playback method, position, and stall health visible at a glance. A
-  focused Done action keeps the Siri Remote inside the modal until dismissal;
-  iPhone and iPad retain their compact inspector.
+  carries the playback method, position, and stall health at a glance, and a
+  focused Done action keeps the Siri Remote inside the modal until dismissal.
+  Its layout is superseded by the top-right ledger described under Changed.
 
 - **Audiobook artwork refresh now uses the cover already embedded in the
   audio file.** Plurx's Books enricher inspected EPUBs only, so refreshing an
