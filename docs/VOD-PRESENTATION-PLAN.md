@@ -1,12 +1,14 @@
 # VOD presentation — every title is a film, not a broadcast
 
-**Status:** PROPOSED, under review — nothing here is built · **Supersedes:**
-the live-HLS presentation contract in [PLAYBACK.md](PLAYBACK.md) once
-executed · **Companions:** [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) (rung
-policy, unchanged by this plan) and [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md)
-(the copy segmenter this plan reuses) · **Written:** 2026-08-23 against
-`origin/main` @ `9cace96e` — **re-verify every cited line at build time; the
-file is the truth, this doc is the map**
+**Status:** PROPOSED, review requests changes — nothing here is built ·
+**Review:** [VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)
+· **Supersedes:** the live-HLS presentation contract in
+[PLAYBACK.md](PLAYBACK.md) once executed · **Companions:**
+[ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) (rung policy, unchanged by this
+plan) and [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md) (the copy segmenter this plan
+reuses) · **Written:** 2026-08-23 against `origin/main` @ `9cace96e` —
+**re-verify every cited line at build time; the file is the truth, this doc is
+the map**
 
 How to work this plan: read §0–§2 before anything else — §2 is the contract
 and everything after it is consequences. Milestones (§8) go in order; each
