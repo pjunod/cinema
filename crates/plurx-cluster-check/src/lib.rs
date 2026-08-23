@@ -2531,7 +2531,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let mut new_fence = None;
     for node_id in 1..=3 {
         if node_id == handoff {
-            match claim_artwork_repair_fence_once(
+            if let Some(fence) = claim_artwork_repair_fence_once(
                 &mut cluster,
                 node_id,
                 repair_item,
@@ -2540,11 +2540,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             )
             .await?
             {
-                Some(fence) => {
-                    handoff_winners.push(node_id);
-                    new_fence = Some(fence);
-                }
-                None => {}
+                handoff_winners.push(node_id);
+                new_fence = Some(fence);
             }
         } else {
             match cluster
