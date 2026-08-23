@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e4f65633"]
+points = ["cluster.media-observation", "cluster.membership", "server.api", "playback.pipeline"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "Exact-auth fixtures mutate the method, normalized path, raw body, sender, target, timestamp, and signature, while the internal handlers reject household bearers. The shared transport refuses redirects, content-length and chunked bodies above its exact budget, and a response body stalled past the caller's common deadline. Snapshot contracts pin private/no-store delivery, protocol and identity bounds, reachable-peer filtering, a fifteen-second signed lifetime that receipt cannot restart, and one-node operation with no peer HTTP. Root readability fixtures require the most-specific configured root and expiry of old probes; offer fixtures prove the common 200 ms deadline, heterogeneous capability filtering, hard source/scratch/egress refusals, deterministic lexicographic ranking, and a cache advantage only for a fenced byte-verified complete generation. A Dolby Vision source without an existing proof stays unopened during offer fan-out. Restoring loose bearer authentication, per-peer deadlines, replay-extended snapshots, offer-time source I/O, stale boot readability, or row-only cache claims makes these retained checks fail."
