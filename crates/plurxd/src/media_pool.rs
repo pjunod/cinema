@@ -362,7 +362,7 @@ impl MediaPool {
                 self.signal_timed_out_root_probes(&roots);
                 break;
             }
-            outcomes.extend(self.reap_root_probes());
+            outcomes.extend(self.reap_root_probes_until(&roots, deadline));
             if !self.has_running_root_probe(&roots) {
                 break;
             }
@@ -419,6 +419,21 @@ impl MediaPool {
     }
 
     fn reap_root_probes(&self) -> Vec<(PathBuf, RootReadability)> {
+        self.reap_root_probes_with_deadline(None)
+    }
+
+    fn reap_root_probes_until(
+        &self,
+        roots: &BTreeSet<PathBuf>,
+        deadline: tokio::time::Instant,
+    ) -> Vec<(PathBuf, RootReadability)> {
+        self.reap_root_probes_with_deadline(Some((roots, deadline)))
+    }
+
+    fn reap_root_probes_with_deadline(
+        &self,
+        deadline: Option<(&BTreeSet<PathBuf>, tokio::time::Instant)>,
+    ) -> Vec<(PathBuf, RootReadability)> {
         let mut registry = self
             .root_probes
             .lock()
@@ -426,22 +441,40 @@ impl MediaPool {
         let completed = registry
             .running
             .iter_mut()
-            .filter_map(|(root, probe)| match probe.child.try_wait() {
-                Ok(Some(status)) => {
-                    // Once the common deadline fired this observation is
-                    // permanently failed, even if the process happened to
-                    // finish successfully before the later reap. A delayed
-                    // success must never acquire a fresh TTL.
-                    Some((root.clone(), status.success() && !probe.kill_sent))
+            .filter_map(|(root, probe)| {
+                if deadline.is_some_and(|(roots, deadline)| {
+                    roots.contains(root) && tokio::time::Instant::now() >= deadline
+                }) && !probe.kill_sent
+                {
+                    let _ = probe.child.start_kill();
+                    probe.kill_sent = true;
                 }
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::debug!(%error, path = %root.display(), "could not reap media root probe");
-                    if !probe.kill_sent {
-                        let _ = probe.child.start_kill();
-                        probe.kill_sent = true;
+                match probe.child.try_wait() {
+                    Ok(Some(status)) => {
+                        // The status read itself can cross the deadline or be
+                        // preempted. Inspect the clock again before permitting
+                        // a positive fact, rather than trusting the time at the
+                        // beginning of a potentially 128-child sweep.
+                        if deadline.is_some_and(|(roots, deadline)| {
+                            roots.contains(root) && tokio::time::Instant::now() >= deadline
+                        }) {
+                            probe.kill_sent = true;
+                        }
+                        // Once the common deadline fired this observation is
+                        // permanently failed, even if the process happened to
+                        // finish successfully before the later reap. A delayed
+                        // success must never acquire a fresh TTL.
+                        Some((root.clone(), status.success() && !probe.kill_sent))
                     }
-                    None
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::debug!(%error, path = %root.display(), "could not reap media root probe");
+                        if !probe.kill_sent {
+                            let _ = probe.child.start_kill();
+                            probe.kill_sent = true;
+                        }
+                        None
+                    }
                 }
             })
             .collect::<Vec<_>>();
@@ -1491,8 +1524,10 @@ mod tests {
                     kill_sent: false,
                 },
             );
-        pool.signal_timed_out_root_probes(&BTreeSet::from([completed_root.clone()]));
-        let outcomes = pool.reap_root_probes();
+        let outcomes = pool.reap_root_probes_until(
+            &BTreeSet::from([completed_root.clone()]),
+            tokio::time::Instant::now(),
+        );
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].0, completed_root);
         assert!(!outcomes[0].1.readable);
