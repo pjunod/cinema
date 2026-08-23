@@ -83,7 +83,12 @@ use production_job_lease::ActiveJobLease;
 mod production_serving_fence;
 use production_serving_fence::ServingFence;
 
+mod named_runner;
 mod topology;
+pub use named_runner::{
+    claim_named_output, validate_named_campaign, NamedRunnerConfig, NamedTopologyCampaign,
+    NamedVoter, NAMED_CAMPAIGN_SCHEMA_VERSION,
+};
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
     NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
@@ -238,9 +243,82 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             let order = topology::parse_topology_order(args.get(3).map(String::as_str))?;
             run_topology_comparison(&output, order).await
         }
+        Some("build-identity") => {
+            if args.get(2).is_some() {
+                bail!("build-identity accepts no arguments");
+            }
+            named_runner::print_embedded_build_identity()
+        }
+        Some("topology-named") => {
+            let config = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-named requires a runner config JSON")?;
+            let output = args
+                .get(3)
+                .map(PathBuf::from)
+                .context("topology-named requires an output directory")?;
+            let source_root = args
+                .get(4)
+                .map(PathBuf::from)
+                .context("topology-named requires the controller source root")?;
+            let owner_nonce = args
+                .get(5)
+                .context("topology-named requires the output owner nonce")?;
+            if args.get(6).is_some() {
+                bail!(
+                    "topology-named accepts exactly config, output, source-root, and owner arguments"
+                );
+            }
+            named_runner::run_named_campaign(&config, &output, &source_root, owner_nonce).await
+        }
+        Some("topology-claim") => {
+            let output = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-claim requires an absent output directory")?;
+            let owner_nonce = args
+                .get(3)
+                .context("topology-claim requires an owner nonce")?;
+            if args.get(4).is_some() {
+                bail!("topology-claim accepts exactly output and owner arguments");
+            }
+            claim_named_output(&output, owner_nonce)
+        }
+        Some("topology-campaign-validate") => {
+            let path = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-campaign-validate requires campaign.json")?;
+            let campaign: NamedTopologyCampaign = serde_json::from_slice(
+                &std::fs::read(&path)
+                    .with_context(|| format!("read named campaign {}", path.display()))?,
+            )?;
+            let root = path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            validate_named_campaign(&campaign, Some(root))
+        }
+        Some("topology-cleanup") => {
+            let path = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-cleanup requires an active cleanup manifest")?;
+            named_runner::cleanup_named_manifest(&path).await
+        }
         Some("node") => {
             let launch: NodeLaunch =
                 serde_json::from_str(args.get(2).context("node mode requires its launch JSON")?)?;
+            node(launch).await
+        }
+        Some("node-hex") => {
+            let encoded = args
+                .get(2)
+                .context("node-hex mode requires hex-encoded launch JSON")?;
+            let bytes = hex::decode(encoded).context("decode node-hex launch JSON")?;
+            let launch: NodeLaunch =
+                serde_json::from_slice(&bytes).context("parse node-hex launch JSON")?;
             node(launch).await
         }
         Some("preflight") => {
@@ -2213,6 +2291,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     node_id,
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
+                    listen_addr: default_listen_addr(),
                     emulate_old_watermark_handler: false,
                 },
             )
@@ -3982,6 +4061,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         node_id: 1,
         root,
         nodes: specs,
+        listen_addr: default_listen_addr(),
         emulate_old_watermark_handler: false,
     };
     // The reservation is dropped here: hiqlite binds its own sockets from the
@@ -4772,8 +4852,14 @@ pub struct NodeLaunch {
     pub node_id: u64,
     pub root: PathBuf,
     pub nodes: Vec<NodeSpec>,
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
+}
+
+fn default_listen_addr() -> String {
+    LISTEN_ADDR.to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4986,6 +5072,12 @@ pub enum Request {
         ordinal: u64,
         value: String,
     },
+    TopologyResources {
+        hardware: String,
+        storage_device: String,
+        network_path: String,
+        reset_max_rss: bool,
+    },
     PostLossWrite {
         target: String,
         position_ms: i64,
@@ -5040,6 +5132,9 @@ pub enum Response {
     },
     TelemetryCount {
         count: usize,
+    },
+    TopologyResources {
+        sample: ResourceSample,
     },
     Dump {
         digest: String,
@@ -5732,6 +5827,7 @@ impl ClusterProcesses {
                 node_id,
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
+                listen_addr: default_listen_addr(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
@@ -5778,6 +5874,24 @@ impl ClusterProcesses {
 
     pub async fn request(&mut self, node_id: u64, request: Request) -> Result<Response> {
         self.node_mut(node_id)?.request(&request).await
+    }
+
+    async fn request_all_concurrently(
+        &mut self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<(u64, Response)>> {
+        if requests.len() != self.nodes.len() || self.nodes.iter().any(Option::is_none) {
+            bail!("concurrent all-voter request requires every configured voter");
+        }
+        let mut calls = Vec::with_capacity(requests.len());
+        for (index, (slot, request)) in self.nodes.iter_mut().zip(requests).enumerate() {
+            let node_id = u64::try_from(index)? + 1;
+            let node = slot
+                .as_mut()
+                .with_context(|| format!("voter {node_id} is not running"))?;
+            calls.push(async move { Ok((node_id, node.request(&request).await?)) });
+        }
+        futures_util::future::try_join_all(calls).await
     }
 
     async fn request_pair_concurrently(
@@ -6347,8 +6461,9 @@ struct NodeMutableState {
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
+    let node_started = Instant::now();
     let listeners = voter_listen_addrs(&launch)?;
-    let _ = ServerTlsConfig::server_config_self_signed(LISTEN_ADDR).await;
+    let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
     let client = match hiqlite::start_node(node_config(&launch)?).await {
         Ok(client) => client,
         Err(error) => {
@@ -6396,6 +6511,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
                     &replication,
                     &launch,
                     &telemetry_path,
+                    node_started,
                     &mut state,
                 )
                 .await
@@ -6422,6 +6538,7 @@ async fn handle_request(
     replication: &ReplicationMonitor,
     launch: &NodeLaunch,
     telemetry_path: &Path,
+    node_started: Instant,
     state: &mut NodeMutableState,
 ) -> Result<Response> {
     let NodeMutableState {
@@ -7345,6 +7462,21 @@ async fn handle_request(
                 .await?;
             Ok(Response::Ok)
         }
+        Request::TopologyResources {
+            hardware,
+            storage_device,
+            network_path,
+            reset_max_rss,
+        } => Ok(Response::TopologyResources {
+            sample: capture_topology_resources(
+                launch.node_id,
+                node_started.elapsed(),
+                hardware,
+                storage_device,
+                network_path,
+                reset_max_rss,
+            )?,
+        }),
         Request::PostLossWrite {
             target,
             position_ms,
@@ -7478,6 +7610,120 @@ async fn handle_request(
             Ok(Response::Ok)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_topology_resources(
+    node_id: u64,
+    wall: Duration,
+    hardware: String,
+    storage_device: String,
+    network_path: String,
+    reset_max_rss: bool,
+) -> Result<ResourceSample> {
+    let stat = std::fs::read_to_string("/proc/self/stat").context("read process CPU counters")?;
+    let after_name = stat
+        .rsplit_once(')')
+        .map(|(_, fields)| fields)
+        .context("parse process stat command name")?;
+    // Fields after the command name begin at proc(5) field 3. utime/stime are
+    // fields 14/15, hence offsets 11/12 in this suffix.
+    let fields = after_name.split_whitespace().collect::<Vec<_>>();
+    let user_ticks = fields
+        .get(11)
+        .context("process stat omitted user ticks")?
+        .parse::<u64>()?;
+    let system_ticks = fields
+        .get(12)
+        .context("process stat omitted system ticks")?
+        .parse::<u64>()?;
+    // SAFETY: sysconf is a read-only libc query with a fixed selector.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        bail!("Linux reported an invalid process clock tick rate");
+    }
+
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("read process resident-memory counters")?;
+    let max_rss_kib = proc_key_u64(&status, "VmHWM:")
+        .or_else(|| proc_key_u64(&status, "VmRSS:"))
+        .context("process status omitted VmHWM and VmRSS")?;
+    let io = std::fs::read_to_string("/proc/self/io").context("read process I/O counters")?;
+    let storage_read_bytes =
+        proc_key_u64(&io, "read_bytes:").context("process I/O omitted read_bytes")?;
+    let storage_write_bytes =
+        proc_key_u64(&io, "write_bytes:").context("process I/O omitted write_bytes")?;
+    let network =
+        std::fs::read_to_string("/proc/net/dev").context("read container network counters")?;
+    let (network_receive_bytes, network_transmit_bytes) = parse_network_bytes(&network)?;
+
+    if reset_max_rss {
+        // Linux supports clear_refs=5 as a process-local high-water reset. The
+        // post-workload VmHWM therefore belongs to the measured interval, not
+        // bootstrap, schema migration, or leader election.
+        std::fs::write("/proc/self/clear_refs", b"5\n")
+            .context("reset process peak resident memory for topology window")?;
+    }
+
+    Ok(ResourceSample {
+        node_id,
+        hardware,
+        storage_device,
+        network_path,
+        cpu_seconds: Some((user_ticks + system_ticks) as f64 / ticks_per_second as f64),
+        wall_seconds: Some(wall.as_secs_f64()),
+        max_rss_bytes: Some(max_rss_kib.saturating_mul(1024)),
+        storage_read_bytes: Some(storage_read_bytes),
+        storage_write_bytes: Some(storage_write_bytes),
+        network_receive_bytes: Some(network_receive_bytes),
+        network_transmit_bytes: Some(network_transmit_bytes),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn capture_topology_resources(
+    _node_id: u64,
+    _wall: Duration,
+    _hardware: String,
+    _storage_device: String,
+    _network_path: String,
+    _reset_max_rss: bool,
+) -> Result<ResourceSample> {
+    bail!("named topology resource capture requires Linux voters")
+}
+
+#[cfg(target_os = "linux")]
+fn proc_key_u64(contents: &str, key: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?.trim();
+        value.split_whitespace().next()?.parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_network_bytes(contents: &str) -> Result<(u64, u64)> {
+    let mut receive = 0_u64;
+    let mut transmit = 0_u64;
+    let mut interfaces = 0_u64;
+    for line in contents.lines().skip(2) {
+        let Some((name, counters)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == "lo" {
+            continue;
+        }
+        let counters = counters.split_whitespace().collect::<Vec<_>>();
+        if counters.len() < 16 {
+            bail!("network interface counters were truncated");
+        }
+        receive = receive.saturating_add(counters[0].parse::<u64>()?);
+        transmit = transmit.saturating_add(counters[8].parse::<u64>()?);
+        interfaces += 1;
+    }
+    if interfaces == 0 {
+        bail!("container has no non-loopback network interface");
+    }
+    Ok((receive, transmit))
 }
 
 #[derive(Debug)]
@@ -8959,8 +9205,8 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
                 addr_api: node.api.clone(),
             })
             .collect(),
-        listen_addr_api: Cow::Borrowed(LISTEN_ADDR),
-        listen_addr_raft: Cow::Borrowed(LISTEN_ADDR),
+        listen_addr_api: Cow::Owned(launch.listen_addr.clone()),
+        listen_addr_raft: Cow::Owned(launch.listen_addr.clone()),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("auth.db"),
         secret_raft: RAFT_SECRET.to_owned(),
@@ -9105,7 +9351,7 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
             let (_, port) = address
                 .rsplit_once(':')
                 .with_context(|| format!("voter address {address} has no port"))?;
-            Ok(format!("{LISTEN_ADDR}:{port}"))
+            Ok(format!("{}:{port}", launch.listen_addr))
         })
         .collect()
 }
@@ -9119,9 +9365,13 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
 /// itself to the controller.
 async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
     for address in addresses {
+        let connection_address = address
+            .strip_prefix("0.0.0.0:")
+            .map(|port| format!("127.0.0.1:{port}"));
+        let connection_address = connection_address.as_deref().unwrap_or(address);
         let deadline = TokioInstant::now() + LISTENER_PROOF_TIMEOUT;
         loop {
-            match tokio::net::TcpStream::connect(address).await {
+            match tokio::net::TcpStream::connect(connection_address).await {
                 Ok(_) => break,
                 Err(error) if TokioInstant::now() >= deadline => {
                     return Err(anyhow!(error)).with_context(|| {
@@ -9272,6 +9522,7 @@ mod tests {
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
+            listen_addr: default_listen_addr(),
             emulate_old_watermark_handler: false,
         };
 

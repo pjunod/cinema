@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "runner_id": "private-lan-four-machine-v1",
+  "image": "plurx-cluster-check:REPLACE_WITH_40_CHAR_SHA",
+  "controller_host": "external-controller-1",
+  "load_generator_host": "external-controller-1",
+  "load_generator_isolation": "external non-voter controller; sequential concurrency=1; foreground campaign only; no concurrent benchmark or build workload",
+  "raft_port": 54201,
+  "api_port": 54202,
+  "min_pairs": 3,
+  "max_pairs": 7,
+  "confidence_half_width_percent": 5.0,
+  "voters": [
+    {
+      "node_id": 1,
+      "label": "runner-node-1",
+      "ssh_host": "REPLACE_NODE_1_SSH_HOST",
+      "advertised_host": "REPLACE_NODE_1_PRIVATE_ADDRESS",
+      "hardware": "REPLACE_WITH_STABLE_NON_SENSITIVE_HARDWARE_CLASS",
+      "storage_device": "REPLACE_WITH_STABLE_NON_SENSITIVE_STORAGE_CLASS",
+      "network_path": "private LAN; isolated Docker bridge"
+    },
+    {
+      "node_id": 2,
+      "label": "runner-node-2",
+      "ssh_host": "REPLACE_NODE_2_SSH_HOST",
+      "advertised_host": "REPLACE_NODE_2_PRIVATE_ADDRESS",
+      "hardware": "REPLACE_WITH_STABLE_NON_SENSITIVE_HARDWARE_CLASS",
+      "storage_device": "REPLACE_WITH_STABLE_NON_SENSITIVE_STORAGE_CLASS",
+      "network_path": "private LAN; isolated Docker bridge"
+    },
+    {
+      "node_id": 3,
+      "label": "runner-node-3",
+      "ssh_host": "REPLACE_NODE_3_SSH_HOST",
+      "advertised_host": "REPLACE_NODE_3_PRIVATE_ADDRESS",
+      "hardware": "REPLACE_WITH_STABLE_NON_SENSITIVE_HARDWARE_CLASS",
+      "storage_device": "REPLACE_WITH_STABLE_NON_SENSITIVE_STORAGE_CLASS",
+      "network_path": "private LAN; isolated Docker bridge"
+    },
+    {
+      "node_id": 4,
+      "label": "runner-node-4",
+      "ssh_host": "REPLACE_NODE_4_SSH_HOST",
+      "advertised_host": "REPLACE_NODE_4_PRIVATE_ADDRESS",
+      "hardware": "REPLACE_WITH_STABLE_NON_SENSITIVE_HARDWARE_CLASS",
+      "storage_device": "REPLACE_WITH_STABLE_NON_SENSITIVE_STORAGE_CLASS",
+      "network_path": "private LAN; isolated Docker bridge"
+    }
+  ]
+}

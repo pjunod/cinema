@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9320f213"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained named-runner regressions require nonce- and capability-bound cleanup targets, fd-relative exact-mode local authority, raw OCI and container-label inspection, commit-safe public labels, per-run load-generator and machine-placement evidence, and backward-compatible semantic-v1 schema handling. Reverting the correction restores cross-campaign cleanup, provenance, privacy, or schema failures that the named campaign validator and focused tests reject."
