@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["916d9c33"]
+points = ["cluster.auth", "playback.pipeline"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained singleton takeover proof requires the production lease lifecycle to finish an exact-token release despite bounded transient no-leader routing, while the remux activity regression requires body drop to deregister synchronously and the serving-loss owner regression independently reaps an unpolled child. The retirement-first fallback regression pins the monotonic producer generation, so a retired session cannot begin or publish a successor even after its predecessor has already been reaped."
