@@ -610,14 +610,17 @@ tell plurx that a file has landed, instead of plurx finding out on its next
 sweep. Nothing here is required: plurx with no integration configured behaves
 exactly as it did before, on scheduled and manual scans alone.
 
-- **Scoped API keys** (Settings → an admin creates one). A key is what another
+- **Scoped API keys** (Settings → Integrations, admin only). A key is what another
   application holds *instead of* a login token, and the distinction is the
   point: a token IS a user, so an admin token handed to a neighbouring app
   also hands over every secret in `GET /api/v1/settings`. A key carries a
   scope list — `scan:trigger`, `status:read` — and cannot widen itself. Stored
   as a SHA-256 hash; the secret (`plx_…`) is shown **once**, at creation, and
   is unrecoverable afterwards. Revoking one is a single delete and takes
-  effect on the next request.
+  effect on the next request. The settings card shows each key's
+  `last_used_at`, which is the cheapest proof that the other application is
+  really holding the key you think it is: never-used, beside an application
+  reporting success, means it is holding a different one.
 - **`POST /api/v1/scan`** — "index exactly this path", scope `scan:trigger`.
   The caller sends an absolute path (a file or a folder) and plurx works out
   which library owns it, so the caller never has to know plurx's library ids;

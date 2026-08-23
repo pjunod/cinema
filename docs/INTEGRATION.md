@@ -244,7 +244,20 @@ scan this key asked for). Creating a key with an unknown scope is rejected
 rather than stored, because a typo'd scope produces a key that looks correct
 in a list and authorizes nothing.
 
-**Where you mint one.** There is **no UI for keys yet** — it is a curl.
+**Where you mint one.** **Settings → Integrations**, as an admin. The card
+lists every key with its scopes and its `last_used_at`, mints new ones from a
+name and a scope checkbox, and revokes with one button. The secret appears
+exactly once, on that screen, with a copy button; leaving the tab drops it,
+because it is bearer material and the operator who navigated away is done with
+it whether or not they said so.
+
+The same screen carries the monarr pairing — monarr's own key, which plurxd
+uses to read monarr's calendar. The two live together deliberately: they are
+opposite directions of one seam, and on separate screens an operator pastes one
+into the other's box with nothing in a position to notice.
+
+The curl below is still the path for a headless setup or a script, and is what
+the UI calls:
 
 ```bash
 # Log in for an admin token — there is no cookie to copy out of a browser.

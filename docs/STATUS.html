@@ -171,7 +171,7 @@
   <!-- ══════════ Integrations ══════════ -->
   <section>
     <h2>Integrations — plurx's side of the monarr pipeline <span class="chip done">✓ complete</span> <span class="ev">INTEGRATION-PLAN.md · FEATURES.md §11</span></h2>
-    <div class="meter"><div class="track"><div class="fill full" style="width:100%"></div></div><div class="n">6 / 6 items</div></div>
+    <div class="meter"><div class="track"><div class="fill full" style="width:100%"></div></div><div class="n">7 / 7 items</div></div>
     <p class="blurb">Exit proven: monarr finishes an import and the file is in the library seconds later, carrying the ids monarr already knew, one <code>correlation_id</code> traceable across both apps.</p>
     <details><summary>Items</summary>
       <ul class="items">
@@ -180,6 +180,7 @@
         <li class="done-item"><span class="m done">✓ done</span><span class="t"><code>POST /api/v1/scan</code>: longest-root resolution, 200 + placed items, 202 + <code>request_id</code> when busy (queued, not dropped), pollable</span></li>
         <li class="done-item"><span class="m done">✓ done</span><span class="t">Scheduled reconcile scans — the slow sweep under the fast path, catching what nobody announced</span></li>
         <li class="done-item"><span class="m done">✓ done</span><span class="t">Migration v9 — enrich by id: a supplied id skips the title search (the step that can be wrong); <code>metadata_at</code> replaces "has an id" as the marker</span></li>
+        <li class="done-item"><span class="m done">✓ done</span><span class="t">Settings → Integrations: both directions of the monarr seam on one admin screen — list/mint/revoke scoped keys with <code>last_used_at</code>, show-once secret dropped on tab exit, beside the monarr pairing that plurxd calls out with. The keys API had shipped since migration v8 with no way to reach it from a browser</span></li>
         <li class="done-item"><span class="m done">✓ done</span><span class="t">Coming-soon rail: <code>GET /api/v1/coming-soon</code> proxies monarr's calendar server-side (the key never reaches a browser), 15-min cache, home rail — unaffected by monarr's v0.20.0 calendar rebuild, which was additive</span></li>
       </ul>
     </details>

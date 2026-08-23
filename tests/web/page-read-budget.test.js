@@ -563,6 +563,7 @@ test("Settings loads only the active tab manifest", () => {
     metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
     playback: { required: ["settings"], secondary: [] },
     users: { required: ["users"], secondary: [] },
+    integrations: { required: ["settings", "keys"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: [] },
   });
@@ -596,6 +597,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
     users:{required:["/users"],secondary:[]},
+    integrations:{required:["/settings","/keys"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
   };

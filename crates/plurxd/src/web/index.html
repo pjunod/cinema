@@ -9200,12 +9200,20 @@ const SETTINGS_ENDPOINTS={
     if(error&&error.status===401) throw error;
     return {unavailable:true,code:error.code,message:error.message};
   }),
+  // Same shape as the roster read: resolve a refusal into a value rather than
+  // rejecting, so a key list this server cannot produce leaves the rest of the
+  // tab — the monarr pairing below it — on screen and usable.
+  keys:()=>api("/keys").catch(error=>{
+    if(error&&error.status===401) throw error;
+    return {unavailable:true,code:error.code,message:error.message};
+  }),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
   metadata:{required:["settings","trakt"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
   users:{required:["users"],secondary:[]},
+  integrations:{required:["settings","keys"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:[]},
 };
@@ -9306,7 +9314,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(reset){
     SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
     SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
-    CLUSTER_LOADED=false; forgetJoinToken();
+    CLUSTER_LOADED=false; forgetJoinToken(); forgetMintedKey();
   }
   const tab=settingsTab();
   layoutChrome("settings",settingsShell(tab));
@@ -9315,13 +9323,14 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
-const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["system","System"],["cluster","Cluster"]];
+const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["integrations","Integrations"],["system","System"],["cluster","Cluster"]];
 function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
-// Leaving the tab drops any minted join token: it is bearer material, and the
-// operator who switched away is done with it whether or not they said so.
+// Leaving the tab drops any minted secret — a join token or an API key. Both
+// are bearer material, and the operator who switched away is done with them
+// whether or not they said so.
 function setSettingsTab(t){
   if(t===settingsTab()) return;
-  forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){}
+  forgetJoinToken(); forgetMintedKey(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){}
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   viewSettings(++PAGE_RENDER_GENERATION,false);
 }
@@ -9347,6 +9356,7 @@ function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
   if(tab==="playback") return playbackPanel(d.settings);
   if(tab==="users")    return usersPanel(d.users);
+  if(tab==="integrations") return integrationsPanel(d);
   if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")  return clusterPanel(d);
   return librariesPanel(d.libs,d.status,d.settings);
@@ -9572,8 +9582,7 @@ function metadataPanel(settings,trakt){
       <input id="ok" placeholder="OMDb API key" type="password" autocomplete="off" value="${esc(settings.omdb_api_key||'')}" onfocus="this.type='text'" onblur="this.type='password'">
       <div class="err" id="oerr"></div>
       <button class="sm" style="margin-top:10px" onclick="saveOmdb()">Save OMDb key</button></div>
-    ${traktCardHtml(trakt)}
-    ${monarrCardHtml()}`;
+    ${traktCardHtml(trakt)}`;
 }
 // Options for a preset dropdown, plus the stored value when it isn't one of
 // the presets. Without that last part a select silently displays some *other*
@@ -10307,6 +10316,178 @@ async function savePlayback(){
       hls_typeless_sliding:document.getElementById("phs").checked}}));
     toast("Playback defaults saved");
   }catch(e){ err.textContent=e.message; }
+}
+// ---- Integrations: the seams with other applications ---------------------
+// Two directions meet on this tab and they are easy to confuse, which is
+// exactly why they share a screen. The API keys card below is what *another*
+// application holds to call plurx. The monarr card under it holds the reverse
+// — monarr's own key, which plurxd uses to read monarr's calendar. Split
+// across two tabs, an operator pastes one into the other's box and neither
+// screen is in a position to notice.
+//
+// Scopes mirror `plurx_core::domain::scopes::ALL`. The server rejects a scope
+// it does not recognise rather than storing it, so drift here surfaces as a
+// refusal at creation time instead of as a key that looks correct in this
+// list and authorises nothing.
+const KEY_SCOPES=[
+  ["scan:trigger","Ask plurx to index a path. This is the one the monarr integration needs."],
+  ["status:read","Read the progress and result of a scan this key asked for."],
+];
+// The secret exists exactly once: the server returns it and keeps only its
+// hash. It lives in a module variable — never localStorage — and is dropped
+// the moment the operator leaves the tab, the same rule as a join token.
+let MINTED_KEY=null;
+function forgetMintedKey(){ MINTED_KEY=null; }
+function integrationsPanel(d){
+  // Belt and braces: viewSettings already turns a non-admin away at the door,
+  // and both endpoints behind this are admin-only on their own account.
+  if(!ME||!ME.is_admin) return "";
+  return `${apiKeysCardHtml(d.keys)}${monarrCardHtml()}`;
+}
+function apiKeysCardHtml(keys){
+  const failed=!!(keys&&keys.unavailable);
+  const list=Array.isArray(keys)?keys:[];
+  const body=failed
+    ? `<div class="empty">${esc(keys.message||"The key list is unavailable.")}
+        <div style="margin-top:12px"><button class="ghost sm" onclick="retryKeys()">Retry</button></div></div>`
+    : list.length
+      ? `<table><thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+         <tbody>${list.map(apiKeyRow).join("")}</tbody></table>`
+      : `<div class="empty">No keys yet. monarr needs one with <code>scan:trigger</code>.</div>`;
+  return `<div class="card" id="keyscard"><h2 class="section" style="margin-top:0">API keys</h2>
+    <p class="muted" style="margin-top:0">A key is what another application holds <b>instead of</b> a login
+      token. The difference is not cosmetic: a token <i>is</i> a user, so an admin token handed to a
+      neighbouring app also hands over every secret on this page. A key carries a scope list and cannot
+      widen itself.</p>
+    ${body}
+    ${failed?"":mintKeyPanel()}
+    ${failed||!list.length?"":`<div class="hint"><b>Last used</b> is the cheapest proof that the other
+      application is really using the key you think it is. A key that has never been used, next to an
+      application reporting success, means it is holding a <i>different</i> key. The timestamp refreshes at
+      most once a minute, so read it as an activity signal rather than a request counter.</div>`}</div>`;
+}
+function apiKeyRow(k){
+  const scopes=(k.scopes||[]).map(s=>`<code>${esc(s)}</code>`).join(" ")||`<span class="muted">none</span>`;
+  const used=k.last_used_at?esc(fmtAgo(k.last_used_at)):`<span class="muted">never</span>`;
+  return `<tr>
+    <td data-label="Name">${esc(k.name)}${k.disabled?` <span class="muted">(revoked)</span>`:""}</td>
+    <td data-label="Scopes">${scopes}</td>
+    <td data-label="Created" class="muted">${esc(fmtAgo(k.created_at))}</td>
+    <td data-label="Last used">${used}</td>
+    <td class="rowactions"><div class="row" style="justify-content:flex-end">
+      <button class="ghost sm" onclick='deleteKey(${Number(k.id)},${esc(JSON.stringify(k.name))},this)'>Revoke</button>
+      </div></td></tr>`;
+}
+// Minting is separated from showing for the same reason the join token is: the
+// server hands back the only copy of the secret and keeps nothing but its hash.
+function mintKeyPanel(){
+  if(MINTED_KEY) return mintedKeyHtml(MINTED_KEY);
+  return `<h2 class="section">Create a key</h2>
+    <label>Name</label>
+    <input id="nkname" placeholder="monarr" autocomplete="off" maxlength="64">
+    <div class="hint">The name is how you will know which key to revoke later. It is not a secret and it is
+      not checked against anything.</div>
+    <div style="margin-top:14px">${KEY_SCOPES.map(([id,label])=>`
+      <label style="display:flex;align-items:flex-start;gap:8px;margin-top:8px">
+        <input type="checkbox" class="nkscope" value="${esc(id)}"${id==="scan:trigger"?" checked":""} style="width:auto">
+        <span><code>${esc(id)}</code><span class="hint" style="display:block">${esc(label)}</span></span></label>`).join("")}</div>
+    <div class="err" id="nkerr"></div>
+    <div class="row" style="margin-top:12px"><button onclick="mintKey(this)">Create key</button></div>
+    <div class="hint">Grant only what the other application actually calls. Every scope is a promise about
+      what a stolen key can do.</div>`;
+}
+// Deliberately loud, and deliberately not a field you can come back to. Anyone
+// holding this string can act on this server with the scopes beside it until
+// the key is revoked, so this says so rather than presenting it as an
+// identifier that is safe to leave on a screen.
+function mintedKeyHtml(minted){
+  const scopes=(minted.scopes||[]).map(s=>`<code>${esc(s)}</code>`).join(" ")||"no scopes";
+  return `<h2 class="section">Create a key</h2>
+    <div class="jointoken" id="nksecret">${esc(minted.key_secret)}</div>
+    <div class="hint"><b>Shown once.</b> plurx keeps only this key's hash, so closing this is the end of it —
+      lose it and you issue a new key. Paste it into <b>${esc(minted.name)}</b> now. Until it is revoked it
+      carries ${scopes} against this server: treat it like a password, and do not paste it into a chat, an
+      issue, or a shell transcript.</div>
+    <div class="row" style="gap:10px;margin-top:10px">
+      <button class="ghost sm" onclick="copyMintedKey()">Copy</button>
+      <button class="ghost sm" onclick="clearMintedKey()">Done — clear it</button></div>`;
+}
+function retryKeys(){
+  SETTINGS_LOADED.delete("keys");
+  viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+function clearMintedKey(){ forgetMintedKey(); renderSettings(); }
+async function copyMintedKey(){
+  if(!MINTED_KEY) return;
+  try{
+    await navigator.clipboard.writeText(MINTED_KEY.key_secret);
+    toast("Key copied");
+  }catch(e){
+    // Plain HTTP is not a secure context, so a LAN install has no clipboard
+    // API at all. Say which gesture works instead of failing quietly.
+    toast("This browser won't copy over plain HTTP — click the key to select it");
+  }
+}
+async function mintKey(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  const err=document.getElementById("nkerr"); if(err) err.textContent="";
+  const nameEl=document.getElementById("nkname");
+  const name=(nameEl?nameEl.value:"").trim();
+  const scopes=Array.from(document.querySelectorAll(".nkscope")).filter(x=>x.checked).map(x=>x.value);
+  // Refuse locally exactly what the server refuses anyway. A round trip to be
+  // told "a key needs a name" is a worse answer than saying it beside the box.
+  if(!name){
+    if(err) err.textContent="A key needs a name — it is how you will know which one to revoke.";
+    return;
+  }
+  if(!scopes.length){
+    if(err) err.textContent="Pick at least one scope. A key with no scopes can do nothing.";
+    return;
+  }
+  const was=btn.textContent; btn.disabled=true; btn.textContent="Creating…";
+  try{
+    const minted=await api("/keys",{method:"POST",body:{name,scopes}});
+    if(!settingsCurrent(generation,"integrations")) return;
+    MINTED_KEY=minted;
+    // Paint the secret before refreshing the list. The secret is the part that
+    // exists exactly once; a slow list read must not stand between the
+    // operator and the only copy of it.
+    renderSettings();
+    SETTINGS_LOADED.delete("keys");
+    loadSettingsKey("keys",generation).then(()=>{
+      if(settingsCurrent(generation,"integrations")) renderSettings();
+    }).catch(()=>{});
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"integrations")) return;
+    btn.disabled=false; btn.textContent=was;
+    const box=document.getElementById("nkerr");
+    if(box) box.textContent=e.message||"Couldn't create the key";
+  }
+}
+// Revocation is immediate and total: whatever holds the key gets a 401 on its
+// very next request. The confirm names the key because this list is the only
+// place that connects a key to the application that is about to stop working.
+async function deleteKey(id,name,btn){
+  if(!confirm(`Revoke the key "${name}"?\n\nWhatever holds it stops being able to reach plurx on its very `+
+    `next request. The key cannot be restored — you would issue a new one and paste it in again.`)) return;
+  const generation=PAGE_RENDER_GENERATION;
+  btn.disabled=true;
+  try{
+    await api(`/keys/${id}`,{method:"DELETE"});
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"integrations")) return;
+    btn.disabled=false;
+    toast(e.message||"Couldn't revoke that key");
+    return;
+  }
+  if(MINTED_KEY&&MINTED_KEY.id===id) forgetMintedKey();
+  SETTINGS_LOADED.delete("keys");
+  await loadSettingsKey("keys",generation).catch(()=>{});
+  if(!settingsCurrent(generation,"integrations")) return;
+  toast("Key revoked");
+  renderSettings();
 }
 // Pairing with monarr, for the Coming soon rail. The key is stored on the
 // server and used by the server: plurxd makes the call to monarr, so this

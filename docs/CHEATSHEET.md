@@ -85,8 +85,10 @@ Full symptom→cause table: [OPERATIONS.md](OPERATIONS.md#common-problems--cause
 
 ## 4. Pairing another application (monarr)
 
-Two commands. The first is run once by an admin; the second is what the other
-application does on every import.
+Two commands. The first is run once by an admin — or, more easily, from
+**Settings → Integrations**, which lists, mints and revokes keys and shows each
+one's last-used time; the second is what the other application does on every
+import.
 
 ```bash
 # 1. Mint a scoped key (with an ADMIN token — not the key you are creating).

@@ -155,6 +155,23 @@ requires = ["node"]
 missing = "fail"
 timeout_seconds = 120
 
+# The API-keys panel carries two things no Rust gate can see. Its scope
+# checkboxes are a hand-written mirror of scopes::ALL, so a scope added on the
+# server with nobody adding it here is a capability no operator can grant and
+# no test would fail over; and the credential it renders exists exactly once,
+# so a missing "shown once" warning, a mint form offered against a list we
+# failed to read, or a key name that closes the onclick attribute it sits in
+# all ship a broken or unsafe settings screen. Pure Node against the shipped
+# index.html, so it runs on every commit.
+[[checks]]
+id = "web-api-keys"
+title = "API-keys panel scope fidelity, show-once secret, and escaping"
+command = "node tests/web/settings-keys.test.js"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["node"]
+missing = "fail"
+timeout_seconds = 120
+
 [[checks]]
 id = "reader-browser"
 title = "EPUB reader restore, navigation, search, and hostile-content boundary"
@@ -615,7 +632,7 @@ depends_on = ["server.api", "api.contract", "playback.pipeline"]
 [[points]]
 id = "web.experience"
 title = "Embedded web player and administration UI"
-contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its admin cluster panel reads the membership API without widening it, presents two voters as a reconfiguration waypoint rather than redundancy, renders every removal refusal as an actionable sentence, stays absent for a non-admin, and holds a minted join token in memory only — never in browser storage, a URL, or a log."
+contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its admin cluster panel reads the membership API without widening it, presents two voters as a reconfiguration waypoint rather than redundancy, renders every removal refusal as an actionable sentence, stays absent for a non-admin, and holds a minted join token in memory only — never in browser storage, a URL, or a log. Its admin integrations panel offers exactly the scope set the server accepts, withholds the mint form for a key list it could not read, escapes operator-supplied key names in both the cell and the revoke handler, and holds a minted API key secret under the same memory-only, dropped-on-exit rule as a join token."
 paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
@@ -629,7 +646,7 @@ paths = [
   "tests/ui-structure.golden",
   "tests/web/**",
 ]
-checks = ["rust-gate", "web-static", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
+checks = ["rust-gate", "web-static", "web-membership", "web-api-keys", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
 
 [[points]]

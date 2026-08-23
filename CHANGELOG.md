@@ -10,6 +10,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **API keys are reachable from the browser.** Settings gains an
+  **Integrations** tab that lists every scoped key with its scopes and
+  last-used time, mints one from a name and a scope checkbox, and revokes it.
+  The secret is shown exactly once with a copy button and is dropped the moment
+  the tab is left, the same rule as a cluster join token. The keys API itself is
+  unchanged and has shipped since migration v8; until now the only way to reach
+  it was `curl`, so an operator looking for key management in Settings
+  correctly concluded there was none. The monarr pairing moves onto the same
+  tab: it is the opposite direction of the same seam — monarr's key, held by
+  plurxd — and separating the two invited pasting one into the other's box. A
+  test gate fails the build if the tab's scope checkboxes ever drift from
+  `plurx_core::domain::scopes::ALL`.
+
 - **Cluster topology guidance and comparable three-versus-four-voter evidence
   are now executable.** Operations recommends three voters for ordinary HA,
   documents readiness-aware sticky proxying and a complete durable authority
