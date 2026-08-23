@@ -330,14 +330,23 @@ impl Client {
         };
 
         if self.inner.proxy_mode {
-            // Reconnect through the same proxy endpoint. The proxy owns leader
-            // discovery; accepting an advertised node (or trying to discover
-            // a leader when the responder has none) would silently escape the
+            // Try the next configured proxy endpoint. The proxies own leader
+            // discovery; accepting an advertised voter (or probing the
+            // authenticated roster directly) would silently escape the
             // caller's network and trust boundary.
-            tx.send_async(ClientStreamReq::LeaderChange((None, None)))
-                .await
-                .expect("the Client API WebSocket Manager to always be running");
-            return true;
+            let (ack, rotated) = tokio::sync::oneshot::channel();
+            return time::timeout(LEADER_RETRY_RECOVERY_TIMEOUT, async {
+                if tx
+                    .send_async(ClientStreamReq::RotateProxy(ack))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
+                rotated.await.is_ok()
+            })
+            .await
+            .unwrap_or(false);
         }
 
         if let (Some(leader_id), Some(node)) = (leader_id, node.clone()) {

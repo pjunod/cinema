@@ -273,6 +273,12 @@ real voters plus a distinct serving process. Raw TCP cut-points isolate only
 the serving process's remote Hiqlite client; the controller retains direct
 access to every voter. The retained contract requires:
 
+- with every cut-point enabled, leadership moves to another voter, the prior
+  one-second authority lease ages out, and media admission recovers through a
+  different member of the original configured proxy pool;
+- closing an already-authenticated watermark stream through the first proxy
+  advances that DB stream's pool cursor and obtains a later quorum watermark
+  while the first proxy remains unavailable;
 - `/healthz` remains 200 while `/readyz` changes to 503 from the expired
   production quorum watermark;
 - mutable HLS capability traffic changes to a topology-free 503 with

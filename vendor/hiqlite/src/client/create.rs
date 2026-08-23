@@ -70,6 +70,8 @@ impl Client {
             api_secret: Some(api_secret),
             request_id: AtomicUsize::new(0),
             tx_shutdown: Some(tx_shutdown),
+            stream_shutdown: watch::channel(false).0,
+            background_handles: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]
@@ -165,12 +167,21 @@ impl Client {
         #[cfg(feature = "cache")]
         let (tx_client_cache, rx_client_cache) = flume::bounded(1);
 
+        let stream_shutdown = watch::channel(false).0;
+        #[allow(unused_mut)]
+        let mut background_handles = Vec::new();
+
         #[cfg(feature = "listen_notify")]
-        let rx_notify = Some(RemoteListener::spawn(
-            leader_cache.clone(),
-            tls,
-            api_secret.clone(),
-        ));
+        let rx_notify = {
+            let (receiver, handle) = RemoteListener::spawn(
+                leader_cache.clone(),
+                tls,
+                api_secret.clone(),
+                stream_shutdown.subscribe(),
+            );
+            background_handles.push(handle);
+            Some(receiver)
+        };
 
         #[cfg(all(feature = "listen_notify_local", not(feature = "listen_notify")))]
         let rx_notify = None;
@@ -202,6 +213,8 @@ impl Client {
             api_secret: Some(api_secret),
             request_id: AtomicUsize::new(0),
             tx_shutdown: None,
+            stream_shutdown,
+            background_handles: std::sync::Mutex::new(background_handles),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]

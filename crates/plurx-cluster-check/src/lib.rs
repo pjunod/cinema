@@ -1053,6 +1053,158 @@ async fn run_serving_partition_attempt() -> Result<ServingPartitionAttempt> {
         return Ok(ServingPartitionAttempt::UnstableInitialAdmission(error));
     }
 
+    // Establish a real WebSocket through the first configured proxy, then
+    // sever that accepted stream while later endpoints remain healthy. A
+    // subsequent watermark must recover through the next per-stream cursor
+    // position without a direct-voter path.
+    let mut stable_drop_client = None;
+    for _ in 0..3 {
+        if cluster.leader().await? != 1 {
+            cluster
+                .request(1, Request::TriggerElection)
+                .await?
+                .require_ok()?;
+            let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+            loop {
+                if cluster.leader().await? == 1 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    bail!("established-drop proof could not place leadership on voter 1");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        let before = raft_position(&mut cluster, 1).await?;
+        let client = Client::remote(
+            proxies.iter().map(TcpPartitionProxy::address).collect(),
+            true,
+            true,
+            API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await?;
+        if tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
+            .await
+            .is_err()
+        {
+            client.shutdown().await?;
+            continue;
+        }
+        let watermark =
+            match tokio::time::timeout(START_TIMEOUT, client.db_quorum_watermark()).await {
+                Ok(Ok(watermark)) => watermark,
+                Ok(Err(_)) | Err(_) => {
+                    client.shutdown().await?;
+                    continue;
+                }
+            };
+        let after = match raft_position(&mut cluster, 1).await {
+            Ok(after) => after,
+            Err(error) => {
+                client.shutdown().await?;
+                return Err(error);
+            }
+        };
+        if before.0 == Some(1)
+            && after.0 == Some(1)
+            && before.1 == after.1
+            && watermark.leader_id == 1
+            && watermark.term == before.1
+        {
+            stable_drop_client = Some(client);
+            break;
+        }
+        client
+            .shutdown()
+            .await
+            .context("close unstable established-drop client streams")?;
+    }
+    let drop_client = stable_drop_client
+        .context("established-drop proof did not retain voter 1 leadership for stream setup")?;
+    proxies[0].partition();
+    cluster
+        .request(2, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        if cluster.leader().await? != 1 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            proxies[0].restore();
+            bail!("established-drop proof did not move leadership off voter 1");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let established_drop = tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+        loop {
+            if drop_client.db_quorum_watermark().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    proxies[0].restore();
+    established_drop.context("configured proxy pool did not recover an established stream drop")?;
+    drop_client
+        .shutdown()
+        .await
+        .context("close established-drop remote client streams")?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    admit_serving_media(&http, &serving.http_base).await?;
+
+    // The cut-points are an authoritative proxy pool, not advertised voter
+    // addresses. Move leadership while every proxy is enabled, wait beyond
+    // the prior one-second authority lease, and require media admission to
+    // recover through another member of that same configured pool.
+    let former_leader = cluster.leader().await?;
+    let election_target = (1..=3)
+        .find(|node_id| *node_id != former_leader)
+        .context("serving proof has no election successor")?;
+    cluster
+        .request(election_target, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let election_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    let successor = loop {
+        let observed = cluster.leader().await?;
+        if observed != former_leader {
+            break observed;
+        }
+        if Instant::now() >= election_deadline {
+            bail!("serving proxy pool did not observe leadership move from voter {former_leader}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    admit_serving_media(&http, &serving.http_base).await?;
+
     for proxy in &proxies {
         proxy.partition();
     }
@@ -1201,7 +1353,7 @@ async fn run_serving_partition_attempt() -> Result<ServingPartitionAttempt> {
     .await?;
 
     println!(
-        "CLUSTER_SERVING_PARTITION cycles=2 liveness=ok readiness=fenced capability=fenced child_killed=true majority_write=locally_converged recovery=ready"
+        "CLUSTER_SERVING_PARTITION cycles=2 established_drop=recovered leader_failover={former_leader}->{successor} proxy_pool=recovered liveness=ok readiness=fenced capability=fenced child_killed=true majority_write=locally_converged recovery=ready"
     );
     cleanup_serving_partition(serving, proxies, &mut cluster).await?;
     Ok(ServingPartitionAttempt::Complete)

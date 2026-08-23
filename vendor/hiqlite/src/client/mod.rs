@@ -1,9 +1,11 @@
 use crate::app_state::AppState;
 use crate::{Error, NodeId};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
 use stream::ClientStreamReq;
 use tokio::sync::{RwLock, oneshot, watch};
+use tokio::task::JoinHandle;
 
 #[cfg(feature = "backup")]
 mod backup;
@@ -70,6 +72,8 @@ pub(crate) struct DbClient {
     pub(crate) api_secret: Option<String>,
     pub(crate) request_id: AtomicUsize,
     pub(crate) tx_shutdown: Option<watch::Sender<bool>>,
+    pub(crate) stream_shutdown: watch::Sender<bool>,
+    pub(crate) background_handles: Mutex<Vec<JoinHandle<()>>>,
     #[cfg(feature = "listen_notify_local")]
     pub(crate) app_start: i64,
     #[cfg(feature = "listen_notify_local")]

@@ -42,9 +42,15 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   delete current state.
 - Remote clients created in proxy mode retain only their configured proxy
   endpoints across WebSocket reconnects, metrics discovery, and
-  `ForwardToLeader` responses. Directly advertised voter addresses never
-  replace that boundary, so a proxy remains an enforceable routing, partition,
-  and trust boundary after recovery.
+  `ForwardToLeader` responses. Connection failures, established-stream closes,
+  and leader-forwarding responses advance independent DB/cache cursors through
+  that original endpoint set; ambiguous in-flight requests fail without
+  replay, and directly advertised voter addresses never replace the boundary.
+  A proxy therefore remains an enforceable routing, partition, and trust
+  boundary after failover and recovery. Remote shutdown uses out-of-band
+  cancellation and joins both stream managers, the rate ticker, and the remote
+  listen-notify loop even when every endpoint is unavailable; active and queued
+  work receives a stable error instead of a dropped-acknowledgement panic.
 - A client receiving `ForwardToLeader(None, None)` treats it as a definitive
   unaccepted request, probes its configured authenticated peers concurrently,
   and reconnects in a detached two-second recovery budget before using the
@@ -52,8 +58,8 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   custom API-secret header cannot leave the configured roster. This closes the
   resumed-follower interval in which the local voter is healthy but has not yet
   republished the current leader without allowing raw client calls to hang;
-  proxy-mode clients reconnect through their pinned proxy instead of escaping
-  that trust boundary.
+  proxy-mode clients reconnect through the next configured proxy instead of
+  escaping that trust boundary.
 
 Remove this vendor when an upstream Hiqlite release contains all nine patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in

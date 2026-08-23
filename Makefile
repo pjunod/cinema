@@ -89,6 +89,14 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	  client::helpers::tests::configured_leader_probes_do_not_wait_for_the_first_peer \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::stream::tests::proxy_failover_cycles_only_through_configured_endpoints \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,listen_notify,macros,sqlite \
+	  client::mgmt::tests::remote_shutdown_joins_streams_with_every_endpoint_unavailable \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  http_client::tests::management_client_does_not_forward_api_secret_across_redirects \
 	  --lib -- --exact
