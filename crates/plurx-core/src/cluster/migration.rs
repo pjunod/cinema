@@ -3658,7 +3658,8 @@ mod tests {
                 hostname: "joining-test-node".to_owned(),
                 raft_address: staged_local.raft_address,
                 api_address: staged_local.api_address,
-                http_base: "http://127.0.0.1:32400".to_owned(),
+                http_base: configured_artwork_url(&joining_config)
+                    .expect("derive the staged node artwork origin"),
                 schema_version: AUTH_SCHEMA_VERSION,
                 protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             })
