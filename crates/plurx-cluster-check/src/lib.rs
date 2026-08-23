@@ -121,6 +121,15 @@ pub const GROWTH_BEAT_INTERVAL_SECS: u64 = 5;
 pub const GROWTH_COMMIT_WINDOW_SECS: u64 = 10;
 /// Production hiqlite snapshot threshold used by the bounded gate.
 pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
+/// Fixed applied-log tail retained after each measured snapshot.
+///
+/// Snapshot construction is asynchronous. The load that triggers it can be a
+/// few entries past the snapshot index by the time the controller observes
+/// the new snapshot, which otherwise leaves a runner-speed-dependent SQLite
+/// WAL tail in the directory-size comparison. Filling both sides to the same
+/// post-snapshot index makes the physical comparison phase-identical without
+/// changing the byte budget or excluding a durable file.
+const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
 /// One extra commit window per stream above the deterministic cadence result.
@@ -2188,6 +2197,13 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         "baseline settle",
     )
     .await?;
+    settle_post_snapshot_tail(
+        &metrics_client,
+        store.as_ref(),
+        baseline_snapshot,
+        "baseline",
+    )
+    .await?;
     let data_dir = launch.root.join("node-1");
     let before_bytes = stable_directory_bytes(&data_dir).await?;
 
@@ -2255,11 +2271,18 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     // hiqlite's retained WAL segment alternates allocation across adjacent
     // compactions. Compare equally settled, two-cycle states so that rollover
     // is not reported as durable progress growth (or as a negative delta).
-    let _ = ensure_compaction_after(
+    let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         measured_snapshot,
         "coalesced settle",
+    )
+    .await?;
+    settle_post_snapshot_tail(
+        &metrics_client,
+        store.as_ref(),
+        settled_snapshot,
+        "coalesced",
     )
     .await?;
     let after_bytes = stable_directory_bytes(&data_dir).await?;
@@ -2294,13 +2317,14 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_measured_snapshot =
         ensure_compaction_after(&metrics_client, store.as_ref(), raw_snapshot, "raw control")
             .await?;
-    let _ = ensure_compaction_after(
+    let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
         raw_measured_snapshot,
         "raw settle",
     )
     .await?;
+    settle_post_snapshot_tail(&metrics_client, store.as_ref(), raw_settled_snapshot, "raw").await?;
     let snapshot_metrics_after = snapshot_metrics.snapshot();
     let build_ok_delta = snapshot_metrics_after
         .build_ok
@@ -2481,6 +2505,34 @@ async fn wait_for_purge(client: &Client, snapshot: u64, phase: &str) -> Result<u
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn settle_post_snapshot_tail(
+    client: &Client,
+    store: &HiqliteAuthStore,
+    snapshot: u64,
+    phase: &str,
+) -> Result<()> {
+    let target = snapshot.saturating_add(GROWTH_SETTLED_LOG_TAIL);
+    let mut applied = applied_index(client).await?;
+    if applied > target {
+        bail!(
+            "{phase} snapshot was observed with a {}-entry tail, beyond the fixed {}-entry settling boundary",
+            applied.saturating_sub(snapshot),
+            GROWTH_SETTLED_LOG_TAIL
+        );
+    }
+    let marker = "cluster.growth.post_snapshot_tail";
+    while applied < target {
+        store
+            .put_setting(marker, &applied.saturating_sub(snapshot).to_string())
+            .await?;
+        applied = applied_index(client).await?;
+    }
+    if applied != target {
+        bail!("{phase} post-snapshot tail settled at {applied}, expected exact index {target}");
+    }
+    Ok(())
 }
 
 async fn stable_directory_bytes(root: &Path) -> Result<u64> {
