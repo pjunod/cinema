@@ -1,0 +1,22 @@
+version = 1
+
+[[coverage]]
+commits = ["5d4c0d5a"]
+points = [
+  "android.client",
+  "apple.client",
+  "cluster.auth",
+  "core.media",
+  "playback.pipeline",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "android-jvm",
+  "apple-simulators",
+  "cluster-auth",
+  "reader-browser",
+  "rust-gate",
+  "web-static",
+]
+reason = "The retained repair regressions require complete-empty ownership inventories to reclaim only exactly rechecked orphans while incomplete-empty inventories fail closed; coordinate producer installation with shared-parent removal; reject intermediate symlinks; preserve failed cache rows and legacy VOD entries; bind quarantine, subtitle, manifest, lease, and store-race behavior; and carry full signed-64-bit item/file identifiers losslessly through rendered web cards, publication open, reading-state save/keepalive/close, and quoted Apple/Android handoff. The deterministic browser fixture imports item and file ids above JavaScript's 2^53 precision boundary before exercising that complete flow."
