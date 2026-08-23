@@ -9,7 +9,6 @@
     "schema_version",
     "evidence_scope",
     "build_sha",
-    "runner_image_digest",
     "workload",
     "workload_sha256",
     "topology_order",
@@ -56,6 +55,9 @@
           "runs": {
             "items": {
               "properties": {
+                "load_generator_isolation": { "type": "null" },
+                "controller_machine_fingerprint": { "type": "null" },
+                "voter_machine_fingerprints": { "type": "null" },
                 "resources": {
                   "items": {
                     "properties": {
@@ -81,10 +83,16 @@
         "required": ["evidence_scope"]
       },
       "then": {
+        "required": ["runner_image_digest"],
         "properties": {
           "runner_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
           "runs": {
             "items": {
+              "required": [
+                "load_generator_isolation",
+                "controller_machine_fingerprint",
+                "voter_machine_fingerprints"
+              ],
               "properties": {
                 "resources": {
                   "items": {
@@ -199,8 +207,17 @@
           "items": { "$ref": "#/$defs/applied_index" }
         },
         "max_apply_lag_entries": { "type": "integer", "minimum": 0 },
-        "controller_host": { "type": "string", "minLength": 1 },
-        "load_generator_host": { "type": "string", "minLength": 1 },
+        "controller_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "load_generator_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "load_generator_isolation": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "controller_machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "voter_machine_fingerprints": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
         "resources": {
           "type": "array",
           "minItems": 3,
@@ -330,9 +347,9 @@
       ],
       "properties": {
         "node_id": { "type": "integer", "minimum": 1 },
-        "hardware": { "type": "string", "minLength": 1 },
-        "storage_device": { "type": "string", "minLength": 1 },
-        "network_path": { "type": "string", "minLength": 1 },
+        "hardware": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "storage_device": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "network_path": { "type": "string", "minLength": 1, "maxLength": 256 },
         "cpu_seconds": { "$ref": "#/$defs/nullable_number" },
         "wall_seconds": { "$ref": "#/$defs/nullable_number" },
         "max_rss_bytes": { "$ref": "#/$defs/nullable_integer" },

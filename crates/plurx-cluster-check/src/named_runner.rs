@@ -7,7 +7,8 @@
 //! adds the pre-registered 3--7-pair stopping rule and an aggregate campaign.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,12 +28,29 @@ use super::{
 
 pub const NAMED_CAMPAIGN_SCHEMA_VERSION: u32 = 1;
 const NAMED_SCOPE: &str = "named_runner";
+const LOCAL_IMAGE_REPOSITORY: &str = "plurx-cluster-check";
 const SSH_CONNECT_TIMEOUT_SECS: &str = "10";
 const REMOTE_ROOT_PREFIX: &str = "/var/tmp/plurx-cluster-named.";
+const REMOTE_OWNER_PREFIX: &str = ".plurx-owner-";
+const REMOTE_OWNER_LABEL: &str = "tv.plurx.named-owner";
 const REMOTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
 pub const CLEANUP_MANIFEST_FILENAME: &str = ".active-cleanup.json";
 const OUTPUT_OWNER_FILENAME: &str = ".campaign-owner";
 static ATOMIC_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const EMBEDDED_BUILD_SHA: Option<&str> = option_env!("PLURX_BUILD_SHA");
+
+pub fn print_embedded_build_identity() -> Result<()> {
+    let build_sha = EMBEDDED_BUILD_SHA.context("runner image omitted its embedded build SHA")?;
+    if build_sha.len() != 40
+        || !build_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("runner image embedded an invalid build SHA");
+    }
+    println!("{build_sha}");
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,6 +208,8 @@ pub async fn run_named_campaign(
                     &cleanup_manifest,
                     &image_digest,
                     owner_nonce,
+                    &build_sha,
+                    &deployment,
                 )
                 .await?,
             );
@@ -307,8 +327,11 @@ async fn run_remote_topology(
     cleanup_manifest: &Path,
     image_digest: &str,
     owner_nonce: &str,
+    build_sha: &str,
+    deployment: &DeploymentProof,
 ) -> Result<TopologyRun> {
     let selected = &config.voters[..usize::try_from(voter_count)?];
+    let placement = verify_run_machine_placement(selected, build_sha, deployment).await?;
     let specs = selected
         .iter()
         .map(|voter| NodeSpec {
@@ -323,7 +346,7 @@ async fn run_remote_topology(
         .map(|voter| RemoteCleanup {
             ssh_host: voter.ssh_host.clone(),
             container_name: format!(
-                "plurx-named-p{pair_index}-v{voter_count}-n{}",
+                "plurx-named-{nonce}-p{pair_index}-v{voter_count}-n{}",
                 voter.node_id
             ),
             remote_root: format!(
@@ -336,15 +359,29 @@ async fn run_remote_topology(
         .collect::<Vec<_>>();
     write_cleanup_manifest(cleanup_manifest, owner_nonce, &cleanups)?;
 
+    let mut claimed_cleanups = Vec::with_capacity(cleanups.len());
     for cleanup in &cleanups {
         if let Err(error) =
             ssh_output(&cleanup.ssh_host, &["mkdir", "--", &cleanup.remote_root]).await
         {
             return Err(with_cleanup_error(
                 error,
-                finish_remote_cleanup(&cleanups, cleanup_manifest).await,
+                finish_remote_cleanup(&cleanups, &claimed_cleanups, cleanup_manifest, owner_nonce)
+                    .await,
             ));
         }
+        let owner_marker = remote_owner_marker(cleanup, owner_nonce)?;
+        if let Err(error) = ssh_output(&cleanup.ssh_host, &["mkdir", "--", &owner_marker]).await {
+            let release = ssh_output(&cleanup.ssh_host, &["rmdir", "--", &cleanup.remote_root])
+                .await
+                .map(|_| ());
+            let cleanup =
+                finish_remote_cleanup(&cleanups, &claimed_cleanups, cleanup_manifest, owner_nonce)
+                    .await;
+            let error = with_cleanup_error(error, release);
+            return Err(with_cleanup_error(error, cleanup));
+        }
+        claimed_cleanups.push(cleanup.clone());
     }
 
     let mut nodes = Vec::with_capacity(selected.len());
@@ -362,6 +399,7 @@ async fn run_remote_topology(
             &cleanup.container_name,
             &cleanup.remote_root,
             image_digest,
+            owner_nonce,
             &launch,
         ) {
             Ok(process) => nodes.push(Some(process)),
@@ -369,7 +407,13 @@ async fn run_remote_topology(
                 drop(nodes);
                 return Err(with_cleanup_error(
                     error,
-                    finish_remote_cleanup(&cleanups, cleanup_manifest).await,
+                    finish_remote_cleanup(
+                        &cleanups,
+                        &claimed_cleanups,
+                        cleanup_manifest,
+                        owner_nonce,
+                    )
+                    .await,
                 ));
             }
         }
@@ -401,6 +445,9 @@ async fn run_remote_topology(
             RunEvidence {
                 controller_host: &config.controller_host,
                 load_generator_host: &config.load_generator_host,
+                load_generator_isolation: Some(&config.load_generator_isolation),
+                controller_machine_fingerprint: Some(&placement.controller),
+                voter_machine_fingerprints: Some(&placement.voters),
                 resources: Some(&identities),
             },
         )
@@ -414,7 +461,8 @@ async fn run_remote_topology(
         cluster.kill_all().await;
         Ok(())
     };
-    let cleanup = finish_remote_cleanup(&cleanups, cleanup_manifest).await;
+    let cleanup =
+        finish_remote_cleanup(&cleanups, &claimed_cleanups, cleanup_manifest, owner_nonce).await;
     let mut errors = Vec::new();
     let run = match result {
         Ok(run) => Some(run),
@@ -442,8 +490,10 @@ fn spawn_remote_node(
     container_name: &str,
     remote_root: &str,
     image_digest: &str,
+    owner_nonce: &str,
     launch: &NodeLaunch,
 ) -> Result<NodeProcess> {
+    validate_owner_nonce(owner_nonce)?;
     let launch_hex = hex::encode(serde_json::to_vec(launch)?);
     let mut command = Command::new("ssh");
     command
@@ -464,6 +514,8 @@ fn spawn_remote_node(
             "-i",
             "--name",
             container_name,
+            "--label",
+            &format!("{REMOTE_OWNER_LABEL}={owner_nonce}"),
             "-v",
             &format!("{remote_root}:/data"),
             "-p",
@@ -497,7 +549,7 @@ fn spawn_remote_node(
     })
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoteCleanup {
     ssh_host: String,
@@ -507,12 +559,198 @@ struct RemoteCleanup {
     node_id: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CleanupManifest {
     schema_version: u32,
     owner_nonce: String,
     cleanups: Vec<RemoteCleanup>,
+}
+
+struct OpenedIdentity {
+    file: std::fs::File,
+    device: u64,
+    inode: u64,
+    mode: u32,
+}
+
+impl OpenedIdentity {
+    fn open_private_file_at(
+        directory: &std::fs::File,
+        filename: &str,
+        label: &str,
+    ) -> Result<Self> {
+        let filename = std::ffi::CString::new(filename)?;
+        // SAFETY: the retained descriptor is an opened directory, the filename
+        // is a fixed NUL-free basename, and a successful fd is immediately
+        // transferred into one owned File.
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                filename.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("open retained {label} without following links"));
+        }
+        // SAFETY: `openat` returned a new owned descriptor and this is its only
+        // conversion into a File.
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+            bail!("{label} must be a regular mode-0600 file");
+        }
+        Ok(Self {
+            file,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.permissions().mode() & 0o777,
+        })
+    }
+
+    fn open_directory(path: &Path) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+            .open(path)
+            .with_context(|| {
+                format!(
+                    "open cleanup manifest parent without following links {}",
+                    path.display()
+                )
+            })?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_dir() {
+            bail!("cleanup manifest parent is not a real directory");
+        }
+        Ok(Self {
+            file,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.permissions().mode() & 0o777,
+        })
+    }
+
+    fn verify_private_entry_at(
+        &self,
+        directory: &std::fs::File,
+        filename: &str,
+        label: &str,
+    ) -> Result<()> {
+        let current = Self::open_private_file_at(directory, filename, label)?;
+        if current.device != self.device || current.inode != self.inode || current.mode != self.mode
+        {
+            bail!("{label} identity changed while cleanup was in progress");
+        }
+        Ok(())
+    }
+
+    fn read_all(&mut self, label: &str) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.file
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read retained {label}"))?;
+        Ok(bytes)
+    }
+}
+
+struct CleanupAuthority {
+    output_dir: PathBuf,
+    directory: OpenedIdentity,
+    manifest: OpenedIdentity,
+    owner: OpenedIdentity,
+    manifest_bytes: Vec<u8>,
+    owner_nonce: String,
+}
+
+impl CleanupAuthority {
+    fn open(path: &Path) -> Result<Self> {
+        if path.file_name().and_then(|value| value.to_str()) != Some(CLEANUP_MANIFEST_FILENAME) {
+            bail!("cleanup authority requires the exact active-manifest filename");
+        }
+        let supplied_output_dir = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .context("cleanup manifest has no claimed output directory")?
+            .to_path_buf();
+        if supplied_output_dir
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            bail!("cleanup manifest parent must not contain traversal");
+        }
+        let supplied_metadata = std::fs::symlink_metadata(&supplied_output_dir)?;
+        if !supplied_metadata.file_type().is_dir() || supplied_metadata.file_type().is_symlink() {
+            bail!("cleanup manifest parent must be a real directory");
+        }
+        let output_dir = std::fs::canonicalize(&supplied_output_dir).with_context(|| {
+            format!(
+                "resolve cleanup manifest parent {}",
+                supplied_output_dir.display()
+            )
+        })?;
+        let directory = OpenedIdentity::open_directory(&output_dir)?;
+        if supplied_metadata.dev() != directory.device || supplied_metadata.ino() != directory.inode
+        {
+            bail!("cleanup manifest parent changed while authority was opened");
+        }
+        let mut manifest = OpenedIdentity::open_private_file_at(
+            &directory.file,
+            CLEANUP_MANIFEST_FILENAME,
+            "cleanup manifest",
+        )?;
+        let mut owner = OpenedIdentity::open_private_file_at(
+            &directory.file,
+            OUTPUT_OWNER_FILENAME,
+            "output owner marker",
+        )?;
+        let manifest_bytes = manifest.read_all("cleanup manifest")?;
+        let owner_nonce = String::from_utf8(owner.read_all("output owner marker")?)?
+            .trim()
+            .to_owned();
+        validate_owner_nonce(&owner_nonce)?;
+        Ok(Self {
+            output_dir,
+            directory,
+            manifest,
+            owner,
+            manifest_bytes,
+            owner_nonce,
+        })
+    }
+
+    fn remove_manifest(self) -> Result<()> {
+        self.owner.verify_private_entry_at(
+            &self.directory.file,
+            OUTPUT_OWNER_FILENAME,
+            "output owner marker",
+        )?;
+        self.manifest.verify_private_entry_at(
+            &self.directory.file,
+            CLEANUP_MANIFEST_FILENAME,
+            "cleanup manifest",
+        )?;
+        let filename = std::ffi::CString::new(CLEANUP_MANIFEST_FILENAME)?;
+        // SAFETY: the retained descriptor is the validated authority
+        // directory and `filename` is the fixed manifest basename.
+        if unsafe { libc::unlinkat(self.directory.file.as_raw_fd(), filename.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "remove retained cleanup manifest from {}",
+                    self.output_dir.display()
+                )
+            });
+        }
+        self.directory.file.sync_all().with_context(|| {
+            format!(
+                "sync cleanup output directory {}",
+                self.output_dir.display()
+            )
+        })?;
+        Ok(())
+    }
 }
 
 fn remote_nonce() -> Result<String> {
@@ -550,14 +788,17 @@ fn verify_output_claim(path: &Path, owner_nonce: &str) -> Result<()> {
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
         bail!("named-runner output claim is not a real directory");
     }
-    let owner_path = path.join(OUTPUT_OWNER_FILENAME);
-    let owner_metadata =
-        std::fs::symlink_metadata(&owner_path).context("inspect named-runner owner marker")?;
-    if !owner_metadata.file_type().is_file()
-        || owner_metadata.file_type().is_symlink()
-        || owner_metadata.permissions().mode() & 0o077 != 0
-        || std::fs::read_to_string(&owner_path)?.trim() != owner_nonce
-    {
+    let canonical = std::fs::canonicalize(path)?;
+    let directory = OpenedIdentity::open_directory(&canonical)?;
+    if metadata.dev() != directory.device || metadata.ino() != directory.inode {
+        bail!("named-runner output claim changed while it was opened");
+    }
+    let mut owner = OpenedIdentity::open_private_file_at(
+        &directory.file,
+        OUTPUT_OWNER_FILENAME,
+        "output owner marker",
+    )?;
+    if String::from_utf8(owner.read_all("output owner marker")?)?.trim() != owner_nonce {
         bail!("named-runner output ownership does not match this invocation");
     }
     let entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
@@ -606,6 +847,8 @@ fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .mode(mode)
         .open(&temporary)
         .with_context(|| format!("create temporary artifact {}", temporary.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("set exact artifact mode on {}", temporary.display()))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
@@ -638,7 +881,7 @@ fn validate_cleanup(cleanup: &RemoteCleanup) -> Result<()> {
     if cleanup.node_id == 0
         || cleanup.node_id > 4
         || !safe_host_token(&cleanup.ssh_host)
-        || !cleanup.container_name.starts_with("plurx-named-p")
+        || !cleanup.container_name.starts_with("plurx-named-")
         || !cleanup
             .container_name
             .bytes()
@@ -664,6 +907,9 @@ fn validate_cleanup(cleanup: &RemoteCleanup) -> Result<()> {
     {
         bail!("cleanup manifest contains an unsafe remote-root basename");
     }
+    if cleanup.container_name != format!("plurx-named-{suffix}") {
+        bail!("cleanup container is not bound to its nonce-owned remote root");
+    }
     Ok(())
 }
 
@@ -688,37 +934,56 @@ fn write_cleanup_manifest(
 }
 
 pub async fn cleanup_named_manifest(path: &Path) -> Result<()> {
-    let manifest: CleanupManifest = serde_json::from_slice(
-        &std::fs::read(path)
-            .with_context(|| format!("read named-runner cleanup manifest {}", path.display()))?,
-    )?;
+    let authority = CleanupAuthority::open(path)?;
+    let manifest: CleanupManifest = serde_json::from_slice(&authority.manifest_bytes)?;
     if manifest.schema_version != 1 || manifest.cleanups.is_empty() || manifest.cleanups.len() > 4 {
         bail!("invalid named-runner cleanup manifest shape");
     }
     validate_owner_nonce(&manifest.owner_nonce)?;
-    let output_dir = path
-        .parent()
-        .context("cleanup manifest has no output directory")?;
-    let owner_path = output_dir.join(OUTPUT_OWNER_FILENAME);
-    if std::fs::read_to_string(&owner_path)?.trim() != manifest.owner_nonce {
+    if authority.owner_nonce != manifest.owner_nonce {
         bail!("cleanup manifest does not belong to the active output owner");
     }
     for cleanup in &manifest.cleanups {
         validate_cleanup(cleanup)?;
     }
-    finish_remote_cleanup(&manifest.cleanups, path).await
+    cleanup_remote(&manifest.cleanups, &manifest.owner_nonce).await?;
+    authority.remove_manifest()
 }
 
-async fn finish_remote_cleanup(cleanups: &[RemoteCleanup], manifest: &Path) -> Result<()> {
-    cleanup_remote(cleanups).await?;
-    std::fs::remove_file(manifest)
-        .with_context(|| format!("remove cleanup manifest {}", manifest.display()))?;
-    Ok(())
+async fn finish_remote_cleanup(
+    retained_cleanups: &[RemoteCleanup],
+    active_cleanups: &[RemoteCleanup],
+    manifest: &Path,
+    owner_nonce: &str,
+) -> Result<()> {
+    let authority = CleanupAuthority::open(manifest)?;
+    let retained: CleanupManifest = serde_json::from_slice(&authority.manifest_bytes)?;
+    if retained.schema_version != 1
+        || retained.owner_nonce != owner_nonce
+        || authority.owner_nonce != owner_nonce
+        || retained.cleanups != retained_cleanups
+        || active_cleanups
+            .iter()
+            .any(|cleanup| !retained.cleanups.contains(cleanup))
+    {
+        bail!("cleanup manifest authority changed before remote cleanup");
+    }
+    cleanup_remote(active_cleanups, owner_nonce).await?;
+    authority.remove_manifest()
 }
 
-async fn cleanup_remote(cleanups: &[RemoteCleanup]) -> Result<()> {
+fn remote_owner_marker(cleanup: &RemoteCleanup, owner_nonce: &str) -> Result<String> {
+    validate_owner_nonce(owner_nonce)?;
+    Ok(format!(
+        "{}{}{}",
+        cleanup.remote_root, REMOTE_OWNER_PREFIX, owner_nonce
+    ))
+}
+
+async fn cleanup_remote(cleanups: &[RemoteCleanup], owner_nonce: &str) -> Result<()> {
     let mut errors = Vec::new();
     for cleanup in cleanups {
+        let owner_marker = remote_owner_marker(cleanup, owner_nonce)?;
         let exists =
             match ssh_command(&cleanup.ssh_host, &["test", "-d", &cleanup.remote_root]).await {
                 Ok(output) if output.status.success() => true,
@@ -738,19 +1003,92 @@ async fn cleanup_remote(cleanups: &[RemoteCleanup]) -> Result<()> {
                 }
             };
         if !exists {
+            match ssh_command(&cleanup.ssh_host, &["test", "-d", &owner_marker]).await {
+                Ok(output) if output.status.success() => {
+                    if let Err(error) =
+                        ssh_output(&cleanup.ssh_host, &["rmdir", "--", &owner_marker]).await
+                    {
+                        errors.push(format!("{error:#}"));
+                    }
+                }
+                Ok(output) if output.status.code() == Some(1) => {}
+                Ok(output) => errors.push(format!(
+                    "inspect orphaned cleanup owner on {} exited {}: {}",
+                    cleanup.ssh_host,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(error) => errors.push(format!("{error:#}")),
+            }
             continue;
         }
-        // The exact container and nonce path were predeclared by this run. The
-        // container removal is idempotent because a clean shutdown used --rm.
-        if let Err(error) = ssh_output(
+        match ssh_command(&cleanup.ssh_host, &["test", "-d", &owner_marker]).await {
+            Ok(output) if output.status.success() => {}
+            Ok(output) if output.status.code() == Some(1) => {
+                errors.push(format!(
+                    "refuse cleanup of unowned remote root {} on {}",
+                    cleanup.remote_root, cleanup.ssh_host
+                ));
+                continue;
+            }
+            Ok(output) => {
+                errors.push(format!(
+                    "inspect cleanup owner on {} exited {}: {}",
+                    cleanup.ssh_host,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("{error:#}"));
+                continue;
+            }
+        }
+        let container = ssh_command(
             &cleanup.ssh_host,
-            &["docker", "rm", "-f", &cleanup.container_name],
+            &["docker", "container", "inspect", &cleanup.container_name],
         )
-        .await
-        {
-            let text = format!("{error:#}");
-            if !text.contains("No such container") {
-                errors.push(text);
+        .await;
+        match container {
+            Ok(output) if output.status.success() => {
+                match container_owner_from_inspect(&output.stdout) {
+                    Ok(owner) if owner == owner_nonce => {
+                        if let Err(error) = ssh_output(
+                            &cleanup.ssh_host,
+                            &["docker", "rm", "-f", &cleanup.container_name],
+                        )
+                        .await
+                        {
+                            errors.push(format!("{error:#}"));
+                            continue;
+                        }
+                    }
+                    Ok(_) | Err(_) => {
+                        errors.push(format!(
+                            "refuse cleanup of unowned container {} on {}",
+                            cleanup.container_name, cleanup.ssh_host
+                        ));
+                        continue;
+                    }
+                }
+            }
+            Ok(output)
+                if String::from_utf8_lossy(&output.stderr)
+                    .to_ascii_lowercase()
+                    .contains("no such") => {}
+            Ok(output) => {
+                errors.push(format!(
+                    "inspect cleanup container on {} exited {}: {}",
+                    cleanup.ssh_host,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("{error:#}"));
+                continue;
             }
         }
         if let Err(error) = ssh_output(
@@ -773,10 +1111,18 @@ async fn cleanup_remote(cleanups: &[RemoteCleanup]) -> Result<()> {
         .await
         {
             errors.push(format!("{error:#}"));
+            continue;
         }
         if let Err(error) =
             ssh_output(&cleanup.ssh_host, &["rmdir", "--", &cleanup.remote_root]).await
         {
+            let text = format!("{error:#}");
+            if !text.contains("No such file or directory") {
+                errors.push(text);
+                continue;
+            }
+        }
+        if let Err(error) = ssh_output(&cleanup.ssh_host, &["rmdir", "--", &owner_marker]).await {
             let text = format!("{error:#}");
             if !text.contains("No such file or directory") {
                 errors.push(text);
@@ -788,6 +1134,18 @@ async fn cleanup_remote(cleanups: &[RemoteCleanup]) -> Result<()> {
     } else {
         bail!("named-runner cleanup failed: {}", errors.join("; "))
     }
+}
+
+fn container_owner_from_inspect(output: &[u8]) -> Result<String> {
+    let containers: serde_json::Value = serde_json::from_slice(output)?;
+    containers
+        .as_array()
+        .filter(|containers| containers.len() == 1)
+        .and_then(|containers| containers.first())
+        .and_then(|container| container.pointer(&format!("/Config/Labels/{REMOTE_OWNER_LABEL}")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .context("container inspection omitted the named-runner owner label")
 }
 
 fn with_cleanup_error(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
@@ -888,16 +1246,26 @@ fn validate_config(config: &NamedRunnerConfig) -> Result<()> {
     if (config.confidence_half_width_percent - 5.0).abs() > f64::EPSILON {
         bail!("named runner confidence half-width target must be 5 percent");
     }
-    for value in [
-        &config.runner_id,
-        &config.image,
-        &config.controller_host,
-        &config.load_generator_host,
-        &config.load_generator_isolation,
+    let transport_values = config
+        .voters
+        .iter()
+        .flat_map(|configured| {
+            [
+                configured.ssh_host.as_str(),
+                configured.advertised_host.as_str(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for (field, value) in [
+        ("runner_id", config.runner_id.as_str()),
+        ("controller_host", config.controller_host.as_str()),
+        ("load_generator_host", config.load_generator_host.as_str()),
+        (
+            "load_generator_isolation",
+            config.load_generator_isolation.as_str(),
+        ),
     ] {
-        if value.trim().is_empty() {
-            bail!("named-runner identity fields must not be empty");
-        }
+        validate_public_evidence(field, value, &transport_values)?;
     }
     if config.controller_host != config.load_generator_host {
         bail!(
@@ -905,22 +1273,18 @@ fn validate_config(config: &NamedRunnerConfig) -> Result<()> {
         );
     }
     for voter in &config.voters {
-        for value in [
-            &voter.ssh_host,
-            &voter.advertised_host,
-            &voter.label,
-            &voter.hardware,
-            &voter.storage_device,
-            &voter.network_path,
-        ] {
-            if value.trim().is_empty() {
-                bail!("named voter {} has an empty identity field", voter.node_id);
-            }
-        }
         for value in [&voter.ssh_host, &voter.advertised_host] {
             if !safe_host_token(value) {
                 bail!("named voter {} has an unsafe host token", voter.node_id);
             }
+        }
+        for (field, value) in [
+            ("voter label", voter.label.as_str()),
+            ("hardware class", voter.hardware.as_str()),
+            ("storage class", voter.storage_device.as_str()),
+            ("network class", voter.network_path.as_str()),
+        ] {
+            validate_public_evidence(field, value, &transport_values)?;
         }
     }
     if !safe_image_reference(&config.image) {
@@ -943,6 +1307,61 @@ fn safe_host_token(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         && !value.contains("..")
+}
+
+fn validate_public_evidence(field: &str, value: &str, transport_values: &[&str]) -> Result<()> {
+    let trimmed = value.trim();
+    if value != trimmed
+        || value.is_empty()
+        || value.len() > 256
+        || !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains("://")
+        || value
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '@' | ':'))
+        || value.parse::<std::net::IpAddr>().is_ok()
+        || value
+            .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+            .any(|token| token.parse::<std::net::Ipv4Addr>().is_ok())
+    {
+        bail!("named-runner {field} is not a bounded commit-safe label");
+    }
+    let lower = value.to_ascii_lowercase();
+    if [
+        "serial",
+        "machine-id",
+        "machine_id",
+        "token",
+        "secret",
+        "private key",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        bail!("named-runner {field} contains identity or credential-shaped material");
+    }
+    if transport_values.iter().any(|transport| {
+        let transport = transport.trim().to_ascii_lowercase();
+        !transport.is_empty()
+            && (lower == transport || (transport.len() >= 4 && lower.contains(&transport)))
+    }) {
+        bail!("named-runner {field} exposes a runtime transport identity");
+    }
+    if value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            token.len() >= 24
+                && (token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || (token.len() >= 32
+                        && token
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))))
+        })
+    {
+        bail!("named-runner {field} contains token-shaped material");
+    }
+    Ok(())
 }
 
 fn verify_controller_source(source_root: &Path, expected_sha: Option<&str>) -> Result<String> {
@@ -998,21 +1417,16 @@ fn safe_image_reference(value: &str) -> bool {
     let Some((repository, tag)) = value.rsplit_once(':') else {
         return false;
     };
-    !repository.is_empty()
-        && repository
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        && repository
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._/:-".contains(&byte))
-        && !repository.contains("..")
-        && !repository.contains("//")
-        && repository
-            .split('/')
-            .all(|part| !part.is_empty() && !part.starts_with('-'))
+    repository == LOCAL_IMAGE_REPOSITORY
         && tag.len() == 40
         && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
@@ -1031,19 +1445,90 @@ struct DeploymentProof {
     voter_machine_fingerprints: Vec<String>,
 }
 
+struct RunMachinePlacement {
+    controller: String,
+    voters: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InspectedImage {
+    digest: String,
+    architecture: String,
+    operating_system: String,
+    revision: String,
+}
+
+fn parse_inspected_image(output: &str) -> Result<InspectedImage> {
+    let images: serde_json::Value =
+        serde_json::from_str(output).context("decode Docker image inspection")?;
+    let image = images
+        .as_array()
+        .filter(|images| images.len() == 1)
+        .and_then(|images| images.first())
+        .context("Docker image inspection must contain exactly one image")?;
+    let string_field = |field: &str| {
+        image
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("image inspection omitted {field}"))
+    };
+    let revision = image
+        .pointer("/Config/Labels/org.opencontainers.image.revision")
+        .and_then(serde_json::Value::as_str)
+        .context("image inspection omitted its OCI revision label")?;
+    Ok(InspectedImage {
+        digest: string_field("Id")?.to_owned(),
+        architecture: string_field("Architecture")?.to_owned(),
+        operating_system: string_field("Os")?.to_owned(),
+        revision: revision.to_owned(),
+    })
+}
+
+async fn verify_run_machine_placement(
+    selected: &[NamedVoter],
+    build_sha: &str,
+    deployment: &DeploymentProof,
+) -> Result<RunMachinePlacement> {
+    let controller = machine_fingerprint(build_sha, &local_machine_identity().await?);
+    if controller != deployment.controller_machine_fingerprint {
+        bail!("named-runner controller machine changed before a raw topology run");
+    }
+    let mut voters = Vec::with_capacity(selected.len());
+    for voter in selected {
+        let machine_id = ssh_output(&voter.ssh_host, &["cat", "/etc/machine-id"]).await?;
+        let fingerprint =
+            machine_fingerprint(build_sha, validate_machine_identity(machine_id.trim())?);
+        let expected = deployment
+            .voter_machine_fingerprints
+            .get(usize::try_from(voter.node_id - 1)?)
+            .context("deployment proof omitted a named voter fingerprint")?;
+        if &fingerprint != expected {
+            bail!(
+                "named voter {} machine identity changed before a raw topology run",
+                voter.node_id
+            );
+        }
+        voters.push(fingerprint);
+    }
+    if voters
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != voters.len()
+        || voters.iter().any(|fingerprint| fingerprint == &controller)
+    {
+        bail!("named raw topology did not retain its registered machine placement");
+    }
+    Ok(RunMachinePlacement { controller, voters })
+}
+
 async fn verify_deployed_image(
     config: &NamedRunnerConfig,
     build_sha: &str,
 ) -> Result<DeploymentProof> {
     let mut command = Command::new("docker");
     command
-        .args([
-            "image",
-            "inspect",
-            "--format",
-            "{{.Id}} {{.Architecture}} {{.Os}}",
-            &config.image,
-        ])
+        .args(["image", "inspect", &config.image])
         .kill_on_drop(true);
     let local = tokio::time::timeout(REMOTE_COMMAND_TIMEOUT, command.output())
         .await
@@ -1055,47 +1540,70 @@ async fn verify_deployed_image(
             String::from_utf8_lossy(&local.stderr).trim()
         );
     }
-    let local = String::from_utf8(local.stdout)?;
-    let mut fields = local.split_whitespace();
-    let digest = fields
-        .next()
-        .context("controller image omitted digest")?
-        .to_owned();
-    let architecture = fields
-        .next()
-        .context("controller image omitted architecture")?
-        .to_owned();
-    let image_os = fields.next().context("controller image omitted OS")?;
-    if fields.next().is_some()
-        || image_os != "linux"
-        || !matches!(architecture.as_str(), "amd64" | "arm64")
+    let local = parse_inspected_image(&String::from_utf8(local.stdout)?)?;
+    if local.operating_system != "linux"
+        || local.revision != build_sha
+        || !matches!(local.architecture.as_str(), "amd64" | "arm64")
     {
         bail!("named-runner image must be native Linux amd64 or arm64");
     }
-    validate_image_digest(&digest)?;
+    validate_image_digest(&local.digest)?;
+    let mut identity_command = Command::new("docker");
+    identity_command
+        .args([
+            "run",
+            "--rm",
+            "--pull=never",
+            "--entrypoint",
+            "/usr/local/bin/plurx-cluster-check",
+            &local.digest,
+            "build-identity",
+        ])
+        .kill_on_drop(true);
+    let identity = tokio::time::timeout(REMOTE_COMMAND_TIMEOUT, identity_command.output())
+        .await
+        .context("run named-runner image identity on controller timed out")?
+        .context("run named-runner image identity on controller")?;
+    if !identity.status.success() || String::from_utf8(identity.stdout)?.trim() != build_sha {
+        bail!("named-runner binary is not bound to the controller source SHA");
+    }
     let controller_identity = local_machine_identity().await?;
     let mut remote_identities = Vec::with_capacity(config.voters.len());
     for voter in &config.voters {
         let remote = ssh_output(
             &voter.ssh_host,
-            &[
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}} {{.Architecture}} {{.Os}}",
-                &config.image,
-            ],
+            &["docker", "image", "inspect", &config.image],
         )
         .await?;
-        if remote.trim() != format!("{digest} {architecture} linux") {
+        let remote = parse_inspected_image(&remote)?;
+        if remote != local {
             bail!(
                 "named voter {} does not have the controller image identity",
                 voter.node_id
             );
         }
+        let remote_build_sha = ssh_output(
+            &voter.ssh_host,
+            &[
+                "docker",
+                "run",
+                "--rm",
+                "--pull=never",
+                "--entrypoint",
+                "/usr/local/bin/plurx-cluster-check",
+                &local.digest,
+                "build-identity",
+            ],
+        )
+        .await?;
+        if remote_build_sha.trim() != build_sha {
+            bail!(
+                "named voter {} binary is not bound to the controller source SHA",
+                voter.node_id
+            );
+        }
         let machine_architecture = ssh_output(&voter.ssh_host, &["uname", "-m"]).await?;
-        if normalize_machine_architecture(machine_architecture.trim())? != architecture {
+        if normalize_machine_architecture(machine_architecture.trim())? != local.architecture {
             bail!(
                 "named voter {} would emulate the runner image",
                 voter.node_id
@@ -1119,8 +1627,8 @@ async fn verify_deployed_image(
         bail!("named runner did not resolve four machines external to the controller");
     }
     Ok(DeploymentProof {
-        image_digest: digest,
-        native_architecture: architecture,
+        image_digest: local.digest,
+        native_architecture: local.architecture,
         controller_machine_fingerprint: machine_fingerprint(build_sha, &controller_identity),
         voter_machine_fingerprints: remote_identities
             .iter()
@@ -1345,12 +1853,7 @@ pub fn validate_named_campaign(
     {
         bail!("unsupported named campaign contract");
     }
-    if campaign.build_sha.len() != 40
-        || !campaign
-            .build_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !is_lower_hex(&campaign.build_sha, 40) {
         bail!("named campaign build SHA must be complete");
     }
     if !safe_image_reference(&campaign.image)
@@ -1360,8 +1863,12 @@ pub fn validate_named_campaign(
     }
     validate_image_digest(&campaign.image_digest)?;
     if !matches!(campaign.native_architecture.as_str(), "amd64" | "arm64")
-        || campaign.controller_machine_fingerprint.len() != 64
+        || !is_lower_hex(&campaign.controller_machine_fingerprint, 64)
         || campaign.voter_machine_fingerprints.len() != 4
+        || campaign
+            .voter_machine_fingerprints
+            .iter()
+            .any(|fingerprint| !is_lower_hex(fingerprint, 64))
         || campaign
             .voter_machine_fingerprints
             .iter()
@@ -1380,22 +1887,22 @@ pub fn validate_named_campaign(
     if campaign.controller_host != campaign.load_generator_host {
         bail!("named campaign load generator was not the external controller process");
     }
-    if [
-        &campaign.runner_id,
-        &campaign.controller_host,
-        &campaign.load_generator_host,
-        &campaign.load_generator_isolation,
-    ]
-    .into_iter()
-    .any(|value| value.trim().is_empty())
-    {
-        bail!("named campaign identity fields must not be empty");
+    for (field, value) in [
+        ("runner_id", campaign.runner_id.as_str()),
+        ("controller_host", campaign.controller_host.as_str()),
+        ("load_generator_host", campaign.load_generator_host.as_str()),
+        (
+            "load_generator_isolation",
+            campaign.load_generator_isolation.as_str(),
+        ),
+    ] {
+        validate_public_evidence(field, value, &[])?;
     }
     if campaign.voter_labels.len() != 4
         || campaign
             .voter_labels
             .iter()
-            .any(|label| label.trim().is_empty())
+            .any(|label| validate_public_evidence("voter label", label, &[]).is_err())
         || campaign
             .voter_labels
             .iter()
@@ -1445,8 +1952,28 @@ pub fn validate_named_campaign(
                 bail!("named raw pair provenance does not match its campaign");
             }
             if artifact.runs.iter().any(|run| {
+                let voter_count = usize::try_from(run.voter_count).unwrap_or(usize::MAX);
                 run.controller_host != campaign.controller_host
                     || run.load_generator_host != campaign.load_generator_host
+                    || run.load_generator_isolation.as_deref()
+                        != Some(campaign.load_generator_isolation.as_str())
+                    || run.controller_machine_fingerprint.as_deref()
+                        != Some(campaign.controller_machine_fingerprint.as_str())
+                    || campaign
+                        .voter_machine_fingerprints
+                        .get(..voter_count)
+                        .is_none_or(|expected| {
+                            run.voter_machine_fingerprints.as_deref() != Some(expected)
+                        })
+                    || run.resources.iter().any(|resource| {
+                        [
+                            ("hardware class", resource.hardware.as_str()),
+                            ("storage class", resource.storage_device.as_str()),
+                            ("network class", resource.network_path.as_str()),
+                        ]
+                        .into_iter()
+                        .any(|(field, value)| validate_public_evidence(field, value, &[]).is_err())
+                    })
             }) {
                 bail!("named raw pair controller placement does not match its campaign");
             }
@@ -1641,16 +2168,66 @@ mod tests {
         assert!(!safe_host_token("nuc4;reboot"));
         assert!(!safe_image_reference("--privileged"));
         assert!(!safe_image_reference("$(touch /tmp/no)"));
+        assert!(
+            validate_public_evidence("runner_id", "private-runner-1", &["private-runner-1"])
+                .is_err()
+        );
+        assert!(validate_public_evidence("runner_id", "lab 10.20.30.40", &[]).is_err());
+        assert!(validate_public_evidence("runner_id", " padded-label ", &[]).is_err());
+    }
+
+    #[test]
+    fn raw_image_inspection_needs_no_shell_sensitive_remote_format() {
+        let output = serde_json::json!([{
+            "Id": format!("sha256:{}", "b".repeat(64)),
+            "Architecture": "arm64",
+            "Os": "linux",
+            "Config": {
+                "Labels": {
+                    "org.opencontainers.image.revision": "a".repeat(40)
+                }
+            }
+        }])
+        .to_string();
+        assert_eq!(
+            parse_inspected_image(&output).expect("pinned image inspection"),
+            InspectedImage {
+                digest: format!("sha256:{}", "b".repeat(64)),
+                architecture: "arm64".to_owned(),
+                operating_system: "linux".to_owned(),
+                revision: "a".repeat(40),
+            }
+        );
+        assert!(parse_inspected_image("[]").is_err());
+    }
+
+    #[test]
+    fn container_cleanup_requires_the_separate_owner_capability() {
+        let owner = "a".repeat(64);
+        let inspection = serde_json::json!([{
+            "Config": { "Labels": { (REMOTE_OWNER_LABEL): owner } }
+        }]);
+        assert_eq!(
+            container_owner_from_inspect(&serde_json::to_vec(&inspection).expect("inspect JSON"))
+                .expect("owner label"),
+            "a".repeat(64)
+        );
+        let unowned = serde_json::json!([{"Config": {"Labels": {}}}]);
+        assert!(container_owner_from_inspect(
+            &serde_json::to_vec(&unowned).expect("unowned inspect JSON")
+        )
+        .is_err());
     }
 
     #[test]
     fn cleanup_scope_refuses_options_and_path_components() {
         use std::os::unix::fs::PermissionsExt;
 
+        let nonce = "a".repeat(64);
         let valid = RemoteCleanup {
             ssh_host: "runner-1".to_owned(),
-            container_name: "plurx-named-p1-v3-n1".to_owned(),
-            remote_root: format!("{REMOTE_ROOT_PREFIX}{}-p1-v3-n1", "a".repeat(64)),
+            container_name: format!("plurx-named-{nonce}-p1-v3-n1"),
+            remote_root: format!("{REMOTE_ROOT_PREFIX}{nonce}-p1-v3-n1"),
             image_digest: format!("sha256:{}", "b".repeat(64)),
             node_id: 1,
         };
@@ -1672,8 +2249,8 @@ mod tests {
             &owner,
             &[RemoteCleanup {
                 ssh_host: "runner-1".to_owned(),
-                container_name: "plurx-named-p1-v3-n1".to_owned(),
-                remote_root: format!("{REMOTE_ROOT_PREFIX}{}-p1-v3-n1", "a".repeat(64)),
+                container_name: format!("plurx-named-{nonce}-p1-v3-n1"),
+                remote_root: format!("{REMOTE_ROOT_PREFIX}{nonce}-p1-v3-n1"),
                 image_digest: format!("sha256:{}", "b".repeat(64)),
                 node_id: 1,
             }],
@@ -1685,6 +2262,66 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn cleanup_targets_are_bound_to_each_campaign_nonce() {
+        let cleanup = |nonce: &str| RemoteCleanup {
+            ssh_host: "runner-1".to_owned(),
+            container_name: format!("plurx-named-{nonce}-p1-v3-n1"),
+            remote_root: format!("{REMOTE_ROOT_PREFIX}{nonce}-p1-v3-n1"),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            node_id: 1,
+        };
+        let first = cleanup(&"a".repeat(64));
+        let second = cleanup(&"c".repeat(64));
+        validate_cleanup(&first).expect("first campaign target");
+        validate_cleanup(&second).expect("second campaign target");
+        assert_ne!(first.container_name, second.container_name);
+
+        let mut crossed = first;
+        crossed.container_name = second.container_name;
+        validate_cleanup(&crossed).expect_err("cross-campaign target must be rejected");
+
+        let first_owner = remote_owner_marker(&crossed, &"d".repeat(64)).expect("first owner");
+        let second_owner = remote_owner_marker(&crossed, &"e".repeat(64)).expect("second owner");
+        assert_ne!(first_owner, second_owner);
+    }
+
+    #[test]
+    fn cleanup_authority_rejects_links_and_non_private_files() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let parent = tempfile::tempdir().expect("cleanup authority parent");
+        let output = parent.path().join("campaign");
+        std::fs::create_dir(&output).expect("campaign output");
+        let owner = "a".repeat(64);
+        write_atomic_with_mode(
+            &output.join(OUTPUT_OWNER_FILENAME),
+            format!("{owner}\n").as_bytes(),
+            0o600,
+        )
+        .expect("owner marker");
+        let cleanup = RemoteCleanup {
+            ssh_host: "runner-1".to_owned(),
+            container_name: format!("plurx-named-{owner}-p1-v3-n1"),
+            remote_root: format!("{REMOTE_ROOT_PREFIX}{owner}-p1-v3-n1"),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            node_id: 1,
+        };
+        let manifest = output.join(CLEANUP_MANIFEST_FILENAME);
+        write_cleanup_manifest(&manifest, &owner, &[cleanup]).expect("cleanup manifest");
+        CleanupAuthority::open(&manifest).expect("private real cleanup authority");
+
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o644))
+            .expect("make manifest public");
+        assert!(CleanupAuthority::open(&manifest).is_err());
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600))
+            .expect("restore manifest mode");
+
+        let linked_output = parent.path().join("linked-campaign");
+        symlink(&output, &linked_output).expect("linked output");
+        assert!(CleanupAuthority::open(&linked_output.join(CLEANUP_MANIFEST_FILENAME)).is_err());
     }
 
     #[test]

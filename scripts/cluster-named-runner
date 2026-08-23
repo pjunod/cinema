@@ -47,6 +47,7 @@ case "${1:-}" in
     git -C "$repo" archive "$sha" | docker build \
       --platform "linux/$architecture" \
       --file benchmarks/cluster-named-runner.Dockerfile \
+      --build-arg "PLURX_BUILD_SHA=$sha" \
       --tag "$image" \
       -
     for host do

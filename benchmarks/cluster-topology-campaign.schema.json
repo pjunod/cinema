@@ -33,8 +33,8 @@
     "schema_version": { "const": 1 },
     "evidence_scope": { "const": "named_runner" },
     "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "runner_id": { "type": "string", "minLength": 1 },
-    "image": { "type": "string", "minLength": 1 },
+    "runner_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "image": { "type": "string", "pattern": "^plurx-cluster-check:[0-9a-f]{40}$" },
     "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "native_architecture": { "enum": ["amd64", "arm64"] },
     "controller_machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -45,14 +45,14 @@
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
     },
-    "controller_host": { "type": "string", "minLength": 1 },
-    "load_generator_host": { "type": "string", "minLength": 1 },
-    "load_generator_isolation": { "type": "string", "minLength": 1 },
+    "controller_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_isolation": { "type": "string", "minLength": 1, "maxLength": 256 },
     "voter_labels": {
       "type": "array",
       "minItems": 4,
       "maxItems": 4,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
     },
     "min_pairs": { "const": 3 },
     "max_pairs": { "const": 7 },

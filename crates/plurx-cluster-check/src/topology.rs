@@ -80,6 +80,12 @@ pub struct TopologyRun {
     pub max_apply_lag_entries: u64,
     pub controller_host: String,
     pub load_generator_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_generator_isolation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_machine_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voter_machine_fingerprints: Option<Vec<String>>,
     pub resources: Vec<ResourceSample>,
 }
 
@@ -229,6 +235,9 @@ pub(super) struct ResourceIdentity {
 pub(super) struct RunEvidence<'a> {
     pub controller_host: &'a str,
     pub load_generator_host: &'a str,
+    pub load_generator_isolation: Option<&'a str>,
+    pub controller_machine_fingerprint: Option<&'a str>,
+    pub voter_machine_fingerprints: Option<&'a [String]>,
     pub resources: Option<&'a [ResourceIdentity]>,
 }
 
@@ -241,6 +250,9 @@ impl RunEvidence<'static> {
                 "local-semantic-run"
             },
             load_generator_host: "controller-process",
+            load_generator_isolation: None,
+            controller_machine_fingerprint: None,
+            voter_machine_fingerprints: None,
             resources: None,
         }
     }
@@ -371,6 +383,9 @@ pub(super) async fn exercise_topology(
         max_apply_lag_entries,
         controller_host: evidence.controller_host.to_owned(),
         load_generator_host: evidence.load_generator_host.to_owned(),
+        load_generator_isolation: evidence.load_generator_isolation.map(str::to_owned),
+        controller_machine_fingerprint: evidence.controller_machine_fingerprint.map(str::to_owned),
+        voter_machine_fingerprints: evidence.voter_machine_fingerprints.map(<[_]>::to_vec),
         resources,
     })
 }
@@ -712,6 +727,41 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
         if run.errors != 0 {
             bail!("topology run recorded {} write errors", run.errors);
         }
+        match artifact.evidence_scope.as_str() {
+            SEMANTIC_EVIDENCE_SCOPE
+                if run.load_generator_isolation.is_none()
+                    && run.controller_machine_fingerprint.is_none()
+                    && run.voter_machine_fingerprints.is_none() => {}
+            NAMED_RUNNER_EVIDENCE_SCOPE => {
+                let isolation = run
+                    .load_generator_isolation
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .context("named topology run omitted load-generator isolation")?;
+                let controller = run
+                    .controller_machine_fingerprint
+                    .as_deref()
+                    .context("named topology run omitted controller fingerprint")?;
+                let voters = run
+                    .voter_machine_fingerprints
+                    .as_deref()
+                    .context("named topology run omitted voter fingerprints")?;
+                if isolation.len() > 256
+                    || !is_sha256_hex(controller)
+                    || voters.len() != usize::try_from(run.voter_count)?
+                    || voters.iter().any(|value| !is_sha256_hex(value))
+                    || voters
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != voters.len()
+                    || voters.iter().any(|value| value == controller)
+                {
+                    bail!("named topology run machine-placement proof is invalid");
+                }
+            }
+            _ => bail!("topology run evidence fields contradict its scope"),
+        }
         if u64::try_from(run.raw_acknowledged_write_round_trip_us.len())?
             != artifact.workload.operations
         {
@@ -828,6 +878,13 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
     Ok(())
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn duration_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
@@ -926,6 +983,9 @@ mod tests {
             max_apply_lag_entries: 0,
             controller_host: "semantic-controller".to_owned(),
             load_generator_host: "controller-process".to_owned(),
+            load_generator_isolation: None,
+            controller_machine_fingerprint: None,
+            voter_machine_fingerprints: None,
             resources: (1..=voter_count)
                 .map(|node_id| ResourceSample {
                     node_id,
@@ -984,8 +1044,20 @@ mod tests {
             required.len(),
             "schema required list contains a duplicate",
         );
-        assert_eq!(properties, required);
-        assert_eq!(properties, serialized);
+        let optional = match definition {
+            None => BTreeSet::from(["runner_image_digest".to_owned()]),
+            Some("run") => BTreeSet::from([
+                "load_generator_isolation".to_owned(),
+                "controller_machine_fingerprint".to_owned(),
+                "voter_machine_fingerprints".to_owned(),
+            ]),
+            _ => BTreeSet::new(),
+        };
+        assert_eq!(properties, serialized.union(&optional).cloned().collect());
+        assert_eq!(
+            required,
+            properties.difference(&optional).cloned().collect()
+        );
     }
 
     fn fixture() -> ClusterTopologyArtifact {
@@ -1164,10 +1236,22 @@ mod tests {
         assert!(!schema_validator.is_valid(&semantic_with_resources));
         assert!(validate_json_artifact(&semantic_with_resources).is_err());
 
+        let mut semantic_with_named_placement = artifact.clone();
+        semantic_with_named_placement["runs"][0]["controller_machine_fingerprint"] =
+            serde_json::json!("d".repeat(64));
+        assert!(!schema_validator.is_valid(&semantic_with_named_placement));
+        assert!(validate_json_artifact(&semantic_with_named_placement).is_err());
+
         let mut named = artifact.clone();
         named["evidence_scope"] = serde_json::json!(NAMED_RUNNER_EVIDENCE_SCOPE);
         named["runner_image_digest"] = serde_json::json!(format!("sha256:{}", "c".repeat(64)));
         for run in named["runs"].as_array_mut().expect("topology runs") {
+            run["load_generator_isolation"] = serde_json::json!("dedicated load generator");
+            run["controller_machine_fingerprint"] = serde_json::json!("d".repeat(64));
+            let voter_count = run["voter_count"].as_u64().expect("voter count");
+            run["voter_machine_fingerprints"] = serde_json::json!((1..=voter_count)
+                .map(|id| format!("{id:064x}"))
+                .collect::<Vec<_>>());
             for resource in run["resources"].as_array_mut().expect("resource samples") {
                 resource["cpu_seconds"] = serde_json::json!(0.1);
                 resource["wall_seconds"] = serde_json::json!(0.2);
@@ -1180,6 +1264,16 @@ mod tests {
         }
         assert!(schema_validator.is_valid(&named));
         validate_json_artifact(&named).expect("valid named-runner artifact");
+
+        let mut legacy_semantic =
+            serde_json::to_value(fixture()).expect("serialize legacy fixture");
+        legacy_semantic
+            .as_object_mut()
+            .expect("legacy artifact object")
+            .remove("runner_image_digest");
+        assert!(schema_validator.is_valid(&legacy_semantic));
+        validate_json_artifact(&legacy_semantic)
+            .expect("schema v1 semantic artifact without digest");
 
         let mut cross_field_hash_mismatch = artifact;
         cross_field_hash_mismatch["runs"][0]["corpus_observations"][0]["corpus_sha256"] =

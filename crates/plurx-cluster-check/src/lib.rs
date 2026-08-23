@@ -243,6 +243,12 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             let order = topology::parse_topology_order(args.get(3).map(String::as_str))?;
             run_topology_comparison(&output, order).await
         }
+        Some("build-identity") => {
+            if args.get(2).is_some() {
+                bail!("build-identity accepts no arguments");
+            }
+            named_runner::print_embedded_build_identity()
+        }
         Some("topology-named") => {
             let config = args
                 .get(2)

@@ -410,8 +410,16 @@ live plurx voter. Each measured topology gets fresh containers, ports in the
 IANA dynamic/private range (`49152--65535`), and a new
 `/var/tmp/plurx-cluster-named.*` data root on local durable storage. A
 controller-generated 256-bit nonce makes every root a single, predeclared
-basename. Successful and failed runs remove only the exact container names and
-nonce paths they recorded before remote creation.
+basename. The same nonce is part of every container name, so two campaigns can
+never claim the same cleanup target. Successful and failed runs remove only
+the exact container names and nonce paths they recorded before remote creation.
+Each newly created root also receives a sibling marker derived from the
+separate, private output-owner capability; cleanup refuses a colliding root
+without that marker instead of treating the random basename as proof of
+ownership. The marker remains until the root itself is gone, so interrupted
+cleanup is safely retryable. Voter containers carry the same capability in a
+private cleanup label, and cleanup refuses to stop a colliding container unless
+its raw Docker inspection matches.
 
 Build from the isolated clone and keep private hostnames and addresses in an
 ignored config under `target/`:
@@ -433,17 +441,25 @@ The image command refuses a dirty or untracked clone and sends `git archive` of
 the exact full source SHA to Docker, so ignored credentials and controller-only
 files cannot enter the build context. It builds for the common native
 architecture reported by the four voters and requires that SHA as the image
-tag. Collection independently requires a clean controller tree with the same
-HEAD at its opening and closing boundaries. It rechecks the image digest,
-native Linux architecture, four distinct salted machine identities, and an
-external controller identity before and after measurement; every measured and
-cleanup container executes that verified digest with pulls disabled, never the
-mutable tag. Runtime SSH names, private addresses, and raw machine ids are
-transport-only; committed artifacts use opaque node labels and build-salted
-fingerprints. Before collection, confirm the configured ports are free, the
-controller and voters have no concurrent build, scan, backup, or benchmark
-work, and every `/var/tmp` root is the declared local durable device rather
-than tmpfs or a network mount.
+tag. Both Dockerfile stages are pinned by manifest digest. The build embeds the
+full source SHA in the runner binary and the runtime image's OCI revision
+label; collection executes that binary by immutable image ID and verifies both
+identities locally and on every voter. Collection independently requires a
+clean controller tree with the same HEAD at its opening and closing
+boundaries. It rechecks the image digest, native Linux architecture, four
+distinct salted machine identities, and an external controller identity before
+and after measurement. It also resamples and binds those fingerprints to each
+raw run. Every measured and cleanup container executes the verified digest
+with pulls disabled, never the mutable tag.
+
+Runtime SSH names, private addresses, and raw machine ids are transport-only;
+committed artifacts use bounded, opaque classification labels and build-salted
+fingerprints. The runner rejects public labels that contain transports, URLs,
+IP addresses, credential/identity markers, or token-shaped values, and accepts
+only the local `plurx-cluster-check:<full-sha>` image name. Before collection,
+confirm the configured ports are free, the controller and voters have no
+concurrent build, scan, backup, or benchmark work, and every `/var/tmp` root is
+the declared local durable device rather than tmpfs or a network mount.
 
 Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
 every raw `pair-NN.json`. After at least three pairs it computes the paired
@@ -455,7 +471,9 @@ at the opening barrier. It may stop only when all two-sided 95% Student-t
 intervals have at most 5% multiplicative half-width, or after seven pairs with
 an `inconclusive` result. `campaign.json` records the medians, intervals,
 stopping verdict, isolated load-generator declaration, and reviewed budgets.
-Validate retained bytes and every cross-file hash with:
+Every raw run repeats the same isolation declaration and records the exact
+controller and voter fingerprint set used for that topology. Validate retained
+bytes and every cross-file hash with:
 
 ```bash
 cargo run --locked -p plurx-cluster-check -- \
@@ -471,7 +489,10 @@ cannot overwrite earlier evidence. During an active topology,
 `.active-cleanup.json` is bound to that owner and atomically created with mode
 `0600` because it contains private transport details. The helper traps
 interruption and replays only its manifest through time-bounded SSH cleanup. It
-does not automatically clean a stale manifest from another invocation. If the
+opens both the manifest and owner marker without following links, requires
+regular mode-`0600` files, retains their descriptors during remote cleanup, and
+rechecks their device/inode identities before deleting the manifest. It does
+not automatically clean a stale manifest from another invocation. If the
 controller itself is killed, recover the retained manifest explicitly before
 reusing the runner hosts. Preserve that directory as evidence and choose a
 fresh output directory for the next campaign:
