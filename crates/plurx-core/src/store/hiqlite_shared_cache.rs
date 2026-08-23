@@ -21,12 +21,14 @@ const ADD_GENERATION_ID: &str =
 const BACKFILL_LOCATION_IDENTITY: &str = "UPDATE transcode_cache_locations
     SET storage_id = 'node:' || node_id || ':cache', generation_id = relative_dir
     WHERE storage_id = ''";
-const STORAGE_GENERATION_INDEX: &str = "CREATE UNIQUE INDEX transcode_cache_storage_generation
+const STORAGE_GENERATION_INDEX: &str =
+    "CREATE UNIQUE INDEX IF NOT EXISTS transcode_cache_storage_generation
     ON transcode_cache_locations(recipe_hash, storage_id, generation_id)
     WHERE storage_id <> '' AND generation_id <> ''";
-const STORAGE_LRU_INDEX: &str = "CREATE INDEX transcode_cache_storage_lru
+const STORAGE_LRU_INDEX: &str = "CREATE INDEX IF NOT EXISTS transcode_cache_storage_lru
     ON transcode_cache_locations(storage_id, complete, last_used_at)";
-const LEGACY_LOCATION_IDENTITY_TRIGGER: &str = "CREATE TRIGGER transcode_cache_location_identity_ai
+const LEGACY_LOCATION_IDENTITY_TRIGGER: &str =
+    "CREATE TRIGGER IF NOT EXISTS transcode_cache_location_identity_ai
     AFTER INSERT ON transcode_cache_locations
     WHEN new.storage_id = '' AND new.generation_id = '' BEGIN
         UPDATE transcode_cache_locations
@@ -37,7 +39,7 @@ const LEGACY_LOCATION_IDENTITY_TRIGGER: &str = "CREATE TRIGGER transcode_cache_l
            AND storage_class = new.storage_class;
     END";
 const LEGACY_LOCATION_GENERATION_TRIGGER: &str =
-    "CREATE TRIGGER transcode_cache_location_identity_au
+    "CREATE TRIGGER IF NOT EXISTS transcode_cache_location_identity_au
     AFTER UPDATE OF relative_dir ON transcode_cache_locations
     WHEN new.storage_class = 'local'
      AND new.storage_id = 'node:' || new.node_id || ':cache'
@@ -49,7 +51,7 @@ const LEGACY_LOCATION_GENERATION_TRIGGER: &str =
            AND node_id = new.node_id
            AND storage_class = new.storage_class;
     END";
-const STORAGE_MEMBERS_SCHEMA: &str = "CREATE TABLE cache_storage_members (
+const STORAGE_MEMBERS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS cache_storage_members (
     storage_id          TEXT NOT NULL,
     node_id             TEXT NOT NULL,
     storage_class       TEXT NOT NULL CHECK (storage_class IN ('local', 'shared')),
@@ -58,9 +60,9 @@ const STORAGE_MEMBERS_SCHEMA: &str = "CREATE TABLE cache_storage_members (
         verification_state IN ('verified', 'suspect', 'unverified')),
     PRIMARY KEY (storage_id, node_id)
 ) STRICT";
-const STORAGE_MEMBERS_INDEX: &str = "CREATE INDEX cache_storage_members_node
+const STORAGE_MEMBERS_INDEX: &str = "CREATE INDEX IF NOT EXISTS cache_storage_members_node
     ON cache_storage_members(node_id, verification_state, storage_id)";
-const CONSUMER_PINS_SCHEMA: &str = "CREATE TABLE cache_consumer_pins (
+const CONSUMER_PINS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS cache_consumer_pins (
     storage_id       TEXT NOT NULL,
     recipe_hash      TEXT NOT NULL,
     generation_id    TEXT NOT NULL,
@@ -72,7 +74,7 @@ const CONSUMER_PINS_SCHEMA: &str = "CREATE TABLE cache_consumer_pins (
     PRIMARY KEY (
         storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
 ) STRICT";
-const CONSUMER_PINS_INDEX: &str = "CREATE INDEX cache_consumer_pins_expiry
+const CONSUMER_PINS_INDEX: &str = "CREATE INDEX IF NOT EXISTS cache_consumer_pins_expiry
     ON cache_consumer_pins(storage_id, expires_at_ms)";
 
 pub(super) fn migration_statements() -> Vec<(String, hiqlite::Params)> {
