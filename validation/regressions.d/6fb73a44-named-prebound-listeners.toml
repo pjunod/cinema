@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6fb73a44"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The named-runner crate check and separate-process cluster gate compile the rebased node startup against current hiqlite's pre-bound listener contract while retaining launch-specific listen addresses and positive listener acceptance proof. Reverting the integration correction restores references to removed legacy panic-guard state and makes the named campaign harness fail to compile."
