@@ -1222,7 +1222,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             )
             .await?,
         "membership_internal",
-        "already published by another cluster node",
+        "conflicts with an existing node claim",
     )?;
     for node_id in 1..=3 {
         let urls = match cluster.request(node_id, Request::ArtworkPeerUrls).await? {
