@@ -143,7 +143,7 @@ impl ServingFence {
         } else {
             self.loss_generation.load(Ordering::Acquire)
         };
-        let _ = self.state.send(ServingState {
+        self.state.send_replace(ServingState {
             ready: desired,
             loss_generation,
         });
@@ -210,5 +210,17 @@ mod tests {
         let recovered = *state.borrow_and_update();
         assert!(recovered.ready);
         assert!(recovered.authority_lost_since(admitted));
+    }
+
+    #[test]
+    fn authority_state_is_retained_before_the_first_subscriber() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        fence.validation_set_ready(false);
+        fence.validation_set_ready(true);
+
+        let state = *fence.subscribe().borrow();
+        assert!(state.ready);
+        assert_eq!(state.loss_generation, 1);
+        assert!(state.authority_lost_since(0));
     }
 }
