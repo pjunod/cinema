@@ -311,6 +311,12 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
         )
         .route(
+            crate::shared_cache::CANARY_PATH,
+            post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
+                crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
+            )),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,

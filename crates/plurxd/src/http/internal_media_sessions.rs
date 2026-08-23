@@ -88,6 +88,29 @@ pub(crate) async fn start(
                 start_deadline,
             )
             .await?;
+        let provisional_pin_ms =
+            i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
+        if !start_state
+            .transcode
+            .pin_shared_session(
+                &started.info.session_id,
+                &request.incarnation_id,
+                1,
+                unix_ms().saturating_add(provisional_pin_ms),
+            )
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            start_state
+                .transcode
+                .stop_session_for_request(
+                    &request.incarnation_id,
+                    &started.info.session_id,
+                    "shared cache pin changed",
+                )
+                .await;
+            return Err("shared cache generation changed before activation".to_owned());
+        }
         let response = RemoteStartResponse::from(started.info);
         let confirmation_state = start_state.clone();
         let confirmation_incarnation = request.incarnation_id.clone();

@@ -34,6 +34,26 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **The VOD presentation plan's feasibility spike ran, and it stopped the
+  build.** Three harnesses under `scripts/` measure what the plan assumed:
+  `vod-plan-probe` builds the plan's fragment index from the
+  production-shaped video-only copy pipe, applies `CutPolicy` over it, then
+  materializes the full production pipe and checks the plan's boundaries,
+  byte bounds and initialization segment against real ffmpeg output;
+  `vod-probe-stub` drives the vendored hls.js through a stub HLS server that
+  can declare nominal EXTINFs over jittered media, block a segment, and
+  answer a deadline with a typed `segment_pending` 503; `vod-probe-fixtures.sh`
+  builds a nine-fixture corpus whose GOPs are deliberately not a whole number
+  of milliseconds. Plan section 12 records the results. The fragment index is
+  deterministic and describes the production fragment stream exactly, so
+  ledger D4 is upheld; blocking behind one hard deadline works on a stock web
+  player, but only when the deadline sits below the client's own first-byte
+  timeout, which sets D1's number at 8 seconds rather than 15; and hls.js
+  ignores the playlist's declared durations in favour of measured PTS, which
+  settles D6 as nominal. A repositioned producer's timestamps, however, carry
+  no film time in any configuration tested, so section 2.2's addressing rule
+  is unimplementable as written and M1 does not start.
+
 - **Cluster topology guidance and comparable three-versus-four-voter evidence
   are now executable.** Operations recommends three voters for ordinary HA,
   documents readiness-aware sticky proxying and a complete durable authority

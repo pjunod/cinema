@@ -23,7 +23,7 @@ use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-pub(crate) const PROTOCOL_VERSION: i64 = 2;
+pub(crate) const PROTOCOL_VERSION: i64 = 3;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);

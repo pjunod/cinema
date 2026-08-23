@@ -34,10 +34,11 @@ use plurx_core::cluster::migration::{
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::config::Config;
 use plurx_core::domain::{
-    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheManifestCheck,
-    CredentialGeneration, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
-    MediaSessionRenewal, MediaSessionRequestClaim, MetadataPatch, NetworkPriorObservation, NewItem,
-    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
+    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
+    MediaSessionRequestClaim, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
+    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
     PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
     ProbeResult, ReadingStateWrite, TraktAuth,
 };
@@ -253,6 +254,25 @@ const CACHE_METHODS: &[&str] = &[
     "invalidate_cache_entry",
     "forget_cache_entry",
     "cache_bytes",
+];
+const SHARED_CACHE_METHODS: &[&str] = &[
+    "put_cache_storage_member",
+    "cache_storage_member",
+    "mark_cache_storage_suspect",
+    "shared_cache_hit",
+    "touch_shared_cache_entry",
+    "claim_shared_cache_entry",
+    "complete_shared_cache_entry",
+    "abandon_shared_cache_entry",
+    "finalize_abandoned_shared_cache_entry",
+    "stale_shared_cache_claims",
+    "acquire_cache_consumer_pin",
+    "renew_cache_consumer_pins",
+    "release_cache_consumer_pin",
+    "prune_expired_cache_consumer_pins",
+    "shared_cache_gc_candidates",
+    "retire_shared_cache_generation",
+    "finalize_retired_shared_cache_generation",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &[
     "pretranscode_job",
@@ -654,6 +674,61 @@ async fn media_session_contract_runs_through_dyn_store() {
             .create_user("session-user-b", "hash", false)
             .await
             .unwrap_or_else(|error| panic!("{backend}: create second session user: {error}"));
+        let (_, shared_file_id) = seed_file(&store, "session-shared-pin-contract").await;
+        let shared_storage_id = format!("shared:session-lifecycle:{backend}");
+        let shared_recipe = format!("shared-session-pin-{backend}");
+        let shared_generation_id = "shared-session-generation";
+        store
+            .put_cache_storage_member(&CacheStorageMember {
+                storage_id: shared_storage_id.clone(),
+                node_id: format!("{backend}-session-reader"),
+                storage_class: "shared".to_owned(),
+                verified_at_ms: 80,
+                verification_state: "verified".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify session storage: {error}"));
+        assert!(store
+            .claim_shared_cache_entry(
+                &shared_recipe,
+                shared_file_id,
+                1,
+                &shared_storage_id,
+                shared_generation_id,
+                "session/shared/generation",
+                81,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim session generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &shared_recipe,
+                &shared_storage_id,
+                shared_generation_id,
+                4_096,
+                &"f".repeat(64),
+                82,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete session generation: {error}")));
+        let shared_generation = store
+            .shared_cache_hit(&shared_recipe, &shared_storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read session generation: {error}"))
+            .expect("session generation");
+        let shared_gc_lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{shared_storage_id}"),
+                "session-gc-owner",
+                83,
+                1_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire session GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh session GC lease was held"),
+        };
         let fingerprint = "a".repeat(64);
         let conflicting = "b".repeat(64);
         let incarnation_a = "00000000-0000-4000-8000-0000000000a1";
@@ -867,6 +942,21 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: first activation must win"));
         assert!(first.predecessor.is_none(), "{backend}");
         assert_eq!(first.route.owner_epoch, 1, "{backend}");
+        assert!(store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: shared_storage_id.clone(),
+                    recipe_hash: shared_recipe.clone(),
+                    generation_id: shared_generation_id.to_owned(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_a.to_owned(),
+                    consumer_epoch: 1,
+                    expires_at_ms: 330,
+                },
+                131,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pin predecessor session: {error}")));
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -944,6 +1034,19 @@ async fn media_session_contract_runs_through_dyn_store() {
             Some(session_a),
             "{backend}"
         );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &shared_storage_id,
+                &shared_recipe,
+                shared_generation_id,
+                CacheConsumerKind::MediaSession,
+                incarnation_a,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect predecessor pin: {error}")),
+            "{backend}: fencing a predecessor must delete its shared-cache pin"
+        );
         assert_eq!(
             store
                 .media_session_route(session_a)
@@ -1017,6 +1120,27 @@ async fn media_session_contract_runs_through_dyn_store() {
             "{backend}: a delayed reopen must not end the current successor"
         );
 
+        assert!(store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: shared_storage_id.clone(),
+                    recipe_hash: shared_recipe.clone(),
+                    generation_id: shared_generation_id.to_owned(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_a2.to_owned(),
+                    consumer_epoch: 1,
+                    expires_at_ms: 350,
+                },
+                190,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pin active media session: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 199, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}"))
+            .is_none());
+
         assert_eq!(
             store
                 .renew_media_sessions(
@@ -1033,6 +1157,11 @@ async fn media_session_contract_runs_through_dyn_store() {
             vec![incarnation_a2.to_owned()],
             "{backend}"
         );
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}"))
+            .is_none());
         assert!(store
             .renew_media_sessions(
                 "node-a",
@@ -1073,6 +1202,26 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: list sessions after end: {error}"))
             .is_empty());
+        assert!(!store
+            .release_cache_consumer_pin(
+                &shared_storage_id,
+                &shared_recipe,
+                shared_generation_id,
+                CacheConsumerKind::MediaSession,
+                incarnation_a2,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect ended session pin: {error}")),
+            "{backend}: ending a session must delete its shared-cache pin"
+        );
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 411, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{backend}: retire generation after session end: {error}"
+            ))
+            .is_some());
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -4575,7 +4724,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v5_store_migrates_atomically_through_v10_on_daemon_open() {
+async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -4604,6 +4753,32 @@ async fn replicated_v5_store_migrates_atomically_through_v10_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
@@ -4684,7 +4859,7 @@ async fn replicated_v5_store_migrates_atomically_through_v10_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v5 through v10 migration");
+        .expect("daemon v5 through v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.proof")
@@ -4735,7 +4910,7 @@ async fn replicated_v5_store_migrates_atomically_through_v10_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v6_store_migrates_atomically_to_v10_on_daemon_open() {
+async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -4763,6 +4938,32 @@ async fn replicated_v6_store_migrates_atomically_to_v10_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
@@ -4838,7 +5039,7 @@ async fn replicated_v6_store_migrates_atomically_to_v10_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v6 to v10 migration");
+        .expect("daemon v6 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v6.proof")
@@ -4880,7 +5081,7 @@ async fn replicated_v6_store_migrates_atomically_to_v10_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v7_store_migrates_atomically_to_v10_on_daemon_open() {
+async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -4912,6 +5113,32 @@ async fn replicated_v7_store_migrates_atomically_to_v10_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
@@ -4969,7 +5196,7 @@ async fn replicated_v7_store_migrates_atomically_to_v10_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v7 to v10 migration");
+        .expect("daemon v7 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v7.proof")
@@ -4999,7 +5226,7 @@ async fn replicated_v7_store_migrates_atomically_to_v10_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
+async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -5031,6 +5258,32 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
@@ -5087,7 +5340,7 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v8 to v10 migration");
+        .expect("daemon v8 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v8.proof")
@@ -5142,7 +5395,7 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v10 schema");
+            .expect("inspect migrated v11 schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -5150,7 +5403,7 @@ async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
+async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -5182,6 +5435,32 @@ async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
@@ -5209,7 +5488,7 @@ async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v9 to v10 migration");
+        .expect("daemon v9 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v9.proof")
@@ -5239,7 +5518,134 @@ async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v10 session schema");
+            .expect("inspect migrated v11 session schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v10 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v10-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v10 migration fixture");
+    current
+        .put_setting("migration.v10.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX transcode_cache_storage_lru", hiqlite::params!()),
+            (
+                "DROP INDEX transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 10 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v10 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v10 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 10 is incompatible"),
+        "{strict_error}"
+    );
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v10 to v11 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v10.proof")
+            .await
+            .expect("read v10 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
+             WHERE name IN ('storage_id', 'generation_id')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('cache_storage_members', 'cache_consumer_pins')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('transcode_cache_storage_generation', \
+                          'transcode_cache_storage_lru', 'cache_storage_members_node', \
+                          'cache_consumer_pins_expiry')",
+            4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('transcode_cache_location_identity_ai', \
+                          'transcode_cache_location_identity_au')",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v11 shared-cache schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -5698,6 +6104,22 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                 .expect("populate composite-key paged parity locations");
         }
     }
+    connection
+        .execute_batch(
+            "UPDATE transcode_cache_locations
+                SET storage_id = 'shared:fixture', generation_id = 'fixture-generation'
+              WHERE recipe_hash = 'fixture-recipe'
+                AND node_id = 'fixture-page-node-000' AND storage_class = 'shared';
+             INSERT INTO cache_storage_members
+                (storage_id, node_id, storage_class, verified_at_ms, verification_state)
+                VALUES ('shared:fixture', 'fixture-node', 'shared', 500, 'verified');
+             INSERT INTO cache_consumer_pins
+                (storage_id, recipe_hash, generation_id, consumer_kind,
+                 consumer_id, consumer_epoch, expires_at_ms)
+                VALUES ('shared:fixture', 'fixture-recipe', 'fixture-generation',
+                        'offline_package', 'fixture-package', 1, 999999000);",
+        )
+        .expect("populate shared cache import facts");
     drop(connection);
     path
 }
@@ -5888,6 +6310,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             DROP TRIGGER transcode_cache_location_identity_au;
+             DROP TRIGGER transcode_cache_location_identity_ai;
+             DROP INDEX transcode_cache_storage_lru;
+             DROP INDEX transcode_cache_storage_generation;
+             DROP TABLE cache_consumer_pins;
+             DROP TABLE cache_storage_members;
+             ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
+             ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
              DROP TRIGGER library_roots_paths_au;
              DROP TABLE scan_reconcile_items;
              DROP TABLE scan_reconcile_guards;
@@ -5966,7 +6396,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 23);
+    assert_eq!(report.tables.len(), 25);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -7363,6 +7793,7 @@ fn contract_inventory_matches_every_store_method() {
         API_KEY_METHODS,
         OUTBOX_METHODS,
         CACHE_METHODS,
+        SHARED_CACHE_METHODS,
         PRETRANSCODE_METHODS,
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
@@ -7377,7 +7808,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 204, "review the Store method count");
+    assert_eq!(declared.len(), 221, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -10244,6 +10675,675 @@ async fn transcode_cache_contract_runs_through_dyn_store() {
                 .is_empty(),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "shared-cache-contract").await;
+        let storage_id = format!("cluster:contract:{backend}:shared");
+        let member = CacheStorageMember {
+            storage_id: storage_id.clone(),
+            node_id: format!("{backend}-reader"),
+            storage_class: "shared".to_owned(),
+            verified_at_ms: 100,
+            verification_state: "verified".to_owned(),
+        };
+        store
+            .put_cache_storage_member(&member)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
+        assert_eq!(
+            store
+                .cache_storage_member(&storage_id, &member.node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read shared member: {error}")),
+            Some(member.clone()),
+            "{backend}"
+        );
+
+        let abandoned_recipe = format!("shared-abandoned-recipe-{backend}");
+        assert!(store
+            .claim_shared_cache_entry(
+                &abandoned_recipe,
+                file_id,
+                1,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+                101,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim abandoned generation: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, 100, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list fresh claims: {error}"))
+            .is_empty());
+        let stale_claims = store
+            .stale_shared_cache_claims(&storage_id, 101, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list stale claims: {error}"));
+        assert_eq!(stale_claims.len(), 1, "{backend}");
+        assert_eq!(stale_claims[0].generation_id, "generation-abandon");
+        assert!(!store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-successor",
+                "shared/abandon/generation-successor",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject stale abandon: {error}")));
+        assert!(store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact abandon: {error}")));
+        assert_eq!(
+            store
+                .stale_shared_cache_claims(&storage_id, 0, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list abandoned claim: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .finalize_abandoned_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize abandoned claim: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, i64::MAX, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list finalized claims: {error}"))
+            .is_empty());
+
+        let recipe_hash = format!("shared-cache-recipe-{backend}");
+        let generation_id = "generation-a";
+        assert!(store
+            .claim_shared_cache_entry(
+                &recipe_hash,
+                file_id,
+                1,
+                &storage_id,
+                generation_id,
+                "shared/recipe/generation-a",
+                110,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim shared generation: {error}")));
+        assert!(!store
+            .claim_shared_cache_entry(
+                &recipe_hash,
+                file_id,
+                1,
+                &storage_id,
+                "generation-loser",
+                "shared/recipe/generation-loser",
+                111,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: duplicate shared claim: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &recipe_hash,
+                &storage_id,
+                generation_id,
+                4_096,
+                &"a".repeat(64),
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete shared generation: {error}")));
+        let generation = store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: shared cache hit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: shared generation disappeared"));
+        assert_eq!(generation.generation_id, generation_id, "{backend}");
+        assert!(store
+            .touch_shared_cache_entry(&recipe_hash, &storage_id, generation_id, 150)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: touch shared generation: {error}")));
+        assert_eq!(
+            store
+                .shared_cache_hit(&recipe_hash, &storage_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read touched generation: {error}"))
+                .expect("touched generation")
+                .last_used_at,
+            150,
+            "{backend}: shared cache uses millisecond timestamps"
+        );
+
+        let mut lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{storage_id}"),
+                "gc-owner",
+                125,
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire shared GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh shared GC lease was held"),
+        };
+
+        let session_pin = CacheConsumerPin {
+            storage_id: storage_id.clone(),
+            recipe_hash: recipe_hash.clone(),
+            generation_id: generation_id.to_owned(),
+            consumer_kind: CacheConsumerKind::MediaSession,
+            consumer_id: "session-incarnation".to_owned(),
+            consumer_epoch: 2,
+            expires_at_ms: 1_000,
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&session_pin, 130)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire session pin: {error}")));
+        assert!(!store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    consumer_epoch: 1,
+                    expires_at_ms: 1_500,
+                    ..session_pin.clone()
+                },
+                131,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject stale pin epoch: {error}")));
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 200, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pinned GC candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .retire_shared_cache_generation(&generation, 200, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .renew_cache_consumer_pins(
+                    &[CacheConsumerPin {
+                        expires_at_ms: 1_500,
+                        ..session_pin.clone()
+                    }],
+                    201,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew session pin: {error}")),
+            1,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .renew_cache_consumer_pins(
+                    &[CacheConsumerPin {
+                        expires_at_ms: 1_200,
+                        ..session_pin.clone()
+                    }],
+                    202,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay older renewal: {error}")),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 1_300, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: monotone pin candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &session_pin.consumer_id,
+                session_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: release session pin: {error}")));
+
+        let lookup_pin = CacheConsumerPin {
+            consumer_id: "lookup-crash-bridge".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 215,
+            ..session_pin.clone()
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&lookup_pin, 210)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire crash bridge pin: {error}")));
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 214, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early pin prune: {error}")),
+            0,
+            "{backend}: live bridge pin must survive pruning"
+        );
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 215, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired pin prune: {error}")),
+            1,
+            "{backend}: a crashed lookup owner must not leak its expired pin"
+        );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &lookup_pin.consumer_id,
+                lookup_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned bridge pin: {error}")));
+
+        let racing_pin = CacheConsumerPin {
+            consumer_kind: CacheConsumerKind::OfflineDownload,
+            consumer_id: "racing-reader".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 1_600,
+            ..session_pin.clone()
+        };
+        let pin_store = Arc::clone(&store);
+        let retire_store = Arc::clone(&store);
+        let pin_future = async {
+            pin_store
+                .acquire_cache_consumer_pin(&racing_pin, 220)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: racing pin: {error}"))
+        };
+        let retire_future = async {
+            retire_store
+                .retire_shared_cache_generation(&generation, 220, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: racing retirement: {error}"))
+        };
+        let (pin_won, gc_successor) = tokio::join!(pin_future, retire_future);
+        let gc_won = gc_successor.is_some();
+        assert_ne!(
+            pin_won, gc_won,
+            "{backend}: pin acquisition and retirement must choose exactly one winner"
+        );
+        if pin_won {
+            assert!(store
+                .release_cache_consumer_pin(
+                    &storage_id,
+                    &recipe_hash,
+                    generation_id,
+                    CacheConsumerKind::OfflineDownload,
+                    &racing_pin.consumer_id,
+                    racing_pin.consumer_epoch,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release racing pin: {error}")));
+            lease = store
+                .retire_shared_cache_generation(&generation, 221, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: race survivor was not retired"));
+        } else {
+            lease = gc_successor.expect("GC race winner successor");
+        }
+        assert!(store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired shared lookup: {error}"))
+            .is_none());
+        let cleanup_candidates = store
+            .shared_cache_gc_candidates(&storage_id, 222, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
+        assert_eq!(cleanup_candidates.len(), 1, "{backend}");
+        assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
+        let mut wrong_generation = cleanup_candidates[0].clone();
+        wrong_generation.relative_dir.push_str("-wrong");
+        assert!(store
+            .finalize_retired_shared_cache_generation(&wrong_generation, 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: wrong tombstone finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after wrong finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: wrong finalization advanced the GC lease"));
+        lease = store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retired generation was not finalized"));
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 224, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalized GC candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 224, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after repeat finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: absent finalization advanced the GC lease"));
+
+        let offline_recipe = format!("shared-offline-recipe-{backend}");
+        assert!(store
+            .claim_shared_cache_entry(
+                &offline_recipe,
+                file_id,
+                1,
+                &storage_id,
+                "generation-offline",
+                "shared/offline/generation",
+                230,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim offline generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &offline_recipe,
+                &storage_id,
+                "generation-offline",
+                8_192,
+                &"b".repeat(64),
+                240,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete offline generation: {error}")));
+        let offline_generation = store
+            .shared_cache_hit(&offline_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: offline shared hit: {error}"))
+            .expect("offline generation");
+        let package_pin = CacheConsumerPin {
+            storage_id: storage_id.clone(),
+            recipe_hash: offline_recipe.clone(),
+            generation_id: "generation-offline".to_owned(),
+            consumer_kind: CacheConsumerKind::OfflinePackage,
+            consumer_id: "offline-package".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 1_700,
+        };
+        let offline_pins = [
+            package_pin.clone(),
+            CacheConsumerPin {
+                consumer_kind: CacheConsumerKind::OfflineDownload,
+                consumer_id: "offline-download".to_owned(),
+                ..package_pin
+            },
+        ];
+        for pin in &offline_pins {
+            assert!(store
+                .acquire_cache_consumer_pin(pin, 250)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: acquire offline pin: {error}")));
+        }
+        for pin in &offline_pins {
+            assert!(store
+                .retire_shared_cache_generation(&offline_generation, 251, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}"))
+                .is_none());
+            assert!(store
+                .release_cache_consumer_pin(
+                    &pin.storage_id,
+                    &pin.recipe_hash,
+                    &pin.generation_id,
+                    pin.consumer_kind,
+                    &pin.consumer_id,
+                    pin.consumer_epoch,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release offline pin: {error}")));
+        }
+        assert!(store
+            .retire_shared_cache_generation(&offline_generation, 252, &lease)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire unpinned offline generation: {error}")
+            })
+            .is_some());
+
+        assert!(store
+            .mark_cache_storage_suspect(&storage_id, &member.node_id, 300)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mark shared storage suspect: {error}")));
+        assert_eq!(
+            store
+                .cache_storage_member(&storage_id, &member.node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read suspect member: {error}"))
+                .map(|member| member.verification_state),
+            Some("suspect".to_owned()),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-shared-pin-contract").await;
+        let storage_id = format!("shared:offline-lifecycle:{backend}");
+        store
+            .put_cache_storage_member(&CacheStorageMember {
+                storage_id: storage_id.clone(),
+                node_id: format!("{backend}-offline-reader"),
+                storage_class: "shared".to_owned(),
+                verified_at_ms: 100,
+                verification_state: "verified".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
+        let mut lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{storage_id}"),
+                "offline-gc-owner",
+                110,
+                10_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire shared GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh shared GC lease was held"),
+        };
+
+        let package_recipe = format!("offline-package-pin-{backend}");
+        let package_generation_id = "offline-package-generation";
+        assert!(store
+            .claim_shared_cache_entry(
+                &package_recipe,
+                file_id,
+                1,
+                &storage_id,
+                package_generation_id,
+                "offline/package/generation",
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim package generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &package_recipe,
+                &storage_id,
+                package_generation_id,
+                1_024,
+                &"c".repeat(64),
+                130,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete package generation: {error}")));
+        let package_generation = store
+            .shared_cache_hit(&package_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read package generation: {error}"))
+            .expect("package generation");
+        let package = offline_request(
+            "shared-package-pin",
+            "shared-package-pin-request",
+            user_id,
+            file_id,
+        );
+        assert!(matches!(
+            store
+                .create_offline_package(&package, 100, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create shared package: {error}")),
+            OfflineCreateOutcome::Created(_)
+        ));
+        assert!(store
+            .mark_offline_package_ready(
+                &package.id,
+                &package.node_id,
+                &package_recipe,
+                1_024,
+                60_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: ready shared package: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&package_generation, 140, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}"))
+            .is_none());
+        assert!(store
+            .delete_offline_package(&package.id, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: delete shared package: {error}")));
+        lease = store
+            .retire_shared_cache_generation(&package_generation, 150, &lease)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire generation after package deletion: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: package generation was not retired"));
+
+        let download_recipe = format!("offline-download-pin-{backend}");
+        let download_generation_id = "offline-download-generation";
+        let download = offline_request(
+            "shared-download-pin",
+            "shared-download-pin-request",
+            user_id,
+            file_id,
+        );
+        assert!(matches!(
+            store
+                .create_offline_package(&download, 160, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create download package: {error}")),
+            OfflineCreateOutcome::Created(_)
+        ));
+        assert!(store
+            .mark_offline_package_ready(
+                &download.id,
+                &download.node_id,
+                &download_recipe,
+                2_048,
+                60_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: ready download package: {error}")));
+        let token_hash = "e".repeat(64);
+        assert!(matches!(
+            store
+                .put_offline_lease(&download.id, user_id, &token_hash, 20_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create download lease: {error}")),
+            OfflineLeaseOutcome::Created(_)
+        ));
+        assert!(store
+            .claim_shared_cache_entry(
+                &download_recipe,
+                file_id,
+                1,
+                &storage_id,
+                download_generation_id,
+                "offline/download/generation",
+                170,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim download generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &download_recipe,
+                &storage_id,
+                download_generation_id,
+                2_048,
+                &"d".repeat(64),
+                180,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete download generation: {error}")));
+        let download_generation = store
+            .shared_cache_hit(&download_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read download generation: {error}"))
+            .expect("download generation");
+        assert!(store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &download_recipe,
+                download_generation_id,
+                CacheConsumerKind::OfflinePackage,
+                &download.id,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: isolate download pin: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&download_generation, 190, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}"))
+            .is_none());
+        assert!(store
+            .delete_offline_package(&download.id, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: delete download package: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&download_generation, 200, &lease)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{backend}: retire generation after download deletion: {error}"
+            ))
+            .is_some());
     })
     .await;
 }
