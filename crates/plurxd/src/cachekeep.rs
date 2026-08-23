@@ -584,7 +584,7 @@ async fn ownership_snapshot(
         .pretranscode_staging_jobs(node_id)
         .await?
         .into_iter()
-        .collect();
+        .collect::<HashSet<_>>();
     let local_rows = inventory
         .rows
         .into_iter()
