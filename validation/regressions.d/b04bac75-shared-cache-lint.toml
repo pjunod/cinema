@@ -2,6 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["b04bac75"]
-points = ["core.media"]
+points = ["cluster.auth", "cluster.membership", "cluster.media-observation", "playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The warnings-as-errors Rust gate retains the shared-cache publication lint corrections."
