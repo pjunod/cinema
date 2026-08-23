@@ -15104,8 +15104,8 @@ mod tests {
                     requirements_json: requirements,
                     reason: "recent".to_owned(),
                     priority: 100,
-                    not_before_ms: 110,
-                    created_at_ms: 110,
+                    not_before_ms: lease_now,
+                    created_at_ms: lease_now,
                 },
                 &lease,
                 &lease
@@ -15128,8 +15128,8 @@ mod tests {
                     scratch_bytes: 2,
                 },
                 &[],
-                120,
-                1_000,
+                lease_now,
+                lease_now.saturating_add(90_000),
             )
             .await
             .expect("claim manifest session")
@@ -15143,7 +15143,7 @@ mod tests {
                 1_234,
                 None,
                 manifest_digest,
-                130,
+                lease_now.saturating_add(1),
             )
             .await
             .expect("complete manifest session"));

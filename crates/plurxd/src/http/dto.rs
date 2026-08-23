@@ -26,6 +26,14 @@ fn image_url(filename: &Option<String>, revision: i64) -> Option<String> {
         .map(|f| format!("/api/v1/images/{f}?v={revision}"))
 }
 
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+fn js_id_text_is_redundant(value: &str) -> bool {
+    value
+        .parse::<i64>()
+        .is_ok_and(|id| (-JS_SAFE_INTEGER_MAX..=JS_SAFE_INTEGER_MAX).contains(&id))
+}
+
 #[derive(Serialize)]
 pub struct WatchDto {
     pub position_ms: i64,
@@ -55,7 +63,9 @@ pub struct RevisionDto {
 pub struct ReadingDto {
     pub file_id: i64,
     /// Lossless decimal spelling for JavaScript clients. Keep the numeric
-    /// field for wire compatibility with native clients.
+    /// field for wire compatibility with native clients, and omit this
+    /// additive spelling when that number is already exact in JavaScript.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
     pub file_id_text: String,
     pub revision: RevisionDto,
     pub locator: serde_json::Value,
@@ -86,7 +96,9 @@ impl TryFrom<ReadingState> for ReadingDto {
 #[derive(Serialize)]
 pub struct ItemDto {
     pub id: i64,
-    /// Lossless decimal spelling for route construction in JavaScript.
+    /// Lossless decimal spelling for route construction in JavaScript. Safe
+    /// integer ids preserve the established byte-for-byte response shape.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
     pub id_text: String,
     pub library_id: i64,
     pub kind: ItemKind,
@@ -316,7 +328,9 @@ pub fn in_progress_dto(item: InProgressItem) -> ItemDto {
 #[derive(Serialize)]
 pub struct FileDto {
     pub id: i64,
-    /// Lossless decimal spelling for route construction in JavaScript.
+    /// Lossless decimal spelling for route construction in JavaScript. Safe
+    /// integer ids preserve the established byte-for-byte response shape.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
     pub id_text: String,
     pub filename: String,
     pub size: i64,

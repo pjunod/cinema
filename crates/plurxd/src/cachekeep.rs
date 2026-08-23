@@ -1803,8 +1803,8 @@ mod tests {
                     requirements_json: requirements,
                     reason: "recent".to_owned(),
                     priority: 100,
-                    not_before_ms: 110,
-                    created_at_ms: 110,
+                    not_before_ms: lease_now,
+                    created_at_ms: lease_now,
                 },
                 &lease,
                 &lease
@@ -1824,7 +1824,13 @@ mod tests {
             scratch_bytes: 2,
         };
         let claimed = store
-            .claim_pretranscode_job(NODE, &capabilities, &[], 120, 1_000)
+            .claim_pretranscode_job(
+                NODE,
+                &capabilities,
+                &[],
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
             .await
             .expect("claim scrub fixture")
             .expect("scrub fixture job");
@@ -1838,7 +1844,7 @@ mod tests {
                 bytes,
                 None,
                 manifest_digest,
-                130,
+                lease_now.saturating_add(1),
             )
             .await
             .expect("complete scrub fixture"));
@@ -2322,8 +2328,8 @@ mod tests {
                     requirements_json: requirements,
                     reason: "recent".to_owned(),
                     priority: 100,
-                    not_before_ms: 100,
-                    created_at_ms: 100,
+                    not_before_ms: lease_now,
+                    created_at_ms: lease_now,
                 },
                 &lease,
                 &lease
@@ -2343,7 +2349,13 @@ mod tests {
             scratch_bytes: i64::MAX,
         };
         let first = store
-            .claim_pretranscode_job(NODE, &capabilities, &[], 120, 300)
+            .claim_pretranscode_job(
+                NODE,
+                &capabilities,
+                &[],
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
             .await
             .expect("first claim")
             .expect("first job");
@@ -2358,15 +2370,22 @@ mod tests {
         tokio::fs::write(staging.join("part-000/seg00000.ts"), b"checkpoint")
             .await
             .expect("checkpoint");
+        let first_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&first, 130, 140)
+            .yield_pretranscode_job(&first, first_resume_at, first_resume_at)
             .await
             .expect("yield"));
         sweep(&store, root.path(), NODE, unix_now()).await;
         assert!(staging.exists(), "a yielded local checkpoint was swept");
 
         let resumed = store
-            .claim_pretranscode_job(NODE, &capabilities, &[], 140, 300)
+            .claim_pretranscode_job(
+                NODE,
+                &capabilities,
+                &[],
+                first_resume_at,
+                first_resume_at.saturating_add(90_000),
+            )
             .await
             .expect("local reclaim")
             .expect("local job");
@@ -2390,12 +2409,19 @@ mod tests {
             "only the exact active fence may retain a commit-unknown final"
         );
 
+        let second_resume_at = lease_now_ms().saturating_add(1_000);
         assert!(store
-            .yield_pretranscode_job(&resumed, 150, 160)
+            .yield_pretranscode_job(&resumed, second_resume_at, second_resume_at)
             .await
             .expect("second yield"));
         let resumed_again = store
-            .claim_pretranscode_job(NODE, &capabilities, &[], 160, 400)
+            .claim_pretranscode_job(
+                NODE,
+                &capabilities,
+                &[],
+                second_resume_at,
+                second_resume_at.saturating_add(90_000),
+            )
             .await
             .expect("second local reclaim")
             .expect("second local job");
@@ -2412,8 +2438,15 @@ mod tests {
             "a repeated retry must reclaim its obsolete fence generation"
         );
 
+        let takeover_at = resumed_again.lease_expires_ms.saturating_add(1);
         let successor = store
-            .claim_pretranscode_job("node-b", &capabilities, &[], 401, 600)
+            .claim_pretranscode_job(
+                "node-b",
+                &capabilities,
+                &[],
+                takeover_at,
+                takeover_at.saturating_add(90_000),
+            )
             .await
             .expect("remote takeover")
             .expect("remote job");
