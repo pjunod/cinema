@@ -18,7 +18,7 @@ pub(crate) struct ActiveJobLease {
     fence: PublicationFence,
     cancel: tokio_util::sync::CancellationToken,
     lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
+    heartbeat: Option<tokio::task::JoinHandle<Result<(), StoreError>>>,
 }
 
 impl ActiveJobLease {
@@ -65,7 +65,7 @@ impl ActiveJobLease {
                         // Graceful release must join an already-dispatched
                         // renewal before it samples and retires the final
                         // token; dropping the future can detach a Raft write.
-                        let _ = renewal.await;
+                        renewal.await?;
                         break;
                     }
                     _ = &mut expiry => {
@@ -75,7 +75,7 @@ impl ActiveJobLease {
                         // it prevents a late Raft write after release returns.
                         heartbeat_fence.revoke();
                         heartbeat_lost.cancel();
-                        let _ = renewal.await;
+                        renewal.await?;
                         let _ = heartbeat_fence.invalidate(&current).await;
                         tracing::warn!(
                             resource = current.resource,
@@ -105,10 +105,11 @@ impl ActiveJobLease {
                             error = %error,
                             "cluster job lease renewal failed and self-fenced"
                         );
-                        break;
+                        return Err(error);
                     }
                 }
             }
+            Ok::<(), StoreError>(())
         });
         Ok(Self {
             coordinator,
@@ -131,11 +132,21 @@ impl ActiveJobLease {
         self.fence.clone()
     }
 
-    pub(crate) async fn release(mut self) {
+    pub(crate) async fn release(mut self) -> Result<(), StoreError> {
+        self.fence.revoke();
         self.cancel.cancel();
+        let mut cleanup_errors = Vec::new();
         if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(error = %error, "cluster job heartbeat task failed during release");
+            match heartbeat.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "cluster job renewal cleanup was ambiguous");
+                    cleanup_errors.push(error.to_string());
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "cluster job heartbeat task failed during release");
+                    cleanup_errors.push(error.to_string());
+                }
             }
         }
         let token = self.fence.snapshot().await;
@@ -147,7 +158,16 @@ impl ActiveJobLease {
                     error = %error,
                     "cluster job lease release failed; TTL will recover it"
                 );
+                cleanup_errors.push(error.to_string());
             }
+        }
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError::Task(format!(
+                "cluster job cleanup was ambiguous: {}",
+                cleanup_errors.join("; ")
+            )))
         }
     }
 }
@@ -162,6 +182,7 @@ fn lease_time_remaining(expires_at_unix_ms: i64) -> Duration {
 
 impl Drop for ActiveJobLease {
     fn drop(&mut self) {
+        self.fence.revoke();
         self.cancel.cancel();
         self.lost.cancel();
         if let Some(heartbeat) = self.heartbeat.take() {

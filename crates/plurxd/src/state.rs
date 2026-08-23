@@ -1082,7 +1082,7 @@ impl JobManager {
             let entry = statuses.entry(library_id).or_default();
             if entry.running {
                 drop(statuses);
-                lease.release().await;
+                let _ = lease.release().await;
                 return false;
             }
             self.metrics.count_scan(why);
@@ -1116,7 +1116,7 @@ impl JobManager {
                     manager.finish(library_id, status).await;
                 }
             }
-            lease.release().await;
+            let _ = lease.release().await;
             // Whatever queued up while this ran is work someone was
             // promised. A full scan covers the same files a targeted one
             // would have, but the CALLER is still owed its answer — the
@@ -1185,7 +1185,7 @@ impl JobManager {
                 "cluster scan lease was lost".to_owned(),
             ))),
         };
-        lease.release().await;
+        let _ = lease.release().await;
         match &out {
             Ok(scan) => {
                 self.record_request(&req, "done", Some(scan), None).await;
@@ -1529,7 +1529,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         outcome
     }
 
@@ -1551,7 +1551,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -1920,7 +1920,7 @@ impl JobManager {
             }
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         false
     }
 
@@ -2189,7 +2189,7 @@ impl JobManager {
                             )),
                         };
                         drop(publisher);
-                        lease.release().await;
+                        let _ = lease.release().await;
                         result?;
                     }
                 }
@@ -2286,7 +2286,7 @@ impl JobManager {
                     }
                 }
                 drop(publisher);
-                lease.release().await;
+                let _ = lease.release().await;
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(error = %error, "artwork retry lease failed"),
@@ -2391,7 +2391,7 @@ impl JobManager {
             *self.last_genre_backfill.lock().await = Some(report);
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
     }
 
     /// One producer pass: sweep the cache back under budget, work out what
@@ -2416,7 +2416,7 @@ impl JobManager {
         let lost = lease.loss_token();
         self.produce_pass_owned(transcode, &lost, lease.publication_fence())
             .await;
-        lease.release().await;
+        let _ = lease.release().await;
     }
 
     async fn produce_pass_owned(
@@ -2671,7 +2671,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -3415,7 +3415,7 @@ mod tests {
         let publisher = lease.publisher(store.as_ref());
         jobs.stamp("job.stamped", &publisher).await;
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         let stamped = jobs.job_stamp("job.stamped").await.expect("stamp");
         assert!((now() - stamped).abs() <= 1);
     }

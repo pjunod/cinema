@@ -226,7 +226,7 @@ async fn refresh_metadata_with_store(
         )),
     };
     drop(publisher);
-    lease.release().await;
+    let _ = lease.release().await;
     result
 }
 

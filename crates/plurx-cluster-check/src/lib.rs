@@ -710,11 +710,18 @@ async fn wait_singleton_cleanup(cluster: &mut ClusterProcesses, node_id: u64) ->
             .await?
         {
             Response::SingletonProbeStatus {
+                cleanup_error: Some(error),
+                ..
+            } => {
+                bail!("singleton probe cleanup on voter {node_id} was ambiguous: {error}");
+            }
+            Response::SingletonProbeStatus {
                 cleanup_done: true, ..
             } => return Ok(()),
             Response::SingletonProbeStatus {
                 outcome,
                 cleanup_done: false,
+                cleanup_error: None,
             } => {
                 if Instant::now() >= deadline {
                     bail!(
@@ -3082,6 +3089,7 @@ pub enum Response {
     SingletonProbeStatus {
         outcome: String,
         cleanup_done: bool,
+        cleanup_error: Option<String>,
     },
     SingletonValue {
         value: Option<String>,
@@ -4224,6 +4232,7 @@ pub fn validate_known_dump(dump: &serde_json::Value) -> Result<()> {
 struct SingletonProbe {
     outcome: Arc<RwLock<String>>,
     cleanup_done: Arc<AtomicBool>,
+    cleanup_error: Arc<RwLock<Option<String>>>,
 }
 
 #[derive(Default)]
@@ -4839,9 +4848,11 @@ async fn handle_request(
                     )?;
                     let outcome = Arc::new(RwLock::new("provider_pending".to_owned()));
                     let cleanup_done = Arc::new(AtomicBool::new(false));
+                    let cleanup_error = Arc::new(RwLock::new(None));
                     *singleton_probe = Some(SingletonProbe {
                         outcome: Arc::clone(&outcome),
                         cleanup_done: Arc::clone(&cleanup_done),
+                        cleanup_error: Arc::clone(&cleanup_error),
                     });
                     let probe_store = opened as Arc<dyn plurx_core::store::Store>;
                     let _probe_task = tokio::spawn(async move {
@@ -4888,7 +4899,12 @@ async fn handle_request(
                         // stuck retirement reports the exact completed phase.
                         // The controller separately waits for cleanup before
                         // sampling the bounded Raft-entry delta.
-                        active.release().await;
+                        if let Err(error) = active.release().await {
+                            *cleanup_error
+                                .write()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(error.to_string());
+                        }
                         cleanup_done.store(true, AtomicOrdering::Release);
                     });
                     Ok(Response::SingletonProbeStart {
@@ -4912,6 +4928,11 @@ async fn handle_request(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone(),
                 cleanup_done: probe.cleanup_done.load(AtomicOrdering::Acquire),
+                cleanup_error: probe
+                    .cleanup_error
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
             })
         }
         Request::ReplaySingletonLease {
