@@ -758,6 +758,12 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
 }
 
 const SERVING_PROOF_KEY: &str = "cluster-check.serving-partition-majority";
+const SERVING_PARTITION_MAX_ATTEMPTS: usize = 3;
+
+enum ServingPartitionAttempt {
+    Complete,
+    UnstableInitialAdmission(String),
+}
 
 /// A raw TCP cut-point in front of one voter API. It carries Hiqlite's TLS
 /// bytes unchanged, and partitioning cancels every accepted connection as
@@ -954,6 +960,25 @@ async fn wait_serving_http(
 }
 
 async fn run_serving_partition_case() -> Result<()> {
+    let mut unstable = Vec::new();
+    for attempt in 1..=SERVING_PARTITION_MAX_ATTEMPTS {
+        match run_serving_partition_attempt().await? {
+            ServingPartitionAttempt::Complete => return Ok(()),
+            ServingPartitionAttempt::UnstableInitialAdmission(error) => {
+                println!(
+                    "CLUSTER_SERVING_UNSTABLE stage=initial-admission attempt={attempt} error={error}"
+                );
+                unstable.push(format!("attempt {attempt}: {error}"));
+            }
+        }
+    }
+    bail!(
+        "serving partition proof exhausted {SERVING_PARTITION_MAX_ATTEMPTS} fresh attempts after pre-proof admission instability: {}",
+        unstable.join(" | ")
+    )
+}
+
+async fn run_serving_partition_attempt() -> Result<ServingPartitionAttempt> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("serving partition data root")?;
     let (mut cluster, specs) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
@@ -995,7 +1020,13 @@ async fn run_serving_partition_case() -> Result<()> {
         reqwest::StatusCode::OK,
     )
     .await?;
-    admit_serving_media(&http, &serving.http_base).await?;
+    if let Err(error) = admit_serving_media(&http, &serving.http_base).await {
+        let error = format!("{error:#}").replace('\n', " ");
+        cleanup_serving_partition(serving, proxies, &mut cluster)
+            .await
+            .context("clean up unstable initial serving admission")?;
+        return Ok(ServingPartitionAttempt::UnstableInitialAdmission(error));
+    }
 
     for proxy in &proxies {
         proxy.partition();
@@ -1147,11 +1178,31 @@ async fn run_serving_partition_case() -> Result<()> {
     println!(
         "CLUSTER_SERVING_PARTITION cycles=2 liveness=ok readiness=fenced capability=fenced child_killed=true majority_write=locally_converged recovery=ready"
     );
-    serving.stop().await?;
+    cleanup_serving_partition(serving, proxies, &mut cluster).await?;
+    Ok(ServingPartitionAttempt::Complete)
+}
+
+async fn cleanup_serving_partition(
+    serving: ServingProcess,
+    proxies: Vec<TcpPartitionProxy>,
+    cluster: &mut ClusterProcesses,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = serving.stop().await {
+        errors.push(format!("serving process: {error:#}"));
+    }
     for proxy in proxies {
         proxy.stop().await;
     }
-    cluster.shutdown_all().await
+    if let Err(error) = cluster.shutdown_all().await {
+        errors.push(format!("voters: {error:#}"));
+        cluster.kill_all().await;
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("serving partition cleanup failed: {}", errors.join(" | "))
+    }
 }
 
 async fn admit_serving_media(client: &reqwest::Client, base: &str) -> Result<()> {
