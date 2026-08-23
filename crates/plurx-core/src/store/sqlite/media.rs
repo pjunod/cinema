@@ -1,6 +1,6 @@
 //! Items (movie/show/season/episode), media files, search.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -292,6 +292,25 @@ impl MediaStore for SqliteStore {
                 &format!("SELECT {ITEM_COLS} FROM items WHERE id = ?1"),
                 params![id],
             )?)
+        })
+        .await
+    }
+
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ids = serde_json::to_string(ids)
+            .map_err(|error| StoreError::Task(format!("encode item title ids: {error}")))?;
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, title FROM items \
+                 WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map(params![ids], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            Ok(rows)
         })
         .await
     }

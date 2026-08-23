@@ -4,7 +4,7 @@
 //! not authorize it, and its peer addresses and authority never enter a
 //! public response. The aggregation/UI remains in `system.rs`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -290,7 +290,11 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         .map(|detail| (detail.0.id.clone(), detail))
         .collect::<HashMap<_, _>>();
     let mut deliveries = Vec::with_capacity(candidates.len());
-    let mut titles = HashMap::new();
+    let titles = candidate_titles(&candidates, |ids| async move {
+        state.store.item_titles(&ids).await
+    })
+    .await
+    .unwrap_or_default();
     for candidate in candidates {
         match candidate {
             ActivityCandidate::Transcode(candidate) => {
@@ -310,13 +314,15 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                 });
             }
             ActivityCandidate::Remux(stream) => {
-                let title = title(state, stream.item_id, &mut titles).await;
                 deliveries.push(ActivityDelivery {
                     method: "remux".to_owned(),
                     user: bounded_text(stream.user_name, MAX_USER_BYTES),
                     file_id: stream.file_id,
                     item_id: stream.item_id,
-                    title: bounded_text(title, MAX_TITLE_BYTES),
+                    title: bounded_text(
+                        titles.get(&stream.item_id).cloned().unwrap_or_default(),
+                        MAX_TITLE_BYTES,
+                    ),
                     started_unix: stream.started_unix,
                     idle_seconds: (stream.delivered_idle_ms.max(0) / 1_000) as u64,
                     delivered_bytes: Some(stream.delivered_bytes),
@@ -324,13 +330,15 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                 });
             }
             ActivityCandidate::Direct(play) => {
-                let title = title(state, play.item_id, &mut titles).await;
                 deliveries.push(ActivityDelivery {
                     method: "direct".to_owned(),
                     user: bounded_text(play.user_name, MAX_USER_BYTES),
                     file_id: play.file_id,
                     item_id: play.item_id,
-                    title: bounded_text(title, MAX_TITLE_BYTES),
+                    title: bounded_text(
+                        titles.get(&play.item_id).cloned().unwrap_or_default(),
+                        MAX_TITLE_BYTES,
+                    ),
                     started_unix: play.started_unix,
                     idle_seconds: play.idle_seconds,
                     delivered_bytes: None,
@@ -392,6 +400,30 @@ fn activity_candidates_bounded(
     candidates
 }
 
+async fn candidate_titles<F, Fut>(
+    candidates: &[ActivityCandidate],
+    fetch: F,
+) -> Result<BTreeMap<i64, String>, plurx_core::error::StoreError>
+where
+    F: FnOnce(Vec<i64>) -> Fut,
+    Fut: Future<Output = Result<BTreeMap<i64, String>, plurx_core::error::StoreError>>,
+{
+    let ids = candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            ActivityCandidate::Remux(stream) => Some(stream.item_id),
+            ActivityCandidate::Direct(play) => Some(play.item_id),
+            ActivityCandidate::Transcode(_) => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    fetch(ids).await
+}
+
 /// Keep the producer and consumer on the same exact wire budget. Serializing
 /// each candidate accounts for JSON escaping without repeatedly encoding the
 /// whole response, and preserves the newest-first ordering above.
@@ -417,21 +449,6 @@ fn bounded_snapshot(node_id: String, deliveries: Vec<ActivityDelivery>) -> Activ
         snapshot.deliveries.push(delivery);
     }
     snapshot
-}
-
-async fn title(state: &AppState, item_id: i64, titles: &mut HashMap<i64, String>) -> String {
-    if let Some(title) = titles.get(&item_id) {
-        return title.clone();
-    }
-    let title = state
-        .store
-        .get_item(item_id)
-        .await
-        .ok()
-        .flatten()
-        .map_or_else(String::new, |item| item.title);
-    titles.insert(item_id, title.clone());
-    title
 }
 
 #[allow(dead_code)]
@@ -607,6 +624,37 @@ mod tests {
         assert!(selected
             .iter()
             .all(|candidate| matches!(candidate, ActivityCandidate::Direct(_))));
+    }
+
+    #[tokio::test]
+    async fn selected_titles_cost_one_bounded_store_call() {
+        let candidates = (0..MAX_DELIVERIES)
+            .map(|index| {
+                ActivityCandidate::Direct(crate::delivery::Live {
+                    registry_id: format!("direct-{index:04}"),
+                    user_name: "viewer".to_owned(),
+                    file_id: index as i64,
+                    item_id: index as i64,
+                    started_unix: index as i64,
+                    idle_seconds: 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let titles = candidate_titles(&candidates, move |ids| async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(ids.len(), MAX_DELIVERIES);
+            Ok(ids
+                .into_iter()
+                .map(|id| (id, format!("title-{id}")))
+                .collect())
+        })
+        .await
+        .expect("bounded title batch");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(titles.len(), MAX_DELIVERIES);
     }
 
     #[tokio::test]

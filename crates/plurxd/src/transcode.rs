@@ -10455,6 +10455,43 @@ mod tests {
         handle.join().expect("join session reader").expect("send");
     }
 
+    #[tokio::test]
+    async fn activity_telemetry_wait_never_holds_the_session_map() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = tempfile::tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = Arc::new(test_session(dir.path().join("session")));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("selected".to_owned(), Arc::clone(&session));
+        let telemetry = session.segments.lock().await;
+        let reader = Arc::clone(&manager);
+        let detail = tokio::spawn(async move {
+            reader
+                .delivery_details_bounded(&["selected".to_owned()], 1)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
+                .await
+                .expect("another map operation must not wait on selected-session telemetry"),
+            1
+        );
+        drop(telemetry);
+        assert_eq!(detail.await.expect("activity reader").len(), 1);
+    }
+
     fn profile5_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
             id: 5,

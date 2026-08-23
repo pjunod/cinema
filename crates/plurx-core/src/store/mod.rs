@@ -501,6 +501,10 @@ pub trait MediaStore: Send + Sync + 'static {
 
     // --- browse ---
     async fn get_item(&self, id: i64) -> Result<Option<Item>, StoreError>;
+    /// Titles for a bounded set of item ids in one storage operation.
+    /// Activity snapshots use this instead of issuing one authority read per
+    /// viewer while building a response with a shorter transport deadline.
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError>;
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError>;
     /// Every item that names at least one materialized artwork file.
     ///
