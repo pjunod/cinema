@@ -460,3 +460,19 @@ source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "enum TVPlaybackInfoPresentation"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale"
+
+[[fixes]]
+id = "apple.native-reader-lossless-route-ids"
+commits = ["5d4c0d5a"]
+source = "clients/apple/Sources/ReaderView.swift"
+source_anchor = "IDs are quoted deliberately"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "android.native-reader-lossless-route-ids"
+commits = ["5d4c0d5a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/ReaderScreen.kt"
+source_anchor = "val item = Net.json.encodeToString(itemId.toString())"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/ReaderPolicyTest.kt"
+test_anchor = "handoffKeepsTheBearerOutOfTheUrlAndEscapesTheTrustedScript"

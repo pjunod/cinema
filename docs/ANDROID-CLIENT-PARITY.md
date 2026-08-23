@@ -22,9 +22,11 @@ for that viewer and keeps server administration out of the comparison.
 > hygiene pass, and an R8-minified release build. The dynamic-range badge also
 > reports what is being *delivered and rendered*, not only what the file
 > carries ([MEDIA-BADGES-PLAN.md](MEDIA-BADGES-PLAN.md) §6).
-> Android build 41 compacts the shared Mini, Standard, and Debug playback-info
-> modes, bounds Debug to the available screen, and uses severity colors for
-> starvation, stalls, idle delivery, slow encoding, and unhealthy player state.
+> Android build 42 preserves full signed 64-bit reader item/file routes across
+> the native-to-JavaScript handoff. Build 41 compacts the shared Mini, Standard,
+> and Debug playback-info modes, bounds Debug to the available screen, and uses
+> severity colors for starvation, stalls, idle delivery, slow encoding, and
+> unhealthy player state.
 >
 > Two acceptance checks remain device-only and unproven in CI: `ShelfFocusTest`
 > (needs a TV emulator or device) and the badge's on-screen behaviour on an HDR
