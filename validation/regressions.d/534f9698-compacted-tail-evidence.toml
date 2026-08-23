@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["534f9698"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained one-voter compacted-growth proof anchors its fixed post-snapshot tail against a quorum-confirmed commit watermark before and after the filler writes. It therefore waits for OpenRaft's asynchronous applied-index publication without submitting an extra entry, while the exact final index still rejects concurrent write contamination or an overshot tail."
