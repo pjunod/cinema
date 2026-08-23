@@ -1146,7 +1146,10 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: reject expired owner: {error}")));
 
-        let maintenance_now = 24 * 60 * 60 * 1_000 + 1_000;
+        // Later request claims already ran bounded maintenance at t=430 and
+        // ended node-b's expired route. Inspect it inside the 24-hour terminal
+        // retention window before advancing past that window below.
+        let maintenance_now = 999;
         store
             .maintain_media_sessions(maintenance_now)
             .await
