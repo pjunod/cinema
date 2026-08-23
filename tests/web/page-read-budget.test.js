@@ -234,22 +234,32 @@ test("Activity detail request guard executes one current request and releases", 
   const document = { visibilityState: "visible", getElementById: () => main };
   const requests = [];
   const painted = [];
+  const phases = [];
   const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
-    "document", "location", "api", "paintActivityBody", "esc",
+    "document", "location", "api", "paintActivityBody", "esc", "setPagePhase", "setPageFailure",
     `let PAGE_RENDER_GENERATION=1,ACTIVITY_DETAIL_BUSY=0;
      ${shippedSource("renderActivityBody")};
      return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,
        navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;},generation:()=>PAGE_RENDER_GENERATION};`,
-  )(document, location, api, (detail) => painted.push(detail), (value) => String(value));
+  )(
+    document, location, api, (detail) => painted.push(detail),
+    (value) => String(value), (_, generation, phase) => phases.push({ generation, phase }),
+    () => {},
+  );
 
   const first = harness.renderActivityBody();
   const overlap = harness.renderActivityBody();
   assert.deepEqual(requests.map((request) => request.url), ["/activity/detail"]);
   assert.equal(harness.busy(), 1);
+  assert.deepEqual(phases, [], "Activity content waits for its delayed detail response");
   requests[0].resolve({ marker: "current" });
   await Promise.all([first, overlap]);
   assert.deepEqual(painted, [{ marker: "current" }]);
+  assert.deepEqual(phases, [
+    { generation: 1, phase: "content" },
+    { generation: 1, phase: "settled" },
+  ]);
   assert.equal(harness.busy(), 0);
 
   const stale = harness.renderActivityBody();
@@ -366,27 +376,41 @@ test("Home render generations refuse out-of-order route completions", async () =
   const main = { innerHTML: "" };
   const document = { getElementById: () => main };
   const loads = [];
+  const phases = [];
   const loadHome = () => new Promise((resolve) => loads.push(resolve));
   const harness = new Function(
-    "document", "location", "loadHome", "layoutChrome", "layoutView", "wireRails", "restoreScroll",
+    "document", "location", "loadHome", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase",
     `let PAGE_RENDER_GENERATION=0;
      ${shippedTopLevelSource("viewHome")};
      return {viewHome,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
   )(
     document, location, loadHome, () => {}, (_, page) => page.marker,
-    () => {}, () => {},
+    () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }),
   );
 
   const old = harness.viewHome();
+  assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
+    "the shell phase commits before the delayed endpoint resolves");
   harness.navigate("#/settings");
   harness.navigate("");
   const current = harness.viewHome();
+  assert.deepEqual(phases.filter((entry) => entry.generation === 4), [
+    { generation: 4, phase: "shell" },
+  ]);
   loads[1]({ marker: "current" });
   await current;
   assert.equal(main.innerHTML, "current");
+  assert.deepEqual(phases.filter((entry) => entry.generation === 4), [
+    { generation: 4, phase: "shell" },
+    { generation: 4, phase: "content" },
+    { generation: 4, phase: "settled" },
+  ], "the delayed response produces ordered content and settled phases");
   loads[0]({ marker: "stale" });
   await old;
   assert.equal(main.innerHTML, "current");
+  assert.deepEqual(phases.filter((entry) => entry.generation === 1), [
+    { generation: 1, phase: "shell" },
+  ], "the stale delayed response cannot commit a later phase");
 
   harness.navigate("#/unknown-fallback");
   const fallback = harness.viewHome();
@@ -398,9 +422,10 @@ test("Home render generations refuse out-of-order route completions", async () =
 test("Activity and Settings stale loads cannot install the page timer", async () => {
   const activityLocation = { hash: "#/activity" };
   const activityLoads = [];
+  const activityPhases = [];
   const timers = [];
   const activityHarness = new Function(
-    "location", "layoutChrome", "renderActivityBody", "setPageTimer",
+    "location", "layoutChrome", "renderActivityBody", "setPageTimer", "setPagePhase",
     `let PAGE_RENDER_GENERATION=0;
      ${shippedTopLevelSource("viewActivity")};
      return {viewActivity,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
@@ -408,8 +433,11 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
     activityLocation, () => {},
     (generation) => new Promise((resolve) => activityLoads.push({ generation, resolve })),
     (_, __, generation) => timers.push(generation),
+    (_, generation, phase) => activityPhases.push({ generation, phase }),
   );
   const oldActivity = activityHarness.viewActivity();
+  assert.deepEqual(activityPhases, [{ generation: 1, phase: "shell" }],
+    "Activity shell commits before its delayed detail body");
   activityHarness.navigate("#/settings");
   activityLoads[0].resolve();
   await oldActivity;
@@ -426,7 +454,7 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
   const settingsTimers = [];
   const api = (url) => new Promise((resolve) => calls.push({ url, resolve }));
   const settingsHarness = new Function(
-    "location", "api", "layoutChrome", "forgetJoinToken", "renderSettings", "setPageTimer", "settingsTick",
+    "location", "api", "layoutChrome", "forgetJoinToken", "renderSettings", "setPageTimer", "settingsTick", "setPagePhase",
     `let ME={is_admin:true},PAGE_RENDER_GENERATION=0,SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,
        CLUSTER_LOADED=false,SETTINGS_DATA=null;
      ${shippedTopLevelSource("viewSettings")};
@@ -434,7 +462,7 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
        data:()=>SETTINGS_DATA};`,
   )(
     settingsLocation, api, () => {}, () => {}, () => commits.push("render"),
-    (_, __, generation) => settingsTimers.push(generation), () => {},
+    (_, __, generation) => settingsTimers.push(generation), () => {}, () => {},
   );
   const oldSettings = settingsHarness.viewSettings();
   await nextTurn();
@@ -460,6 +488,102 @@ test("Activity and Settings stale loads cannot install the page timer", async ()
   assert.equal(settingsHarness.data().settings.marker, "current");
   assert.equal(commits.length, 1);
   assert.equal(settingsTimers.length, 1);
+});
+
+test("Settings System content precedes its delayed visible-log settlement", async () => {
+  const location = { hash: "#/settings" };
+  const phases = [];
+  const timers = [];
+  let releaseLogs;
+  const logs = new Promise((resolve) => { releaseLogs = resolve; });
+  const api = (url) => Promise.resolve(
+    url === "/settings" ? {} : url === "/trakt/status" ? {} : [],
+  );
+  const harness = new Function(
+    "location", "api", "layoutChrome", "forgetJoinToken", "renderSettings",
+    "setPageTimer", "settingsTick", "setPagePhase",
+    `let ME={is_admin:true},PAGE_RENDER_GENERATION=0,SETTINGS=null,TRAKT=null,TRAKT_EDIT=false,
+       CLUSTER_LOADED=false,SETTINGS_DATA=null;
+     ${shippedTopLevelSource("viewSettings")};
+     return {viewSettings};`,
+  )(
+    location, api, () => {}, () => {}, () => logs,
+    (_, __, generation) => timers.push(generation), () => {},
+    (_, generation, phase) => phases.push({ generation, phase }),
+  );
+
+  const pending = harness.viewSettings();
+  await nextTurn();
+  assert.deepEqual(phases, [
+    { generation: 1, phase: "shell" },
+    { generation: 1, phase: "content" },
+  ]);
+  assert.deepEqual(timers, [1], "measurement does not delay normal timer installation");
+  await pending;
+  releaseLogs();
+  await nextTurn();
+  assert.deepEqual(phases.at(-1), { generation: 1, phase: "settled" });
+});
+
+test("Page phases are generation-fenced, ordered, and wired to measured routes", () => {
+  const main = { dataset: {} };
+  const document = { getElementById: (id) => id === "main" ? main : null };
+  const location = { hash: "#/activity" };
+  const marks = [{ name: "plurx-page-phase:6:home:settled" }];
+  const performance = {
+    getEntriesByType: () => [...marks],
+    clearMarks: (name) => {
+      const index = marks.findIndex((entry) => entry.name === name);
+      if (index !== -1) marks.splice(index, 1);
+    },
+    mark: (name) => marks.push({ name }),
+  };
+  const harness = new Function(
+    "document", "location", "performance",
+    `let PAGE_RENDER_GENERATION=7;
+     ${shippedSource("pagePhaseName")};
+     ${shippedSource("setPagePhase")};
+     ${shippedSource("setPageFailure")};
+     return {setPagePhase,setPageFailure,setGeneration:(value)=>{PAGE_RENDER_GENERATION=value;}};`,
+  )(document, location, performance);
+
+  assert.equal(harness.setPagePhase("#/activity", 6, "shell"), false);
+  assert.equal(harness.setPagePhase("#/settings", 7, "shell"), false);
+  assert.equal(harness.setPagePhase("#/activity", 7, "unknown"), false);
+  assert.equal(harness.setPagePhase("#/activity", 7, "shell"), true);
+  assert.deepEqual(main.dataset, {
+    page: "activity", pageGeneration: "7", phase: "shell",
+  });
+  assert.deepEqual(marks.map((entry) => entry.name), [
+    "plurx-page-phase:7:activity:shell",
+  ], "a new generation discards prior page marks before adding its shell");
+  assert.equal(harness.setPageFailure("#/activity", 7, "render_error"), true);
+  assert.equal(main.dataset.pageFailure, "render_error");
+  assert.equal(harness.setPageFailure("#/activity", 7, null), true);
+  assert.equal(main.dataset.pageFailure, undefined);
+  assert.equal(harness.setPagePhase("#/activity", 7, "content"), true);
+  assert.equal(harness.setPagePhase("#/activity", 7, "settled"), true);
+  assert.equal(harness.setPagePhase("#/activity", 7, "content"), false,
+    "a poll cannot regress a settled route to content");
+  assert.equal(main.dataset.phase, "settled");
+
+  harness.setGeneration(8);
+  location.hash = "#/settings";
+  assert.equal(harness.setPagePhase("#/settings", 8, "shell"), true);
+  assert.deepEqual(main.dataset, {
+    page: "settings", pageGeneration: "8", phase: "shell",
+  });
+  assert.equal(marks.length, 1, "normal navigation keeps only the current phase marks");
+
+  for (const [name, route] of [["viewHome", "route"], ["viewSettings", "route"]]) {
+    const source = shippedTopLevelSource(name);
+    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"shell"\\)`));
+    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"content"\\)`));
+    assert.match(source, new RegExp(`setPagePhase\\(${route},generation,"settled"\\)`));
+  }
+  const activity = shippedSource("renderActivityBody");
+  assert.match(activity, /setPagePhase\("#\/activity",generation,"content"\)/);
+  assert.match(activity, /setPagePhase\("#\/activity",generation,"settled"\)/);
 });
 
 process.on("beforeExit", () => {
