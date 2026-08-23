@@ -61,7 +61,7 @@ pub enum IndexOutcome {
 pub async fn index_stream<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
-    expected_ticks: Option<u64>,
+    expected_ms: Option<i64>,
 ) -> IndexOutcome {
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
@@ -172,12 +172,14 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
             rows: rows.len(),
         };
     }
-    if let Some(expected) = expected_ticks {
+    if let Some(expected_ms) = expected_ms {
         let covered: u64 = rows.iter().map(|row| row.duration).sum();
-        // A whole second of slack: the probe's duration and the video track's
-        // summed sample durations are two different measurements of the same
-        // film and they disagree in the last frame's worth routinely.
-        let slack = u64::from(timescale);
+        let expected = (expected_ms.max(0) as u64).saturating_mul(u64::from(timescale)) / 1000;
+        // Two seconds of slack. The probe's duration and the video track's
+        // summed sample durations are two measurements of the same film and
+        // they routinely disagree by the last frame or two; a container whose
+        // header rounds disagrees by more.
+        let slack = u64::from(timescale) * 2;
         if covered + slack < expected {
             return IndexOutcome::Truncated {
                 reason: format!("covered {covered} of {expected} ticks"),
@@ -222,7 +224,10 @@ pub async fn build(
 ) -> IndexOutcome {
     let args = transcode::copy_index_pipe_args(file, have_dovi_bsf, preserve_dolby_vision);
     let identity = identity_for(file, have_dovi_bsf, preserve_dolby_vision);
-    let expected_ticks = None; // filled in below once the timescale is known
+    // The probe's duration, carried in so a short read is caught. Passed in
+    // milliseconds and converted against the pipe's own timescale inside the
+    // reader, because the timescale is not known until the moov arrives.
+    let expected_ms = file.duration_ms.filter(|ms| *ms > 0);
     let started = Instant::now();
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
@@ -264,7 +269,7 @@ pub async fn build(
     }
 
     let outcome =
-        match tokio::time::timeout(budget, index_stream(stdout, identity, expected_ticks)).await {
+        match tokio::time::timeout(budget, index_stream(stdout, identity, expected_ms)).await {
             Ok(outcome) => outcome,
             Err(_) => IndexOutcome::Truncated {
                 reason: format!("exceeded the {}s index budget", budget.as_secs()),
@@ -416,13 +421,13 @@ mod tests {
         else {
             panic!("the full pipe indexes");
         };
-        let covered: u64 = full.rows.iter().map(|row| row.duration).sum();
+        let _covered: u64 = full.rows.iter().map(|row| row.duration).sum();
         // Claim the file is a minute longer than it is: the coverage check is
         // the only thing standing between a short read and a wrong index.
         let outcome = index_stream(
             std::io::Cursor::new(bytes),
             identity(),
-            Some(covered + u64::from(full.timescale) * 60),
+            Some(60_000 + 12_000),
         )
         .await;
         assert!(

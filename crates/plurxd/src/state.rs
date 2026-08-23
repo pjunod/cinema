@@ -855,6 +855,10 @@ struct ArtworkSweepResult {
 /// exactly the shape D4 wants, since a file without an index simply keeps
 /// today's presentation until it has one.
 const INDEX_MAX_PER_PASS: usize = 4;
+/// Files one pass will even look at. An already-indexed library attempts
+/// nothing, so without this the pass would query every file every minute for
+/// the life of the server.
+const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
 /// Wall clock one pass will spend, whatever it got through.
 const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 /// Per file, so one pathological NAS read gives the slot back rather than
@@ -2983,6 +2987,7 @@ impl JobManager {
 
         let mut built = 0usize;
         let mut attempted = 0usize;
+        let mut examined = 0usize;
         for library in libraries {
             let paths = match self.store.library_file_paths(library.id).await {
                 Ok(paths) => paths,
@@ -2992,9 +2997,16 @@ impl JobManager {
                 }
             };
             for (file_id, _path) in paths {
-                if attempted >= INDEX_MAX_PER_PASS || std::time::Instant::now() >= deadline {
+                // Both bounds, because they stop different runaways: a
+                // library that is already fully indexed attempts nothing and
+                // would otherwise walk every file every minute.
+                if attempted >= INDEX_MAX_PER_PASS
+                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                    || std::time::Instant::now() >= deadline
+                {
                     break;
                 }
+                examined += 1;
                 if !transcode.pretranscode_worker_idle() {
                     return;
                 }

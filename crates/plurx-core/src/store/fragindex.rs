@@ -58,7 +58,7 @@ fn pack(rows: &[IndexRow]) -> Vec<u8> {
 }
 
 fn unpack(blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> {
-    if blob.len() % ROW_BYTES != 0 {
+    if !blob.len().is_multiple_of(ROW_BYTES) {
         return Err(StoreError::Migration(format!(
             "a stored fragment index is {} bytes, not a whole number of \
              {ROW_BYTES}-byte rows",
