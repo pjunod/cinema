@@ -606,3 +606,163 @@ pub(crate) async fn lease_loop(state: AppState) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    use axum::routing::get;
+    use axum::Router;
+    use bytes::Bytes;
+    use futures_util::{stream, StreamExt};
+
+    use crate::transcode::ReopenReason;
+
+    fn valid_start_request() -> RemoteStartRequest {
+        let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
+        RemoteStartRequest {
+            incarnation_id: incarnation_id.clone(),
+            user_id: 7,
+            request: SessionRequest {
+                file_id: 11,
+                playback_id: "player-a".to_owned(),
+                request_id: Some(incarnation_id),
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind: SessionKind::Transcode { height: 720 },
+                start_seconds: 12.5,
+                audio_index: Some(1),
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10: false,
+            },
+        }
+    }
+
+    fn valid_start_response() -> RemoteStartResponse {
+        let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
+        RemoteStartResponse {
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            session_id,
+            duration_ms: Some(7_200_000),
+            start_seconds: 12.5,
+            media_origin_seconds: 12.5,
+            target_height: 720,
+            kind: SessionKind::Transcode { height: 720 },
+            encoder: "qsv".to_owned(),
+            grade: OutputGrade::Sdr,
+            vod: false,
+        }
+    }
+
+    #[test]
+    fn remote_start_contract_rejects_unfenced_or_noncanonical_inputs() {
+        let request = valid_start_request();
+        assert!(request.is_valid());
+
+        let mut mismatched = request.clone();
+        mismatched.request.request_id = Some("00000000-0000-4000-8000-0000000000ff".to_owned());
+        assert!(!mismatched.is_valid());
+
+        let mut unbound_reopen = request.clone();
+        unbound_reopen.request.reopen_reason = Some(ReopenReason::Stall);
+        assert!(!unbound_reopen.is_valid());
+
+        let mut traversal = request.clone();
+        traversal.request.playback_id = "player\r\nforged".to_owned();
+        assert!(!traversal.is_valid());
+
+        let mut json = serde_json::to_value(request).expect("serialize start request");
+        json.get_mut("request")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("request object")
+            .insert("future_unfenced_field".to_owned(), serde_json::json!(true));
+        assert!(serde_json::from_value::<RemoteStartRequest>(json).is_err());
+    }
+
+    #[test]
+    fn remote_start_response_is_bound_to_the_session_capability() {
+        let response = valid_start_response();
+        assert!(response.is_valid());
+
+        let mut wrong_path = response.clone();
+        wrong_path.playlist_url = "/api/v1/hls/somebody-else/index.m3u8".to_owned();
+        assert!(!wrong_path.is_valid());
+
+        let mut mismatched_height = response.clone();
+        mismatched_height.kind = SessionKind::Transcode { height: 1080 };
+        assert!(!mismatched_height.is_valid());
+
+        let mut nonfinite = response;
+        nonfinite.start_seconds = f64::NAN;
+        assert!(!nonfinite.is_valid());
+    }
+
+    #[test]
+    fn relay_resource_names_are_single_safe_path_components() {
+        for value in ["seg00001.ts", "init.mp4", "subtitle-2.vtt"] {
+            assert!(valid_resource_name(value), "{value}");
+        }
+        for value in ["", ".", "..", "../secret", "nested/segment.ts", "x\r\ny"] {
+            assert!(!valid_resource_name(value), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_forwards_only_media_headers_without_buffering_the_body() {
+        let app = Router::new().route(
+            "/media",
+            get(|| async {
+                let chunks =
+                    stream::once(async { Ok::<Bytes, Infallible>(Bytes::from_static(b"first")) })
+                        .chain(stream::pending::<Result<Bytes, Infallible>>());
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, "video/mp2t")
+                    .header(header::CACHE_CONTROL, "private, max-age=1")
+                    .header(header::CONTENT_RANGE, "bytes 0-4/10")
+                    .header(header::SET_COOKIE, "peer-secret=must-not-leak")
+                    .header(header::CONNECTION, "close")
+                    .header("x-peer-internal", "must-not-leak")
+                    .body(Body::from_stream(chunks))
+                    .expect("fixture response")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind relay fixture");
+        let address = listener.local_addr().expect("relay fixture address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve relay fixture");
+        });
+        let peer = reqwest::Client::new()
+            .get(format!("http://{address}/media"))
+            .send()
+            .await
+            .expect("request peer stream");
+
+        let relayed = relay_response(peer).expect("build streamed relay");
+        assert_eq!(relayed.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            relayed.headers().get(header::CONTENT_TYPE),
+            Some(&"video/mp2t".parse().expect("content type"))
+        );
+        assert!(relayed.headers().get(header::CONTENT_RANGE).is_some());
+        assert!(relayed.headers().get(header::SET_COOKIE).is_none());
+        assert!(relayed.headers().get(header::CONNECTION).is_none());
+        assert!(relayed.headers().get("x-peer-internal").is_none());
+
+        let drain = axum::body::to_bytes(relayed.into_body(), 1_024);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), drain)
+                .await
+                .is_err(),
+            "relay_response must return before a peer finishes its body"
+        );
+        server.abort();
+    }
+}

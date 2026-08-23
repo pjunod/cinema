@@ -2664,6 +2664,7 @@ pub struct DeliveryCandidate {
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
@@ -2709,7 +2710,7 @@ pub struct SessionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionKind {
     Transcode {
         height: i64,

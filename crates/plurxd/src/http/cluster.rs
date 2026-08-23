@@ -152,3 +152,74 @@ fn api_error(error: MembershipError) -> ApiError {
     };
     ApiError::typed(status, error.code(), error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use plurx_core::domain::MediaSessionActivation;
+    use plurx_core::store::SqliteStore;
+
+    use super::*;
+
+    fn state() -> AppState {
+        let root =
+            std::env::temp_dir().join(format!("plurx-cluster-route-{}", uuid::Uuid::new_v4()));
+        AppState::new(
+            "test".to_owned(),
+            Arc::new(SqliteStore::open_in_memory().expect("session store")),
+            crate::state::Dirs {
+                artwork: root.join("artwork"),
+                transcode: root.join("transcode"),
+                cache: root.join("cache"),
+                subs: root.join("subs"),
+            },
+            "test-node".to_owned(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        )
+    }
+
+    #[tokio::test]
+    async fn node_removal_is_blocked_while_it_owns_a_live_media_session() {
+        let state = state();
+        assert!(require_no_owned_media_sessions(&state, "test-node")
+            .await
+            .is_ok());
+        let user = state
+            .store
+            .create_user("session-owner", "hash", false)
+            .await
+            .expect("create session owner");
+        state
+            .store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000c1".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
+                user_id: user.id,
+                playback_id: "player-a".to_owned(),
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "test-node".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 100,
+                lease_expires_at_ms: 12_100,
+            })
+            .await
+            .expect("activate media route")
+            .expect("media route outcome");
+
+        match require_no_owned_media_sessions(&state, "test-node")
+            .await
+            .expect_err("owned session must fence removal")
+        {
+            ApiError::Typed { status, code, .. } => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(code, "media_sessions_active");
+            }
+            error => panic!("unexpected removal error: {error:?}"),
+        }
+    }
+}

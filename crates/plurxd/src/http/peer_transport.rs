@@ -347,6 +347,18 @@ mod tests {
 
     #[test]
     fn exact_header_parser_requires_a_canonical_signed_nonce() {
+        let mut household = axum::http::HeaderMap::new();
+        household.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer household-session-token"
+                .parse()
+                .expect("household bearer"),
+        );
+        assert!(
+            exact_auth_from_headers(&household).is_none(),
+            "internal media routes must not widen a household bearer into peer authority"
+        );
+
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(NODE_HEADER, "node-a".parse().expect("node"));
         headers.insert(TARGET_HEADER, "node-b".parse().expect("target"));
