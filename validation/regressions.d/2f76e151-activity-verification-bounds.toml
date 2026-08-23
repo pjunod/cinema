@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2f76e151"]
+points = ["cluster.auth", "cluster.membership", "server.api"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained cluster lifecycle independently constructs both the removed shared-HMAC activity exploit and the established v4 artwork proof, requiring the former to fail and the latter to remain rolling-compatible. Activity verifiers preload 64 peers excluding self and use a globally admitted, bounded cache miss path for larger clusters. Paused-time daemon coverage requires queued peer requests to expire at the original common deadline. Reverting this correction rejects the 65th voter, restores incompatible evidence, or reintroduces scheduler-dependent deadline coverage."
