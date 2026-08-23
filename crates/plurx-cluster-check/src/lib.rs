@@ -1167,28 +1167,20 @@ async fn run_serving_partition_attempt() -> Result<ServingPartitionAttempt> {
     admit_serving_media(&http, &serving.http_base).await?;
 
     // The cut-points are an authoritative proxy pool, not advertised voter
-    // addresses. Move leadership while every proxy is enabled, wait beyond
-    // the prior one-second authority lease, and require media admission to
-    // recover through another member of that same configured pool.
+    // addresses. Suspend the current leader while every proxy remains
+    // enabled, require the surviving majority to elect a successor, then
+    // restore the old process. This makes the handoff deterministic while
+    // proving recovery through another member of the configured pool.
     let former_leader = cluster.leader().await?;
-    let election_target = (1..=3)
-        .find(|node_id| *node_id != former_leader)
-        .context("serving proof has no election successor")?;
-    cluster
-        .request(election_target, Request::TriggerElection)
-        .await?
-        .require_ok()?;
-    let election_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
-    let successor = loop {
-        let observed = cluster.leader().await?;
-        if observed != former_leader {
-            break observed;
-        }
-        if Instant::now() >= election_deadline {
-            bail!("serving proxy pool did not observe leadership move from voter {former_leader}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    let eligible = (1..=3)
+        .filter(|node_id| *node_id != former_leader)
+        .collect::<Vec<_>>();
+    let paused_leader = cluster.pause(former_leader)?;
+    let successor = cluster.leader_among(&eligible).await;
+    paused_leader
+        .resume()
+        .context("resume former serving-proof leader after deterministic handoff")?;
+    let successor = successor.context("serving proxy pool did not observe majority failover")?;
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     wait_serving_http(
         &http,
