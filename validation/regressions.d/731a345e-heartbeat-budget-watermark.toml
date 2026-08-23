@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["731a345e"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained membership lifecycle brackets two acknowledged heartbeat transactions with same-leader, same-term quorum watermarks and requires an exact two-entry committed-index delta. This avoids sampling the asynchronously published OpenRaft metrics watch while preserving the strict write budget."
