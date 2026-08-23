@@ -977,6 +977,18 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
         let spec = specs[(node_id - 1) as usize].clone();
         let token_digest = join_token_digest(&issued.token);
+        if node_id == 3 {
+            cluster
+                .request(
+                    1,
+                    Request::SeedLegacyPartialRedemption {
+                        token_digest: token_digest.clone(),
+                        node_id: "node-3".to_owned(),
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
         let request = RedeemJoinRequest {
             token_digest: token_digest.clone(),
             raft_id: issued.raft_id,
@@ -988,6 +1000,19 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_VERSION,
         };
+        if node_id == 2 {
+            let mut no_http_resume = request.clone();
+            no_http_resume.http_base.clear();
+            cluster
+                .request(
+                    1,
+                    Request::RedeemJoin {
+                        request: no_http_resume,
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
         cluster
             .request(
                 1,
@@ -997,6 +1022,31 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             )
             .await?
             .require_ok()?;
+        if node_id == 2 {
+            cluster
+                .request(
+                    1,
+                    Request::SeedHistoricalHttpDuplicate {
+                        node_id: "historical-node".to_owned(),
+                        public_http_url: request.http_base.clone(),
+                    },
+                )
+                .await?
+                .require_ok()?;
+        }
+        let mut changed_origin = request.clone();
+        changed_origin.http_base = format!("http://127.0.0.1:{}", 34_000 + node_id);
+        require_membership_error(
+            cluster
+                .request(
+                    1,
+                    Request::RedeemJoin {
+                        request: changed_origin,
+                    },
+                )
+                .await?,
+            "cluster_http_endpoint_in_use",
+        )?;
         cluster
             .spawn_node(
                 &executable,
@@ -3188,6 +3238,10 @@ pub enum Request {
         token_digest: String,
         node_id: String,
     },
+    SeedHistoricalHttpDuplicate {
+        node_id: String,
+        public_http_url: String,
+    },
     Bootstrap,
     RejectIdentityDrift,
     Open,
@@ -4800,6 +4854,19 @@ async fn handle_request(
                 .execute(
                     "DELETE FROM cluster_node_http WHERE node_id = $1",
                     hiqlite::macros::params!(node_id),
+                )
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::SeedHistoricalHttpDuplicate {
+            node_id,
+            public_http_url,
+        } => {
+            client
+                .execute(
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) VALUES ($1, $2) \
+                     ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url",
+                    hiqlite::macros::params!(node_id, public_http_url),
                 )
                 .await?;
             Ok(Response::Ok)

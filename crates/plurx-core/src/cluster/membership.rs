@@ -131,6 +131,12 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_node_http (\
          node_id TEXT PRIMARY KEY, \
          public_http_url TEXT NOT NULL) STRICT",
+    // A durable exact-origin claim distinguishes pre-M3d shared-address rows
+    // from origins admitted by the node-scoped redemption protocol. Legacy
+    // rows may migrate once; a claimed origin is immutable on every retry.
+    "CREATE TABLE IF NOT EXISTS cluster_node_http_claims (\
+         node_id TEXT PRIMARY KEY, \
+         public_http_url TEXT NOT NULL) STRICT",
     // Additive so a rolling upgrade can teach old membership rows their
     // machine names without rewriting the cluster_nodes table underneath an
     // older voter. Every new daemon creates this table before its heartbeat.
@@ -1040,6 +1046,8 @@ impl MembershipManager {
                    WHERE token.token_hash = $3 AND token.raft_id = $4 \
                      AND ((token.state = 'issued' AND token.expires_at > $5) \
                        OR (token.state = 'redeeming' AND token.node_id = $1))) \
+                 AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
+                   WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
                  AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  AND NOT EXISTS (\
                    SELECT 1 FROM cluster_node_http owner_http \
@@ -1079,8 +1087,8 @@ impl MembershipManager {
         } else if resume_legacy_partial {
             statements.push((
                 "UPDATE cluster_join_tokens SET node_id = node_id \
-                 WHERE token_hash = $2 AND raft_id = $3 AND state = 'redeeming' \
-                   AND node_id = $1 \
+                 WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
+                   AND state = 'redeeming' \
                    AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  RETURNING node_id"
                     .to_owned(),
@@ -1102,6 +1110,19 @@ impl MembershipManager {
             ));
             0
         };
+        if let Some(http_base) = http_base.as_deref() {
+            statements.push((
+                "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                 VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                   public_http_url = excluded.public_http_url \
+                 WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
+                    Param::Text(http_base.to_owned()),
+                ],
+            ));
+        }
         statements.extend([
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
@@ -1315,45 +1336,64 @@ impl MembershipManager {
         http_base: &str,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        let changed = inner
+        let transaction = inner
             .client
-            .execute(
-                "INSERT INTO cluster_node_http (node_id, public_http_url) \
-                 SELECT $1, $2 WHERE EXISTS (\
-                   SELECT 1 FROM cluster_join_tokens token \
-                   WHERE token.token_hash = $3 AND token.raft_id = $4 \
-                     AND token.state = 'redeeming' AND token.node_id = $1) \
-                 AND EXISTS (\
-                   SELECT 1 FROM cluster_nodes node \
-                   WHERE node.node_id = $1 AND node.raft_id = $4 \
-                     AND node.raft_address = $5 AND node.api_address = $6 \
-                     AND node.removed_at IS NULL \
-                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                       WHERE removal.node_id = node.node_id)) \
-                 AND NOT EXISTS (\
-                   SELECT 1 FROM cluster_node_http owner_http \
-                   JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
-                   WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
-                     AND owner_node.removed_at IS NULL \
-                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
-                       WHERE removing.node_id = owner_node.node_id)) \
-                 ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url \
-                 WHERE cluster_node_http.public_http_url = excluded.public_http_url \
-                    OR EXISTS (SELECT 1 FROM cluster_node_http legacy_peer \
-                      WHERE legacy_peer.node_id != $1 \
-                        AND legacy_peer.public_http_url = cluster_node_http.public_http_url)",
-                params!(
-                    request.node_id.as_str(),
-                    http_base,
-                    request.token_digest.as_str(),
-                    request.raft_id as i64,
-                    request.raft_address.as_str(),
-                    request.api_address.as_str()
+            .txn(vec![
+                (
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                     SELECT $1, $2 WHERE EXISTS (\
+                       SELECT 1 FROM cluster_join_tokens token \
+                       WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                         AND token.state = 'redeeming' AND token.node_id = $1) \
+                     AND EXISTS (\
+                       SELECT 1 FROM cluster_nodes node \
+                       WHERE node.node_id = $1 AND node.raft_id = $4 \
+                         AND node.raft_address = $5 AND node.api_address = $6 \
+                         AND node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                           WHERE removal.node_id = node.node_id)) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
+                       WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                     AND NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http owner_http \
+                       JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                       WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                         AND owner_node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                           WHERE removing.node_id = owner_node.node_id)) \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     RETURNING node_id"
+                        .to_owned(),
+                    params!(
+                        request.node_id.as_str(),
+                        http_base,
+                        request.token_digest.as_str(),
+                        request.raft_id as i64,
+                        request.raft_address.as_str(),
+                        request.api_address.as_str()
+                    ),
                 ),
-            )
-            .await?;
-        if changed == 1 {
-            return Ok(());
+                (
+                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(http_base.to_owned()),
+                    ],
+                ),
+            ])
+            .await;
+        match transaction {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                return Ok(());
+            }
+            Err(error) if error.to_string().contains("StmtIndex(") => {}
+            Err(error) => return Err(error.into()),
         }
         let latest = self.token_record(&request.token_digest).await?;
         if latest.state == "redeemed" {
@@ -1506,31 +1546,55 @@ impl MembershipManager {
         // former shared join URL in every row while voters roll forward. A
         // node may replace its own legacy value, but may never claim a URL
         // currently published by another node.
-        let changed = inner
+        let transaction = inner
             .client
-            .execute(
-                "INSERT INTO cluster_node_http (node_id, public_http_url) \
-                 SELECT $1, $2 WHERE NOT EXISTS (\
-                   SELECT 1 FROM cluster_node_http AS owner_http \
-                   WHERE owner_http.public_http_url = $2 \
-                     AND owner_http.node_id != $1 \
-                     AND EXISTS (\
-                       SELECT 1 FROM cluster_nodes AS owner_node \
-                       WHERE owner_node.node_id = owner_http.node_id \
-                         AND owner_node.removed_at IS NULL \
-                         AND NOT EXISTS (\
-                           SELECT 1 FROM cluster_node_removals AS removing \
-                           WHERE removing.node_id = owner_node.node_id))) \
-                 ON CONFLICT(node_id) DO UPDATE SET \
-                   public_http_url = excluded.public_http_url",
-                params!(inner.identity.node_id.as_str(), inner.artwork_http.as_str()),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::Internal(format!(
-                "artwork URL {} is already published by another cluster node",
-                inner.artwork_http
-            )));
+            .txn(vec![
+                (
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                     SELECT $1, $2 WHERE NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http_claims claim \
+                       WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                     AND NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http AS owner_http \
+                       WHERE owner_http.public_http_url = $2 \
+                         AND owner_http.node_id != $1 \
+                         AND EXISTS (\
+                           SELECT 1 FROM cluster_nodes AS owner_node \
+                           WHERE owner_node.node_id = owner_http.node_id \
+                             AND owner_node.removed_at IS NULL \
+                             AND NOT EXISTS (\
+                               SELECT 1 FROM cluster_node_removals AS removing \
+                               WHERE removing.node_id = owner_node.node_id))) \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     RETURNING node_id"
+                        .to_owned(),
+                    params!(inner.identity.node_id.as_str(), inner.artwork_http.as_str()),
+                ),
+                (
+                    "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
+                     VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(inner.artwork_http.clone()),
+                    ],
+                ),
+            ])
+            .await;
+        match transaction {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
+            }
+            Err(error) if error.to_string().contains("StmtIndex(") => {
+                return Err(MembershipError::Internal(format!(
+                    "artwork URL {} conflicts with an existing node claim",
+                    inner.artwork_http
+                )));
+            }
+            Err(error) => return Err(error.into()),
         }
         self.upsert_hostname(&inner.identity.node_id, &inner.local_hostname)
             .await
