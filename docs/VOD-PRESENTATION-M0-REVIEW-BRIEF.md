@@ -1,6 +1,17 @@
 # VOD M0 review brief — three normative sentences to re-decide
 
-**Status:** review requested · **Reviews:**
+**Status:** RULED 2026-08-23 — A1, A2 and A3 decided, M1 authorized with
+amendments, D6 left open; the amendments are applied to plan §2.1, §2.2, §2.3,
+§6 and §9, and §12.9 records them. The sections below are kept as the record of
+what was asked and on what evidence · **Ruling summary:** A1 — adopt
+byte-landing identification, strengthened to a 3-fragment byte-count sequence,
+typed failure on no match or a double match; the `tfdt` rebase is untouched.
+A2 — documentation, not policy: `TARGETDURATION` bounds time, not bytes, and
+M4 sizes the web segment budget from `est_bytes`. A3 — write the invariant:
+`block_budget_secs` = the client's own configured first-byte timeout minus 2 s,
+plus a new `playback.vod_materialize_budget` (30 s) so a stuck producer fails
+typed before the client's retry ladder ends. **One premise in the ruling was
+re-verified and does not hold** — see §4 · **Original status:** review requested · **Reviews:**
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §12 (the M0 results) against
 §2.2 (the media-time contract) · **Written:** 2026-08-23 against `main` @
 `f522eff7`, branch `agent/vod-m0` · **Asks for:** a decision on §2.2 and a
@@ -141,6 +152,25 @@ a constant inside a vendored player. Two things a reviewer should rule on:
   `segment_pending`. §2.3 has no rule that a producer must fail typed before a
   client's retry budget runs out, and without one the client's error is
   `fragLoadError` rather than the typed refusal the plan designed.
+
+**Re-verified after the ruling, and the correction does not hold.** The ruling
+states the vendored `hls.min.js` default `maxTimeToFirstByteMs` is `8e3`, which
+would make an 8 s deadline tie the client's abort timer rather than sit under
+it. It is `1e4`. The `8e3` values in the bundle belong to `certLoadPolicy` and
+`keyLoadPolicy`, neither of which governs a fragment fetch:
+
+```text
+certLoadPolicy:{default:{maxTimeToFirstByteMs:8e3,maxLoadTimeMs:2e4
+keyLoadPolicy:{default:{maxTimeToFirstByteMs:8e3,maxLoadTimeMs:2e4
+fragLoadPolicy:{default:{maxTimeToFirstByteMs:1e4,maxLoadTimeMs:12e4
+```
+
+The runs agree: every abort landed at 10 000–10 005 ms, and the
+`deadline-8000` arm recorded **zero aborted attempts at all four block
+lengths**, which an 8 000 ms abort timer could not produce. The invariant is
+applied as ruled; it resolves to 8 s for web, with margin rather than by race.
+The ruling's other half is correct — `index.html:5188` configures no load
+policy, so M4 setting `fragLoadPolicy` explicitly stands.
 
 Also worth a reviewer's eye, though not a decision: hls.js **ignores
 `Retry-After`** (the header is read only for HTTP 429 in its content-steering

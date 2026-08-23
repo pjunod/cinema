@@ -1,8 +1,9 @@
 # VOD presentation — every title is a film, not a broadcast
 
-**Status:** M0 RUN, M1 BLOCKED — P0's fidelity proof failed clause (b) and
-§2.2 needs a review decision before any product code; results are in §12 and
-the decision is requested in
+**Status:** M0 ACCEPTED, M1 AUTHORIZED with amendments — P0 failed clause (b)
+as v2 wrote it, rulings A1–A3 amended §2.1/§2.2/§2.3/§6/§9 accordingly, and
+D6 stays open pending the device halves. Results are §12; the rulings are
+recorded in
 [VOD-PRESENTATION-M0-REVIEW-BRIEF.md](VOD-PRESENTATION-M0-REVIEW-BRIEF.md) ·
 **Review:** [VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)
 · **Response:**
@@ -22,8 +23,12 @@ ends with an acceptance check that is a runnable command or an observable
 fact on a named machine. M0 is a feasibility-and-measurement spike that can
 still change three decisions (D1, D4, D6 in §9) — and M0-P0 is a proof, not
 a measurement; do not start M1 until M0's results are recorded. **M0 ran on
-2026-08-23 and §12 records it: D1, D4 and D6 are resolved there, P0 clause
-(b) failed, and §2.2 is flagged for re-decision — so M1 is blocked.**
+2026-08-23 and §12 records it. Its review ruled A1–A3 on the same day: §2.2's
+addressing is now by output-byte sequence, §2.1 states what `TARGETDURATION`
+does not bound, §2.3 carries an invariant instead of a number plus a producer
+materialization budget, and §6 gains stopgaps S5 and S6. D1 and D4 are
+resolved; D6 stays open until the device halves of P2 and P3 return, and it
+gates M3's transcode serving, not M1 or M2's copy work.**
 If a step seems to require changing something §7 forbids, **stop and flag it
 instead of improvising** — the guardrails are load-bearing.
 
@@ -130,6 +135,18 @@ shape remains in the codebase, served to clients that do not opt in
   carries `#EXT-X-PLAYLIST-TYPE:VOD` and `#EXT-X-MEDIA-SEQUENCE:0`, and
   its `#EXT-X-TARGETDURATION` is the ceiling of the largest planned
   duration. fMP4 playlists keep `#EXT-X-MAP:URI="init.mp4"`.
+- `TARGETDURATION` bounds **time, not bytes.** Segment size is bounded by
+  floor × bitrate, because `CutPolicy`'s floor gates both ceilings
+  (`fmp4.rs:1774-1776`): above roughly 85 Mb/s the 64 MiB byte ceiling cannot
+  bind inside the 6 s floor at all, and M0 measured 125.2 MB segments on a
+  143 Mb/s source (§12.4). **This is not a VOD regression** — today's live
+  path serves those exact bytes from the same policy on the same file. It is
+  written down here because an immutable playlist states its durations
+  upfront and a reader may otherwise infer a byte bound that does not exist.
+  Admission (§2.4) is unaffected: it works from planned totals, which this
+  plan is the first thing to make available. M4 sets the web player's
+  in-flight segment budget from the plan's `est_bytes` rather than from the
+  `MSE_SEGMENT_CEILING_BYTES` assumption mirrored at `index.html:6849`.
 - The playlist's bytes are **immutable for the life of the playback**. No
   EVENT→sliding rewrite, no MEDIA-SEQUENCE advance, no publish gate: the
   playlist is available the moment the session answers, before any media
@@ -165,14 +182,25 @@ and computable upfront.
   existing reader + `classify`, recording per fragment: first-sample DTS,
   duration ticks, output byte length, and the clean/dirty verdict. This is
   exactly what `scripts/gop-census` does today minus the census math — the
-  index is that walk, persisted. Video-only makes the index (and therefore
-  the plan) valid for **every audio selection** of the file; the byte
-  ceiling is applied to video fragment bytes with a fixed audio headroom
-  (audio adds at most bitrate × duration, bounded by the probe), proven in
-  M0-P0. The index is persisted per file, keyed by the file's identity
-  recipe like the cache, built in the background at scan/analyze time or on
-  first demand. **A file with no index keeps the legacy live presentation
-  for that watch** and converts from the next one — no cold play ever waits
+  index is that walk, persisted. Video-only makes the index's **fragment
+  sequence** valid for every audio selection of the file — count, clean/dirty
+  verdicts, durations and output byte counts were identical across audio
+  branches on 9 of 9 M0 fixtures (§12.2). Its **timeline** is not: the
+  production pipe's video DTS grid sits a constant, audio-branch-dependent
+  offset ahead of the index's (0, 6 or 678 ticks measured; 678 ticks is the
+  AAC encoder delay), which is one more reason the media-time contract below
+  addresses fragments by byte sequence rather than by timestamp. The byte
+  ceiling is applied to video fragment bytes with an audio headroom of
+  **1.5 × nominal bitrate × duration**: nominal is not an upper bound — M0
+  measured ffmpeg's AAC encoder overshooting `-b:a 320k` by 1.2235× (§12.4) —
+  and oversizing is safe because `est_bytes` feeds admission, not refusal.
+  The index is persisted per file, keyed by the file's identity recipe like
+  the cache **and by the video-branch argv fingerprint**, so a differing video
+  branch — a Dolby Vision preservation path, a different bitstream filter, an
+  ffmpeg upgrade — can never reuse a stale index. It is built in the
+  background at scan/analyze time or on first demand. **A file with no index
+  keeps the legacy live presentation for that watch** and converts from the
+  next one — no cold play ever waits
   on indexing. Index build cost is M0-P1; plan-vs-production fidelity is
   M0-P0 and gates everything (D4).
 - **Copy plan entries** are `CutPolicy` applied over the index's clean
@@ -190,6 +218,11 @@ and computable upfront.
 - Audio tails at end-of-stream follow the c58a4307 rule (trailing audio
   split at the policy ceiling into audio-only entries), computed from the
   probe's per-track durations — the final EXTINFs are honest upfront.
+  `#EXT-X-TARGETDURATION` is computed over **all** plan entries, audio-tail
+  entries included. M0's `audiotail-2397` fixture makes the reason concrete:
+  its honest target duration is 15 s where a video-only plan emits 8, and an
+  understated `EXT-X-TARGETDURATION` is a spec violation players act on
+  (§12.4).
 
 **The media-time contract** (review B2 — a stable name is nothing without
 stable time inside the bytes):
@@ -206,10 +239,21 @@ stable time inside the bytes):
   [PERF2-PLAN-REVIEW.md](PERF2-PLAN-REVIEW.md) §2 R1 validated when it
   proved `-start_number` alone moves names, not PTS.
 - A producer repositioned to a plan boundary seeks with `-noaccurate_seek
-  -ss <boundary>` (lands at the RAP at-or-before) and the segmenter
-  discards fragments until the first whose DTS equals the boundary; a
-  mismatch (never-equal) is a typed producer failure and an index
-  invalidation, not a silent drift.
+  -ss <boundary>` and lands at the RAP at-or-before it — always at-or-before,
+  by design, so the segmenter always discards forward. **It recognises the
+  landing by output byte count, not by timestamp** (M0-P0, §12.3, ruling A1):
+  the landing fragment plus the next two form a 3-long sequence of output byte
+  counts, matched against the index, and the segmenter then counts planned
+  boundaries forward from the matched position. A repositioned generation's
+  DTS carries no film time — `-avoid_negative_ts make_zero` rebases every
+  generation to zero and `-copyts` does not change it — so a DTS-equality test
+  can never converge, which M0 measured over 43 boundaries before this rule
+  replaced it. Two outcomes are a typed producer failure plus an index
+  invalidation, not a silent drift: a 3-sequence matching **nowhere** in the
+  index, and one matching in **two** places. That is what keeps D4's promise
+  that an ffmpeg upgrade which re-fragments differently fails loudly —
+  different fragmentation means different output byte counts, so the sequence
+  misses rather than misaligning.
 - The rendition's `init.mp4` is written by its first process generation and
   stored as **the** init. Every later generation's init must be
   byte-identical or the generation is refused with a typed
@@ -233,21 +277,40 @@ deleted):
    case: the producer runs ahead of the playhead (§2.4).
 2. **Not yet materialized** → the response **blocks** until the segment
    lands, bounded by a **hard** per-request deadline: `min(server cap,
-   the client's declared budget)`. The create body carries
-   `block_budget_secs` — what this stack's own shorter timer allows
-   (hls.js: whatever `fragLoadingTimeOut` the player configures; Media3:
-   inside OkHttp's 60 s read timeout; AVPlayer: the M0-P3 measured value);
-   the server default `playback.vod_block_secs` (15 s until P3 says
-   otherwise) caps it. **Deadline expiry answers a typed, retryable
+   the client's declared budget)`. **The invariant, not the number**
+   (M0-P3, §12.7, ruling A3): a client's declared `block_budget_secs` is its
+   own configured first-byte timeout **minus 2 s**, both read from one
+   client-side constant, and a client must configure that timeout explicitly
+   rather than inherit a vendored default. A declaration at or above the
+   client's own timeout is a client bug — the server would still be waiting
+   when the client abandons the request, so expiry never reaches it and the
+   typed refusal is unreachable. That is refused loudly in review, not at
+   runtime. M0 measured it directly: against hls.js's `fragLoadPolicy`
+   default `maxTimeToFirstByteMs` of 10 000 ms, an 8 s deadline carried a
+   60 s block to the end through five typed 503s with zero aborted attempts,
+   while a 15 s deadline produced a fatal error and **zero** 503s in five
+   attempts. **Deadline expiry answers a typed, retryable
    `segment_pending` 503 with `Retry-After`** — never an open-ended wait,
-   never a bare 404. All three stacks retry fragment loads; M0-P3 measures
-   each stack's actual 503 handling to set budgets and retry configs, not
-   to choose the shape.
+   never a bare 404. All three stacks retry fragment loads. `Retry-After`
+   stays on the wire — AVPlayer and Media3 are unmeasured — but the plan no
+   longer assumes it steers retry cadence: hls.js reads the header only for
+   HTTP 429 in its content-steering controller and backs fragment retries off
+   on its own ladder (§12.7).
 3. **Producer dead or the request is beyond repair** → a **typed** 5xx with
    the refusal vocabulary the playlist path grew in `64a24854`
    (`producer_failed`, `session_failed`), because at that point an error is
    the truth. A planned segment is never 404'd; today's bare segment 404
    (`http/hls.rs:1669`) survives only for genuinely unknown names.
+
+**The producer must answer within a budget, so the client never has to give
+up first** (ruling A3). A new setting `playback.vod_materialize_budget`
+(default 30 s) bounds the time from the first wait on a segment to
+produced-or-typed-failure, enforced by the existing producer watchdog and by
+the reposition path. Without it a producer that never materializes outlives
+the client's retry ladder and the viewer gets a raw transport error instead of
+the typed refusal this contract designed: hls.js gives 7 attempts over roughly
+31.6 s and then a fatal `fragLoadError` (§12.7). M4 sizes the web retry ladder
+explicitly so its total — attempts × backoff — exceeds this budget.
 
 Bounding the wait pool (review B4's operational half): a client disconnect
 **cancels** the server-side wait (response-body drop aborts it); blocked
@@ -493,6 +556,22 @@ soon enough to skip:
   404 on a pruned segment lands in `errorLog()` unobserved (no
   `AVPlayerItemNewErrorLogEntry` observer) — structurally invisible until
   something else fails. One observer + one beacon.
+- **S5 — every `-b:a`-derived size is understated.** M0 measured ffmpeg's
+  AAC encoder overshooting its `-b:a 320k` target by 1.2235× on the 5.1
+  branch (§12.4): the bitrate in the argument list is a request, not a
+  ceiling. Audit every place a buffer, budget, or headroom is sized from
+  `-b:a` and give each a measured margin. M1's `est_bytes` already uses
+  1.5 × nominal (§2.2).
+- **S6 — `media_origin` on a keyframe-coincident seek.**
+  `parse_keyframe_origin` reads `ffprobe -read_intervals "{start}%+#4"`,
+  which filters packets to `≥ start`. For an arbitrary seek target that
+  agrees with where the demuxer lands, to within 1 ms measured. For a target
+  that **is** a keyframe timestamp it reports that keyframe while
+  `-noaccurate_seek -ss` lands a full GOP earlier — 1.752 s of disagreement
+  measured on `closed-gop-2397`, 1.502 s on `h264-2997` (§12.3). Audit the
+  live path for seeks that can land on a keyframe timestamp. VOD itself is
+  unaffected once §2.2's byte-sequence addressing lands, because it stops
+  using the origin probe altogether.
 - **S4 — Android 400-fallback leaks its predecessor.** The unbound retry
   strips `previous_session_id` after `sessionId` was already nulled without
   a DELETE (`StallReopen.kt:142-161`), so the predecessor's encoder slot
@@ -714,7 +793,8 @@ Numbered so the review can attack them individually; each carries its why
 and the rejected alternative.
 
 1. **Block first — behind one hard deadline — for planned-but-unmade
-   segments (D1, revised per review B4; RESOLVED by M0-P3, §12.7).** AVPlayer demonstrably tolerates
+   segments (D1, revised per review B4; RESOLVED by M0-P3, §12.7).**
+   AVPlayer demonstrably tolerates
    slow bytes and demonstrably distrusts errors and mutation (the whole
    build-63 arc; PLAYBACK.md holds playlist requests open for exactly this
    reason), so blocking stays the primary path — but the wait is bounded by
@@ -724,10 +804,19 @@ and the rejected alternative.
    escape hatch (an unbounded response the client cannot retry) and
    503-as-primary (spends AVPlayer's error tolerance on the common case).
    M0-P3 sets the numbers and proves each stack's 503 retry behavior.
-   **Resolved:** the deadline must sit strictly below the shortest client
-   first-byte timeout or expiry never reaches the client — web's is 10 s, so
-   `playback.vod_block_secs` defaults to **8** pending the device halves
-   (§12.7, §12.9).
+   **Resolved (ruling A3):** the contract is an invariant, not a number —
+   a client declares `block_budget_secs` = its own configured first-byte
+   timeout minus 2 s, from one client-side constant, and configures that
+   timeout explicitly rather than inheriting a vendored default; a
+   declaration at or above the client's own timeout is a client bug refused
+   in review. `playback.vod_materialize_budget` (30 s) bounds the producer so
+   the viewer never outlives it into a raw transport error. Against hls.js's
+   `fragLoadPolicy` default of 10 000 ms this resolves to **8 s** for web,
+   pending the device halves, which can only lower it. The `8e3` values in
+   the vendored bundle belong to `certLoadPolicy` and `keyLoadPolicy` and
+   govern no fragment fetch — re-verified 2026-08-23; the `deadline-8000`
+   arm recorded zero aborted attempts at every block length, which an 8 000 ms
+   abort timer could not have produced.
 2. **Client opt-in via create body, server gate via setting (D2).** The
    rollout needs old-client/new-server and new-client/old-server to both
    keep working with zero double-serving; a per-request declaration is the
@@ -746,7 +835,13 @@ and the rejected alternative.
    audio selection, persisted per file identity, built in the background at
    import; a file with no index keeps the legacy presentation for that
    watch, so no cold play ever waits on indexing. M0-P0 proves fidelity
-   before M0-P1 prices it.
+   before M0-P1 prices it. **Resolved (ruling A1):** upheld — the index is
+   deterministic and describes the production fragment stream exactly on 9 of
+   9 fixtures (§12.2). Amended: the index is keyed by the video-branch argv
+   fingerprint as well as the file identity, so a Dolby Vision preservation
+   path or an ffmpeg upgrade can never reuse a stale one, and the
+   re-fragmentation-fails-loudly property now rides the byte-sequence match
+   in §2.2 rather than a DTS comparison.
 5. **Sessions resurrect from persisted recipes rather than never reaping —
    and only from the dormant state (D5, extended per review B6).** Keeps
    memory bounded and the reaper's real job (resource housekeeping) intact
@@ -757,7 +852,10 @@ and the rejected alternative.
    recipe-only resurrection (re-animates what DELETE/supersession/admin
    action/revocation meant to end).
 6. **Transcode EXTINFs nominal-2.0 (D6-A) unless M0-P2 objects, then
-   segmenter-exact (D6-B). RESOLVED: D6-A, on the web half (§12.6).** A is a no-op to the encode pipeline; B
+   segmenter-exact (D6-B). STILL OPEN — the web half says D6-A (§12.6) but
+   P2 spoke for hls.js only, so this cannot be decided until the AVPlayer and
+   Media3 halves return. It gates M3's transcode serving, not M1 or M2.**
+   A is a no-op to the encode pipeline; B
    unifies both paths through `fmp4::Segmenter` at the cost of touching
    the transcode output path. Measured, not argued.
 7. **Rung switching stays session-replacement (D7).** One encode is a
@@ -781,7 +879,14 @@ and the rejected alternative.
     producer-driven policy would have chosen — is invisible to clients and
     accepted. A planned boundary the materializing pipe cannot honor
     (DTS never matches) is a typed failure plus index invalidation, never
-    a silent re-cut.
+    a silent re-cut. **Amended by ruling A1:** the boundary a materializing
+    pipe must honor is recognised by matching a 3-long sequence of output
+    fragment byte counts against the index, then counting planned boundaries
+    forward — not by comparing timestamps, which M0 proved cannot converge
+    (§12.3). The typed failure now fires on a sequence that matches nowhere
+    or matches twice. The segmenter's `tfdt` rebase to plan `start_ticks` is
+    unchanged: the media-time contract survived M0 intact, only its
+    addressing did not.
 11. **A VOD rendition is bound to its owner node; takeover never reuses
     its URIs (D11, new per review B5).** Cross-node takeover rebuilds
     recipes with locally valid encoders — protocol-compatible, not
@@ -903,7 +1008,7 @@ So a plan built from the video-only index cuts at boundaries the production
 pipe really emits, for any audio selection. D4 is upheld on the evidence, not
 on the argument.
 
-### 12.3 P0(b) — fail: the plan's boundaries are real, its film-time addressing is not
+### 12.3 P0(b) — fail: the boundaries are real, the addressing is not
 
 Three measurements, each of which independently breaks a sentence in §2.2.
 
@@ -1083,39 +1188,66 @@ Named so nobody reads a green run as coverage it is not:
   input and cannot change output bytes, but the probe's argv differs from the
   daemon's logged one.
 
-### 12.9 Ledger outcomes, and the one thing that must be re-decided
+### 12.9 Ledger outcomes, and how the review ruled
 
-**D1 — resolved; shape unchanged, numbers set.** Blocking behind one hard
-deadline is right, and §12.7 shows it works on stock clients. The number is not
-free: `playback.vod_block_secs` must be **strictly below the shortest client
-first-byte timeout**, or expiry never reaches the client. Web's is 10 s, so the
-default becomes **8**, not the placeholder 15 — pending the device halves,
-which can only lower it. Each client's `block_budget_secs` declaration stays as
-designed, and no client needs a raised fragment timeout for the server to work.
+M0's results were reviewed on 2026-08-23. The rulings are recorded here and
+already applied to §2.1, §2.2, §2.3, §6 and §9; **M1 is authorized.**
 
-**D4 — resolved; upheld.** The fragment index built by the production-shaped
-video-only copy pipe is deterministic (§12.1) and describes the production
-fragment stream exactly (§12.2). Its *timeline* does not transfer, which is
-§2.2's problem, not D4's.
+**D1 — resolved (ruling A3): the invariant, not the number.** A client
+declares `block_budget_secs` = its own configured first-byte timeout minus
+2 s, both from one client-side constant, and configures that timeout
+explicitly rather than inheriting a vendored default. A declaration at or
+above the client's own timeout is a client bug, refused in review rather than
+at runtime. `playback.vod_materialize_budget` (default 30 s) bounds the
+producer from first wait to produced-or-typed-failure, so a viewer never
+outlives it into a raw `fragLoadError`; M4 sizes the web retry ladder so
+attempts × backoff exceeds that budget. `Retry-After` stays on the wire, but
+the plan drops the assumption that it steers web retry cadence.
 
-**D6 — resolved: D6-A** on the web half (§12.6), pending the device halves.
-Routing the encode through `fmp4::Segmenter` (D6-B) buys nothing hls.js needs.
+Against today's vendored hls.js this resolves to **8 s** for web. One premise
+raised in review was re-verified and does not hold: the `8e3` values in
+`hls.min.js` are `certLoadPolicy` and `keyLoadPolicy`, neither of which
+governs a fragment fetch, while `fragLoadPolicy.default.maxTimeToFirstByteMs`
+is `1e4`. The measurements agree — every abort landed at 10 000–10 005 ms —
+and the `deadline-8000` arm recorded **zero aborted attempts at all four block
+lengths**, which an 8 000 ms abort timer could not have produced. The 8 s
+deadline sat under the client's timer with margin; it did not tie it.
 
-**§2.2 — stop-and-flag, not resolved.** Three sentences in a normative section
-are contradicted by §12.3, and amending §2.2 is not one of the three decisions
-M0 may change (§8 M0). They are:
+**D4 — resolved (ruling A1): upheld and strengthened.** The index stands. Two
+amendments: it is keyed by the video-branch argv fingerprint as well as the
+file identity, so a Dolby Vision path or an ffmpeg upgrade can never reuse a
+stale one — which also closes §12.8's DV and A/V-offset exposure structurally
+rather than by measurement — and D4's re-fragmentation-fails-loudly property
+now rides the byte-sequence match rather than a DTS comparison.
 
-1. "the segmenter discards fragments until the first whose DTS equals the
-   boundary" — no repositioned generation emits film-time DTS;
-2. "a mismatch (never-equal) is a typed producer failure and an index
-   invalidation" — as written this fires on every reposition;
-3. "Video-only makes the index (and therefore the plan) valid for every audio
-   selection" — true of the sequence, false of the timeline.
+**D6 — still open.** The web half says D6-A (§12.6), but P2 spoke for hls.js
+only. It gates M3's transcode serving, not M1 or M2's copy work, so it does
+not block the build.
 
-The measurements point at a replacement — identify the landing fragment by its
-output byte count against the index (43/43 unique), then count planned
-boundaries forward from there, and let the segmenter rebase `tfdt` to the plan's
-`start_ticks` as §2.2 already requires — but choosing it is a review decision.
-A revision should also say what the plan does with a segment `CutPolicy` cannot
-hold under the byte ceiling (§12.4), and should replace the nominal audio
-headroom with a measured one.
+**§2.2 — re-decided (ruling A1), and this is what M0 was for.** A repositioned
+producer recognises its landing by matching a 3-long sequence of output
+fragment byte counts against the index, then counts planned boundaries forward
+from the matched position. `-noaccurate_seek -ss {:.3}` stays: landing
+at-or-before the boundary and discarding forward is by design, and only the
+equality test was broken. The segmenter's `tfdt` rebase to plan `start_ticks`
+is untouched — the media-time contract survived M0 intact; its addressing did
+not. Typed failure plus index invalidation now fires on a sequence matching
+nowhere or matching in two places, and M1 builds both as constructed unit
+tests: a synthetic index with a duplicated byte-count run near the landing,
+and a landing absent from the index. Neither condition occurred in the M0
+corpus, which is exactly why they are constructed rather than sampled.
+
+**§2.1 — amended (ruling A2), documentation not policy.** No `CutPolicy`
+change; §7 holds. The playlist now says what `TARGETDURATION` does not bound.
+
+**Group B — the defects found in passing.** B1 becomes stopgap S5 (audit every
+`-b:a`-derived sizing; M1's `est_bytes` uses 1.5 × nominal, above the measured
+1.2235× worst case, and oversizing is safe because `est_bytes` feeds admission
+rather than refusal). B2 becomes stopgap S6 (audit the live path's
+`media_origin` on keyframe-coincident seeks). B3 folds into M1's spec:
+`TARGETDURATION` is computed over all plan entries, audio-tail entries
+included.
+
+**Still owed before M2 completes**, via STATUS.html's operator protocols: the
+device halves of P2 and P3, P1 on nynuc over NFS, and P0 over at least ten
+real titles including a Dolby Vision title and one with an A/V offset.
