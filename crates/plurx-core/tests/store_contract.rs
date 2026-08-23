@@ -888,6 +888,15 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: activate cross-user session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: cross-user activation must win"));
         assert!(second.predecessor.is_none(), "{backend}");
+        assert_eq!(
+            store
+                .owned_media_sessions("node-b", 344)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list live node-b session: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
 
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
@@ -1027,14 +1036,13 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: list node-a sessions: {error}"));
         assert_eq!(owned_a.len(), 1, "{backend}");
         assert_eq!(owned_a[0].session_id, session_a2, "{backend}");
-        assert_eq!(
+        assert!(
             store
                 .owned_media_sessions("node-b", 399)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: list node-b sessions: {error}"))
-                .len(),
-            1,
-            "{backend}"
+                .unwrap_or_else(|error| panic!("{backend}: list expired node-b sessions: {error}"))
+                .is_empty(),
+            "{backend}: owner inventory must exclude an expired lease"
         );
 
         let ended = store
@@ -5672,6 +5680,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE playback_events;
              DROP TABLE network_priors;
              DROP TABLE reading_state;
+             DROP TABLE media_session_requests;
+             DROP TABLE media_playback_pointers;
+             DROP TABLE media_sessions;
              DROP TABLE job_leases;
              DROP TRIGGER pretranscode_jobs_cancel_source;
              DROP INDEX pretranscode_jobs_active;
@@ -5740,7 +5751,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 20);
+    assert_eq!(report.tables.len(), 23);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -7148,7 +7159,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 203, "review the Store method count");
+    assert_eq!(declared.len(), 204, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
