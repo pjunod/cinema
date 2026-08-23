@@ -4195,7 +4195,7 @@ impl ContractCluster {
             let input = child.stdin.take().expect("contract voter stdin");
             let output = child.stdout.take().expect("contract voter stdout");
             let stderr = child.stderr.take().expect("contract voter stderr");
-            let event_tx = event_tx.clone();
+            let stdout_tx = event_tx.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(output);
                 let result = loop {
@@ -4223,13 +4223,13 @@ impl ContractCluster {
                         }
                     }
                 };
-                let _ = event_tx.send(ContractStartupEvent {
+                let _ = stdout_tx.send(ContractStartupEvent {
                     node_id,
                     result,
                     output: Some(reader.into_inner()),
                 });
             });
-            let event_tx = event_tx.clone();
+            let stderr_tx = event_tx.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stderr);
                 let mut line = String::new();
@@ -4238,7 +4238,7 @@ impl ContractCluster {
                     match reader.read_line(&mut line) {
                         Ok(0) | Err(_) => return,
                         Ok(_) if contract_stderr_is_port_collision(&line) => {
-                            let _ = event_tx.send(ContractStartupEvent {
+                            let _ = stderr_tx.send(ContractStartupEvent {
                                 node_id,
                                 result: Err(ContractStartError::PortCollision),
                                 output: None,
