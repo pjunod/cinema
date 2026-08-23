@@ -466,6 +466,185 @@ mod tests {
         );
     }
 
+    fn compact_handler(source: &str, start: &str, end: &str) -> String {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing handler boundary {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing handler boundary {end}"))
+            .0
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn assert_catalogue_methods(handler: &str, methods: &[&str]) {
+        for method in methods {
+            assert!(
+                handler.contains(&format!("state.catalogue.{method}")),
+                "eligible handler no longer routes {method} through CatalogueReader"
+            );
+            assert!(
+                !handler.contains(&format!("state.store.{method}")),
+                "eligible handler routes {method} directly through Authority"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
+        let browse = include_str!("browse.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn list_items",
+                "pub async fn item_detail",
+            ),
+            &[
+                "get_library",
+                "list_top_items_in_genre",
+                "item_max_heights",
+                "item_media_facts",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn item_detail",
+                "pub async fn home_previews",
+            ),
+            &[
+                "get_item",
+                "get_item_children",
+                "item_media_facts",
+                "files_for_item",
+                "get_file_probe_json",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn home_previews", "pub async fn hubs"),
+            &[
+                "list_libraries",
+                "home_preview_pages",
+                "item_max_heights",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
+            &["recently_added", "child_counts", "item_max_heights"],
+        );
+        assert!(
+            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
+                .contains("state.store.search_items")
+        );
+
+        let libraries = include_str!("libraries.rs");
+        assert_catalogue_methods(
+            &compact_handler(libraries, "pub async fn list", "pub async fn create"),
+            &["list_libraries"],
+        );
+        for mutation in [
+            "state.store.create_library",
+            "state.store.update_library",
+            "state.store.set_library_schedule",
+            "state.store.delete_library",
+            "state.store.reset_library_root_fingerprint",
+        ] {
+            assert!(libraries
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(mutation));
+        }
+
+        let plex = include_str!("plex.rs");
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn sections", "async fn views"),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn visible_item", "async fn element_for"),
+            &["get_item", "get_library"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn element_for", "pub async fn section_all"),
+            &["files_for_item", "get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
+            &["get_library", "list_top_items_in_genre"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn children", "pub async fn part"),
+            &["get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn part", "pub async fn image"),
+            &["get_file"],
+        );
+        let image = compact_handler(plex, "pub async fn image", "pub async fn photo_transcode");
+        assert!(image.contains("visible_item(&state"));
+        assert!(!image.contains("state.store."));
+        assert_catalogue_methods(
+            &compact_handler(
+                plex,
+                "pub async fn photo_transcode",
+                "pub async fn timeline",
+            ),
+            &["get_item"],
+        );
+        let timeline = compact_handler(plex, "pub async fn timeline", "pub async fn scrobble");
+        assert!(timeline.contains("state.store.get_item"));
+        assert!(!timeline.contains("state.catalogue.get_item"));
+        assert!(timeline.contains("state.progress.put"));
+        let scrobble = compact_handler(plex, "pub async fn scrobble", "pub async fn unscrobble");
+        assert!(scrobble.contains("state.store.get_item"));
+        assert!(scrobble.contains("state.store.set_watched_tree"));
+        assert!(!scrobble.contains("state.catalogue.get_item"));
+        let unscrobble =
+            compact_handler(plex, "pub async fn unscrobble", "pub struct ScrobbleQuery");
+        assert!(unscrobble.contains("state.store.get_item"));
+        assert!(unscrobble.contains("state.store.set_watched_tree"));
+        assert!(!unscrobble.contains("state.catalogue.get_item"));
+        let plex_search = compact_handler(plex, "pub async fn search", "fn version");
+        assert!(plex_search.contains("state.store.search_items"));
+        assert!(!plex_search.contains("state.catalogue.search_items"));
+
+        let system = include_str!("system.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn system_info",
+                "pub async fn library_shape",
+            ),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn library_shape",
+                "pub async fn probe_storage",
+            ),
+            &["media_shape"],
+        );
+        let authority_only = [include_str!("auth.rs"), include_str!("watch.rs"), system]
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        for authority_call in [
+            "state.store.get_user_by_username",
+            "state.store.set_watched_tree",
+            "state.store.settings_snapshot",
+            "state.store.put_setting",
+        ] {
+            assert!(authority_only.contains(authority_call));
+        }
+    }
+
     fn test_dirs(base: &std::path::Path) -> crate::state::Dirs {
         crate::state::Dirs {
             artwork: base.join("artwork"),

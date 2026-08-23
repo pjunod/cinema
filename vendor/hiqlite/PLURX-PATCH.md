@@ -74,6 +74,10 @@ That check must remain until this directory is removed.
 
 Source: <https://crates.io/crates/hiqlite/0.14.0>
 
+The `validation-test-helpers` feature adds process-local apply-pause and
+transport-partition controls used only by Plurx's separate-process acceptance
+harness. Production binaries do not enable or compile those controls.
+
 The retained lockfile, README, tests, and static assets are upstream
 provenance, not an in-place test suite; the workspace excludes this directory
 deliberately.

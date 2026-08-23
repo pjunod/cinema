@@ -106,6 +106,10 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  writer::tests::single_file_snapshot_tail_restores_its_missing_purge_boundary \
 	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
+	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features cluster-read-cost-validation \
 	  --test store_contract -- --test-threads=1
 	$(CARGO) test --locked -p plurx-cluster-check \

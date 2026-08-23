@@ -32,6 +32,51 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLY_PAUSED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLY_PAUSE_OBSERVED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_APPLY_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Pause this validation process immediately before its next SQLite
+/// state-machine apply. The feature is absent from production builds.
+#[cfg(feature = "validation-test-helpers")]
+pub fn validation_pause_apply() {
+    VALIDATION_APPLY_PAUSE_OBSERVED.store(false, Ordering::Release);
+    VALIDATION_APPLY_PAUSED.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "validation-test-helpers")]
+pub fn validation_apply_pause_observed() -> bool {
+    VALIDATION_APPLY_PAUSE_OBSERVED.load(Ordering::Acquire)
+}
+
+#[cfg(feature = "validation-test-helpers")]
+pub fn validation_resume_apply() {
+    VALIDATION_APPLY_PAUSED.store(false, Ordering::Release);
+    VALIDATION_APPLY_PAUSE_OBSERVED.store(false, Ordering::Release);
+    VALIDATION_APPLY_NOTIFY.notify_waiters();
+}
+
+#[cfg(feature = "validation-test-helpers")]
+async fn validation_wait_for_apply() {
+    while VALIDATION_APPLY_PAUSED.load(Ordering::Acquire) {
+        // Register the waiter before publishing that the pause was observed.
+        // `Notify::notify_waiters()` does not retain a permit, so enabling the
+        // future closes the lost-wakeup window between the flag recheck and
+        // the await.
+        let notified = VALIDATION_APPLY_NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        VALIDATION_APPLY_PAUSE_OBSERVED.store(true, Ordering::Release);
+        if !VALIDATION_APPLY_PAUSED.load(Ordering::Acquire) {
+            break;
+        }
+        notified.as_mut().await;
+    }
+}
 use tokio::{fs, task, time};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -868,6 +913,8 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         I: IntoIterator<Item = Entry> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        #[cfg(feature = "validation-test-helpers")]
+        validation_wait_for_apply().await;
         if self.snapshot_recovery_pending.load(Ordering::Acquire) {
             let error = std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -1310,6 +1357,23 @@ mod snapshot_metrics_contracts {
             .await
             .expect("request writer shutdown");
         shutdown_ack.await.expect("writer shutdown ack");
+    }
+
+    #[cfg(feature = "validation-test-helpers")]
+    #[tokio::test]
+    async fn validation_apply_resume_cannot_miss_the_registered_waiter() {
+        validation_pause_apply();
+        let waiter = tokio::spawn(validation_wait_for_apply());
+
+        while !validation_apply_pause_observed() {
+            tokio::task::yield_now().await;
+        }
+        validation_resume_apply();
+
+        tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("registered apply waiter must observe resume")
+            .expect("apply waiter task must complete");
     }
 
     #[tokio::test]
