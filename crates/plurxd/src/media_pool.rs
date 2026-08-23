@@ -1273,6 +1273,7 @@ fn unix_ms() -> i64 {
 mod tests {
     use super::*;
     use plurx_core::domain::{AudioStream, SubtitleStream};
+    use tokio::sync::mpsc;
 
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {

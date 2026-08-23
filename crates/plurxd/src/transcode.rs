@@ -4372,7 +4372,6 @@ pub(crate) struct MediaOfferProbe {
     pub(crate) decoder_supported: bool,
     pub(crate) target_supported: bool,
     pub(crate) cache_hit: bool,
-    pub(crate) background_active: bool,
     pub(crate) free_hardware_slots: usize,
     pub(crate) free_software_threads: usize,
     pub(crate) encoder: String,
@@ -4643,10 +4642,11 @@ impl TranscodeManager {
         let session_pressure_limit = hardware_slots_max
             .saturating_add((software_threads_max / 2).max(1))
             .max(1);
-        let mut tone_map_pipelines = capabilities
-            .tone_map
-            .then(|| vec![self.pipeline.name().to_owned()])
-            .unwrap_or_default();
+        let mut tone_map_pipelines = if capabilities.tone_map {
+            vec![self.pipeline.name().to_owned()]
+        } else {
+            Vec::new()
+        };
         if self.dovi_passthrough {
             tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
         }
@@ -4746,7 +4746,6 @@ impl TranscodeManager {
             decoder_supported,
             target_supported,
             cache_hit,
-            background_active: self.admissions.background_is_active(),
             free_hardware_slots: hardware_max.saturating_sub(hardware_used),
             free_software_threads: software_max.saturating_sub(software_used),
             encoder: encoder.family_name().to_owned(),
