@@ -230,6 +230,14 @@ test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "capabilityDiagnosticsExplainWhyDolbyVisionWasNotClaimed"
 
 [[fixes]]
+id = "android.playback-ledger-note-placement"
+commits = ["9cc4d912"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "private fun splitLedgerValue(value: String, facts: Int = 3)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackInfoOverlayTest.kt"
+test_anchor = "fun lightThemeStillShowsStructuredPlaybackDetails()"
+
+[[fixes]]
 id = "apple.stall-clock-regime-flap"
 commits = ["7ed1e5e"]
 source = "clients/apple/Sources/PlayerController.swift"
