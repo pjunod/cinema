@@ -1456,7 +1456,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "newRequestId",
     "logout",
     [
-      'const API="/api/v1"; let TOKEN="token";',
+      'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
       shippedSource("api"),
       shippedSource("openSession"),

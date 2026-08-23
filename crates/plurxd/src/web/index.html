@@ -97,6 +97,13 @@
 
   h2.section{font-size:16px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--text);margin:26px 4px 14px;padding-top:24px;border-top:1px solid var(--line)}
   h2.section:first-child{border-top:0;padding-top:4px}
+  /* Incremental Home regions are stable DOM mounts. A heading at the start of
+     Coming Soon is no longer main's first heading when a hub preceded it, so
+     restore the shipped separator; keep the old first-heading treatment when
+     the hub mount is genuinely empty. */
+  [data-home-slot="hero"]{display:contents}
+  [data-home-region="soon"]>h2.section:first-child{border-top:1px solid var(--line);padding-top:24px}
+  [data-home-region="hubs"]:empty+[data-home-region="soon"]>h2.section:first-child{border-top:0;padding-top:4px}
   .card h2.section{border-top:0;padding-top:0}   /* cards separate their own sections */
   .getapp{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:16px 20px 2px;padding:13px 16px;background:rgba(229,72,77,.08);border:1px solid var(--accent);border-radius:12px}
   .getapp a.btn{display:inline-block;background:var(--accent);color:#fff;padding:8px 15px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap}
@@ -1941,6 +1948,8 @@
   font-size:12px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
   color:var(--muted)}
 [data-layout=theater] h2.section:first-child{margin-top:6px}
+[data-layout=theater] [data-home-region="soon"]>h2.section:first-child{border-top:0;padding-top:0;margin-top:30px}
+[data-layout=theater] [data-home-region="hubs"]:empty+[data-home-region="soon"]>h2.section:first-child{margin-top:6px}
 
 /* Larger posters. Note the variable: the SHIPPED name is --poster (set on
    <html> by applyPosterSize() from the user's icon-size preference), not the
@@ -2542,6 +2551,7 @@ const API = "/api/v1";
 // the native WebView prepares the handoff.
 const NATIVE_READER_BOOT = new URLSearchParams(location.search).get("native-reader")==="1";
 let TOKEN = NATIVE_READER_BOOT ? null : (localStorage.getItem("plurx_token") || null);
+let AUTH_GENERATION=0;
 let ME = null;
 
 function nativeReaderPost(event,message=""){
@@ -2562,7 +2572,7 @@ async function startNativeReader(token,itemId,fileId){
   if(!NATIVE_READER_BOOT||typeof token!=="string"||!token||!(/^[1-9]\d*$/).test(item)||!(/^[1-9]\d*$/).test(file)){
     nativeReaderPost("error","Cinema could not validate this reader handoff."); return false;
   }
-  TOKEN=token; ME=null;
+  TOKEN=token; AUTH_GENERATION++; ME=null;
   history.replaceState(null,"",`${location.pathname}?native-reader=1#/read/${item}/${file}`);
   await boot();
   return true;
@@ -2571,12 +2581,20 @@ window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
 async function api(path, {method="GET", body=null, raw=false}={}){
+  const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
   const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null});
+  if(authGeneration!==AUTH_GENERATION){
+    const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
+    throw error;
+  }
   if(res.status===401){
-    logout();
+    // Parallel requests from an expired credential may finish after the user
+    // has already signed in again. Only the credential generation that sent
+    // this request may clear the current session.
+    if(authGeneration===AUTH_GENERATION) logout();
     const error=new Error("unauthorized"); error.status=401;
     throw error;
   }
@@ -3015,7 +3033,15 @@ function artHtml(it, cls){
 // ---- auth flows -----------------------------------------------------------
 function logout(){
   if(READER) destroyReader(false);
-  TOKEN=null; ME=null;
+  PAGE_RENDER_GENERATION++;
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  ACTIVITY_SNAPSHOT=null; ACTIVITY_DETAIL_BUSY=0;
+  SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_TICKING=null; SETTINGS_DATA={};
+  SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+  LOGS_RUN=null; CLUSTER_LOGS_RUN=null;
+  CLUSTER_LOADED=false; CLUSTER_LEAVING=false; forgetJoinToken();
+  const protectedMain=document.getElementById("main"); if(protectedMain) protectedMain.innerHTML="";
+  TOKEN=null; AUTH_GENERATION++; ME=null;
   if(!NATIVE_READER_BOOT) localStorage.removeItem("plurx_token");
   clearInterval(ACT_TIMER); ACT_TIMER=null; document.documentElement.classList.remove("working");
   if(NATIVE_READER_BOOT){ nativeReaderPost("session-ended"); return; }
@@ -3077,7 +3103,7 @@ function renderSetup(){
       if(p.value.length<8) throw new Error("Password must be at least 8 characters.");
       if(p.value!==p2.value){ p2.value=""; p2.focus(); throw new Error("Those two passwords don't match. Try again."); }
       const r=await api("/setup",{method:"POST",body:{username:u.value.trim(),password:p.value}});
-      TOKEN=r.token; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
+      TOKEN=r.token; AUTH_GENERATION++; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
     });
 }
 function renderLogin(){
@@ -3091,7 +3117,7 @@ function renderLogin(){
      </details>`,
     "Sign in", async()=>{
       const r=await api("/auth/login",{method:"POST",body:{username:u.value.trim(),password:p.value,device:"Web"}});
-      TOKEN=r.token; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
+      TOKEN=r.token; AUTH_GENERATION++; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
     });
 }
 
@@ -3591,45 +3617,15 @@ function groupToggleHtml(group){
 // first; activity, settings, search, auth and the player keep their existing
 // renderers behind the layout chrome until a gate converts them.
 //
-// A large library roster must not become a burst of unbounded HTTP requests.
-// Six workers keep the critical path short while capping simultaneous cluster
-// and database work; the current wire contract still uses one preview request
-// per library.
-const HOME_PREVIEW_CONCURRENCY=6;
-async function loadHomePreviews(libs){
-  const entries=new Array(libs.length);
-  let cursor=0, stopped=false;
-  async function worker(){
-    while(true){
-      if(stopped) return;
-      const index=cursor++;
-      if(index>=libs.length) return;
-      const lib=libs[index];
-      let page;
-      try{
-        page=await api(`/libraries/${lib.id}/items?limit=24&sort=added`);
-      }catch(error){
-        if(error&&error.status===401){ stopped=true; throw error; }
-        page={items:[],total:null,unavailable:true};
-      }
-      entries[index]=[lib.id,page];
-    }
-  }
-  const workers=Math.min(HOME_PREVIEW_CONCURRENCY,libs.length);
-  await Promise.all(Array.from({length:workers},worker));
-  return Object.fromEntries(entries);
-}
-async function loadHome(){
-  // coming-soon is fetched with the rest but never allowed to fail the page:
-  // it depends on another application, and the home screen must not.
-  const [libs, hubs, soon] = await Promise.all([
-    api("/libraries"), api("/hubs"),
-    api("/coming-soon").catch(()=>({configured:false,entries:[]})),
-  ]);
-  const group=homeGroup();
+// Turn the fixed-size server batch into the layout-neutral Home model. The
+// browser never fans out by library: every roster size is the same three HTTP
+// requests (/hubs, /home/previews, and /coming-soon).
+function buildHomeSections(batch,group=homeGroup()){
+  const previews=(batch&&batch.libraries)||[];
+  const libs=previews.map(preview=>preview.library);
   const sections=[];
   if(libs.length){
-    const previews=await loadHomePreviews(libs);
+    const byId=Object.fromEntries(previews.map(preview=>[preview.library.id,preview]));
     if(group==="category"){
       // Bucket libraries by category, keeping Movies before TV before others.
       const order=[], byKey={};
@@ -3637,38 +3633,77 @@ async function loadHome(){
       order.sort((a,b)=>catOrder(a)-catOrder(b)||a.localeCompare(b));
       for(const key of order){
         const g=byKey[key];
-        const pages=g.libs.map(l=>previews[l.id]);
-        const unavailable=pages.some(page=>page.unavailable);
+        const pages=g.libs.map(l=>byId[l.id]);
         sections.push({
           key,
           name:g.cat.name,
           items:[].concat(...pages.map(p=>p.items)).slice(0,24),
-          total:unavailable?null:pages.reduce((n,p)=>n+(p.total||0),0),
-          unavailable,
+          total:pages.reduce((n,p)=>n+(p.total||0),0),
+          unavailable:false,
           // One share in this category → link straight to it; several → merged category page.
           href:g.libs.length===1 ? `#/library/${g.libs[0].id}` : `#/category/${encodeURIComponent(key)}`,
         });
       }
     } else {
       for(const lib of libs){
-        const page=previews[lib.id];
+        const page=byId[lib.id];
         sections.push({key:String(lib.id), name:lib.name, items:page.items, total:page.total,
-          unavailable:!!page.unavailable, href:`#/library/${lib.id}`});
+          unavailable:false, href:`#/library/${lib.id}`});
       }
     }
   }
-  return {kind:"home", hubs, soon, libs, group, sections};
+  return {libs,group,sections};
 }
 async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const route=location.hash;
-  layoutChrome("home", `<div id="hubs"><div class="empty">Loading…</div></div>`);
+  const page={kind:"home",
+    hubs:{continue_watching:[],next_up:[],recently_added:[]},
+    soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
+    hubsPending:true,previewsPending:true,soonPending:true,
+    hubsError:false,previewsError:false,soonError:false};
+  const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
+  const commit=(name,content=false)=>{
+    if(!current()) return;
+    const main=document.getElementById("main"); if(!main) return;
+    const template=document.createElement("template");
+    const keepPhotos=name==="previews"?null:PHOTO_SET, keepLightboxAt=LB_AT;
+    template.innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
+    if(keepPhotos){ PHOTO_SET=keepPhotos; LB_AT=keepLightboxAt; }
+    const incoming=template.content.querySelectorAll(`[data-home-region="${name}"]`);
+    for(const next of incoming){
+      const slot=next.dataset.homeSlot;
+      const old=main.querySelector(`[data-home-region="${name}"][data-home-slot="${slot}"]`);
+      if(old) old.replaceWith(next);
+    }
+    wireRails();
+    if(content) setPagePhase(route,generation,"content");
+    if(name==="previews") restoreScroll();
+  };
+  layoutChrome("home",layoutView("home",page));
   setPagePhase(route,generation,"shell");
-  const page=await loadHome();
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
-  document.getElementById("main").innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
-  setPagePhase(route,generation,"content");
-  wireRails();
-  restoreScroll();
+  const region=(name,promise,apply)=>promise.then(value=>{
+    if(!current()) return;
+    page[`${name}Pending`]=false; const meaningful=apply(value); commit(name,meaningful);
+  }).catch(error=>{
+    if(error&&error.status===401) throw error;
+    if(!current()) return;
+    page[`${name}Pending`]=false; page[`${name}Error`]=true;
+    const visible=name==="hubs"||name==="previews";
+    if(visible) setPageFailure(route,generation,`${name}_error`);
+    commit(name,visible);
+  });
+  await Promise.allSettled([
+    region("hubs",api("/hubs"),value=>{
+      page.hubs=value;
+      return ["continue_watching","next_up","recently_added"].some(key=>(value[key]||[]).length);
+    }),
+    region("previews",api("/home/previews"),value=>{
+      Object.assign(page,buildHomeSections(value,page.group));
+      return true; // even an empty roster paints the useful "No libraries" state
+    }),
+    region("soon",api("/coming-soon"),value=>{ page.soon=value; return !!(value.entries||[]).length; }),
+  ]);
+  if(!current()) return;
   setPagePhase(route,generation,"settled");
 }
 // ---- layout renderers -----------------------------------------------------
@@ -3710,28 +3745,35 @@ function layoutRegion(name, region, model){
 // It is the zero-diff baseline every other layout is measured against, so this
 // function changes only when the shipped app is meant to change.
 function classicHomeBody(p){
-  let html=installBannerHtml();
+  let hubs=installBannerHtml(), soon="", previews="";
   // The first two rails pass watchCtx: those rows are about where you are in
   // something, so the card carries "23m left" / "watched Tuesday".
-  if(p.hubs.continue_watching.length){ html+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
-  if(p.hubs.next_up && p.hubs.next_up.length){ html+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
-  if(p.hubs.recently_added.length){ html+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
+  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
+  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
+  if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
   // Coming soon: what monarr expects. Absent entirely when nothing is paired
   // or monarr had nothing to say — an empty rail is worse than no rail.
   if(p.soon && p.soon.entries && p.soon.entries.length){
-    html+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+    soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
   }
-  if(p.libs.length){
-    html+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
       const count=s.total==null?"preview unavailable":`view all (${s.total})`;
       const unavailable=s.unavailable?`<div class="hint">Some library previews are unavailable right now.</div>`:"";
-      html+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
+      previews+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
     }
   } else {
-    html+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
   }
-  return html;
+  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
 // One rail: a heading, and a strip with an arrow at each end.
 //
@@ -8938,13 +8980,20 @@ const ITEM_FOR_FILE={};
 // Where the header pill lands: live streams (with a stop for admins),
 // per-library scan state, and the Trakt story — refreshed every 3s.
 async function viewActivity(generation=++PAGE_RENDER_GENERATION){
-  layoutChrome("activity", `<div class="empty">Loading…</div>`);
+  layoutChrome("activity", `<h2 class="section" style="margin-top:6px">Now playing</h2>
+    <div class="empty" aria-busy="true">Checking current activity…</div>
+    <h2 class="section">Pre-transcoding</h2><h2 class="section">Offline downloads</h2>
+    <h2 class="section">Library</h2><h2 class="section">Trakt</h2>`);
   setPagePhase("#/activity",generation,"shell");
+  if(ACTIVITY_SNAPSHOT){
+    paintActivityBody(ACTIVITY_SNAPSHOT);
+    setPagePhase("#/activity",generation,"content");
+  }
   await renderActivityBody(generation);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   setPageTimer(()=>renderActivityBody(generation), 3000, generation);
 }
-let ACTIVITY_DETAIL_BUSY=0;
+let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 function detailActivitySummary(d,deliveries){
   const acts=[];
   for(const scan of (d.scans||[])){
@@ -8961,8 +9010,23 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   ACTIVITY_DETAIL_BUSY=generation;
   try{
   let d; try{ d=await api("/activity/detail"); }
-  catch(e){ if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return; const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure("#/activity",generation,"render_error"); setPagePhase("#/activity",generation,"content"); setPagePhase("#/activity",generation,"settled"); return; }
+  catch(e){
+    if(e&&e.status===401) return;
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+    const m=document.getElementById("main");
+    if(ACTIVITY_SNAPSHOT){
+      let stale=document.getElementById("activity-stale");
+      if(!stale&&m){
+        stale=document.createElement("div"); stale.id="activity-stale"; stale.className="hint";
+        m.prepend(stale);
+      }
+      if(stale) stale.textContent=`Showing the last update — refresh failed: ${e.message}`;
+    }else if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`;
+    setPageFailure("#/activity",generation,"render_error");
+    setPagePhase("#/activity",generation,"content"); setPagePhase("#/activity",generation,"settled"); return;
+  }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  ACTIVITY_SNAPSHOT=d;
   paintActivityBody(d);
   setPageFailure("#/activity",generation,null);
   setPagePhase("#/activity",generation,"content");
@@ -9119,56 +9183,159 @@ function statusText(st){
   }
   return "idle";
 }
-let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=false;
-let LOGS_PROMISE=null, LOGS_ACTIVE=null, LOGS_PENDING=null;
-let CLUSTER_LOGS_PROMISE=null, CLUSTER_LOGS_ACTIVE=null, CLUSTER_LOGS_PENDING=null;
-async function viewSettings(generation=++PAGE_RENDER_GENERATION){
+let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=null;
+let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
+let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
+const SETTINGS_ENDPOINTS={
+  libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
+  sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
+  cluster:()=>api("/cluster/nodes").catch(error=>{
+    if(error&&error.status===401) throw error;
+    return {unavailable:true,code:error.code,message:error.message};
+  }),
+};
+const SETTINGS_MANIFEST={
+  libraries:{required:["settings","libs","status"],secondary:[]},
+  metadata:{required:["settings","trakt"],secondary:["libs"]},
+  playback:{required:["settings"],secondary:[]},
+  users:{required:["users"],secondary:[]},
+  system:{required:["sys"],secondary:["playbackEvents"]},
+  cluster:{required:["cluster"],secondary:[]},
+};
+function cacheSettings(value){
+  SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
+  return value;
+}
+function cacheTrakt(value){
+  TRAKT=value; SETTINGS_DATA.trakt=value; SETTINGS_LOADED.add("trakt");
+  return value;
+}
+function settingsCurrent(generation,tab){
+  const h=location.hash;
+  return generation===PAGE_RENDER_GENERATION&&(h==="#/settings"||h==="#/admin")&&settingsTab()===tab;
+}
+function loadSettingsKey(key,generation){
+  if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
+  const active=SETTINGS_LOADS.get(key);
+  let transport=active&&active.promise;
+  if(!transport){
+    transport=SETTINGS_ENDPOINTS[key]();
+    const entry={promise:transport};
+    SETTINGS_LOADS.set(key,entry);
+    transport.finally(()=>{
+      if(SETTINGS_LOADS.get(key)===entry) SETTINGS_LOADS.delete(key);
+    }).catch(()=>{});
+  }
+  return transport.then(value=>{
+    if(generation!==PAGE_RENDER_GENERATION) return value;
+    SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
+    if(key==="settings") cacheSettings(value);
+    if(key==="trakt") cacheTrakt(value);
+    if(key==="cluster") CLUSTER_LOADED=true;
+    return value;
+  });
+}
+function settingsTabsHtml(tab){
+  return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
+}
+function settingsShell(tab){
+  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+}
+function patchSettingsSecondary(tab,key){
+  if(tab==="metadata"&&key==="libs"){
+    const mount=document.getElementById("metadata-libraries");
+    if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
+  }
+  if(tab==="system"&&key==="playbackEvents"){
+    const mount=document.getElementById("settings-playback-events");
+    if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
+  }
+}
+function patchSettingsSecondaryError(tab,key,error){
+  const message=esc(error&&error.message||"request failed");
+  if(tab==="metadata"&&key==="libs"){
+    const mount=document.getElementById("metadata-libraries");
+    if(mount) mount.innerHTML=`<div class="hint">Library context is unavailable: ${message}</div>`;
+  }
+  if(tab==="system"&&key==="playbackEvents"){
+    const mount=document.getElementById("settings-playback-events");
+    if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
+  }
+}
+async function loadSettingsTab(generation,tab){
+  const route=location.hash, manifest=SETTINGS_MANIFEST[tab];
+  try{
+    await Promise.all(manifest.required.map(key=>loadSettingsKey(key,generation)));
+  }catch(error){
+    if(error&&error.status===401) return;
+    if(!settingsCurrent(generation,tab)) return;
+    const body=document.getElementById("setbody");
+    if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
+    setPageFailure(route,generation,"render_error");
+    setPagePhase(route,generation,"content"); setPagePhase(route,generation,"settled");
+    return false;
+  }
+  if(!settingsCurrent(generation,tab)) return false;
+  renderSettings();
+  setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
+  const secondary=manifest.secondary.map(key=>loadSettingsKey(key,generation).then(()=>{
+    if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key);
+  }).catch(error=>{
+    if(error&&error.status===401) throw error;
+    if(settingsCurrent(generation,tab)){
+      patchSettingsSecondaryError(tab,key,error);
+      setPageFailure(route,generation,`${key}_error`);
+    }
+  }));
+  if(tab==="system") secondary.push(refreshLogs());
+  if(tab==="cluster") secondary.push(refreshClusterLogs());
+  await Promise.allSettled(secondary);
+  if(settingsCurrent(generation,tab)) setPagePhase(route,generation,"settled");
+  return settingsCurrent(generation,tab);
+}
+async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(!ME.is_admin){ location.hash="#/"; return; }
   const route=location.hash;
-  layoutChrome("settings",`<div class="empty">Loading…</div>`);
+  if(reset){
+    SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
+    SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+    CLUSTER_LOADED=false; forgetJoinToken();
+  }
+  const tab=settingsTab();
+  layoutChrome("settings",settingsShell(tab));
   setPagePhase(route,generation,"shell");
-  const since7d=Date.now()-7*24*60*60*1000;
-  const [libs,settings,status,sys,users,trakt,playbackEvents]=await Promise.all([
-    api("/libraries"),api("/settings"),api("/scan/status"),api("/system"),api("/users"),
-    api("/trakt/status").catch(()=>null),
-    api(`/system/playback-events?since=${since7d}&limit=2000`).catch(()=>[])]);
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
-  SETTINGS=settings; TRAKT=trakt; TRAKT_EDIT=false;
-  // Re-entering Settings re-reads the roster and drops any token still held.
-  CLUSTER_LOADED=false; forgetJoinToken();
-  SETTINGS_DATA={libs,settings,status,sys,users,trakt,playbackEvents,cluster:null};
-  const panelSettled=renderSettings();
-  setPagePhase(route,generation,"content");
-  setPageTimer(settingsTick, 2000, generation);
-  if(panelSettled&&typeof panelSettled.then==="function"){
-    panelSettled.then(
-      ()=>setPagePhase(route,generation,"settled"),
-      ()=>{ setPageFailure(route,generation,"render_error"); setPagePhase(route,generation,"settled"); }
-    );
-  }else setPagePhase(route,generation,"settled");
+  const loaded=await loadSettingsTab(generation,tab);
+  if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
-let SETTINGS_DATA=null;
 const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["system","System"],["cluster","Cluster"]];
 function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
 // Leaving the tab drops any minted join token: it is bearer material, and the
 // operator who switched away is done with it whether or not they said so.
-function setSettingsTab(t){ forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){} renderSettings(); }
+function setSettingsTab(t){
+  if(t===settingsTab()) return;
+  forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){}
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+function retrySettingsTab(){
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
+}
 function renderSettings(){
   // Settings work resolves asynchronously. The selected tab survives in
   // localStorage after navigation, so it cannot prove this route is still on
   // screen; a late cluster read or mutation must not repaint another page.
   const h=location.hash;
   if(h!=="#/settings"&&h!=="#/admin") return;
-  const d=SETTINGS_DATA; if(!d) return;
+  const d=SETTINGS_DATA;
   const tab=settingsTab();
-  const bar=SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
-  document.getElementById("main").innerHTML=`<div class="settabs">${bar}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
+  const manifest=SETTINGS_MANIFEST[tab];
+  if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
+  document.getElementById("main").innerHTML=`<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
-  if(tab==="cluster"){
-    loadCluster();                       // the roster is fetched on first open, not with Settings
-    refreshClusterLogs();                // replication detail has its own ring on this tab
-  }
+  if(tab==="cluster") return refreshClusterLogs();
 }
 function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
@@ -9388,7 +9555,7 @@ async function backfillFromKey(){
 }
 function metadataPanel(settings,trakt){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[];
-  return `${keyBackfillHtml(libs)}<div class="card"><h2 class="section" style="margin-top:0">API keys</h2>
+  return `<div id="metadata-libraries">${keyBackfillHtml(libs)}</div><div class="card"><h2 class="section" style="margin-top:0">API keys</h2>
       <label>TMDB — posters, overviews, episode data</label>
       <p class="muted" style="margin:2px 0 6px">${settings.tmdb_configured?"Configured. Click the field to reveal it, or type a new key to replace it.":"Add a free key (<a href='https://www.themoviedb.org/settings/api' target='_blank' rel='noopener'>themoviedb.org</a>) to fetch posters, overviews, and episode data."}</p>
       <input id="tk" placeholder="TMDB API key" type="password" autocomplete="off" value="${esc(settings.tmdb_api_key||'')}" onfocus="this.type='text'" onblur="this.type='password'">
@@ -9621,7 +9788,7 @@ function systemPanel(sys,playbackEvents){
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>Right now</dt><dd>${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'} · Watch state: ${replicationText(sys.replication)}</dd>
       </dl></div>
-    ${playbackSummaryCard(playbackEvents)}
+    <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
     <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>
       <div class="row"><select id="loglvl" style="max-width:120px" onchange="refreshLogs()">
           <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
@@ -9658,15 +9825,10 @@ let CLUSTER_LEAVING=false;
 let CLUSTER_TOKEN=null;
 function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; }
 async function loadCluster(){
-  if(CLUSTER_LOADED) return;
-  CLUSTER_LOADED=true;
-  let answer;
-  // A never-joined SQLite install refuses this with 409 `membership_unavailable`.
-  // That is a truthful answer about a healthy server, not an error to report.
-  try{ answer=await api("/cluster/nodes"); }
-  catch(e){ answer={unavailable:true,code:e.code,message:e.message}; }
-  if(SETTINGS_DATA) SETTINGS_DATA.cluster=answer;
-  if(settingsTab()==="cluster") renderSettings();
+  const generation=PAGE_RENDER_GENERATION;
+  SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+  await loadSettingsKey("cluster",generation);
+  if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 // A Raft majority is floor(n/2)+1, so the number of voters that may be lost is
 // n minus that majority: 1 of 3, 1 of 4, 2 of 5. Said once, here.
@@ -9821,9 +9983,8 @@ function clusterPanel(d){
       <div class="logbox" id="cllogbox">Loading…</div></div>`;
 }
 function retryCluster(){
-  CLUSTER_LOADED=false;
-  if(SETTINGS_DATA) SETTINGS_DATA.cluster=null;
-  renderSettings();
+  SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
@@ -9880,14 +10041,19 @@ function joinTokenHtml(issued){
       <button class="ghost sm" onclick="clearJoinToken()">Done — clear it</button></div>`;
 }
 async function mintJoinToken(btn){
+  const generation=PAGE_RENDER_GENERATION;
   const sel=document.getElementById("clttl");
   const expires_in_seconds=sel?Number(sel.value):600;
   const was=btn.textContent; btn.disabled=true; btn.textContent="Creating…";
   try{
-    CLUSTER_TOKEN=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
+    const token=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_TOKEN=token;
     CLUSTER_REFUSAL=null;
     renderSettings();
   }catch(e){
+    if(e&&e.status===401) throw e;
+    if(!settingsCurrent(generation,"cluster")) return;
     btn.disabled=false; btn.textContent=was;
     toast(e.message||"Couldn't create a join token");
   }
@@ -9912,32 +10078,49 @@ async function removeNode(nodeId){
     `Bringing it back means stopping it, discarding that directory, and joining it again with a new token. `+
     `Media files are not touched.`)) return;
   CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
   try{
-    if(SETTINGS_DATA) SETTINGS_DATA.cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}`,{method:"DELETE"});
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}`,{method:"DELETE"});
+    SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
     toast("Node removed");
   }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_REFUSAL={node_id:nodeId, code:e.code, message:e.message};
-    // The refusal means the rendered roster lost a race. Let the guarded
-    // render below start a fresh read immediately instead of telling the
-    // operator to act on stale rows.
-    if(e.code==="cluster_node_not_found") CLUSTER_LOADED=false;
+    // Ordinary policy refusals belong beside the roster that produced them.
+    // A not-found refusal proves that roster lost a race, so paint the reason
+    // first and then replace only that cached roster with a guarded fresh read.
+    renderSettings();
+    if(e.code==="cluster_node_not_found"){
+      SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+      loadSettingsKey("cluster",generation).then(()=>{
+        if(settingsCurrent(generation,"cluster")) renderSettings();
+      }).catch(()=>{});
+    }
+    return;
   }
-  renderSettings();
+  if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 async function leaveCluster(btn,nodeId){
   if(!confirm(`Permanently remove this Cinema node from the cluster and shut it down?\n\n`+
     `Do not use this for an update or restart. Rejoining requires discarding this node's old Cinema `+
     `data directory and using a new join token. Media files are not touched.`)) return;
   CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
   const was=btn.textContent; btn.disabled=true; btn.textContent="Leaving…";
   try{
     await api("/cluster/leave",{method:"POST",body:{node_id:nodeId}});
+    if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_LEAVING=true;
   }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
     btn.disabled=false; btn.textContent=was;
     CLUSTER_REFUSAL={node_id:"This node",code:e.code,message:e.message};
   }
-  renderSettings();
+  if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 // Inline library editor: the row becomes an editable form (name · kind · paths).
 function editLib(id){
@@ -9979,14 +10162,17 @@ async function refreshAll(){
   await Promise.all(libs.map(l=>api(`/libraries/${l.id}/refresh`,{method:"POST"}).catch(()=>{})));
   toast("Refreshing all libraries…"); setTimeout(settingsTick,400);
 }
-async function settingsTick(){
+async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab()){
   const h=location.hash;
-  if((h!=="#/settings"&&h!=="#/admin")||document.visibilityState==="hidden"||SETTINGS_TICKING) return;
-  SETTINGS_TICKING=true;
+  if(generation!==PAGE_RENDER_GENERATION||(h!=="#/settings"&&h!=="#/admin")||settingsTab()!==tab||document.visibilityState==="hidden"||
+     (SETTINGS_TICKING&&SETTINGS_TICKING.generation===generation&&SETTINGS_TICKING.authGeneration===AUTH_GENERATION)) return;
+  const owner={generation,authGeneration:AUTH_GENERATION};
+  SETTINGS_TICKING=owner;
   try{
-    const tab=settingsTab();
     if(tab==="libraries"){
       const status=await api("/scan/status");
+      if(!settingsCurrent(generation,tab)) return;
+      SETTINGS_DATA.status=status; SETTINGS_LOADED.add("status");
       for(const [id,st] of Object.entries(status)){
         const el=document.getElementById("st-"+id);
         if(el) el.innerHTML=statusText(st);
@@ -10000,11 +10186,12 @@ async function settingsTick(){
     // Live Trakt card: the device-link poll and sync state resolve server-side.
     if(tab==="metadata"&&!TRAKT_EDIT){
       const t=await api("/trakt/status");
-      if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ TRAKT=t; paintTrakt(); }
+      if(!settingsCurrent(generation,tab)) return;
+      if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ cacheTrakt(t); paintTrakt(); }
     }
     await Promise.all(secondary);
-  }catch(e){}
-  finally{ SETTINGS_TICKING=false; }
+  }catch(e){ if(e&&e.status===401) return; }
+  finally{ if(SETTINGS_TICKING===owner) SETTINGS_TICKING=null; }
 }
 function sameLogRequest(left,right){ return !!left&&left.box===right.box&&left.level===right.level; }
 async function runLogRequest(request,cluster){
@@ -10021,6 +10208,7 @@ async function runLogRequest(request,cluster){
       ||'<span class="muted">Nothing at this level yet.</span>';
     if(stick) box.scrollTop=box.scrollHeight;
   }catch(e){
+    if(e&&e.status===401) throw e;
     const currentBox=document.getElementById(boxId);
     const currentLevel=document.getElementById(levelId);
     if(currentBox===box&&(currentLevel?currentLevel.value:"info")===level){
@@ -10028,40 +10216,34 @@ async function runLogRequest(request,cluster){
     }
   }
 }
-function refreshLogs(){
-  const box=document.getElementById("logbox"); if(!box) return Promise.resolve();
-  const sel=document.getElementById("loglvl");
+function refreshLogStream(cluster){
+  const boxId=cluster?"cllogbox":"logbox", levelId=cluster?"clloglvl":"loglvl";
+  const box=document.getElementById(boxId); if(!box) return Promise.resolve();
+  const sel=document.getElementById(levelId);
   const desired={box,level:sel?sel.value:"info"};
-  if(sameLogRequest(LOGS_ACTIVE,desired)){ LOGS_PENDING=null; return LOGS_PROMISE; }
-  LOGS_PENDING=desired;
-  if(LOGS_PROMISE) return LOGS_PROMISE;
-  LOGS_PROMISE=(async()=>{
+  let run=cluster?CLUSTER_LOGS_RUN:LOGS_RUN;
+  if(run){
+    if(sameLogRequest(run.active,desired)) run.pending=null;
+    else run.pending=desired;
+    return run.promise;
+  }
+  run={active:null,pending:desired,promise:null,authGeneration:AUTH_GENERATION};
+  if(cluster) CLUSTER_LOGS_RUN=run; else LOGS_RUN=run;
+  run.promise=(async()=>{
     try{
-      while(LOGS_PENDING){
-        LOGS_ACTIVE=LOGS_PENDING; LOGS_PENDING=null;
-        await runLogRequest(LOGS_ACTIVE,false);
+      while(run.pending&&run.authGeneration===AUTH_GENERATION){
+        run.active=run.pending; run.pending=null;
+        await runLogRequest(run.active,cluster);
       }
-    }finally{ LOGS_ACTIVE=null; LOGS_PROMISE=null; }
+    }finally{
+      if(cluster&&CLUSTER_LOGS_RUN===run) CLUSTER_LOGS_RUN=null;
+      if(!cluster&&LOGS_RUN===run) LOGS_RUN=null;
+    }
   })();
-  return LOGS_PROMISE;
+  return run.promise;
 }
-function refreshClusterLogs(){
-  const box=document.getElementById("cllogbox"); if(!box) return;
-  const sel=document.getElementById("clloglvl");
-  const desired={box,level:sel?sel.value:"info"};
-  if(sameLogRequest(CLUSTER_LOGS_ACTIVE,desired)){ CLUSTER_LOGS_PENDING=null; return CLUSTER_LOGS_PROMISE; }
-  CLUSTER_LOGS_PENDING=desired;
-  if(CLUSTER_LOGS_PROMISE) return CLUSTER_LOGS_PROMISE;
-  CLUSTER_LOGS_PROMISE=(async()=>{
-    try{
-      while(CLUSTER_LOGS_PENDING){
-        CLUSTER_LOGS_ACTIVE=CLUSTER_LOGS_PENDING; CLUSTER_LOGS_PENDING=null;
-        await runLogRequest(CLUSTER_LOGS_ACTIVE,true);
-      }
-    }finally{ CLUSTER_LOGS_ACTIVE=null; CLUSTER_LOGS_PROMISE=null; }
-  })();
-  return CLUSTER_LOGS_PROMISE;
-}
+function refreshLogs(){ return refreshLogStream(false); }
+function refreshClusterLogs(){ return refreshLogStream(true); }
 async function addLib(){
   const name=ln.value.trim(), sel=lk.value, paths=lp.value.split(",").map(s=>s.trim()).filter(Boolean);
   // "Anime" is a shows library flagged anime (absolute numbering + AniList).
@@ -10108,7 +10290,7 @@ function langOpts(cur){ return LANG_CHOICES.map(([v,l])=>`<option value="${v}" $
 async function savePlayback(){
   const err=document.getElementById("perr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       default_audio_lang:document.getElementById("pal").value,
       default_sub_lang:document.getElementById("psl").value,
       sub_mode:document.getElementById("psm").value,
@@ -10116,7 +10298,7 @@ async function savePlayback(){
       hls_readrate:document.getElementById("phr").value,
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
-      hls_typeless_sliding:document.getElementById("phs").checked}});
+      hls_typeless_sliding:document.getElementById("phs").checked}}));
     toast("Playback defaults saved");
   }catch(e){ err.textContent=e.message; }
 }
@@ -10177,10 +10359,10 @@ async function testMonarr(){
 async function saveMonarr(){
   const err=document.getElementById("mnerr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       monarr_url:document.getElementById("mnurl").value.trim(),
       monarr_api_key:document.getElementById("mnkey").value.trim(),
-      monarr_watched_sync:document.getElementById("mnsync").checked}});
+      monarr_watched_sync:document.getElementById("mnsync").checked}}));
     toast("monarr settings saved");
     testMonarr(); // saving without checking is how a typo survives a week
 
@@ -10221,17 +10403,17 @@ function paintTrakt(){ const el=document.getElementById("traktcard"); if(el) el.
 async function saveTraktKeys(){
   const err=document.getElementById("tkerr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       trakt_client_id:document.getElementById("tcid").value.trim(),
-      trakt_client_secret:document.getElementById("tcs").value.trim()}});
+      trakt_client_secret:document.getElementById("tcs").value.trim()}}));
     TRAKT_EDIT=false;
-    TRAKT=await api("/trakt/status");
+    cacheTrakt(await api("/trakt/status"));
     paintTrakt(); toast("Trakt keys saved");
   }catch(e){ err.textContent=e.message; }
 }
-async function traktLink(){ try{ TRAKT=await api("/trakt/link",{method:"POST"}); paintTrakt(); }catch(e){ toast(e.message); } }
-async function traktUnlink(){ try{ TRAKT=await api("/trakt/link",{method:"DELETE"}); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
-async function traktSyncNow(){ try{ TRAKT=await api("/trakt/sync",{method:"POST"}); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
+async function traktLink(){ try{ cacheTrakt(await api("/trakt/link",{method:"POST"})); paintTrakt(); }catch(e){ toast(e.message); } }
+async function traktUnlink(){ try{ cacheTrakt(await api("/trakt/link",{method:"DELETE"})); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
+async function traktSyncNow(){ try{ cacheTrakt(await api("/trakt/sync",{method:"POST"})); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
 
 // ---- users (admin) --------------------------------------------------------
 function userRow(u){
@@ -10612,16 +10794,21 @@ function catalogHomeBody(p){
   catalogFillNav();
 
   const hub=k=>(p.hubs&&p.hubs[k])||[];
-  let html=installBannerHtml();
+  let hubs=installBannerHtml(), soon="", previews="";
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) html+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           html+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
-  if(hub("recently_added").length)    html+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) html+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
+  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 
-  if(p.libs.length){
-    html+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
       const total=s.total==null?"":`<span class="px-n">${esc(String(s.total))}</span>`;
       // rail() interpolates its heading as HTML (classic passes plain text),
@@ -10634,15 +10821,17 @@ function catalogHomeBody(p){
       // holding photos, because grid() is what populates PHOTO_SET and without
       // it the lightbox opens on one picture and cannot page to the next.
       const photos=s.items.some(i=>i.kind==="photo");
-      html += (!s.items.length||photos)
+      previews += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
-      if(s.unavailable) html+=`<div class="hint">Some library previews are unavailable right now.</div>`;
+      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   }else{
-    html+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
   }
-  return html;
+  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
 
 LAYOUTS.catalog={name:"Catalog", surfaces:["desktop","mobile","tv"], chrome:catalogChrome, views:{home:catalogHomeBody}};
@@ -11211,20 +11400,25 @@ function theaterHomeBody(p){
   // With no hero, main's own padding already clears the bar and the page
   // simply starts with the install banner — the empty-continue-hub and
   // empty-server paths are the same code path, not a special case.
-  let html = pick ? theaterHeroHtml(pick) : "";
-  let body = installBannerHtml();
+  let hero = pick ? theaterHeroHtml(pick) : "";
+  let hubs=installBannerHtml(), soon="", previews="";
 
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) body+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           body+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
-  if(hub("recently_added").length)    body+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
+  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
+  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
   // Coming soon: absent entirely when nothing is paired or monarr had nothing
   // to say — an empty rail is worse than no rail.
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) body+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 
-  if(p.libs.length){
-    body+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
       const count=s.total==null?"preview unavailable":`view all (${esc(String(s.total))})`;
       const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· ${count}</a>`;
@@ -11236,15 +11430,18 @@ function theaterHomeBody(p){
       // without it the lightbox opens on one picture and cannot page to the
       // next.
       const photos=s.items.some(i=>i.kind==="photo");
-      body += (!s.items.length||photos)
+      previews += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
-      if(s.unavailable) body+=`<div class="hint">Some library previews are unavailable right now.</div>`;
+      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   } else {
-    body+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
   }
-  return html+`<div class="th-rails">${body}</div>`;
+  return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
+    `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -11830,7 +12027,7 @@ function destroyReader(flush){
 async function closeReader(){
   const r=READER; if(!r){ history.back(); return; }
   await saveReaderState(true); const itemId=r.itemId; destroyReader(false);
-  if(NATIVE_READER_BOOT){ TOKEN=null; ME=null; nativeReaderPost("close"); return; }
+  if(NATIVE_READER_BOOT){ TOKEN=null; AUTH_GENERATION++; ME=null; nativeReaderPost("close"); return; }
   location.hash=`#/item/${itemId}`;
 }
 async function viewReader(itemId,fileId){
