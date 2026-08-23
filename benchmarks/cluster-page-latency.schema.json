@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-page-latency-v1.json",
+  "title": "plurx named-runner page-phase latency evidence",
+  "$comment": "Draft 2020-12 validates the closed credential-safe shape. scripts/cluster-page-latency validates redaction, route uniqueness, raw phase order, timestamps, Type-7 percentile recomputation, and summary counts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "server_build",
+    "scenario",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "runner",
+    "target",
+    "sample_count_per_route",
+    "routes"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "named_runner" },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "server_build": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{7,40}|v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9]+-g[0-9a-f]{7,40})?)$"
+    },
+    "scenario": {
+      "enum": [
+        "healthy",
+        "voter_unavailable",
+        "delayed_home_optional",
+        "delayed_system_optional"
+      ]
+    },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "runner": { "$ref": "#/$defs/runner" },
+    "target": { "$ref": "#/$defs/target" },
+    "sample_count_per_route": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "routes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/route" }
+    }
+  },
+  "$defs": {
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hardware", "storage_device", "network_path"],
+      "properties": {
+        "hardware": { "$ref": "#/$defs/safe_label" },
+        "storage_device": { "$ref": "#/$defs/safe_label" },
+        "network_path": { "$ref": "#/$defs/safe_label" }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "voter_count"],
+      "properties": {
+        "role": { "enum": ["leader", "follower"] },
+        "voter_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route", "samples", "summary"],
+      "properties": {
+        "route": {
+          "enum": [
+            "home",
+            "activity",
+            "settings:libraries",
+            "settings:system"
+          ]
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/sample" }
+        },
+        "summary": { "$ref": "#/$defs/summary" }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shell_us", "content_us", "settled_us", "endpoints", "failure"],
+      "properties": {
+        "shell_us": { "$ref": "#/$defs/nullable_integer" },
+        "content_us": { "$ref": "#/$defs/nullable_integer" },
+        "settled_us": { "$ref": "#/$defs/nullable_integer" },
+        "endpoints": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/endpoint" }
+        },
+        "failure": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "navigation_error",
+            "phase_timeout",
+            "source_timeout",
+            "render_error",
+            "unauthorized",
+            "http_error",
+            "endpoint_overflow"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "failure": { "type": "null" } },
+            "required": ["failure"]
+          },
+          "then": {
+            "properties": {
+              "shell_us": { "type": "integer" },
+              "content_us": { "type": "integer" },
+              "settled_us": { "type": "integer" }
+            }
+          }
+        }
+      ]
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route", "start_us", "end_us", "status"],
+      "properties": {
+        "route": {
+          "enum": [
+            "/api/v1/activity/detail",
+            "/api/v1/activity",
+            "/api/v1/cluster/nodes",
+            "/api/v1/coming-soon",
+            "/api/v1/hubs",
+            "/api/v1/libraries",
+            "/api/v1/libraries/{library_id}/items",
+            "/api/v1/other",
+            "/api/v1/scan/status",
+            "/api/v1/server",
+            "/api/v1/settings",
+            "/api/v1/system",
+            "/api/v1/system/logs",
+            "/api/v1/system/playback-events",
+            "/api/v1/trakt/status",
+            "/api/v1/users"
+          ]
+        },
+        "start_us": { "type": "integer", "minimum": 0, "maximum": 3600000000 },
+        "end_us": { "type": "integer", "minimum": 0, "maximum": 3600000000 },
+        "status": {
+          "anyOf": [
+            { "const": 0 },
+            { "type": "integer", "minimum": 100, "maximum": 599 }
+          ]
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["success_count", "failure_count", "shell", "content", "settled"],
+      "properties": {
+        "success_count": { "type": "integer", "minimum": 0 },
+        "failure_count": { "type": "integer", "minimum": 0 },
+        "shell": { "$ref": "#/$defs/distribution" },
+        "content": { "$ref": "#/$defs/distribution" },
+        "settled": { "$ref": "#/$defs/distribution" }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "p50_us", "p95_us", "max_us"],
+      "properties": {
+        "sample_count": { "type": "integer", "minimum": 0 },
+        "p50_us": { "$ref": "#/$defs/nullable_number" },
+        "p95_us": { "$ref": "#/$defs/nullable_number" },
+        "max_us": { "$ref": "#/$defs/nullable_number" }
+      }
+    },
+    "safe_label": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "nullable_integer": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 3600000000
+    },
+    "nullable_number": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 3600000000
+    }
+  }
+}

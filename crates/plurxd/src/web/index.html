@@ -3662,11 +3662,14 @@ async function loadHome(){
 async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const route=location.hash;
   layoutChrome("home", `<div id="hubs"><div class="empty">Loading…</div></div>`);
+  setPagePhase(route,generation,"shell");
   const page=await loadHome();
   if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
   document.getElementById("main").innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
+  setPagePhase(route,generation,"content");
   wireRails();
   restoreScroll();
+  setPagePhase(route,generation,"settled");
 }
 // ---- layout renderers -----------------------------------------------------
 // Attached to the registry declared in the <head> script. A layout supplies a
@@ -8936,6 +8939,7 @@ const ITEM_FOR_FILE={};
 // per-library scan state, and the Trakt story — refreshed every 3s.
 async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   layoutChrome("activity", `<div class="empty">Loading…</div>`);
+  setPagePhase("#/activity",generation,"shell");
   await renderActivityBody(generation);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   setPageTimer(()=>renderActivityBody(generation), 3000, generation);
@@ -8957,9 +8961,12 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   ACTIVITY_DETAIL_BUSY=generation;
   try{
   let d; try{ d=await api("/activity/detail"); }
-  catch(e){ if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return; const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  catch(e){ if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return; const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure("#/activity",generation,"render_error"); setPagePhase("#/activity",generation,"content"); setPagePhase("#/activity",generation,"settled"); return; }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   paintActivityBody(d);
+  setPageFailure("#/activity",generation,null);
+  setPagePhase("#/activity",generation,"content");
+  setPagePhase("#/activity",generation,"settled");
   } finally {
     if(ACTIVITY_DETAIL_BUSY===generation) ACTIVITY_DETAIL_BUSY=0;
   }
@@ -9119,6 +9126,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION){
   if(!ME.is_admin){ location.hash="#/"; return; }
   const route=location.hash;
   layoutChrome("settings",`<div class="empty">Loading…</div>`);
+  setPagePhase(route,generation,"shell");
   const since7d=Date.now()-7*24*60*60*1000;
   const [libs,settings,status,sys,users,trakt,playbackEvents]=await Promise.all([
     api("/libraries"),api("/settings"),api("/scan/status"),api("/system"),api("/users"),
@@ -9129,8 +9137,15 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION){
   // Re-entering Settings re-reads the roster and drops any token still held.
   CLUSTER_LOADED=false; forgetJoinToken();
   SETTINGS_DATA={libs,settings,status,sys,users,trakt,playbackEvents,cluster:null};
-  renderSettings();
+  const panelSettled=renderSettings();
+  setPagePhase(route,generation,"content");
   setPageTimer(settingsTick, 2000, generation);
+  if(panelSettled&&typeof panelSettled.then==="function"){
+    panelSettled.then(
+      ()=>setPagePhase(route,generation,"settled"),
+      ()=>{ setPageFailure(route,generation,"render_error"); setPagePhase(route,generation,"settled"); }
+    );
+  }else setPagePhase(route,generation,"settled");
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
 let SETTINGS_DATA=null;
@@ -9149,7 +9164,7 @@ function renderSettings(){
   const tab=settingsTab();
   const bar=SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
   document.getElementById("main").innerHTML=`<div class="settabs">${bar}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
-  if(tab==="system") refreshLogs();     // the log box only exists on the System tab
+  if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"){
     loadCluster();                       // the roster is fetched on first open, not with Settings
     refreshClusterLogs();                // replication detail has its own ring on this tab
@@ -11860,6 +11875,44 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 // ---- router ---------------------------------------------------------------
 // One page-scoped poller at a time; routing away always clears it.
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
+function pagePhaseName(route){
+  if(route==="#/activity") return "activity";
+  if(route==="#/settings"||route==="#/admin") return "settings";
+  return "home";
+}
+function setPagePhase(route,generation,phase){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return false;
+  const order={shell:0,content:1,settled:2};
+  if(!(phase in order)) return false;
+  const main=document.getElementById("main");
+  if(!main) return false;
+  const page=pagePhaseName(route);
+  const sameGeneration=main.dataset.page===page&&main.dataset.pageGeneration===String(generation);
+  if(sameGeneration&&order[phase]<=order[main.dataset.phase]) return phase===main.dataset.phase;
+  if(phase==="shell"){
+    delete main.dataset.pageFailure;
+    if(typeof performance!=="undefined"&&performance.getEntriesByType&&performance.clearMarks){
+      for(const entry of performance.getEntriesByType("mark")){
+        if(entry.name.startsWith("plurx-page-phase:")) performance.clearMarks(entry.name);
+      }
+    }
+  }
+  main.dataset.page=page;
+  main.dataset.pageGeneration=String(generation);
+  main.dataset.phase=phase;
+  if(typeof performance!=="undefined"&&performance.mark){
+    performance.mark(`plurx-page-phase:${generation}:${page}:${phase}`);
+  }
+  return true;
+}
+function setPageFailure(route,generation,failure){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return false;
+  const main=document.getElementById("main");
+  if(!main||main.dataset.pageGeneration!==String(generation)) return false;
+  if(failure) main.dataset.pageFailure=failure;
+  else delete main.dataset.pageFailure;
+  return true;
+}
 function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION) return;
   clearInterval(PAGE_TIMER);
@@ -11897,7 +11950,7 @@ async function render(){
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
     if(generation===PAGE_RENDER_GENERATION) restoreScroll();
   }catch(e){
-    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; else toast(e.message); }
+    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); }else toast(e.message); }
   }
 }
 window.addEventListener("hashchange",render);
