@@ -131,7 +131,12 @@ function node(id, raftId, role, extra = {}) {
 }
 
 function status(availability, nodes) {
-  return { availability, nodes, replication: REPLICATION };
+  return {
+    local_node_id: nodes[0] && nodes[0].node_id,
+    availability,
+    nodes,
+    replication: REPLICATION,
+  };
 }
 
 // ---- the two-voter state is the point -------------------------------------
@@ -296,6 +301,10 @@ const REFUSAL_CODES = [
   "node_owns_offline_work",
   "cluster_leader_removal_refused",
   "cluster_node_not_found",
+  "self_removal_requires_leave",
+  "leave_node_mismatch",
+  "membership_upgrade_required",
+  "membership_removal_pending",
 ];
 
 test("each removal refusal renders as an actionable sentence, not a code", () => {
@@ -323,11 +332,11 @@ test("a stale-node refusal refreshes the roster it says is stale", () => {
   assert.match(text, /current roster is being refreshed/i);
 
   const removeNode = shippedSource("removeNode");
-  assert.match(
-    removeNode,
-    /if\(e\.code==="cluster_node_not_found"\) CLUSTER_LOADED=false/,
-  );
   assert.match(removeNode, /renderSettings\(\)/);
+  assert.match(removeNode, /if\(e\.code==="cluster_node_not_found"\)\{/);
+  assert.match(removeNode, /SETTINGS_LOADED\.delete\("cluster"\)/);
+  assert.match(removeNode, /loadSettingsKey\("cluster",generation\)/);
+  assert.match(removeNode, /settingsCurrent\(generation,"cluster"\)/);
 });
 
 test("node_owns_offline_work tells the operator what to do next", () => {
@@ -390,6 +399,20 @@ test("a roster row shows hostname and advertised host without listener ports", (
   }
 });
 
+test("a pending removal is visible and offers an idempotent retry", () => {
+  const ui = sandbox();
+  const row = ui.clusterNodeRow(
+    node("node-b", 2, "voter", { removal_pending: true }),
+    "node-a",
+  );
+  assert.match(row, /Removal pending/);
+  assert.match(row, />Retry removal</);
+  const refusal = ui.membershipRefusalText("membership_removal_pending", "");
+  assert.match(refusal, /finish upgrading every cluster node/i);
+  assert.match(refusal, /retry this same removal/i);
+  assert.match(refusal, /do not return.*to service/i);
+});
+
 test("hostname leads the identity while node id stays secondary", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(
@@ -420,6 +443,17 @@ test("the current leader is labeled beside its hostname", () => {
   assert.equal(follower.includes(">Leader<"), false);
 });
 
+test("the action flex row stays inside its table cell", () => {
+  const ui = sandbox();
+  const row = ui.clusterNodeRow(node("node-a", 1, "voter"));
+  assert.match(row, /<td class="rowactions"><div class="row"/);
+  assert.equal(
+    /<td[^>]*class="[^"]*\brow\b/.test(row),
+    false,
+    `a table cell was changed into a flex row: ${row}`,
+  );
+});
+
 test("an unreachable node says so rather than showing a blank", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(node("node-c", 3, "voter", { reachable: false }));
@@ -448,6 +482,24 @@ test("cluster diagnostics have a separate log surface", () => {
   assert.match(html, /Cluster log/);
   assert.match(html, /id="cllogbox"/);
   assert.match(html, /instead of the general System log/);
+});
+
+test("the local row cannot use generic removal", () => {
+  const ui = sandbox();
+  const local = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
+  const peer = ui.clusterNodeRow(node("node-b", 2, "voter"), "node-a");
+  assert.match(local, /This node/);
+  assert.match(local, /Use graceful leave below/);
+  assert.equal(local.includes(">Remove<"), false);
+  assert.match(peer, />Remove</);
+});
+
+test("graceful leave binds the POST to the roster's local node", () => {
+  const panel = sandbox().leavePanel("node-a");
+  assert.match(panel, /leaveCluster\(this,&quot;node-a&quot;\)/);
+  const handler = shippedSource("leaveCluster");
+  assert.match(handler, /body:\{node_id:nodeId\}/);
+  assert.match(sandbox().leavePanel(), /identity unavailable/i);
 });
 
 // ---- admin gating ---------------------------------------------------------
@@ -554,9 +606,10 @@ test("routing away from Settings drops the in-memory join token", () => {
 test("the Cluster tab is registered and dispatched", () => {
   assert.match(SHIPPED_UI, /\["cluster","Cluster"\]/);
   assert.match(SHIPPED_UI, /if\(tab==="cluster"\)\s*return clusterPanel\(d\)/);
-  // Fetched on first open, not with the rest of Settings: the common install
-  // refuses this endpoint, and asking every visit would spend a failed request.
-  assert.match(SHIPPED_UI, /if\(tab==="cluster"\)\s*\{\s*loadCluster\(\)/);
+  // The active-tab manifest fetches this roster on first Cluster open; it is
+  // absent from every other tab's dependency wave.
+  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\[\]\}/);
+  assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
   assert.equal(
     /Promise\.all\(\[[^\]]*cluster\/nodes/.test(SHIPPED_UI),
     false,

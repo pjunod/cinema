@@ -10,6 +10,46 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Cluster topology guidance and comparable three-versus-four-voter evidence
+  are now executable.** Operations recommends three voters for ordinary HA,
+  documents readiness-aware sticky proxying and a complete durable authority
+  set, and keeps scratch/cache I/O off consensus storage. The separate-process
+  harness runs an identical quorum-acknowledged write workload on fresh three-
+  and four-voter clusters and emits a versioned semantic artifact with raw
+  acknowledged-write round trips, type-7 percentiles, a stable leader term,
+  quorum, commit count, applied lag, and per-voter validation of the expected
+  logical corpus. Hosted CI leaves resource fields null so it cannot
+  masquerade as named-runner evidence.
+
+- **Idle cluster voters now prepare different likely-next titles in parallel.**
+  One fenced scheduler ranks and enqueues immutable source generations, while
+  every compatible node claims distinct whole-title jobs with renewable,
+  takeover-safe row fences. Yielded work resumes from node-local numbered
+  parts; a successor on another node restarts cleanly, and an expired worker
+  cannot publish. Cache location and ready state commit atomically, source
+  deletion cancels work, eviction makes it eligible again, and housekeeping
+  preserves only the current staging owner. New distributed cache generations
+  carry an authenticated object manifest whose fenced digest is bound to the
+  cache-location row. Starts load that bounded manifest without walking the
+  film, while requests authenticate the exact playlist or segment bytes they
+  return. Scheduled cleanup rotates a durable object cursor under a 132 MiB
+  plus two-byte EOF-probe ceiling, yields to same-title playback, and
+  invalidates the exact corrupt generation. Offline downloads fail their ready
+  lease coherently when that authoritative generation is removed. The existing
+  foreground admission lane still preempts speculative ffmpeg work within its
+  five-second bound, and completed hits start as childless cached sessions.
+  Worker claims use the boot-probed decoder/encoder/tone-map inventory and
+  current reserved disk capacity, paginate beyond incompatible work, and
+  self-fence renewals at their local deadline. Ready/terminal history is
+  pruned under hard active and total queue ceilings. Workers open/stat the
+  source before ffmpeg and keep unreadable-mount refusals node-local, so one
+  unmounted voter cannot spend the cluster's failure budget. Individual empty
+  queue polls avoid cache filesystem walks; producer nodes rate-limit a bounded
+  local sweep to every 15 minutes, while scheduled cleanup remains the
+  backstop for abandoned queue staging/final directories after a restart with
+  no cache rows. Rename-to-publication blocks both recipe eviction and orphan
+  cleanup.
+
 - **Cluster schedulers now spend shared work once, even when every voter ticks
   together.** Scans and refreshes share a per-library lease across startup,
   scheduled, manual, and targeted integration triggers; probe repair, artwork
@@ -19,9 +59,12 @@ bump may break compatibility and a **patch** bump never does.
   speculative encoder. Every scan/metadata publication validates the
   exact owner, fence, renewal revision, expiry, and prior expiry inside its
   SQLite or replicated transaction, so a paused predecessor cannot publish
-  after a successor takes over. Speculative cache claims use generation-scoped
-  paths and fence claim, heartbeat, completion, and failure cleanup in the
-  same way. Targeted requests queue behind remote owners,
+  after a successor takes over. Starting voter removal atomically invalidates
+  every job token owned by that node, and replicated triggers make a durable
+  owner tombstone authoritative even for the preceding rolling-upgrade binary.
+  Older tombstones are backfilled on startup and idempotent retry. Speculative cache claims
+  use generation-scoped paths and fence claim, heartbeat, completion, and
+  failure cleanup in the same way. Targeted requests queue behind remote owners,
   while telemetry pruning, scratch cleanup, artwork files, and cache eviction
   remain node-local work with node-scoped clocks. Same-path integration
   waiters retain their own request status and metadata hints while queued;
@@ -76,14 +119,19 @@ bump may break compatibility and a **patch** bump never does.
 - **Artwork now follows library rows across the cluster.** Item metadata is
   replicated, but its poster and backdrop bytes live in each node's local
   artwork cache, so a follower inherited a valid filename and returned 404.
-  Each voter now publishes its own public HTTP base inside private membership
-  state and continuously inventories every replicated artwork reference. A
+  Each voter now publishes a node-specific `cluster.artwork_url` inside private
+  membership state (separate from a possibly shared load-balanced join URL)
+  and continuously inventories every replicated artwork reference. A
   missing file is pulled from a reachable peer under a one-minute,
   filename-bound cluster proof, bounded to an image-sized response, and
   atomically materialized; no reusable user bearer crosses between nodes. If
   no peer retains the file, a paced source/provider repair recreates it.
   Requests use the same peer path immediately while the background pass
-  converges, and image bytes still never enter Raft.
+  converges. Peer pulls are singleflight and globally bounded, source repair
+  uses both the shared `provider:artwork` job lease and a leader-arbitrated
+  per-item owner/term/generation fence. Provider-origin and catalogue writes
+  validate both exact tokens atomically before mutation; image bytes still
+  never enter Raft.
 
 - **Repeated authentication no longer appends one Raft entry per request.**
   Login-token and scoped API-key authorization still use authority-consistent

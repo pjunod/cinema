@@ -739,46 +739,41 @@ pub async fn subtitle_vtt(
         .segment_window(&session, sequence)
         .await
         .ok_or(ApiError::NotFound("subtitle segment"))?;
-    let cached = crate::subtitles::vtt_path(&state.subs_dir, &file, index);
-    let (bytes, cache_control) = match tokio::fs::read(&cached).await {
-        Ok(bytes) => {
-            tracing::info!(
-                session_id = %session,
-                file_id = file.id,
-                index,
-                codec = %track.codec,
-                language = track.language.as_deref().unwrap_or("und"),
-                title = track.title.as_deref().unwrap_or(""),
-                start_seconds = context.start_seconds,
-                "serving native HLS WebVTT subtitle"
-            );
-            (bytes, "private, max-age=3600")
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // AVPlayer gives a subtitle segment only about two seconds to
-            // answer and blocks the muxed video while it waits. Extracting an
-            // embedded text track is a full-source scan that can legitimately
-            // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
-            // here turns healthy Dolby Vision, HDR and H.264 streams into a
-            // black screen. Publish a syntactically valid empty segment now
-            // and let the deduplicated cache extraction finish independently.
-            // `no-store` lets a player retry this window once the sidecar is
-            // ready instead of pinning the temporary empty answer.
-            crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-            tracing::debug!(
-                session_id = %session,
-                file_id = file.id,
-                index,
-                "serving an empty subtitle segment while its sidecar cache warms"
-            );
-            (b"WEBVTT\n\n".to_vec(), "no-store")
-        }
-        Err(error) => {
-            return Err(ApiError::Internal(format!(
-                "reading extracted subtitles: {error}"
-            )));
-        }
-    };
+    let (bytes, cache_control) =
+        match crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index).await {
+            Ok(Some(bytes)) => {
+                tracing::info!(
+                    session_id = %session,
+                    file_id = file.id,
+                    index,
+                    codec = %track.codec,
+                    language = track.language.as_deref().unwrap_or("und"),
+                    title = track.title.as_deref().unwrap_or(""),
+                    start_seconds = context.start_seconds,
+                    "serving native HLS WebVTT subtitle"
+                );
+                (bytes, "private, max-age=3600")
+            }
+            Ok(None) | Err(_) => {
+                // AVPlayer gives a subtitle segment only about two seconds to
+                // answer and blocks the muxed video while it waits. Extracting an
+                // embedded text track is a full-source scan that can legitimately
+                // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
+                // here turns healthy Dolby Vision, HDR and H.264 streams into a
+                // black screen. Publish a syntactically valid empty segment now
+                // and let the deduplicated cache extraction finish independently.
+                // `no-store` lets a player retry this window once the sidecar is
+                // ready instead of pinning the temporary empty answer.
+                crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
+                tracing::debug!(
+                    session_id = %session,
+                    file_id = file.id,
+                    index,
+                    "serving an empty subtitle segment while its sidecar cache warms"
+                );
+                (b"WEBVTT\n\n".to_vec(), "no-store")
+            }
+        };
     Ok((
         StatusCode::OK,
         [
@@ -851,7 +846,7 @@ async fn exact_hls_context(
     else {
         return context;
     };
-    let Some(opened) = state.transcode.segment(session, "init.mp4").await else {
+    let Ok(Some(opened)) = state.transcode.segment(session, "init.mp4").await else {
         return context;
     };
     // Initialization segments are a few KiB. Bound malformed input so a
@@ -1669,11 +1664,17 @@ pub async fn segment(
 ) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
 
-    let opened = state
-        .transcode
-        .segment(&session, &seg)
-        .await
-        .ok_or(ApiError::NotFound("segment"))?;
+    let opened = match state.transcode.segment(&session, &seg).await {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Err(ApiError::NotFound("segment")),
+        Err(crate::transcode::SegmentOpenError::Capacity) => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "response_snapshot_capacity",
+                "authenticated media response capacity is full; retry shortly",
+            ));
+        }
+    };
     let content_type = segment_content_type(&seg);
     if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
@@ -1730,7 +1731,7 @@ pub async fn segment(
         );
     }
     let opened_len = opened.len;
-    let reader = tokio_util::io::ReaderStream::new(opened.file);
+    let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let delivery = opened.delivery;
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —

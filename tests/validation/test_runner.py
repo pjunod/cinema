@@ -158,11 +158,33 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(web["hiqlite_spike"])
         self.assertFalse(web["cluster_auth"])
 
+        for page_read_path in (
+            "crates/plurxd/src/http/browse.rs",
+            "crates/plurxd/src/http/system.rs",
+        ):
+            with self.subTest(page_read_path=page_read_path):
+                page_read = scope_for_paths(catalog, (page_read_path,))
+                self.assertTrue(page_read["cluster_auth"])
+
+        for web_only_path in (
+            "Makefile",
+            "crates/plurxd/src/web/index.html",
+            "tests/web/page-read-budget.test.js",
+        ):
+            with self.subTest(web_only_path=web_only_path):
+                web_only = scope_for_paths(catalog, (web_only_path,))
+                self.assertFalse(web_only["cluster_auth"])
+
         cluster = scope_for_paths(
             catalog, ("crates/plurx-core/src/store/hiqlite.rs",)
         )
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
+
+        topology_schema = scope_for_paths(
+            catalog, ("benchmarks/cluster-topology.schema.json",)
+        )
+        self.assertTrue(topology_schema["cluster_auth"])
 
         core = scope_for_paths(catalog, ("crates/plurx-core/src/domain.rs",))
         self.assertTrue(core["hiqlite_spike"])

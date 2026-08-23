@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a2095333", "23c7e976"]
+points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades", "validation.framework"]
+checks = ["rust-gate", "cluster-auth", "history-regressions"]
+reason = "The retained workspace build and local/remote observer contracts prove the passive Raft handle crosses Hiqlite's public client boundary while remaining constructible only from an embedded local node, and the concurrent projection test rejects torn observations."

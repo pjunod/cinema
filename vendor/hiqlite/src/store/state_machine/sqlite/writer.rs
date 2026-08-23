@@ -34,7 +34,10 @@ pub enum WriterRequest {
     Query(Query),
     Migrate(Migrate),
     Snapshot(SnapshotRequest),
-    SnapshotApply((String, oneshot::Sender<()>)),
+    SnapshotApply((
+        String,
+        oneshot::Sender<Result<(), StorageError<NodeId>>>,
+    )),
     MetadataRead(oneshot::Sender<StateMachineData>),
     MetadataMembership(MetaMembershipRequest),
     Backup(BackupRequest),
@@ -538,34 +541,52 @@ CREATE TABLE IF NOT EXISTS _metadata
                 WriterRequest::SnapshotApply((path, ack)) => {
                     let start = Instant::now();
                     info!("Starting snapshot restore from {}", path);
-                    conn.restore(
+                    let result = conn.restore(
                         "main",
                         path,
                         Some(|p: Progress| {
                             println!("Database restore remaining: {}", p.remaining);
                         }),
-                    )
-                    .expect("SnapshotApply to always succeed in sql writer");
-
-                    if let Err(err) = conn.execute("PRAGMA optimize", []) {
-                        error!("Error during 'PRAGMA optimize': {}", err);
-                    }
-
-                    info!(
-                        "Snapshot restore finished after {} ms",
-                        start.elapsed().as_millis()
                     );
 
-                    sm_data = conn
-                        .query_row("SELECT data FROM _metadata WHERE key = 'meta'", (), |row| {
-                            let meta_bytes: Vec<u8> = row.get(0)?;
-                            let metadata: StateMachineData =
-                                deserialize(&meta_bytes).expect("Metadata to deserialize ok");
-                            Ok(metadata)
-                        })
-                        .expect("Metadata query to always succeed");
+                    let result = match result {
+                        Ok(()) => {
+                            if let Err(err) = conn.execute("PRAGMA optimize", []) {
+                                error!("Error during 'PRAGMA optimize': {}", err);
+                            }
 
-                    ack.send(()).unwrap()
+                            let metadata = conn
+                                .query_row(
+                                    "SELECT data FROM _metadata WHERE key = 'meta'",
+                                    (),
+                                    |row| row.get::<_, Vec<u8>>(0),
+                                )
+                                .map_err(|err| StorageError::IO {
+                                    source: StorageIOError::read_state_machine(&err),
+                                })
+                                .and_then(|meta_bytes| {
+                                    deserialize(&meta_bytes).map_err(|err| StorageError::IO {
+                                        source: StorageIOError::read_state_machine(&err),
+                                    })
+                                });
+                            match metadata {
+                                Ok(metadata) => {
+                                    sm_data = metadata;
+                                    info!(
+                                        "Snapshot restore finished after {} ms",
+                                        start.elapsed().as_millis()
+                                    );
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(err) => Err(StorageError::IO {
+                            source: StorageIOError::write_state_machine(&err),
+                        }),
+                    };
+
+                    let _ = ack.send(result);
                 }
 
                 WriterRequest::MetadataRead(ack) => {

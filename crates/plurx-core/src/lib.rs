@@ -13,6 +13,8 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod fmp4;
+#[cfg(unix)]
+pub mod fs_secure;
 pub mod mediafacts;
 pub mod metadata;
 pub mod playback;

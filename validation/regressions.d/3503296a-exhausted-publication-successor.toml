@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3503296a"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained coordination unit regression and separate-process removal proof require the last signed-64-bit publication revision to remain representable, then self-fence an exhausted revision or expiry as FenceRejected before a delayed removed-owner command can reach durable mutation."

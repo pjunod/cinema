@@ -205,7 +205,7 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
         "container": any(matches(path, CONTAINER_PATHS) for path in paths),
         "mobile_version": "mobile-version" in check_ids,
         "hiqlite_spike": "core.media" in point_ids,
-        "cluster_auth": "cluster.auth" in point_ids,
+        "cluster_auth": bool({"cluster.auth", "cluster.page-reads"} & point_ids),
         "docs_only": False,
     }
 

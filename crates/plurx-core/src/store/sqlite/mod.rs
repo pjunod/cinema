@@ -15,6 +15,7 @@ mod library;
 mod media;
 mod offline;
 mod outbox;
+mod pretranscode;
 mod publication;
 mod reading;
 mod telemetry;
@@ -29,9 +30,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{keys, SettingsStore};
+use super::{keys, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot, SettingsStore};
 use crate::cluster::coordination::Lease;
-use crate::domain::{Item, ItemKind, MediaFile, User};
+use crate::domain::{Item, ItemKind, MediaFile, OfflinePackageStats, User};
 use crate::error::StoreError;
 use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
@@ -622,6 +623,62 @@ const MIGRATIONS: &[&str] = &[
         expires_at_ms  INTEGER NOT NULL,
         updated_at_ms  INTEGER NOT NULL
     ) STRICT;",
+    // v24: candidate generation stays a singleton, while compatible workers
+    // claim distinct whole-title speculative transcodes from this durable
+    // queue. The row's own fence is the publication authority; it is not the
+    // candidate pass's generic scheduler lease.
+    "ALTER TABLE transcode_cache_locations ADD COLUMN manifest_digest TEXT;
+    ALTER TABLE transcode_cache_locations
+        ADD COLUMN scrub_object_index INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE pretranscode_jobs (
+        id                TEXT PRIMARY KEY,
+        dedupe_key        TEXT NOT NULL,
+        file_id           INTEGER NOT NULL,
+        source_size       INTEGER NOT NULL,
+        source_mtime      INTEGER NOT NULL,
+        target_height     INTEGER NOT NULL,
+        policy_generation TEXT NOT NULL,
+        requirements_json TEXT NOT NULL,
+        reason            TEXT NOT NULL CHECK (
+                              reason IN ('in_progress', 'next_up', 'recent')),
+        priority          INTEGER NOT NULL,
+        state             TEXT NOT NULL CHECK (
+                              state IN ('queued', 'running', 'ready', 'failed',
+                                        'cancelled')),
+        owner_node_id     TEXT,
+        staging_node_id   TEXT,
+        fence             INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms  INTEGER,
+        attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms     INTEGER NOT NULL,
+        last_error_code   TEXT,
+        recipe_hash       TEXT,
+        storage_id        TEXT,
+        relative_dir      TEXT,
+        manifest_digest   TEXT,
+        created_at_ms     INTEGER NOT NULL,
+        updated_at_ms     INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX pretranscode_jobs_due
+        ON pretranscode_jobs(state, not_before_ms, priority DESC, created_at_ms, id);
+    CREATE INDEX pretranscode_jobs_dedupe
+        ON pretranscode_jobs(dedupe_key, state);
+    CREATE INDEX pretranscode_jobs_staging
+        ON pretranscode_jobs(staging_node_id, state, id);
+    CREATE UNIQUE INDEX pretranscode_jobs_active
+        ON pretranscode_jobs(dedupe_key)
+        WHERE state IN ('queued', 'running');
+
+    CREATE TRIGGER pretranscode_jobs_cancel_source BEFORE DELETE ON files
+    BEGIN
+        DELETE FROM pretranscode_jobs
+         WHERE file_id = OLD.id AND state IN ('ready', 'failed', 'cancelled');
+        UPDATE pretranscode_jobs
+           SET state = 'cancelled', owner_node_id = NULL, staging_node_id = NULL,
+               lease_expires_ms = NULL, policy_generation = '', requirements_json = '{}'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running');
+    END;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -972,7 +1029,7 @@ impl SqliteStore {
     async fn with_fenced_conn<T, F>(
         &self,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
         f: F,
     ) -> Result<T, StoreError>
     where
@@ -980,18 +1037,36 @@ impl SqliteStore {
         T: Send + 'static,
     {
         let lease = lease.clone();
+        let replacement = replacement.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let current: bool = tx.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM job_leases
-                     WHERE resource = ?1 AND owner_node_id = ?2
-                       AND fence = ?3 AND revision = ?4
-                       AND expires_at_ms = ?5 AND expires_at_ms > ?6
-                 )",
+            let execution_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| {
+                    StoreError::Task(format!("system clock precedes unix epoch: {error}"))
+                })?
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
+            let replacement_valid = replacement.resource == lease.resource
+                && replacement.owner_node_id == lease.owner_node_id
+                && replacement.fence == lease.fence
+                && replacement.revision == lease.revision.saturating_add(1)
+                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms
+                && replacement.expires_at_unix_ms > execution_time_ms;
+            if !replacement_valid {
+                return Err(StoreError::Task(
+                    "invalid atomic publication lease replacement".to_owned(),
+                ));
+            }
+            let renewed = tx.execute(
+                "UPDATE job_leases
+                    SET revision = ?6, expires_at_ms = ?7, updated_at_ms = ?8
+                  WHERE resource = ?1 AND owner_node_id = ?2
+                    AND fence = ?3 AND revision = ?4
+                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
                 params![
-                    lease.resource,
-                    lease.owner_node_id,
+                    &lease.resource,
+                    &lease.owner_node_id,
                     i64::try_from(lease.fence).map_err(|error| {
                         StoreError::Database(format!("lease fence is out of range: {error}"))
                     })?,
@@ -999,11 +1074,14 @@ impl SqliteStore {
                         StoreError::Database(format!("lease revision is out of range: {error}"))
                     })?,
                     lease.expires_at_unix_ms,
-                    observed_at_unix_ms,
+                    i64::try_from(replacement.revision).map_err(|error| {
+                        StoreError::Database(format!("lease revision is out of range: {error}"))
+                    })?,
+                    replacement.expires_at_unix_ms,
+                    execution_time_ms,
                 ],
-                |row| row.get(0),
             )?;
-            if !current {
+            if renewed != 1 {
                 return Err(StoreError::FenceRejected {
                     resource: lease.resource,
                     owner_node_id: lease.owner_node_id,
@@ -1038,6 +1116,77 @@ impl SqliteStore {
         })
         .await
         .map_err(|e| StoreError::Task(e.to_string()))?
+    }
+}
+
+#[async_trait]
+impl MetricsStore for SqliteStore {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_read(move |conn| {
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM libraries),
+                    (SELECT COUNT(*) FROM users),
+                    COALESCE(SUM(state = 'queued'), 0),
+                    COALESCE(SUM(state = 'preparing'), 0),
+                    COALESCE(SUM(state = 'ready'), 0),
+                    COALESCE(SUM(state = 'failed'), 0),
+                    COALESCE(SUM(CASE WHEN state = 'queued'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'preparing'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'ready'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN state = 'failed'
+                        THEN COALESCE(actual_bytes, reserved_bytes) ELSE 0 END), 0),
+                    (SELECT COUNT(*) FROM offline_package_leases lease
+                     JOIN offline_packages active ON active.id = lease.package_id
+                     WHERE active.node_id = ?1 AND active.state = 'ready'
+                       AND lease.expires_at > ?2),
+                    (SELECT COALESCE(SUM(location.bytes), 0)
+                     FROM transcode_cache_locations location
+                     WHERE location.node_id = ?1
+                       AND location.storage_class = 'local'
+                       AND location.complete = 1
+                       AND EXISTS (
+                           SELECT 1 FROM offline_packages pinned
+                           WHERE pinned.node_id = location.node_id
+                             AND pinned.recipe_hash = location.recipe_hash
+                             AND pinned.state IN ('queued', 'preparing', 'ready')
+                       )),
+                    (SELECT COALESCE(SUM(status = 'pending'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(SUM(status = 'ok'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox)
+                 FROM offline_packages WHERE node_id = ?1",
+                params![node_id, now],
+                |row| {
+                    Ok(PrometheusStoreSnapshot {
+                        libraries: row.get(0)?,
+                        users: row.get(1)?,
+                        offline: OfflinePackageStats {
+                            queued: row.get(2)?,
+                            preparing: row.get(3)?,
+                            ready: row.get(4)?,
+                            failed: row.get(5)?,
+                            queued_bytes: row.get(6)?,
+                            preparing_bytes: row.get(7)?,
+                            ready_bytes: row.get(8)?,
+                            failed_bytes: row.get(9)?,
+                            active_leases: row.get(10)?,
+                            pinned_bytes: row.get(11)?,
+                        },
+                        watched_outbox: (row.get(12)?, row.get(13)?, row.get(14)?),
+                    })
+                },
+            )
+            .map_err(StoreError::from)
+        })
+        .await
     }
 }
 
@@ -1094,6 +1243,24 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn settings_snapshot(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut settings = std::collections::BTreeMap::new();
+            for row in rows {
+                let (key, value) = row?;
+                settings.insert(key, value);
+            }
+            Ok(settings)
+        })
+        .await
+    }
+
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
@@ -1106,6 +1273,74 @@ impl SettingsStore for SqliteStore {
                 params![key, value],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        let key = key.to_owned();
+        let value = value.to_owned();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 VALUES (?1, ?2, unixepoch())
+                 ON CONFLICT(key) DO NOTHING",
+                params![key, value],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn put_setting_if_absent_if_artwork_repair_current(
+        &self,
+        key: &str,
+        value: &str,
+        expected_item_id: i64,
+        fence: &ArtworkRepairFence,
+    ) -> Result<bool, StoreError> {
+        let key = key.to_owned();
+        let value = value.to_owned();
+        let fence = fence.clone();
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 SELECT ?1, ?2, unixepoch()
+                 WHERE ?3 = ?4 AND EXISTS (
+                   SELECT 1 FROM cluster_artwork_repairs
+                   WHERE item_id = ?4 AND owner_node_id = ?5 AND leader_term = ?6
+                     AND generation = ?7)
+                 ON CONFLICT(key) DO NOTHING",
+                params![
+                    key,
+                    value,
+                    expected_item_id,
+                    fence.item_id,
+                    fence.owner_node_id,
+                    fence.leader_term,
+                    fence.generation,
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError> {
+        let filename = filename.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM settings
+                  WHERE substr(key, 1, 27) = 'internal.book_cover_origin.'
+                    AND json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,
+                                     '$.filename') = ?1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM items WHERE poster_path = ?1 OR backdrop_path = ?1)",
+                params![filename],
+            )?)
         })
         .await
     }
@@ -1356,7 +1591,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 23,
+            version, 24,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -1890,6 +2125,84 @@ mod tests {
             6
         );
     }
+
+    #[tokio::test]
+    async fn v24_adds_the_pretranscode_queue_without_losing_v23_state() {
+        use crate::store::SettingsStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(23) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.proof', 'survives-v23')",
+                [],
+            )
+            .expect("seed v23 row");
+            conn.pragma_update(None, "user_version", 23)
+                .expect("version");
+        }
+
+        let store = SqliteStore::open(&db).expect("migrate v23 to v24");
+        assert_eq!(
+            store
+                .get_setting("migration.proof")
+                .await
+                .expect("read v23 proof")
+                .as_deref(),
+            Some("survives-v23")
+        );
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('pretranscode_jobs')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("queue columns"),
+            24
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transcode_cache_locations')
+                  WHERE name = 'manifest_digest'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cache manifest column"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transcode_cache_locations')
+                  WHERE name = 'scrub_object_index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cache scrub cursor column"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'trigger' AND name = 'pretranscode_jobs_cancel_source'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("source trigger"),
+            1
+        );
+    }
+
     /// v13 adds a column to `items`, which is the migration shape with a
     /// silent failure mode: `ITEM_COLS` and `ITEM_COL_COUNT` are positional,
     /// and four queries select `ITEM_COLS` and then read their own trailing

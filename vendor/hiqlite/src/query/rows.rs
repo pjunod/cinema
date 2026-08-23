@@ -84,6 +84,44 @@ impl RowOwned {
 
         Self { columns: cols }
     }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn from_db_quorum_watermark(watermark: crate::DbQuorumWatermark) -> Self {
+        Self {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text(watermark.term.to_string()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text(watermark.leader_id.to_string()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text(watermark.committed_index.to_string()),
+                },
+            ],
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn into_db_quorum_watermark(mut self) -> Result<crate::DbQuorumWatermark, Error> {
+        fn parse(field: &'static str, value: String) -> Result<u64, Error> {
+            value.parse().map_err(|_| {
+                Error::Connect(format!("database quorum watermark has invalid {field}"))
+            })
+        }
+
+        let term = parse("term", self.try_get("term")?)?;
+        let leader_id = parse("leader_id", self.try_get("leader_id")?)?;
+        let committed_index = parse("committed_index", self.try_get("committed_index")?)?;
+        Ok(crate::DbQuorumWatermark {
+            term,
+            leader_id,
+            committed_index,
+        })
+    }
 }
 
 impl RowOwned {

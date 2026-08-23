@@ -409,6 +409,27 @@ node-status payload. The automatic certificates encrypt traffic but are
 self-signed and accepted without certificate verification; the shared secrets,
 not a certificate authority, authenticate membership requests.
 
+The read-only activity snapshot is the narrow application-level peer call. An
+explicit per-node `artwork_url` origin is retained behind membership (never
+projected in public status), and requests to
+`/_internal/v1/activity-snapshot` carry a 30-second Ed25519 proof from the
+calling node's owner-only private key. Only the public key is replicated. The
+proof names the current sender and intended target; the receiver verifies that
+key and also requires both ends to remain committed, non-removed voters. A
+removed machine therefore cannot use retained cluster-wide secrets to
+impersonate a survivor. Calls refuse redirects and validate the returned node
+identity. They never forward a login, admin, Plex, scoped API-key bearer, or
+HLS session capability. Missing, stale, cross-target, removed-sender, or
+invalid proofs receive 401. The producer enforces the same exact 256 KiB JSON
+budget as the consumer and returns only node identity and bounded
+active-delivery fields: no media paths, peer addresses, credentials, library
+rows, or settings.
+
+Artwork recovery predates that activity route and retains its v4 shared-HMAC
+wire during rolling upgrades. The activity key is not substituted into the
+artwork protocol without a future negotiated protocol transition; new and old
+v4 voters therefore continue to exchange artwork while a cluster rolls.
+
 The consequence is explicit: **anything past a network you fully trust belongs
 behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain
 HTTP the bearer token crosses the wire in the clear, so on an untrusted segment

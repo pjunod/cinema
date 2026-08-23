@@ -297,6 +297,18 @@ doesn't triple-hit the providers.
 local login; optional OIDC (Google/Apple) code flow mapping to local accounts
 (REQ-USER-2). Argon2id at rest, SHA-256 token lookup.
 
+Cluster activity uses one separate, non-public application RPC:
+`/_internal/v1/activity-snapshot`. Membership retains explicitly advertised
+plurxd endpoints internally and signs each request with short-lived cluster
+authority from a durable per-node Ed25519 key, bound to the live sender and
+intended target; user/admin/Plex bearers, shared cluster secrets, and HLS
+capability ids are never forwarded. The response is a byte-exact bounded,
+minimal node-local delivery snapshot. Fan-out is concurrent under one
+two-second deadline, caps the roster, rejects redirects and wrong-node responses, and
+distinguishes unhealthy, unreachable, invalid, and timed-out peers for the
+public aggregator. A SQLite or never-joined node has no peers and performs no
+fan-out.
+
 **Plex-compat façade** (Tier 1, REQ-PLEX-1) — a stateless translation layer over
 the *same* services, plus a GDM responder (UDP 239.0.0.250:32414, LAN-only).
 Implements the endpoint set the Kodi-family clients actually use: `/identity`,

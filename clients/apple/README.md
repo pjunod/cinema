@@ -12,12 +12,18 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.2.7**, build `78` in [`project.yml`](project.yml) — working
+> Status: **v0.2.7**, build `81` in [`project.yml`](project.yml) — working
 > development client. Browse, resume, discover, and play on both iOS and
 > tvOS. Both targets compile against the iOS/tvOS 26.5 SDKs and share the
-> same regression suite. Build 78 marks a duration-estimated Skip Credits
+> same regression suite. Build 81 marks a duration-estimated Skip Credits
 > button as an estimate, so it no longer reads exactly like a chapter-derived
-> one. Build 77 carries the explicit delivered-SDR
+> one. Build 80 quotes native reader item/file identifiers so
+> JavaScript preserves the full signed 64-bit route across the WebView handoff.
+> Build 79 compacts all three playback-info modes, bounds
+> the full Debug panel to the available tvOS canvas, and colors fields that need
+> attention. Build 78 keeps the tvOS dashboard as Standard and adds shared Mini
+> and full Debug modes on iOS and tvOS. Build
+> 77 carries the explicit delivered-SDR
 > acknowledgement required for a forced bitmap-subtitle session over an HDR
 > source, without allowing an unplanned HDR downgrade. Build 75 adds online PDFKit reading on iPhone and
 > iPad with exact-revision temporary bytes, page resume, local search, and

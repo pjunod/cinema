@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["195c90d1"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process singleton proof keeps cleanup failures fatal in a stable term. When release reports an ambiguous leader change, the controller first proves the leader or term actually changed, emits the exact trial-instability marker, shuts down the provider and voter processes, and only then permits the parent to retry a wholly fresh trial; semantic, fencing, cleanup, and commit-budget failures without proven topology churn remain non-retryable."

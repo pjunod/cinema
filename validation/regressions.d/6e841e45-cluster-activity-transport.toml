@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6e841e45"]
+points = ["cluster.auth", "cluster.membership"]
+checks = ["cluster-auth", "security-boundaries"]
+reason = "The retained three-voter lifecycle requires sender/target binding, rejects forged, stale, cross-target, and freshly signed removed-voter proofs, and keeps SQLite peer discovery local-only. Daemon regressions reject credentialed/path/query origins and wrong-node shapes; follow-up transport evidence owns the redirect, body-size, concurrency, and per-node-key assertions. Reverting the correction restores removed-node reads, unsafe endpoint parsing, serial peer work, wrong-node attribution, or SQLite aggregation failure."

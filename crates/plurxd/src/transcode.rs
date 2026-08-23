@@ -9,21 +9,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64,
+    AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use plurx_core::domain::PlaybackEvent;
+use plurx_core::domain::{PlaybackEvent, PretranscodeJob, PretranscodeWorkerCapabilities};
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
     self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,
     PipelineDigest, QualityRateControlValidation, QualityRc, RateMode, Recipe, ToneMap,
     TranscodeOptions,
 };
+use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::admission::{
     Admission, Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
@@ -39,6 +40,10 @@ const SESSION_IDLE_SECS: u64 = 60;
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
+const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
+const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
+const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
@@ -881,6 +886,13 @@ pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
 /// Spawn an ffmpeg HLS transcode, draining its stderr (at `-loglevel error`)
 /// into the logs so a failure is visible instead of a silently dead session,
 /// and its stdout — which carries `-progress` telemetry — into `progress`.
+#[derive(Clone, Copy, Default)]
+struct FfmpegDescriptors {
+    source: Option<std::os::fd::RawFd>,
+    output: Option<std::os::fd::RawFd>,
+    subtitle: Option<std::os::fd::RawFd>,
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
@@ -888,6 +900,7 @@ fn spawn_ffmpeg(
     progress: Arc<Progress>,
     generation: u64,
     runtime_cache: &std::path::Path,
+    descriptors: FfmpegDescriptors,
 ) -> Result<Child, String> {
     // `-progress pipe:1` is a global option, so it can lead the vector; the
     // HLS muxer writes to files, which leaves stdout free to carry it.
@@ -895,6 +908,46 @@ fn spawn_ffmpeg(
     full.extend_from_slice(args);
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    if descriptors.source.is_some()
+        || descriptors.output.is_some()
+        || descriptors.subtitle.is_some()
+    {
+        // The held handles remain close-on-exec in plurxd. Duplicate both
+        // before assigning their fixed child descriptors so an unlucky raw-fd
+        // number cannot make one dup2 clobber the other's source.
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = |fd: Option<std::os::fd::RawFd>| -> std::io::Result<Option<i32>> {
+                    let Some(fd) = fd else { return Ok(None) };
+                    let duplicated = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10);
+                    if duplicated == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(Some(duplicated))
+                    }
+                };
+                let source = duplicate(descriptors.source)?;
+                let output = duplicate(descriptors.output)?;
+                let subtitle = duplicate(descriptors.subtitle)?;
+                for (duplicate, target) in [(source, 3), (output, 4), (subtitle, 5)] {
+                    let Some(duplicate) = duplicate else { continue };
+                    if libc::dup2(duplicate, target) == -1 {
+                        libc::close(duplicate);
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(duplicate);
+                    let flags = libc::fcntl(target, libc::F_GETFD);
+                    if flags == -1
+                        || libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = command
         .args(&full)
         .stdin(std::process::Stdio::null())
@@ -1318,6 +1371,32 @@ struct LastRequest {
     kind: &'static str,
 }
 
+/// Immutable publication identity for the cache location behind a session.
+///
+/// Integrity failures remove the row with all five fields as a compare-and-
+/// delete. A request that started against generation A must never erase a
+/// replacement generation B that another producer published meanwhile.
+#[derive(Clone, PartialEq, Eq)]
+struct CachedLocationIdentity {
+    recipe_hash: String,
+    node_id: String,
+    storage_class: String,
+    relative_dir: String,
+    manifest_digest: Option<String>,
+}
+
+enum CacheOfferVerdict {
+    Pending {
+        identity: CachedLocationIdentity,
+        started_at: Instant,
+    },
+    Ready {
+        identity: CachedLocationIdentity,
+        verified: bool,
+        observed_at: Instant,
+    },
+}
+
 impl LastRequest {
     fn now(kind: &'static str) -> Self {
         Self {
@@ -1363,6 +1442,10 @@ struct Session {
     /// has decided to replace but reaches the gate after the watchdog.
     #[cfg(test)]
     watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous at the first per-session activity read. It proves
+    /// the manager registry lock was released before telemetry can wait.
+    #[cfg(test)]
+    activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -1380,6 +1463,16 @@ struct Session {
     /// session's full lifetime so the budget sweep cannot remove its playlist
     /// or segments while an HTTP response can still reach them.
     _cache_reader: Option<crate::cachekeep::CacheReadGuard>,
+    /// Exact bounded text-subtitle inode inherited by ffmpeg as `/dev/fd/5`.
+    /// Keeping it for the session lifetime also lets a fallback child inherit
+    /// the same bytes without reopening a replaceable pathname.
+    subtitle_handle: Option<std::fs::File>,
+    /// Small authenticated inventory loaded once at offer time. Media objects
+    /// are verified only when requested, not walked before playback starts.
+    cache_manifest: Option<Arc<plurx_core::transcode::manifest::GenerationManifest>>,
+    /// Exact durable identity used to invalidate this location if a requested
+    /// object later fails the generation manifest.
+    cache_location: Option<CachedLocationIdentity>,
     /// The request that keeps this session alive. Keeping the kind beside the
     /// clock makes an idle reap explain whether the last sign of life was a
     /// playlist reload, a media segment, or only a subtitle/context lookup.
@@ -1608,8 +1701,17 @@ impl Session {
         }
     }
 
-    async fn kill_child_for_replacement(&self) -> ChildReplacement<'_> {
+    async fn kill_child_for_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
+        // Retirement uses the same transition. If it won first, this
+        // previously scheduled fallback is stale and must not resurrect an
+        // encoder after the manager removed the session. Holding the gate
+        // through the check and successor publication also prevents
+        // retirement from starting between this verdict and the caller's
+        // install.
+        if self.retired.load(Acquire) {
+            return None;
+        }
         self.kill_child().await;
         #[cfg(test)]
         {
@@ -1623,7 +1725,7 @@ impl Session {
                 pause.wait().await;
             }
         }
-        replacement
+        Some(replacement)
     }
 
     /// Begin a replacement only while its session is still live after this
@@ -1804,6 +1906,18 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    #[cfg(test)]
+    {
+        let pause = s
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
     let (ahead, first_retained_segment, published_end_ms) = {
         let index = s.segments.lock().await;
         (
@@ -1875,6 +1989,14 @@ pub struct SegmentFile {
     pub(crate) delivery: SegmentDelivery,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentOpenError {
+    /// Authenticated snapshot memory is still owned by earlier response
+    /// bodies. This is an admission outcome, not evidence that the immutable
+    /// cache generation is corrupt.
+    Capacity,
+}
+
 /// Who is reading the segment behind a [`SegmentDelivery`].
 ///
 /// Almost every open is a client fetch, but `exact_hls_context` opens
@@ -1923,6 +2045,9 @@ pub(crate) struct SegmentDelivery {
     started_at: Instant,
     slow_read_reported: bool,
     terminal: bool,
+    // Keeps the global authenticated-snapshot memory permit for exactly the
+    // lifetime of the response or internal probe consuming that snapshot.
+    _snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
 }
 
 impl SegmentDelivery {
@@ -1933,6 +2058,7 @@ impl SegmentDelivery {
         segment: &str,
         encoder: String,
         expected_bytes: u64,
+        snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
     ) -> Self {
         let method = match session.method {
             crate::delivery::Method::Direct => "direct_play",
@@ -1952,6 +2078,7 @@ impl SegmentDelivery {
             started_at: Instant::now(),
             slow_read_reported: false,
             terminal: false,
+            _snapshot_lease: snapshot_lease,
         }
     }
 
@@ -2548,6 +2675,14 @@ pub struct SessionInfo {
     pub suspend_count: u64,
 }
 
+/// Cheap identity used to choose the globally newest activity before walking
+/// any session telemetry locks.
+#[derive(Clone, Debug)]
+pub struct DeliveryCandidate {
+    pub id: String,
+    pub started_unix: i64,
+}
+
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
@@ -2899,6 +3034,44 @@ pub struct Produced {
     pub parts: usize,
 }
 
+/// One coherent speculative-policy read. Candidate geometry, dedupe identity,
+/// worker track selection and encoder choice all derive from this same value;
+/// none of them rereads one setting independently.
+#[derive(Debug, Clone)]
+pub struct PretranscodePolicySnapshot {
+    pub generation: String,
+    requested_encoder: String,
+    rate_control: RateControlSnapshot,
+    prefs: plurx_core::tracks::LangPrefs,
+}
+
+impl PretranscodePolicySnapshot {
+    pub fn target_height(&self, file: &plurx_core::domain::MediaFile) -> i64 {
+        TranscodeManager::pretranscode_target_height_for(file, &self.requested_encoder)
+    }
+
+    pub fn acceptable_encoder_families(&self) -> Vec<String> {
+        match self.requested_encoder.trim().to_ascii_lowercase().as_str() {
+            family @ ("software" | "nvenc" | "qsv" | "vaapi" | "videotoolbox") => {
+                vec![family.to_owned()]
+            }
+            _ => ["software", "nvenc", "qsv", "vaapi", "videotoolbox"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PretranscodeProduceOutcome {
+    Ready(Produced),
+    Yielded,
+    StoreUnavailable,
+    PolicyChanged,
+    SourceChanged,
+}
+
 /// A validated, zero-origin portable package request. Native subtitles are a
 /// presentation rendition and deliberately do not alter the video recipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2925,6 +3098,627 @@ pub enum OfflineProduceOutcome {
     Cached(Produced),
     Yielded,
     ClaimedElsewhere,
+    StoreUnavailable,
+    PolicyChanged,
+    SourceChanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct LocalSourceSnapshot {
+    bytes: u64,
+    modified_secs: i64,
+    modified_nanos: i64,
+    changed_secs: i64,
+    changed_nanos: i64,
+    device: u64,
+    inode: u64,
+}
+
+impl LocalSourceSnapshot {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            bytes: metadata.len(),
+            modified_secs: metadata.mtime(),
+            modified_nanos: metadata.mtime_nsec(),
+            changed_secs: metadata.ctime(),
+            changed_nanos: metadata.ctime_nsec(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+const PRETRANSCODE_STAGING_IDENTITY: &str = ".pretranscode-source.json";
+const MAX_PRETRANSCODE_STAGING_IDENTITY_BYTES: u64 = 4 * 1024;
+const MAX_PRETRANSCODE_PART_PLAYLIST_BYTES: u64 = 1024 * 1024;
+const MAX_RETAINED_PLAYLIST_BYTES: u64 = plurx_core::transcode::manifest::MAX_MANIFEST_BYTES;
+const MAX_RETAINED_SEGMENT_DURATION_MS: i64 = 120_000;
+const MAX_RETAINED_TITLE_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+pub(crate) fn validated_vod_part(text: &str) -> Option<crate::produce::Part> {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    if lines.next()? != "#EXTM3U" {
+        return None;
+    }
+    let remaining = lines.collect::<Vec<_>>();
+    if remaining.last().copied() != Some("#EXT-X-ENDLIST")
+        || remaining[..remaining.len().saturating_sub(1)].contains(&"#EXT-X-ENDLIST")
+    {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut durations_ms = Vec::new();
+    let mut pending_duration = None;
+    let mut header_tags = std::collections::BTreeSet::new();
+    let mut target_duration = None;
+    let mut started_segments = false;
+    for line in &remaining[..remaining.len().saturating_sub(1)] {
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            if pending_duration.is_some() {
+                return None;
+            }
+            started_segments = true;
+            pending_duration = Some(
+                rest.split(',')
+                    .next()?
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|duration| duration.is_finite() && *duration >= 0.0)
+                    .map(|seconds| (seconds * 1000.0).round() as i64)?,
+            );
+        } else if line.starts_with('#') {
+            // Legacy adoption authenticates and later serves this exact
+            // playlist. Only accept the URI-free header tags emitted by our
+            // VOD assembler; KEY, MAP, BYTERANGE and unknown extensions can
+            // otherwise smuggle references or byte interpretation outside
+            // the authenticated object inventory.
+            if pending_duration.is_some() || started_segments {
+                return None;
+            }
+            let tag = if *line == "#EXT-X-VERSION:3" {
+                "version"
+            } else if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+                let seconds = value.parse::<i64>().ok().filter(|value| {
+                    *value > 0 && *value <= MAX_RETAINED_SEGMENT_DURATION_MS / 1_000
+                })?;
+                target_duration = Some(seconds);
+                "target_duration"
+            } else if *line == "#EXT-X-MEDIA-SEQUENCE:0" {
+                "media_sequence"
+            } else if *line == "#EXT-X-PLAYLIST-TYPE:VOD" {
+                "playlist_type"
+            } else if *line == "#EXT-X-INDEPENDENT-SEGMENTS" {
+                "independent_segments"
+            } else {
+                return None;
+            };
+            if !header_tags.insert(tag) {
+                return None;
+            }
+        } else {
+            durations_ms.push(pending_duration.take()?);
+            segments.push((*line).to_owned());
+        }
+    }
+    if pending_duration.is_some() {
+        return None;
+    }
+    let part = crate::produce::Part {
+        segments,
+        durations_ms,
+    };
+    if part.is_empty()
+        || part.segments.len() != part.durations_ms.len()
+        || part.segments.len() >= plurx_core::transcode::manifest::MAX_OBJECTS
+    {
+        return None;
+    }
+    let mut total_ms = 0_i64;
+    for (index, (name, duration_ms)) in part.segments.iter().zip(&part.durations_ms).enumerate() {
+        if name != &format!("seg{index:05}.ts")
+            || *duration_ms <= 0
+            || *duration_ms > MAX_RETAINED_SEGMENT_DURATION_MS
+        {
+            return None;
+        }
+        total_ms = total_ms.checked_add(*duration_ms)?;
+        if total_ms > MAX_RETAINED_TITLE_DURATION_MS {
+            return None;
+        }
+    }
+    if target_duration.is_some_and(|target| {
+        let longest = part.durations_ms.iter().copied().max().unwrap_or_default();
+        target < (longest + 999) / 1_000
+    }) {
+        return None;
+    }
+    Some(part)
+}
+const MAX_RETAINED_TOTAL_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct PretranscodeStagingIdentity {
+    job_id: String,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    policy_generation: String,
+    recipe_hash: String,
+    source: LocalSourceSnapshot,
+}
+
+async fn read_pretranscode_staging_identity(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+) -> Option<PretranscodeStagingIdentity> {
+    let bytes = temp
+        .read_bounded_child(
+            PRETRANSCODE_STAGING_IDENTITY,
+            MAX_PRETRANSCODE_STAGING_IDENTITY_BYTES,
+        )
+        .await
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+async fn write_pretranscode_staging_identity(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    identity: &PretranscodeStagingIdentity,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(identity)
+        .map_err(|error| format!("serializing staging source identity: {error}"))?;
+    if bytes.len() as u64 > MAX_PRETRANSCODE_STAGING_IDENTITY_BYTES {
+        return Err("staging source identity exceeds its bounded format".to_owned());
+    }
+    temp.atomic_write_child(PRETRANSCODE_STAGING_IDENTITY, &bytes)
+        .await
+        .map_err(|error| format!("publishing staging source identity: {error}"))
+}
+
+async fn bind_pretranscode_staging(
+    parent: &plurx_core::fs_secure::SecureDirectory,
+    name: &str,
+    temp: plurx_core::fs_secure::SecureDirectory,
+    job: &PretranscodeJob,
+    recipe_hash: &str,
+    source: LocalSourceSnapshot,
+) -> Result<plurx_core::fs_secure::SecureDirectory, String> {
+    let expected = PretranscodeStagingIdentity {
+        job_id: job.id.clone(),
+        file_id: job.file_id,
+        source_size: job.source_size,
+        source_mtime: job.source_mtime,
+        policy_generation: job.policy_generation.clone(),
+        recipe_hash: recipe_hash.to_owned(),
+        source,
+    };
+    if read_pretranscode_staging_identity(&temp).await.as_ref() == Some(&expected) {
+        return Ok(temp);
+    }
+
+    // Missing, corrupt, or mismatched identity makes every retained segment
+    // untrusted. Rebuild only this job-scoped staging root, then atomically
+    // bind the empty replacement before ffmpeg can create its first part.
+    let expected_identity = temp
+        .identity()
+        .await
+        .map_err(|error| format!("identifying unbound staging directory: {error}"))?;
+    let quarantine = format!(".stale-{name}-{}", uuid::Uuid::new_v4().simple());
+    parent
+        .rename_child(name, &quarantine)
+        .await
+        .map_err(|error| format!("quarantining unbound staging directory: {error}"))?;
+    let quarantine_identity = match parent.open_child_directory(&quarantine).await {
+        Ok(directory) => directory.identity().await.ok(),
+        Err(_) => None,
+    };
+    if !quarantine_identity.is_some_and(|identity| identity.same_inode(expected_identity)) {
+        let _ = parent.rename_child_noreplace(&quarantine, name).await;
+        return Err("staging directory changed while it was quarantined".to_owned());
+    }
+    let replacement = parent
+        .create_child_directory(name)
+        .await
+        .map_err(|error| format!("recreating unbound staging directory: {error}"))?;
+    write_pretranscode_staging_identity(&replacement, &expected).await?;
+    Ok(replacement)
+}
+
+#[derive(Clone)]
+pub struct BoundPretranscodeSource {
+    snapshot: LocalSourceSnapshot,
+    path: std::path::PathBuf,
+    handle: Arc<std::fs::File>,
+}
+
+pub async fn pretranscode_source_snapshot(
+    file: &plurx_core::domain::MediaFile,
+    trusted_roots: &[std::path::PathBuf],
+) -> Option<BoundPretranscodeSource> {
+    #[cfg(not(unix))]
+    {
+        let _ = (file, trusted_roots);
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        // Resolve only the configured library root. Components beneath it are
+        // untrusted media-library contents and remain subject to O_NOFOLLOW;
+        // canonicalizing the complete file would turn a swapped file symlink
+        // into authority to read outside the library.
+        let mut matching_roots = trusted_roots
+            .iter()
+            .filter_map(|root| {
+                file.path
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|relative| (root, relative))
+            })
+            .collect::<Vec<_>>();
+        // Overlapping configured roots are legitimate (for example a broad
+        // `/media` root and a more specific relocation mounted at
+        // `/media/nas`). The narrowest authority must win; otherwise the
+        // broad root sees the relocation itself as an untrusted nested
+        // symlink and rejects a path whose selected root was explicitly
+        // configured.
+        matching_roots.sort_by_key(|(root, _)| std::cmp::Reverse(root.components().count()));
+        let mut path = None;
+        for (root, relative) in matching_roots {
+            if relative.as_os_str().is_empty()
+                || !relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let Ok(canonical_root) = tokio::fs::canonicalize(root).await else {
+                continue;
+            };
+            path = Some(canonical_root.join(relative));
+            break;
+        }
+        let path = path?;
+        let open_path = path.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&open_path)
+        })
+        .await
+        .ok()?
+        .ok()?;
+        let metadata = handle.metadata().ok()?;
+        let snapshot = LocalSourceSnapshot::from_metadata(&metadata);
+        (metadata.is_file()
+            && snapshot.bytes == file.size.max(0) as u64
+            && snapshot.modified_secs == file.mtime)
+            .then_some(BoundPretranscodeSource {
+                snapshot,
+                path,
+                handle: Arc::new(handle),
+            })
+    }
+}
+
+async fn bound_source_snapshot(
+    source: Option<&BoundPretranscodeSource>,
+) -> Option<LocalSourceSnapshot> {
+    let source = source?;
+    let handle = Arc::clone(&source.handle);
+    let path = source.path.clone();
+    let expected = source.snapshot;
+    tokio::task::spawn_blocking(move || {
+        let handle_snapshot = handle
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+        if handle_snapshot != expected {
+            return None;
+        }
+        let current = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let current_snapshot = current
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+        (current_snapshot == expected).then_some(current_snapshot)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Renewal-safe view of a distributed queue claim.
+///
+/// Heartbeat replacement takes the write lock; publication and settlement
+/// retain a read lock through the backend CAS. A completion can therefore use
+/// neither the predecessor expiry nor a token invalidated between checking and
+/// writing.
+#[derive(Clone)]
+pub struct PretranscodeFence {
+    state: Arc<RwLock<Option<PretranscodeJob>>>,
+    revoked: Arc<AtomicBool>,
+}
+
+type PretranscodeSettlementFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<bool, plurx_core::error::StoreError>> + Send + 'a>,
+>;
+
+impl PretranscodeFence {
+    pub fn new(job: PretranscodeJob) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(Some(job))),
+            revoked: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub async fn snapshot(&self) -> Option<PretranscodeJob> {
+        self.state.read().await.clone()
+    }
+
+    pub async fn renew(
+        &self,
+        store: &dyn Store,
+        now_unix_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        let mut state = self.state.write().await;
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
+        let Some(current) = state.clone() else {
+            return Ok(false);
+        };
+        let renewed = store
+            .renew_pretranscode_job(&current, now_unix_ms, lease_expires_ms)
+            .await;
+        if self.revoked.load(Acquire) {
+            return match renewed {
+                Ok(Some(replacement)) => {
+                    // Retain an acknowledged replacement only so retirement
+                    // can return this now-unowned row to the queue.
+                    *state = Some(replacement);
+                    Ok(false)
+                }
+                Ok(None) => {
+                    *state = None;
+                    Ok(false)
+                }
+                Err(error) => {
+                    *state = None;
+                    Err(error)
+                }
+            };
+        }
+        match renewed {
+            Ok(Some(replacement))
+                if renewal_response_is_authoritative(&current, &replacement, unix_ms()) =>
+            {
+                *state = Some(replacement);
+                Ok(true)
+            }
+            Ok(Some(replacement)) => {
+                // The backend renewed before the predecessor deadline but
+                // answered too late for continuous local authority. Keep the
+                // exact acknowledged token for deterministic retirement while
+                // synchronously blocking publication and settlement.
+                *state = Some(replacement);
+                self.revoke();
+                Ok(false)
+            }
+            Ok(None) => {
+                *state = None;
+                Ok(false)
+            }
+            Err(error) => {
+                // Renewal uncertainty is loss of publication authority, not
+                // permission to keep the last token until its wall-clock TTL.
+                *state = None;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn revoke(&self) {
+        self.revoked.store(true, Release);
+    }
+
+    pub async fn invalidate(&self, expected: &PretranscodeJob) -> bool {
+        let mut state = self.state.write().await;
+        if state.as_ref() != Some(expected) {
+            return false;
+        }
+        *state = None;
+        true
+    }
+
+    async fn settle<'a, F>(&'a self, operation: F) -> Result<bool, plurx_core::error::StoreError>
+    where
+        F: FnOnce(PretranscodeJob, i64) -> PretranscodeSettlementFuture<'a>,
+    {
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
+        let mut state = self.state.write().await;
+        if self.revoked.load(Acquire) {
+            return Ok(false);
+        }
+        let Some(job) = state.clone() else {
+            return Ok(false);
+        };
+        let observed_at = unix_ms();
+        // The backend owns its deadline. An equal outer timeout can drop a
+        // still-committing Hiqlite request, while SQLite's blocking
+        // transaction cannot be cancelled safely at all.
+        let result = operation(job, observed_at).await;
+        // Every settlement is terminal for this running token.
+        *state = None;
+        result
+    }
+
+    pub async fn retire(&self, store: &dyn Store) -> Result<(), plurx_core::error::StoreError> {
+        self.revoke();
+        let mut state = self.state.write().await;
+        let Some(job) = state.clone() else {
+            return Ok(());
+        };
+        let now_unix_ms = unix_ms();
+        let result = store
+            .yield_pretranscode_job(&job, now_unix_ms, now_unix_ms)
+            .await;
+        *state = None;
+        result.map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete(
+        &self,
+        store: &dyn Store,
+        recipe_hash: &str,
+        relative_dir: &str,
+        bytes: i64,
+        expected_previous_bytes: Option<i64>,
+        manifest_digest: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        let _ = now_unix_ms;
+        self.settle(move |job, observed_at| {
+            Box::pin(async move {
+                store
+                    .complete_pretranscode_job(
+                        &job,
+                        recipe_hash,
+                        CACHE_RECIPE_VERSION,
+                        relative_dir,
+                        bytes,
+                        expected_previous_bytes,
+                        manifest_digest,
+                        observed_at,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn yield_job(
+        &self,
+        store: &dyn Store,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        self.settle(move |job, observed_at| {
+            Box::pin(async move {
+                store
+                    .yield_pretranscode_job(&job, observed_at, not_before_ms.max(now_unix_ms))
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn fail_job(
+        &self,
+        store: &dyn Store,
+        error_code: &str,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        self.settle(move |job, observed_at| {
+            Box::pin(async move {
+                store
+                    .fail_pretranscode_job(
+                        &job,
+                        error_code,
+                        observed_at,
+                        not_before_ms.max(now_unix_ms),
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn cancel_job(
+        &self,
+        store: &dyn Store,
+        error_code: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, plurx_core::error::StoreError> {
+        let _ = now_unix_ms;
+        self.settle(move |job, observed_at| {
+            Box::pin(async move {
+                store
+                    .cancel_pretranscode_job(&job, error_code, observed_at)
+                    .await
+            })
+        })
+        .await
+    }
+}
+
+/// A backend may commit a renewal before the old deadline but deliver its
+/// response after that deadline. Local publication authority is continuous
+/// only when the response itself arrives while the predecessor is still live.
+fn renewal_response_is_authoritative(
+    previous: &PretranscodeJob,
+    replacement: &PretranscodeJob,
+    response_now_ms: i64,
+) -> bool {
+    response_now_ms < previous.lease_expires_ms
+        && replacement.lease_expires_ms > response_now_ms
+        && replacement.id == previous.id
+        && replacement.owner_node_id == previous.owner_node_id
+        && replacement.fence == previous.fence
+}
+
+#[cfg(test)]
+mod pretranscode_renewal_tests {
+    use super::*;
+
+    fn job(expires: i64) -> PretranscodeJob {
+        PretranscodeJob {
+            id: "00000000-0000-4000-8000-000000000301".to_owned(),
+            dedupe_key: "renewal-boundary".to_owned(),
+            file_id: 1,
+            source_size: 1,
+            source_mtime: 1,
+            target_height: 720,
+            policy_generation: "contract-v1".to_owned(),
+            requirements_json: "{}".to_owned(),
+            reason: "recent".to_owned(),
+            priority: 1,
+            state: "running".to_owned(),
+            owner_node_id: "node-a".to_owned(),
+            fence: 7,
+            lease_expires_ms: expires,
+            attempts: 0,
+            not_before_ms: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn delayed_renewal_response_cannot_restore_expired_authority() {
+        let previous = job(1_000);
+        let replacement = job(2_000);
+        assert!(renewal_response_is_authoritative(
+            &previous,
+            &replacement,
+            999
+        ));
+        assert!(!renewal_response_is_authoritative(
+            &previous,
+            &replacement,
+            1_000
+        ));
+        assert!(!renewal_response_is_authoritative(
+            &previous,
+            &replacement,
+            1_001
+        ));
+    }
 }
 
 /// The policy and source shared by the cache-claim and encoder stages of one
@@ -2940,6 +3734,10 @@ struct PortableProduction<'a> {
     cancelled: Option<&'a tokio_util::sync::CancellationToken>,
     offline_package_id: Option<&'a str>,
     publication_fence: Option<PublicationFence>,
+    pretranscode_fence: Option<PretranscodeFence>,
+    expected_policy_generation: Option<String>,
+    expected_source_snapshot: Option<LocalSourceSnapshot>,
+    bound_source: Option<Arc<BoundPretranscodeSource>>,
 }
 
 /// Everything an earlier pass already encoded, in order.
@@ -2949,19 +3747,135 @@ struct PortableProduction<'a> {
 /// Reading the parts back off disk — rather than recording a resume point in
 /// the database — keeps the bookmark and the bytes the same fact, so they
 /// cannot disagree after a crash between writing one and the other.
-async fn resume_parts(temp: &std::path::Path) -> Vec<crate::produce::Part> {
-    let mut parts = Vec::new();
-    loop {
-        let dir = temp.join(crate::produce::part_dir(parts.len()));
-        if tokio::fs::metadata(&dir).await.is_err() {
-            return parts;
+const MAX_RETAINED_PART_DIRECTORIES: usize = 10_000;
+/// Worst-case resumable staging descendants: every generation segment, one
+/// directory and playlist per retained part, the source identity, plus a
+/// small fixed allowance for checkpoint/control files.
+pub(crate) const MAX_PRETRANSCODE_CLEANUP_ENTRIES: usize =
+    plurx_core::transcode::manifest::MAX_OBJECTS + (2 * MAX_RETAINED_PART_DIRECTORIES) + 100;
+
+async fn discard_dependent_parts(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    first: usize,
+    force: bool,
+) -> Result<(), String> {
+    let names = temp
+        .child_names(MAX_RETAINED_PART_DIRECTORIES.saturating_add(4))
+        .await
+        .map_err(|error| format!("walking retained transcode parts: {error}"))?;
+    let dependent = names
+        .into_iter()
+        .filter(|name| pretranscode_part_index(name).is_some_and(|index| index >= first))
+        .collect::<Vec<_>>();
+    if !force && dependent.is_empty() {
+        return Ok(());
+    }
+    for name in [ASSEMBLED_TEMP_DIR, ASSEMBLED_DIR] {
+        remove_staged_child(temp, name).await?;
+    }
+    for name in dependent {
+        remove_staged_child(temp, &name).await?;
+    }
+    Ok(())
+}
+
+async fn remove_staged_child(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    name: &str,
+) -> Result<(), String> {
+    match temp
+        .remove_child_tree(
+            name,
+            plurx_core::transcode::manifest::MAX_OBJECTS.saturating_add(100),
+            2,
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("removing retained directory: {error}")),
+    }
+}
+
+async fn quarantine_remove_cache_tree(
+    path: &std::path::Path,
+    max_depth: usize,
+) -> Result<(), String> {
+    let parent = path.parent().ok_or("cache tree has no parent")?;
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("cache tree has no safe name")?;
+    let identity = match plurx_core::fs_secure::directory_identity_nofollow(path).await {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("identifying cache tree: {error}")),
+    };
+    let quarantine = format!(".delete-{name}-{}", uuid::Uuid::new_v4().simple());
+    plurx_core::fs_secure::rename_child(parent, name, &quarantine)
+        .await
+        .map_err(|error| format!("quarantining cache tree: {error}"))?;
+    let quarantined = parent.join(&quarantine);
+    let moved_identity = plurx_core::fs_secure::directory_identity_nofollow(&quarantined)
+        .await
+        .ok();
+    if !moved_identity.is_some_and(|moved| moved.same_inode(identity)) {
+        let _ = plurx_core::fs_secure::rename_child_noreplace(parent, &quarantine, name).await;
+        return Err("cache tree changed while it was quarantined".to_owned());
+    }
+    match plurx_core::fs_secure::remove_bounded_directory_tree_child(
+        parent,
+        &quarantine,
+        MAX_PRETRANSCODE_CLEANUP_ENTRIES,
+        max_depth,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = plurx_core::fs_secure::rename_child_noreplace(parent, &quarantine, name).await;
+            Err(format!("removing quarantined cache tree: {error}"))
         }
-        let part = read_part(&dir).await;
-        if part.is_empty() {
+    }
+}
+
+async fn resume_parts(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+) -> Result<Vec<crate::produce::Part>, String> {
+    let mut parts = Vec::new();
+    let mut playlist_bytes = 0_u64;
+    let mut segments = 0_usize;
+    let mut duration_ms = 0_i64;
+    loop {
+        if parts.len() >= MAX_RETAINED_PART_DIRECTORIES {
+            return Err("retained transcode exceeds its part bound".to_owned());
+        }
+        let name = crate::produce::part_dir(parts.len());
+        let Ok(dir) = temp.open_child_directory(&name).await else {
+            discard_dependent_parts(temp, parts.len(), false).await?;
+            return Ok(parts);
+        };
+        let remaining_playlist_bytes = MAX_RETAINED_PLAYLIST_BYTES.saturating_sub(playlist_bytes);
+        let Some((part, part_playlist_bytes)) =
+            read_validated_part(&dir, remaining_playlist_bytes).await
+        else {
             // A directory with no listed segments contributes nothing and
             // would shift every later part's numbering if it were counted.
-            let _ = tokio::fs::remove_dir_all(&dir).await;
-            return parts;
+            discard_dependent_parts(temp, parts.len(), true).await?;
+            return Ok(parts);
+        };
+        playlist_bytes = playlist_bytes.saturating_add(part_playlist_bytes);
+        segments = segments.saturating_add(part.segments.len());
+        let Some(total_duration) = duration_ms.checked_add(part.duration_ms()) else {
+            discard_dependent_parts(temp, parts.len(), true).await?;
+            return Ok(parts);
+        };
+        duration_ms = total_duration;
+        if segments >= plurx_core::transcode::manifest::MAX_OBJECTS
+            || duration_ms > MAX_RETAINED_TOTAL_DURATION_MS
+        {
+            discard_dependent_parts(temp, parts.len(), true).await?;
+            return Ok(parts);
         }
         parts.push(part);
     }
@@ -2973,50 +3887,186 @@ async fn resume_parts(temp: &std::path::Path) -> Vec<crate::produce::Part> {
 /// the segment that was being written when the process was killed and the
 /// playlist does not — an unlisted `.ts` file is a truncated one, and treating
 /// it as content puts a corrupt two seconds into the middle of a film.
-async fn read_part(part_dir: &std::path::Path) -> crate::produce::Part {
-    match tokio::fs::read_to_string(part_dir.join("index.m3u8")).await {
-        Ok(text) => crate::produce::Part::from_playlist(&text),
-        Err(_) => crate::produce::Part {
+async fn read_part(part_dir: &plurx_core::fs_secure::SecureDirectory) -> crate::produce::Part {
+    read_validated_part(part_dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+        .await
+        .map(|(part, _)| part)
+        .unwrap_or_else(|| crate::produce::Part {
             segments: Vec::new(),
             durations_ms: Vec::new(),
-        },
-    }
+        })
 }
 
-/// Move every part's segments into one flat directory, write the VOD playlist,
-/// and clear the part directories away.
+async fn read_validated_part(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    remaining_playlist_bytes: u64,
+) -> Option<(crate::produce::Part, u64)> {
+    let bytes = part_dir
+        .read_bounded_child(
+            "index.m3u8",
+            MAX_PRETRANSCODE_PART_PLAYLIST_BYTES.min(remaining_playlist_bytes),
+        )
+        .await
+        .ok()?;
+    let encoded_len = bytes.len() as u64;
+    let Ok(text) = String::from_utf8(bytes) else {
+        return None;
+    };
+    let part = crate::produce::Part::from_retained_playlist(&text)?;
+    if part.is_empty()
+        || part.segments.len() != part.durations_ms.len()
+        || part.segments.len() >= plurx_core::transcode::manifest::MAX_OBJECTS
+    {
+        return None;
+    }
+    let mut names = std::collections::HashSet::with_capacity(part.segments.len());
+    for (index, (name, duration_ms)) in part.segments.iter().zip(&part.durations_ms).enumerate() {
+        if name != &format!("seg{index:05}.ts")
+            || !names.insert(name.as_str())
+            || *duration_ms <= 0
+            || *duration_ms > MAX_RETAINED_SEGMENT_DURATION_MS
+        {
+            return None;
+        }
+        let metadata = part_dir.child_metadata(name).await.ok()?;
+        if !metadata.is_file
+            || metadata.identity.size == 0
+            || metadata.identity.size > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+        {
+            return None;
+        }
+    }
+    Some((part, encoded_len))
+}
+
+fn is_pretranscode_part_segment(name: &str) -> bool {
+    let Some(digits) = name
+        .strip_prefix("seg")
+        .and_then(|rest| rest.strip_suffix(".ts"))
+    else {
+        return false;
+    };
+    digits.len() == 5 && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn pretranscode_part_index(name: &str) -> Option<usize> {
+    let index = name.strip_prefix("part-")?;
+    (index.len() >= 3 && index.len() <= 9 && index.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| index.parse().ok())
+        .flatten()
+}
+
+fn is_pretranscode_part_path(path: &str) -> bool {
+    use std::path::Component;
+
+    let mut components = std::path::Path::new(path).components();
+    let (Some(Component::Normal(part)), Some(Component::Normal(segment)), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+    let Some(part) = part.to_str() else {
+        return false;
+    };
+    pretranscode_part_index(part).is_some()
+        && segment.to_str().is_some_and(is_pretranscode_part_segment)
+}
+
+pub(crate) const ASSEMBLED_DIR: &str = "assembled";
+pub(crate) const ASSEMBLED_TEMP_DIR: &str = ".assembled.tmp";
+
+async fn assembled_publication(
+    directory: &plurx_core::fs_secure::SecureDirectory,
+    parts: usize,
+) -> Option<Published> {
+    let bytes = directory
+        .read_bounded_child(
+            "index.m3u8",
+            plurx_core::transcode::manifest::MAX_MANIFEST_BYTES,
+        )
+        .await
+        .ok()?;
+    let playlist = String::from_utf8(bytes).ok()?;
+    let parsed = validated_vod_part(&playlist)?;
+    let mut measured = playlist.len().min(i64::MAX as usize) as i64;
+    for (index, name) in parsed.segments.iter().enumerate() {
+        if name != &format!("seg{index:05}.ts") {
+            return None;
+        }
+        let metadata = directory.child_metadata(name).await.ok()?;
+        if !metadata.is_file
+            || metadata.identity.size == 0
+            || metadata.identity.size > plurx_core::transcode::manifest::MAX_OBJECT_BYTES
+        {
+            return None;
+        }
+        measured = measured.saturating_add(metadata.identity.size.min(i64::MAX as u64) as i64);
+    }
+    Some(Published {
+        bytes: measured,
+        duration_ms: parsed.duration_ms(),
+        segments: parsed.segments.len(),
+        parts,
+    })
+}
+
+/// Build one flat, atomic generation while retaining all resumable part bytes.
 ///
-/// Renames rather than copies: everything is inside one temp directory on one
-/// filesystem, so this costs nothing however large the asset.
+/// Hard links are metadata-only on the same cache filesystem. A crash at any
+/// placement boundary leaves only `.assembled.tmp`, which the retry rebuilds;
+/// the numbered parts remain the authoritative encode checkpoint until the
+/// final generation is durably settled.
 async fn publish_from(
-    temp: &std::path::Path,
+    temp: &plurx_core::fs_secure::SecureDirectory,
     parts: &[crate::produce::Part],
 ) -> Result<Option<Published>, String> {
+    if let Ok(generation) = temp.open_child_directory(ASSEMBLED_DIR).await {
+        if let Some(published) = assembled_publication(&generation, parts.len()).await {
+            return Ok(Some(published));
+        }
+    }
+    remove_staged_child(temp, ASSEMBLED_TEMP_DIR).await?;
+    remove_staged_child(temp, ASSEMBLED_DIR).await?;
+    let staging = temp
+        .create_child_directory(ASSEMBLED_TEMP_DIR)
+        .await
+        .map_err(|error| format!("creating assembled generation: {error}"))?;
     let assembled = crate::produce::assemble(parts);
     if assembled.placements.is_empty() {
         return Ok(None);
     }
     let mut bytes = 0i64;
     for p in &assembled.placements {
-        let from = temp.join(&p.from);
-        let to = temp.join(&p.to);
-        bytes += tokio::fs::metadata(&from)
+        if !is_pretranscode_part_path(&p.from) || !is_pretranscode_part_segment(&p.to) {
+            return Err("assembled placement contains an unsafe segment path".to_owned());
+        }
+        let (part_name, segment_name) = p
+            .from
+            .split_once('/')
+            .ok_or("assembled placement lacks a part boundary")?;
+        let source = temp
+            .open_child_directory(part_name)
             .await
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
-        tokio::fs::rename(&from, &to)
+            .map_err(|error| format!("opening {part_name}: {error}"))?;
+        let placed = staging
+            .place_regular_child_from(
+                &source,
+                segment_name,
+                &p.to,
+                plurx_core::transcode::manifest::MAX_OBJECT_BYTES,
+            )
             .await
-            .map_err(|e| format!("placing {}: {e}", p.to))?;
+            .map_err(|error| format!("placing {}: {error}", p.to))?;
+        bytes = bytes.saturating_add(placed.min(i64::MAX as u64) as i64);
     }
-    tokio::fs::write(temp.join("index.m3u8"), assembled.playlist.as_bytes())
+    staging
+        .atomic_write_child("index.m3u8", assembled.playlist.as_bytes())
         .await
         .map_err(|e| format!("writing the playlist: {e}"))?;
     bytes += assembled.playlist.len() as i64;
-    // The part directories are empty now; what is left in them is ffmpeg's own
-    // playlist and any segment it never listed.
-    for i in 0..parts.len() {
-        let _ = tokio::fs::remove_dir_all(temp.join(crate::produce::part_dir(i))).await;
-    }
+    temp.rename_child(ASSEMBLED_TEMP_DIR, ASSEMBLED_DIR)
+        .await
+        .map_err(|error| format!("publishing assembled generation: {error}"))?;
     Ok(Some(Published {
         bytes,
         duration_ms: assembled.duration_ms,
@@ -3034,6 +4084,75 @@ struct CacheConfig {
     dir: PathBuf,
     ffmpeg_build: String,
     node_id: String,
+}
+
+async fn ensure_cache_directory(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+) -> Result<(), String> {
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| "cache directory escapes its configured root".to_owned())?;
+    let root_metadata = tokio::fs::symlink_metadata(root)
+        .await
+        .map_err(|error| format!("inspecting cache root: {error}"))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err("cache root is not a regular directory".to_owned());
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("cache directory has an unsafe component".to_owned());
+        };
+        current.push(name);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(format!("{} is not a regular directory", current.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = current
+                    .parent()
+                    .ok_or_else(|| "cache directory has no parent".to_owned())?;
+                let name = current
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or_else(|| "cache directory has no safe name".to_owned())?;
+                plurx_core::fs_secure::create_directory_child(parent, name)
+                    .await
+                    .map_err(|error| format!("creating {}: {error}", current.display()))?;
+            }
+            Err(error) => return Err(format!("inspecting {}: {error}", current.display())),
+        }
+    }
+    Ok(())
+}
+
+/// Free bytes the queue may safely promise on the cache filesystem. Keep a
+/// fixed emergency margin for SQLite/Raft logs, manifests, and foreground
+/// session scratch that can arrive immediately after the claim decision.
+fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
+    const EMERGENCY_MARGIN: u128 = 512 * 1024 * 1024;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // Safety: `path` is NUL-terminated for the duration of the call and
+    // `stats` is initialized by libc only when statvfs returns success.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // Safety: the successful call above initialized the complete structure.
+    let stats = unsafe { stats.assume_init() };
+    let fragment = if stats.f_frsize == 0 {
+        stats.f_bsize
+    } else {
+        stats.f_frsize
+    } as u128;
+    let bytes = (stats.f_bavail as u128)
+        .saturating_mul(fragment)
+        .saturating_sub(EMERGENCY_MARGIN)
+        .min(i64::MAX as u128);
+    Some(bytes as i64)
 }
 
 /// One atomically published answer to the operator's requested rate control.
@@ -3124,6 +4243,8 @@ pub struct TranscodeManager {
     /// Extracted text subtitles shared with the WebVTT endpoint.
     subtitle_cache: PathBuf,
     caps: EncoderCaps,
+    /// Portable decoder names inventoried from this exact ffmpeg at boot.
+    decoders: Vec<String>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -3143,10 +4264,40 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    /// Last completed cache-filesystem capacity sample. Request and scheduler
+    /// paths read only this atomic projection: `statvfs` can block forever on
+    /// a hard network mount and therefore belongs to one non-accumulating
+    /// background worker, never the async media-serving runtime.
+    scratch_bytes_free: AtomicI64,
+    /// Wall-clock completion time of the free-space sample. A previously
+    /// positive sample fails closed once it is too old, including while a
+    /// later `statvfs` call remains stuck on a hard mount.
+    scratch_sampled_at_unix_ms: AtomicI64,
+    /// Even outside publication, odd while the two sample atomics change.
+    /// Readers accept bytes only when both generation reads match.
+    scratch_sample_generation: AtomicU64,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
+    /// Fresh, byte-verified cache facts used by speculative placement. A hard
+    /// cache mount may strand one verifier, but the semaphore and pending
+    /// entry ensure offers never submit a second filesystem operation behind
+    /// it. Offers fail closed until the background verdict arrives.
+    cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
+    cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Process-local quorum serving authority. The router rejects ordinary
+    /// starts before they reach the manager; this second edge closes the
+    /// transition race between that check and publishing a spawned child.
+    serving_ready: AtomicBool,
+    /// Monotonic counterpart to `serving_ready`. Recovery may reopen the
+    /// process, but it cannot erase a loss observed by a session admitted
+    /// under an older generation.
+    serving_loss_generation: AtomicU64,
+    /// Lock-free projection for Prometheus. The session map remains the
+    /// authority; every production insert/removal publishes its resulting
+    /// length while holding that map's lock.
+    active_session_count: Arc<AtomicUsize>,
     /// Creation requests by `request_id` — reserved *before* work starts, so
     /// two concurrent creates with the same id cannot both pass the check and
     /// spawn two encoders (the check-then-act race this map used to have).
@@ -3203,6 +4354,57 @@ pub struct TranscodeManager {
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
 }
 
+/// Store-free, lock-free projection used by the Prometheus handler.
+#[derive(Clone)]
+pub(crate) struct TranscodeMetrics {
+    active_sessions: Arc<AtomicUsize>,
+    active_cache: crate::cachekeep::ActiveCacheMetrics,
+}
+
+/// Bounded local facts published in the cluster media snapshot. None of these
+/// fields require reading a library source path.
+pub(crate) struct MediaNodeRuntime {
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) scratch_target_bytes: u64,
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) encoder_families: Vec<String>,
+    pub(crate) max_target_height: i64,
+    pub(crate) decoders: Vec<String>,
+    pub(crate) tone_map_pipelines: Vec<String>,
+    pub(crate) hardware_slots_used: usize,
+    pub(crate) hardware_slots_max: usize,
+    pub(crate) software_threads_used: usize,
+    pub(crate) software_threads_max: usize,
+    pub(crate) live_waiting: bool,
+    pub(crate) background_active: bool,
+}
+
+/// Node-local answer to a diagnostics-only offer request. Calculating it does
+/// not reserve capacity or open the media source.
+pub(crate) struct MediaOfferProbe {
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) decoder_supported: bool,
+    pub(crate) target_supported: bool,
+    pub(crate) cache_hit: bool,
+    pub(crate) free_hardware_slots: usize,
+    pub(crate) free_software_threads: usize,
+    pub(crate) encoder: String,
+    pub(crate) pipeline: String,
+    pub(crate) recent_speed: Option<f64>,
+}
+
+impl TranscodeMetrics {
+    pub(crate) fn snapshot(&self) -> (usize, usize) {
+        (
+            self.active_sessions.load(Relaxed),
+            self.active_cache.active_entries(),
+        )
+    }
+}
+
 impl TranscodeManager {
     /// `pipeline` is the tone-map graph this node proved at boot — see
     /// [`crate::pipeprobe`]. It is fixed for the manager's life because it is
@@ -3235,11 +4437,20 @@ impl TranscodeManager {
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
             rate_control_update: Mutex::new(()),
             caps,
+            decoders: Vec::new(),
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            scratch_bytes_free: AtomicI64::new(0),
+            scratch_sampled_at_unix_ms: AtomicI64::new(0),
+            scratch_sample_generation: AtomicU64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
+            cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            serving_ready: AtomicBool::new(true),
+            serving_loss_generation: AtomicU64::new(0),
+            active_session_count: Arc::new(AtomicUsize::new(0)),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
@@ -3285,6 +4496,11 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_decoders(mut self, decoders: Vec<String>) -> Self {
+        self.decoders = decoders;
+        self
+    }
+
     /// Whether this build can strip a Dolby Vision configuration
     /// (`dovi_rpu`, ffmpeg 7.1+).
     pub fn dv_strippable(&self) -> bool {
@@ -3320,8 +4536,12 @@ impl TranscodeManager {
             .expect("test eviction claim")
     }
 
-    pub fn active_cache_entries(&self) -> usize {
-        self.cache_readers.active_entries()
+    /// Narrow process-metrics handle with no session map or Store access.
+    pub(crate) fn metrics_handle(&self) -> TranscodeMetrics {
+        TranscodeMetrics {
+            active_sessions: Arc::clone(&self.active_session_count),
+            active_cache: self.cache_readers.metrics(),
+        }
     }
 
     /// Override [`ProducerTuning`]. Tests only — there is deliberately no
@@ -3344,6 +4564,345 @@ impl TranscodeManager {
         self.cache
             .as_ref()
             .map(|c| (c.dir.as_path(), c.node_id.as_str()))
+    }
+
+    /// Refresh free cache space outside Tokio's blocking pool.
+    ///
+    /// Only one OS call exists at a time. If a dead mount never returns, this
+    /// loop consumes interval ticks without submitting another call, while
+    /// request paths keep using the last completed (or fail-closed zero)
+    /// sample only until its maximum age.
+    pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
+        let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
+            return;
+        };
+        let mut interval = tokio::time::interval(SCRATCH_SAMPLE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            let sample_path = cache_dir.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("plurx-scratch-sample".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(available_cache_scratch_bytes(&sample_path));
+                })
+            {
+                tracing::debug!(%error, "could not start cache scratch sampler");
+            }
+            loop {
+                tokio::select! {
+                    sample = &mut receiver => {
+                        let sample = sample.ok().flatten().unwrap_or(0).max(0);
+                        self.scratch_sample_generation.fetch_add(1, AcqRel);
+                        self.scratch_bytes_free.store(sample, Relaxed);
+                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+                        self.scratch_sample_generation.fetch_add(1, Release);
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // The outstanding OS call is deliberately left alone.
+                        // Do not submit another one until it actually returns.
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bounded claim filter for the distributed speculative queue.
+    pub fn pretranscode_capabilities(&self) -> PretranscodeWorkerCapabilities {
+        let mut encoder_families = vec!["software".to_owned()];
+        for (available, family) in [
+            (self.caps.nvenc, "nvenc"),
+            (self.caps.qsv, "qsv"),
+            (self.caps.vaapi, "vaapi"),
+            (self.caps.videotoolbox, "videotoolbox"),
+        ] {
+            if available {
+                encoder_families.push(family.to_owned());
+            }
+        }
+        PretranscodeWorkerCapabilities {
+            version: plurx_core::domain::PretranscodeRequirements::VERSION,
+            decoders: self.decoders.clone(),
+            encoder_families,
+            max_target_height: if self.caps.nvenc
+                || self.caps.qsv
+                || self.caps.vaapi
+                || self.caps.videotoolbox
+            {
+                MAX_HEIGHT
+            } else {
+                AUTO_SOFTWARE_HEIGHT
+            },
+            output_contracts: vec!["hls-mpegts-v1".to_owned()],
+            // The selected graph is a boot-proved pipeline (with CPU as the
+            // explicit fallback), but an operator can still disable mapping.
+            tone_map: self.pipeline.handles(Some("hdr10")) && tone_map_pref() != ToneMap::None,
+            output_grades: vec!["sdr".to_owned()],
+            scratch_bytes: {
+                let (bytes, sampled_at) = read_scratch_sample(
+                    &self.scratch_sample_generation,
+                    &self.scratch_bytes_free,
+                    &self.scratch_sampled_at_unix_ms,
+                );
+                fresh_scratch_bytes(bytes, sampled_at, unix_ms())
+            },
+        }
+    }
+
+    /// Snapshot media capacity without probing a source mount.
+    pub(crate) async fn media_node_runtime(&self) -> MediaNodeRuntime {
+        const SCRATCH_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+        let capabilities = self.pretranscode_capabilities();
+        let (hardware_slots_used, hardware_slots_max) = self.hardware_slots().await;
+        let software_threads_max = self.software_budget().await;
+        let software_threads_used = self.admissions.software_in_use();
+        let session_pressure_limit = hardware_slots_max
+            .saturating_add((software_threads_max / 2).max(1))
+            .max(1);
+        let mut tone_map_pipelines = if capabilities.tone_map {
+            vec![self.pipeline.name().to_owned()]
+        } else {
+            Vec::new()
+        };
+        if self.dovi_passthrough {
+            tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
+        }
+        MediaNodeRuntime {
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            scratch_target_bytes: SCRATCH_TARGET_BYTES,
+            active_sessions: self.active_session_count.load(Relaxed),
+            session_pressure_limit,
+            encoder_families: capabilities.encoder_families,
+            max_target_height: capabilities.max_target_height,
+            decoders: capabilities.decoders,
+            tone_map_pipelines,
+            hardware_slots_used,
+            hardware_slots_max,
+            software_threads_used,
+            software_threads_max,
+            live_waiting: self.admissions.live_is_waiting(),
+            background_active: self.admissions.background_is_active(),
+        }
+    }
+
+    /// Inspect whether this node could service one request. Offers are
+    /// intentionally non-reserving and never stat/open `file.path`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn media_offer_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        start_seconds: f64,
+        audio_override: Option<i64>,
+        subtitle_override: Option<i64>,
+        hdr10: bool,
+    ) -> Result<MediaOfferProbe, &'static str> {
+        let needs_source_proof =
+            Self::needs_dovi_reshape(file).map_err(|_| "unsupported_source")?;
+        if needs_source_proof {
+            if !self.dovi_reshape {
+                return Err("incapable");
+            }
+            let proof = self
+                .dovi_proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&Self::dovi_proof_key(file))
+                .copied();
+            if proof != Some(true) {
+                // The authoritative live path may create this proof for the
+                // selected node. Diagnostics fan-out must never be what opens
+                // every candidate's source mount.
+                return Err("source_proof_unavailable");
+            }
+        }
+        let capabilities = self.pretranscode_capabilities();
+        let decoder_supported = crate::media_pool::decoder_contract(file).is_some_and(|decoder| {
+            capabilities
+                .decoders
+                .iter()
+                .any(|candidate| candidate == decoder || candidate == "*")
+        });
+        let geometry_supported =
+            (MIN_HEIGHT..=capabilities.max_target_height).contains(&target_height);
+        let Tracks {
+            audio_index,
+            subtitle_burn,
+        } = self
+            .select_tracks(file, audio_override, subtitle_override)
+            .await;
+        let (encoder, grade) = self
+            .encoder_and_grade_for(file, hdr10, target_height)
+            .await
+            .map_err(|_| "incapable")?;
+        let target_supported = geometry_supported && (!hdr10 || grade == OutputGrade::Hdr10);
+        let opts = self.live_lookup_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            start_seconds,
+            audio_index,
+            subtitle_burn,
+            None,
+            grade,
+        );
+        let cache_hit = self.verified_cache_hit(file, &opts, encoder).await;
+        let (hardware_used, hardware_max) = self.hardware_slots().await;
+        let software_max = self.software_budget().await;
+        let software_used = self.admissions.software_in_use();
+        let active_sessions = self.active_session_count.load(Relaxed);
+        let session_pressure_limit = hardware_max
+            .saturating_add((software_max / 2).max(1))
+            .max(1);
+        let workload = Workload::of(file, target_height);
+        Ok(MediaOfferProbe {
+            active_sessions,
+            session_pressure_limit,
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            decoder_supported,
+            target_supported,
+            cache_hit,
+            free_hardware_slots: hardware_max.saturating_sub(hardware_used),
+            free_software_threads: software_max.saturating_sub(software_used),
+            encoder: encoder.family_name().to_owned(),
+            pipeline: opts.pipeline.name().to_owned(),
+            recent_speed: self
+                .admissions
+                .recent_speed(&workload.class(encoder.family_name())),
+        })
+    }
+
+    /// Identity for every mutable input that can change a speculative recipe
+    /// without changing the source snapshot or target height.
+    #[cfg(test)]
+    pub async fn pretranscode_policy_generation(&self) -> String {
+        self.pretranscode_policy_snapshot().await.generation
+    }
+
+    #[cfg(test)]
+    pub async fn pretranscode_policy_snapshot(&self) -> PretranscodePolicySnapshot {
+        self.try_pretranscode_policy_snapshot()
+            .await
+            .unwrap_or_else(|_| {
+                let rate_control = self.rate_control_snapshot();
+                let prefs = plurx_core::tracks::LangPrefs::default();
+                let requested_encoder = String::new();
+                PretranscodePolicySnapshot {
+                    generation: Self::pretranscode_policy_generation_for(
+                        rate_control,
+                        &requested_encoder,
+                        &prefs,
+                    ),
+                    requested_encoder,
+                    rate_control,
+                    prefs,
+                }
+            })
+    }
+
+    pub async fn try_pretranscode_policy_snapshot(
+        &self,
+    ) -> Result<PretranscodePolicySnapshot, plurx_core::error::StoreError> {
+        let rate_control = self.rate_control_snapshot();
+        let prefs = self.try_lang_prefs().await?;
+        let requested_encoder = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await?
+            .unwrap_or_default();
+        let generation =
+            Self::pretranscode_policy_generation_for(rate_control, &requested_encoder, &prefs);
+        Ok(PretranscodePolicySnapshot {
+            generation,
+            requested_encoder,
+            rate_control,
+            prefs,
+        })
+    }
+
+    async fn pretranscode_policy_interruption(
+        &self,
+        expected: &str,
+    ) -> Option<OfflineProduceOutcome> {
+        match self.try_pretranscode_policy_snapshot().await {
+            Ok(policy) if policy.generation == expected => None,
+            Ok(_) => Some(OfflineProduceOutcome::PolicyChanged),
+            Err(error) => {
+                tracing::warn!(%error, "speculative publication could not verify transcode policy");
+                Some(OfflineProduceOutcome::Yielded)
+            }
+        }
+    }
+
+    /// Cluster-stable speculative output geometry.
+    ///
+    /// Candidate generation must not inherit the scheduler node's local GPU.
+    /// Automatic/unknown policy therefore chooses the universally claimable
+    /// software rung, while an explicit hardware-family request may queue the
+    /// source rung (HDR remains at the broadly proved 1080p tone-map ceiling).
+    /// Claiming independently enforces each worker's proved height ceiling.
+    fn pretranscode_target_height_for(
+        file: &plurx_core::domain::MediaFile,
+        requested_encoder: &str,
+    ) -> i64 {
+        let explicit_hardware = matches!(
+            requested_encoder,
+            "nvenc" | "qsv" | "vaapi" | "videotoolbox"
+        );
+        let ceiling = if !explicit_hardware {
+            AUTO_SOFTWARE_HEIGHT
+        } else if file.hdr.is_some() {
+            AUTO_HARDWARE_PROBED_HEIGHT
+        } else {
+            MAX_HEIGHT
+        };
+        ladder(file.height)
+            .into_iter()
+            .find(|rung| rung.height <= ceiling)
+            .map_or(MIN_HEIGHT, |rung| rung.height)
+    }
+
+    /// Speculative dedupe must cover the same mutable policy inputs as track
+    /// selection and recipe construction. Normalize language aliases so a
+    /// spelling-only settings edit does not create useless replacement work.
+    fn pretranscode_policy_generation_for(
+        snapshot: RateControlSnapshot,
+        requested_encoder: &str,
+        prefs: &plurx_core::tracks::LangPrefs,
+    ) -> String {
+        let audio_lang =
+            plurx_core::tracks::bcp47_tag(Some(&prefs.audio_lang)).to_ascii_lowercase();
+        let sub_lang = plurx_core::tracks::bcp47_tag(Some(&prefs.sub_lang)).to_ascii_lowercase();
+        let mut hasher = Sha256::new();
+        for value in [
+            format!("recipe:{CACHE_RECIPE_VERSION}"),
+            "contract:hls-mpegts-v1".to_owned(),
+            format!("requested-encoder:{requested_encoder}"),
+            format!("requested:{}", snapshot.requested_mode.as_str()),
+            format!("quality:{:?}", snapshot.requested_quality),
+            format!("audio-lang:{audio_lang}"),
+            format!("subtitle-lang:{sub_lang}"),
+            format!("subtitle-mode:{}", prefs.sub_mode.as_str()),
+        ] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        format!("speculative-auto-v2:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Speculative work never reserves a queue row while foreground/offline
+    /// encoding already owns or is waiting for this node's capacity. A race
+    /// after this observation is still resolved by admission before ffmpeg.
+    pub fn pretranscode_worker_idle(&self) -> bool {
+        !self.admissions.live_is_waiting()
+            && self.admissions.in_use() == 0
+            && self.admissions.software_in_use() == 0
+            && !self
+                .offline_waiting
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn subtitle_cache_dir(&self) -> &std::path::Path {
@@ -3399,6 +4958,16 @@ impl TranscodeManager {
         audio_override: Option<i64>,
         subtitle_override: Option<i64>,
     ) -> Tracks {
+        let prefs = self.lang_prefs().await;
+        Self::select_tracks_with_prefs(file, audio_override, subtitle_override, &prefs)
+    }
+
+    fn select_tracks_with_prefs(
+        file: &plurx_core::domain::MediaFile,
+        audio_override: Option<i64>,
+        subtitle_override: Option<i64>,
+        prefs: &plurx_core::tracks::LangPrefs,
+    ) -> Tracks {
         // Prefer original (Japanese) audio + subs when the file is dual-audio
         // anime-style (REQ-SUB-2), and honour the server-wide language
         // preferences otherwise. Native WebVTT-capable tracks remain media
@@ -3409,12 +4978,11 @@ impl TranscodeManager {
         // so a `JPN` dual-audio file was advertised as Japanese by all three
         // of those surfaces and then played as English by this one.
         let prefer_original = plurx_core::tracks::prefers_original_audio(&file.audio_streams);
-        let prefs = self.lang_prefs().await;
         let selection = plurx_core::tracks::select_tracks(
             &file.audio_streams,
             &file.subtitle_streams,
             prefer_original,
-            &prefs,
+            prefs,
         );
         // A viewer's explicit choice wins over the automatic one, and is the
         // only way a bitmap subtitle is ever burned: the automatic rule exists
@@ -3626,6 +5194,22 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Encoder, String> {
+        let requested = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.encoder_for_file_with_preference(file, &requested)
+            .await
+    }
+
+    async fn encoder_for_file_with_preference(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested: &str,
+    ) -> Result<Encoder, String> {
         if self.require_dovi_renderer(file).await? {
             // Software decode is forced by the pipeline itself
             // (`requires_software_decode`) — that is what preserves the RPU
@@ -3634,7 +5218,7 @@ impl TranscodeManager {
             // been proved at boot; an unproved pairing falls back to software
             // rather than failing in front of a viewer. Pinning it to x264
             // used to cap 4K Dolby Vision at 720p for every non-DV client.
-            let preferred = self.encoder().await;
+            let preferred = self.caps.choose(requested);
             if preferred != Encoder::Software
                 && crate::ffmpeg::has_dovi_reshape_with(preferred).await
             {
@@ -3643,7 +5227,7 @@ impl TranscodeManager {
                 Ok(Encoder::Software)
             }
         } else {
-            Ok(self.encoder().await)
+            Ok(self.caps.choose(requested))
         }
     }
 
@@ -3855,7 +5439,7 @@ impl TranscodeManager {
             .codec
             .to_lowercase();
         matches!(codec.as_str(), "subrip" | "srt" | "webvtt" | "mov_text")
-            .then(|| crate::subtitles::vtt_path(&self.subtitle_cache, file, burn.subtitle_index))
+            .then(|| PathBuf::from("/dev/fd/5"))
     }
 
     /// Materialise a text subtitle before ffmpeg opens the video pipeline.
@@ -3865,16 +5449,271 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
         burn: Option<&plurx_core::transcode::SubtitleBurn>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<std::fs::File>, String> {
         let Some(burn) = burn else {
-            return Ok(());
+            return Ok(None);
         };
         if self.subtitle_file(file, Some(burn)).is_none() {
-            return Ok(());
+            return Ok(None);
         }
-        crate::subtitles::ensure_vtt(&self.subtitle_cache, file, burn.subtitle_index)
+        crate::subtitles::ensure_vtt_file(&self.subtitle_cache, file, burn.subtitle_index)
             .await
-            .map(|_| ())
+            .map(Some)
+    }
+
+    async fn invalidate_cache_location(
+        &self,
+        location: &CachedLocationIdentity,
+        reason: &'static str,
+    ) -> bool {
+        Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
+    }
+
+    async fn invalidate_cache_location_with_store(
+        store: &dyn Store,
+        location: &CachedLocationIdentity,
+        reason: &'static str,
+    ) -> bool {
+        match store
+            .invalidate_cache_entry(
+                &location.recipe_hash,
+                &location.node_id,
+                &location.storage_class,
+                &location.relative_dir,
+                location.manifest_digest.as_deref(),
+            )
+            .await
+        {
+            Ok(invalidated) => {
+                tracing::warn!(
+                    recipe = %location.recipe_hash,
+                    node = %location.node_id,
+                    storage_class = %location.storage_class,
+                    relative_dir = %location.relative_dir,
+                    invalidated,
+                    reason,
+                    "cache location failed integrity validation"
+                );
+                invalidated
+            }
+            Err(error) => {
+                tracing::error!(
+                    recipe = %location.recipe_hash,
+                    node = %location.node_id,
+                    storage_class = %location.storage_class,
+                    relative_dir = %location.relative_dir,
+                    %error,
+                    reason,
+                    "could not invalidate a corrupt cache location"
+                );
+                false
+            }
+        }
+    }
+
+    async fn fail_cached_session_integrity(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        reason: &'static str,
+    ) {
+        if let Some(location) = &session.cache_location {
+            self.invalidate_cache_location(location, reason).await;
+        }
+        session.fail(PlaylistError::SessionFailed(
+            "cached media failed an integrity check".to_owned(),
+        ));
+        let _ = self.retire_session(session_id, session).await;
+    }
+
+    /// Prove that the complete local generation for this exact recipe is
+    /// byte-verified. This is the non-reserving subset of `serve_cached`: it
+    /// neither creates a session nor updates last-used metadata.
+    async fn verified_cache_hit(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> bool {
+        let Some(cache) = self.cache.as_ref() else {
+            return false;
+        };
+        let Some(mut digest) = self.digest() else {
+            return false;
+        };
+        let hash = self
+            .effective_recipe(&mut digest, file, opts, encoder, false)
+            .hash();
+        let Some(hit) = self
+            .store
+            .cache_hit(&hash, &cache.node_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+        // Legacy completions do not carry a byte inventory and therefore
+        // cannot make the stronger cluster placement claim.
+        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+            return false;
+        };
+        let identity = CachedLocationIdentity {
+            recipe_hash: hash.clone(),
+            node_id: cache.node_id.clone(),
+            storage_class: hit.storage_class.clone(),
+            relative_dir: hit.relative_dir.clone(),
+            manifest_digest: hit.manifest_digest.clone(),
+        };
+        let now = Instant::now();
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            verdicts.retain(|_, verdict| match verdict {
+                CacheOfferVerdict::Pending { started_at, .. } => {
+                    now.saturating_duration_since(*started_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+                CacheOfferVerdict::Ready { observed_at, .. } => {
+                    now.saturating_duration_since(*observed_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+            });
+            match verdicts.get(&hash) {
+                Some(CacheOfferVerdict::Ready {
+                    identity: cached,
+                    verified,
+                    ..
+                }) if cached == &identity => return *verified,
+                Some(CacheOfferVerdict::Pending {
+                    identity: cached, ..
+                }) if cached == &identity => return false,
+                _ => {
+                    verdicts.remove(&hash);
+                }
+            }
+            if verdicts.len() >= MAX_CACHE_OFFER_VERDICTS {
+                return false;
+            }
+        }
+        let Ok(permit) = Arc::clone(&self.cache_offer_verifier).try_acquire_owned() else {
+            return false;
+        };
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another request may have published while this one acquired the
+            // sole verifier. Never replace a fresh verdict with pending.
+            if verdicts.contains_key(&hash) {
+                return false;
+            }
+            verdicts.insert(
+                hash.clone(),
+                CacheOfferVerdict::Pending {
+                    identity: identity.clone(),
+                    started_at: now,
+                },
+            );
+        }
+        let verdicts = Arc::clone(&self.cache_offer_verdicts);
+        let store = Arc::clone(&self.store);
+        let readers = self.cache_readers.clone();
+        let cache_root = cache.dir.clone();
+        tokio::spawn(async move {
+            let verified = Self::verify_cache_offer_location(
+                Arc::clone(&store),
+                readers,
+                cache_root,
+                identity.clone(),
+                expected_manifest,
+            )
+            .await;
+            let mut verdicts = verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(
+                verdicts.get(&hash),
+                Some(CacheOfferVerdict::Pending { identity: pending, .. }) if pending == &identity
+            ) {
+                verdicts.insert(
+                    hash,
+                    CacheOfferVerdict::Ready {
+                        identity,
+                        verified,
+                        observed_at: Instant::now(),
+                    },
+                );
+            }
+            drop(permit);
+        });
+        false
+    }
+
+    async fn verify_cache_offer_location(
+        store: Arc<dyn Store>,
+        readers: crate::cachekeep::ActiveCacheReaders,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+    ) -> bool {
+        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
+            return false;
+        };
+        let Some(dir) =
+            crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
+        else {
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "unsafe_relative_path",
+            )
+            .await;
+            return false;
+        };
+        let manifest = match crate::manifest_cache::load(
+            crate::manifest_cache::GenerationKey {
+                cache_root,
+                node_id: identity.node_id.clone(),
+                recipe_hash: identity.recipe_hash.clone(),
+                storage_class: identity.storage_class.clone(),
+                relative_dir: identity.relative_dir.clone(),
+                manifest_digest: expected_manifest,
+            },
+            &dir,
+        )
+        .await
+        {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                let _ = Self::invalidate_cache_location_with_store(
+                    store.as_ref(),
+                    &identity,
+                    "manifest_invalid",
+                )
+                .await;
+                return false;
+            }
+        };
+        let playlist_valid = manifest
+            .read_verified_playlist(&dir, "index.m3u8")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(validated_vod_part)
+            .is_some();
+        if !playlist_valid {
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "playlist_invalid_vod",
+            )
+            .await;
+        }
+        playlist_valid
     }
 
     /// Serve a finished transcode, if this exact one has already been made.
@@ -3899,11 +5738,10 @@ impl TranscodeManager {
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
 
-        // Claim before looking at either the row or the filesystem. An
-        // eviction already in progress turns this into an ordinary miss; a
-        // successful lookup carries the guard in the Session until every
-        // response using that session is gone.
-        let Some(cache_reader) = self.cache_readers.begin_read(&hash) else {
+        // Claim deletion safety before looking at either the row or the
+        // filesystem. A miss is not active playback; upgrade this generic
+        // guard only after the complete generation has been validated.
+        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
             tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
             return None;
         };
@@ -3924,7 +5762,19 @@ impl TranscodeManager {
                 return None;
             }
         };
-        let dir = cache.dir.join(&hit.relative_dir);
+        let cache_location = CachedLocationIdentity {
+            recipe_hash: hash.clone(),
+            node_id: cache.node_id.clone(),
+            storage_class: hit.storage_class.clone(),
+            relative_dir: hit.relative_dir.clone(),
+            manifest_digest: hit.manifest_digest.clone(),
+        };
+        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
+        else {
+            self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
+                .await;
+            return None;
+        };
         // The row says the bytes are there; the disk is what actually has to
         // have them. A cache root on a mount that did not come back after a
         // reboot would otherwise serve a playlist for an empty directory —
@@ -3934,8 +5784,77 @@ impl TranscodeManager {
                 recipe = %hash, dir = %dir.display(),
                 "cache row points at a directory with no playlist — treating as a miss"
             );
+            self.invalidate_cache_location(&cache_location, "playlist_missing")
+                .await;
             return None;
         }
+        let cache_manifest = if let Some(expected) = hit.manifest_digest.as_deref() {
+            let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+            if tokio::fs::metadata(&manifest_path).await.is_err() {
+                tracing::warn!(
+                    recipe = %hash,
+                    dir = %dir.display(),
+                    "cache location has a fenced manifest digest but no manifest — treating as a miss"
+                );
+                self.invalidate_cache_location(&cache_location, "manifest_missing")
+                    .await;
+                return None;
+            }
+            match crate::manifest_cache::load(
+                crate::manifest_cache::GenerationKey {
+                    cache_root: cache.dir.clone(),
+                    node_id: cache.node_id.clone(),
+                    recipe_hash: hash.clone(),
+                    storage_class: hit.storage_class.clone(),
+                    relative_dir: hit.relative_dir.clone(),
+                    manifest_digest: expected.to_owned(),
+                },
+                &dir,
+            )
+            .await
+            {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    tracing::warn!(
+                        recipe = %hash,
+                        dir = %dir.display(),
+                        %error,
+                        "cache generation manifest is invalid — treating as a miss"
+                    );
+                    self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                        .await;
+                    return None;
+                }
+            }
+        } else {
+            // Legacy rows predate fenced manifests. A stray manifest may be a
+            // losing queue adoption, so bounded legacy reads remain the only
+            // authority until a fenced completion installs its digest.
+            None
+        };
+        let playlist_bytes = match &cache_manifest {
+            Some(manifest) => manifest
+                .read_verified_playlist(&dir, "index.m3u8")
+                .await
+                .ok()
+                .flatten(),
+            None => plurx_core::transcode::manifest::read_bounded_playlist(&dir, "index.m3u8")
+                .await
+                .ok()
+                .flatten(),
+        };
+        let playlist_valid = playlist_bytes
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(validated_vod_part)
+            .is_some();
+        if !playlist_valid {
+            self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
+                .await;
+            return None;
+        }
+        let cache_reader = self.cache_readers.begin_playback(&hash)?;
+        drop(cache_lookup);
         let _ = self.store.touch_cache_entry(&hash, &cache.node_id).await;
 
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -3953,9 +5872,14 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: Some(cache_reader),
+            subtitle_handle: None,
+            cache_manifest,
+            cache_location: Some(cache_location),
             last_request: Mutex::new(LastRequest::now("session-start")),
             file_id: file.id,
             item_id: file.item_id,
@@ -4002,10 +5926,12 @@ impl TranscodeManager {
             typeless_sliding: false,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
             .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            return None;
+        }
         tracing::info!(
             %session_id, recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
@@ -4051,12 +5977,8 @@ impl TranscodeManager {
     /// *termination* — see [`crate::admission`] for why suspending would not
     /// release anything that matters.
     ///
-    /// **One of these at a time per node.** Resuming rests on it: an incomplete
-    /// claim held by this node is read as "an earlier pass of mine stopped
-    /// here", and two concurrent producers would each read the other's live
-    /// work that way and encode into the same staging directory.
-    /// [`crate::state::JobManager::produce_pass`] is the only caller and holds
-    /// a flag that enforces it.
+    /// **One of these at a time per node.** Queue claiming and the worker's
+    /// process-local guard enforce that invariant for production traffic.
     ///
     /// Returns the recipe hash on success, `None` when there was nothing to do
     /// (already cached, already claimed by another producer, no cache
@@ -4069,63 +5991,112 @@ impl TranscodeManager {
         deadline: Instant,
     ) -> Result<Option<Produced>, String> {
         let cancelled = tokio_util::sync::CancellationToken::new();
-        self.produce_attempt(file, target_height, deadline, &cancelled, None)
-            .await
+        Ok(
+            match self
+                .produce_attempt(
+                    file,
+                    target_height,
+                    deadline,
+                    &cancelled,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await?
+            {
+                PretranscodeProduceOutcome::Ready(produced) => Some(produced),
+                PretranscodeProduceOutcome::Yielded
+                | PretranscodeProduceOutcome::StoreUnavailable
+                | PretranscodeProduceOutcome::PolicyChanged
+                | PretranscodeProduceOutcome::SourceChanged => None,
+            },
+        )
     }
 
-    /// Speculative production with an ownership token. Losing the cluster
-    /// candidate-pass lease cancels the active ffmpeg child at the same
-    /// checkpoint used for live/offline preemption, so a stale node cannot
-    /// keep consuming an encoder or finish a cache publication.
-    pub async fn produce_cancelled(
+    /// Execute one claimed queue row through the same producer and admission
+    /// lane as live/offline work.
+    pub async fn produce_pretranscode_job(
         &self,
         file: &plurx_core::domain::MediaFile,
         target_height: i64,
         deadline: Instant,
         cancelled: &tokio_util::sync::CancellationToken,
-        publication_fence: PublicationFence,
-    ) -> Result<Option<Produced>, String> {
+        source: BoundPretranscodeSource,
+        fence: PretranscodeFence,
+    ) -> Result<PretranscodeProduceOutcome, String> {
+        let snapshot = source.snapshot;
         self.produce_attempt(
             file,
             target_height,
             deadline,
             cancelled,
-            Some(publication_fence),
+            Some(snapshot),
+            Some(Arc::new(source)),
+            None,
+            Some(fence),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn produce_attempt(
         &self,
         file: &plurx_core::domain::MediaFile,
         target_height: i64,
         deadline: Instant,
         cancelled: &tokio_util::sync::CancellationToken,
+        expected_source_snapshot: Option<LocalSourceSnapshot>,
+        bound_source: Option<Arc<BoundPretranscodeSource>>,
         publication_fence: Option<PublicationFence>,
-    ) -> Result<Option<Produced>, String> {
+        pretranscode_fence: Option<PretranscodeFence>,
+    ) -> Result<PretranscodeProduceOutcome, String> {
         if cancelled.is_cancelled() {
-            return Ok(None);
+            return Ok(PretranscodeProduceOutcome::Yielded);
         }
         if self.cache.is_none() {
-            return Ok(None);
+            return Ok(PretranscodeProduceOutcome::Yielded);
         }
         if self
             .offline_waiting
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            return Ok(None);
+            return Ok(PretranscodeProduceOutcome::Yielded);
         }
         let _producer = match self.background_producer.try_lock() {
             Ok(permit) => permit,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(PretranscodeProduceOutcome::Yielded),
         };
-        let rate_control = self.rate_control_snapshot();
+        let policy = match self.try_pretranscode_policy_snapshot().await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "speculative worker could not read transcode policy");
+                return Ok(PretranscodeProduceOutcome::Yielded);
+            }
+        };
+        if let Some(fence) = &pretranscode_fence {
+            let Some(job) = fence.snapshot().await else {
+                return Ok(PretranscodeProduceOutcome::Yielded);
+            };
+            if job.policy_generation != policy.generation {
+                return Ok(PretranscodeProduceOutcome::PolicyChanged);
+            }
+        }
         // A background artifact is the zero-offset default shared by future
         // plays. Never bake a historical, file-persisted correction into it.
         let mut playback_file = file.clone();
         playback_file.audio_offset_ms = 0;
         let file = &playback_file;
-        let encoder = self.encoder_for_file(file).await?;
+        let encoder = self
+            .encoder_for_file_with_preference(file, &policy.requested_encoder)
+            .await?;
+        if !policy
+            .acceptable_encoder_families()
+            .iter()
+            .any(|family| family == encoder.family_name())
+        {
+            return Ok(PretranscodeProduceOutcome::Yielded);
+        }
         // Through the same track selection a real playback uses. Not an
         // optimisation — the tracks are part of the recipe, so producing with
         // "no audio track chosen" makes an entry named for a session that will
@@ -4133,9 +6104,9 @@ impl TranscodeManager {
         let Tracks {
             audio_index,
             subtitle_burn,
-        } = self.select_tracks(file, None, None).await;
+        } = Self::select_tracks_with_prefs(file, None, None, &policy.prefs);
         let opts = self.speculative_producer_options(
-            rate_control,
+            policy.rate_control,
             encoder,
             file,
             target_height,
@@ -4147,8 +6118,9 @@ impl TranscodeManager {
             .effective_recipe(&mut digest, file, &opts, encoder, false)
             .hash();
         if cancelled.is_cancelled() {
-            return Ok(None);
+            return Ok(PretranscodeProduceOutcome::Yielded);
         }
+        let queue_owned = pretranscode_fence.is_some();
 
         Ok(
             match self
@@ -4162,15 +6134,30 @@ impl TranscodeManager {
                         cancelled: Some(cancelled),
                         offline_package_id: None,
                         publication_fence,
+                        pretranscode_fence,
+                        expected_policy_generation: queue_owned
+                            .then_some(policy.generation.clone()),
+                        expected_source_snapshot,
+                        bound_source,
                     },
                     hash,
                 )
                 .await?
             {
-                OfflineProduceOutcome::Ready(produced) => Some(produced),
+                OfflineProduceOutcome::Ready(produced) => {
+                    PretranscodeProduceOutcome::Ready(produced)
+                }
+                OfflineProduceOutcome::Cached(produced) if queue_owned => {
+                    PretranscodeProduceOutcome::Ready(produced)
+                }
+                OfflineProduceOutcome::PolicyChanged => PretranscodeProduceOutcome::PolicyChanged,
+                OfflineProduceOutcome::SourceChanged => PretranscodeProduceOutcome::SourceChanged,
+                OfflineProduceOutcome::StoreUnavailable => {
+                    PretranscodeProduceOutcome::StoreUnavailable
+                }
                 OfflineProduceOutcome::Cached(_)
                 | OfflineProduceOutcome::Yielded
-                | OfflineProduceOutcome::ClaimedElsewhere => None,
+                | OfflineProduceOutcome::ClaimedElsewhere => PretranscodeProduceOutcome::Yielded,
             },
         )
     }
@@ -4256,6 +6243,10 @@ impl TranscodeManager {
                     cancelled: Some(cancelled),
                     offline_package_id: Some(package_id),
                     publication_fence: None,
+                    pretranscode_fence: None,
+                    expected_policy_generation: None,
+                    expected_source_snapshot: None,
+                    bound_source: None,
                 },
                 hash,
             )
@@ -4292,59 +6283,241 @@ impl TranscodeManager {
             file,
             opts,
             encoder: _,
-            deadline: _,
+            deadline,
             yield_to_offline: _,
             cancelled,
             offline_package_id,
             publication_fence,
+            pretranscode_fence,
+            expected_policy_generation,
+            expected_source_snapshot,
+            bound_source,
         } = &request;
         let cancelled = *cancelled;
         let offline_package_id = *offline_package_id;
+        let pretranscode_fence = pretranscode_fence.clone();
         let cache = self.cache.as_ref().ok_or("no cache configured")?;
+        let queue_job = if let Some(fence) = &pretranscode_fence {
+            let Some(job) = fence.snapshot().await else {
+                return Ok(OfflineProduceOutcome::Yielded);
+            };
+            Some(job)
+        } else {
+            None
+        };
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        if let Some(cached) = self
-            .store
-            .cache_hit(&hash, &cache.node_id)
-            .await
-            .map_err(|error| error.to_string())?
-        {
+        // Queue reuse has the same lookup/delete race as playback reuse. Hold
+        // the recipe guard through manifest validation and fenced completion,
+        // otherwise eviction can remove the bytes and row before the queue
+        // transaction re-publishes that location as ready.
+        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
+            return Ok(OfflineProduceOutcome::Yielded);
+        };
+        let cached = match self.store.cache_hit(&hash, &cache.node_id).await {
+            Ok(cached) => cached,
+            Err(error) => {
+                tracing::warn!(recipe = %hash, %error, "cache lookup unavailable during production");
+                return Ok(OfflineProduceOutcome::StoreUnavailable);
+            }
+        };
+        if let Some(cached) = cached {
+            let Some(_cache_reader) = self.cache_readers.begin_read(&hash) else {
+                return Ok(OfflineProduceOutcome::Yielded);
+            };
+            drop(cache_lookup);
+            let cache_location = CachedLocationIdentity {
+                recipe_hash: hash.clone(),
+                node_id: cache.node_id.clone(),
+                storage_class: cached.storage_class.clone(),
+                relative_dir: cached.relative_dir.clone(),
+                manifest_digest: cached.manifest_digest.clone(),
+            };
             if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                 return Ok(OfflineProduceOutcome::Yielded);
             }
-            let playlist =
-                tokio::fs::read_to_string(cache.dir.join(&cached.relative_dir).join("index.m3u8"))
+            let Some(root) =
+                crate::cachekeep::validated_entry_dir(&cache.dir, &cached.relative_dir).await
+            else {
+                self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
+                    .await;
+                return Err("cache row contains an unsafe relative path".to_owned());
+            };
+            let mut manifest = if let Some(expected) = cached.manifest_digest.as_deref() {
+                let manifest_path = root.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+                if tokio::fs::metadata(&manifest_path).await.is_err() {
+                    self.invalidate_cache_location(&cache_location, "manifest_missing")
+                        .await;
+                    return Err("cached generation lost its fenced manifest".to_owned());
+                }
+                match crate::manifest_cache::load(
+                    crate::manifest_cache::GenerationKey {
+                        cache_root: cache.dir.clone(),
+                        node_id: cache.node_id.clone(),
+                        recipe_hash: hash.clone(),
+                        storage_class: cached.storage_class.clone(),
+                        relative_dir: cached.relative_dir.clone(),
+                        manifest_digest: expected.to_owned(),
+                    },
+                    &root,
+                )
+                .await
+                {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                            .await;
+                        return Err(format!("cached generation manifest is invalid: {error}"));
+                    }
+                }
+            } else {
+                None
+            };
+            let playlist_bytes = match &manifest {
+                Some(manifest) => manifest
+                    .read_verified_playlist(&root, "index.m3u8")
                     .await
-                    .map_err(|error| format!("reading cached offline playlist: {error}"))?;
-            if !playlist.contains("#EXT-X-ENDLIST") {
-                return Err("complete cache row contains a non-VOD playlist".to_owned());
-            }
-            let part = crate::produce::Part::from_playlist(&playlist);
+                    .map_err(|error| format!("verifying cached playlist: {error}"))?,
+                None => plurx_core::transcode::manifest::read_bounded_playlist(&root, "index.m3u8")
+                    .await
+                    .map_err(|error| format!("reading cached playlist: {error}"))?,
+            };
+            let Some(playlist_bytes) = playlist_bytes else {
+                self.invalidate_cache_location(&cache_location, "playlist_object_mismatch")
+                    .await;
+                return Err("cached playlist failed bounded generation verification".to_owned());
+            };
+            let playlist = match String::from_utf8(playlist_bytes) {
+                Ok(playlist) => playlist,
+                Err(error) => {
+                    self.invalidate_cache_location(&cache_location, "playlist_invalid_utf8")
+                        .await;
+                    return Err(format!("cached playlist is not valid UTF-8: {error}"));
+                }
+            };
+            let Some(part) = validated_vod_part(&playlist) else {
+                self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
+                    .await;
+                return Err("complete cache row contains an invalid VOD playlist".to_owned());
+            };
+            let mut settled_bytes = cached.bytes;
             if let Some(package_id) = offline_package_id {
                 let _ = self
                     .store
                     .update_offline_progress(package_id, &cache.node_id, "transcoding", 999)
                     .await;
             }
+            if let Some(fence) = &pretranscode_fence {
+                if let Some(expected) = expected_policy_generation.as_deref() {
+                    if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                        return Ok(outcome);
+                    }
+                }
+                if let Some(expected) = expected_source_snapshot {
+                    if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
+                        return Ok(OfflineProduceOutcome::SourceChanged);
+                    }
+                }
+                let generation_id = queue_job
+                    .as_ref()
+                    .map(|job| format!("{}:{}", job.id, job.fence))
+                    .ok_or("queue publication lost its generation")?;
+                let names = std::iter::once("index.m3u8".to_owned())
+                    .chain(part.segments.iter().cloned())
+                    .collect::<Vec<_>>();
+                let adopting_legacy = cached.manifest_digest.is_none();
+                if manifest.is_none() {
+                    manifest = Some(std::sync::Arc::new(
+                        match plurx_core::transcode::manifest::publish_controlled(
+                            &root,
+                            &generation_id,
+                            &names,
+                            || {
+                                cancelled
+                                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                                    || !self.pretranscode_worker_idle()
+                                    || Instant::now() >= *deadline
+                            },
+                        )
+                        .await
+                        {
+                            Ok(Some(manifest)) => manifest,
+                            Ok(None) => return Ok(OfflineProduceOutcome::Yielded),
+                            Err(error) => {
+                                self.invalidate_cache_location(
+                                    &cache_location,
+                                    "legacy_manifest_adoption_failed",
+                                )
+                                .await;
+                                return Err(error);
+                            }
+                        },
+                    ));
+                }
+                let manifest_bytes = if adopting_legacy {
+                    tokio::fs::metadata(root.join(plurx_core::transcode::manifest::MANIFEST_FILE))
+                        .await
+                        .map_err(|error| format!("measuring adopted manifest: {error}"))?
+                        .len()
+                        .min(i64::MAX as u64) as i64
+                } else {
+                    0
+                };
+                settled_bytes = cached.bytes.saturating_add(manifest_bytes);
+                if let Some(expected) = expected_policy_generation.as_deref() {
+                    if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                        return Ok(outcome);
+                    }
+                }
+                if let Some(expected) = expected_source_snapshot {
+                    if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
+                        return Ok(OfflineProduceOutcome::SourceChanged);
+                    }
+                }
+                let manifest = manifest.as_ref().expect("queue manifest");
+                let completed = match fence
+                    .complete(
+                        self.store.as_ref(),
+                        &hash,
+                        &cached.relative_dir,
+                        settled_bytes,
+                        adopting_legacy.then_some(cached.bytes),
+                        &manifest.manifest_digest,
+                        unix_ms(),
+                    )
+                    .await
+                {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        tracing::warn!(recipe = %hash, %error, "queue cache-hit settlement unavailable");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !completed {
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+            }
             return Ok(OfflineProduceOutcome::Cached(Produced {
                 recipe: hash,
-                bytes: cached.bytes,
+                bytes: settled_bytes,
                 duration_ms: part.duration_ms(),
                 segments: part.segments.len(),
                 parts: 0,
             }));
         }
+        drop(cache_lookup);
 
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        self.ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
+        let subtitle_handle = self
+            .ensure_text_subtitle(file, opts.subtitle_burn.as_ref())
             .await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        let generation = if let Some(fence) = publication_fence {
+        let lease_generation = if let Some(fence) = publication_fence {
             let Some(lease) = fence.snapshot().await else {
                 return Ok(OfflineProduceOutcome::Yielded);
             };
@@ -4352,11 +6525,43 @@ impl TranscodeManager {
         } else {
             None
         };
-        let relative = generation.map_or_else(
-            || format!("{}/{hash}", &hash[..2]),
-            |fence| format!("{}/{hash}-f{fence}", &hash[..2]),
-        );
-        let taken = if let Some(fence) = publication_fence {
+        let relative = if let Some(job) = &queue_job {
+            format!("{}/{hash}-j{}-f{}", &hash[..2], job.id, job.fence)
+        } else {
+            lease_generation.map_or_else(
+                || format!("{}/{hash}", &hash[..2]),
+                |fence| format!("{}/{hash}-f{fence}", &hash[..2]),
+            )
+        };
+        let temp = if let Some(job) = &queue_job {
+            // Staging is node-local and job-stable so yielding and reclaiming
+            // the same row on this node resumes its published part boundary.
+            // The final generation remains fence-scoped below; a successor on
+            // another node has a different local root and starts from zero.
+            cache.dir.join("tmp").join(format!("{hash}-j{}", job.id))
+        } else {
+            lease_generation.map_or_else(
+                || crate::cachekeep::staging_dir(&cache.dir, &hash),
+                |fence| cache.dir.join("tmp").join(format!("{hash}-f{fence}")),
+            )
+        };
+        let temp_parent = temp
+            .parent()
+            .ok_or("cache staging directory has no parent")?;
+        let staging_identity = temp
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or("cache staging directory has no safe identity")?;
+        // Take the shared-parent guard before checking or creating `tmp`.
+        // Empty-parent cleanup is otherwise able to unlink it in the gap
+        // between this check and the first staging child installation.
+        let Some(_staging_guard) = self.cache_readers.begin_staging(staging_identity) else {
+            return Ok(OfflineProduceOutcome::Yielded);
+        };
+        ensure_cache_directory(&cache.dir, temp_parent).await?;
+        let taken = if pretranscode_fence.is_some() {
+            true
+        } else if let Some(fence) = publication_fence {
             PublicationStore::fenced(self.store.as_ref(), fence.clone())
                 .claim_cache_entry(
                     &hash,
@@ -4366,6 +6571,7 @@ impl TranscodeManager {
                     &relative,
                 )
                 .await
+                .map_err(|error| error.to_string())?
         } else {
             self.store
                 .claim_cache_entry(
@@ -4376,17 +6582,16 @@ impl TranscodeManager {
                     &relative,
                 )
                 .await
-        }
-        .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+        };
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        let temp = generation.map_or_else(
-            || crate::cachekeep::staging_dir(&cache.dir, &hash),
-            |fence| cache.dir.join("tmp").join(format!("{hash}-f{fence}")),
-        );
         if !taken {
-            if tokio::fs::metadata(&temp).await.is_err() {
+            if plurx_core::fs_secure::SecureDirectory::open(&temp)
+                .await
+                .is_err()
+            {
                 tracing::debug!(
                     recipe = %hash,
                     file = file.id,
@@ -4401,13 +6606,45 @@ impl TranscodeManager {
             );
         }
 
-        let published = match self.produce_into(&temp, &hash, &request).await {
+        let staging_parent = plurx_core::fs_secure::SecureDirectory::open(temp_parent)
+            .await
+            .map_err(|error| format!("opening cache staging parent: {error}"))?;
+        let mut staging = match staging_parent.open_child_directory(staging_identity).await {
+            Ok(staging) => staging,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => staging_parent
+                .create_child_directory(staging_identity)
+                .await
+                .map_err(|error| format!("creating cache staging root: {error}"))?,
+            Err(error) => return Err(format!("opening cache staging root: {error}")),
+        };
+        if let Some(job) = &queue_job {
+            let Some(source) = expected_source_snapshot.as_ref().copied() else {
+                return Ok(OfflineProduceOutcome::SourceChanged);
+            };
+            staging = bind_pretranscode_staging(
+                &staging_parent,
+                staging_identity,
+                staging,
+                job,
+                &hash,
+                source,
+            )
+            .await?;
+        }
+
+        let mut published = match self
+            .produce_into(&staging, &hash, &request, subtitle_handle.as_ref())
+            .await
+        {
             Ok(Some(published)) => published,
             Ok(None) => {
                 if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                     return Ok(OfflineProduceOutcome::Yielded);
                 }
-                if let Some(fence) = publication_fence {
+                if pretranscode_fence.is_some() {
+                    // The queue heartbeat is the claim heartbeat. No cache
+                    // location exists until fenced completion.
+                } else if let Some(fence) = publication_fence {
                     if let Err(error) = PublicationStore::fenced(self.store.as_ref(), fence.clone())
                         .touch_cache_claim(&hash, &cache.node_id)
                         .await
@@ -4420,8 +6657,17 @@ impl TranscodeManager {
                 return Ok(OfflineProduceOutcome::Yielded);
             }
             Err(error) => {
-                let _ = tokio::fs::remove_dir_all(&temp).await;
-                if !cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+                // A failed assembly may have created another generation-sized
+                // set of hardlinks. Remove those capability-relative children
+                // first so the outer staging quarantine retains a fixed shape
+                // of parts + playlists + identity within its 120,100-entry
+                // ceiling.
+                let _ = remove_staged_child(&staging, ASSEMBLED_TEMP_DIR).await;
+                let _ = remove_staged_child(&staging, ASSEMBLED_DIR).await;
+                let _ = quarantine_remove_cache_tree(&temp, 3).await;
+                if !cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                    && pretranscode_fence.is_none()
+                {
                     if let Some(fence) = publication_fence {
                         let _ = PublicationStore::fenced(self.store.as_ref(), fence.clone())
                             .forget_cache_entry(&hash, &cache.node_id, "local")
@@ -4440,28 +6686,133 @@ impl TranscodeManager {
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        let final_dir = cache.dir.join(&relative);
-        if let Some(parent) = final_dir.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+        if let Some(expected) = expected_policy_generation.as_deref() {
+            if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                return Ok(outcome);
+            }
         }
+        if let Some(expected) = expected_source_snapshot {
+            if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
+                return Ok(OfflineProduceOutcome::SourceChanged);
+            }
+        }
+        let generation = staging
+            .open_child_directory(ASSEMBLED_DIR)
+            .await
+            .map_err(|error| format!("opening assembled generation: {error}"))?;
+        let manifest = if let Some(job) = &queue_job {
+            let names = std::iter::once("index.m3u8".to_owned())
+                .chain((0..published.segments).map(|index| format!("seg{index:05}.ts")))
+                .collect::<Vec<_>>();
+            let manifest = plurx_core::transcode::manifest::publish_controlled_directory(
+                &generation,
+                &format!("{}:{}", job.id, job.fence),
+                &names,
+                || {
+                    cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                        || !self.pretranscode_worker_idle()
+                        || Instant::now() >= request.deadline
+                },
+            )
+            .await?;
+            let Some(manifest) = manifest else {
+                return Ok(OfflineProduceOutcome::Yielded);
+            };
+            if let Some(expected) = expected_policy_generation.as_deref() {
+                if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                    return Ok(outcome);
+                }
+            }
+            published.bytes = published.bytes.saturating_add(
+                generation
+                    .child_metadata(plurx_core::transcode::manifest::MANIFEST_FILE)
+                    .await
+                    .map(|metadata| metadata.identity.size.min(i64::MAX as u64) as i64)
+                    .unwrap_or(0),
+            );
+            Some(manifest)
+        } else {
+            None
+        };
+        let final_dir = cache.dir.join(&relative);
+        // Protect both recipe eviction and the final path across rename ->
+        // durable completion. This is intentionally acquired before ensuring
+        // the shared fanout parent: the parent guard closes its otherwise
+        // empty ensure -> child-install race with orphan cleanup.
+        let identity = final_dir
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or("cache publication has no safe final-directory identity")?;
+        let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
+            return Ok(OfflineProduceOutcome::Yielded);
+        };
+        let final_parent = final_dir.parent().ok_or("final generation has no parent")?;
+        ensure_cache_directory(&cache.dir, final_parent).await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
-        tokio::fs::rename(&temp, &final_dir)
+        if let Some(expected) = expected_policy_generation.as_deref() {
+            if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                return Ok(outcome);
+            }
+        }
+        if let Some(expected) = expected_source_snapshot {
+            if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
+                return Ok(OfflineProduceOutcome::SourceChanged);
+            }
+        }
+        staging
+            .rename_child_to(ASSEMBLED_DIR, final_parent, identity)
             .await
             .map_err(|error| format!("publishing {}: {error}", final_dir.display()))?;
-        if let Some(fence) = publication_fence {
+        if let (Some(fence), Some(manifest)) = (pretranscode_fence.as_ref(), manifest.as_ref()) {
+            if let Some(expected) = expected_policy_generation.as_deref() {
+                if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
+                    let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+                    return Ok(outcome);
+                }
+            }
+            if let Some(expected) = expected_source_snapshot {
+                if bound_source_snapshot(bound_source.as_deref()).await != Some(*expected) {
+                    let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+                    return Ok(OfflineProduceOutcome::SourceChanged);
+                }
+            }
+            let completed = match fence
+                .complete(
+                    self.store.as_ref(),
+                    &hash,
+                    &relative,
+                    published.bytes,
+                    None,
+                    &manifest.manifest_digest,
+                    unix_ms(),
+                )
+                .await
+            {
+                Ok(completed) => completed,
+                Err(error) => {
+                    tracing::warn!(recipe = %hash, %error, "queue completion settlement unavailable");
+                    return Ok(OfflineProduceOutcome::StoreUnavailable);
+                }
+            };
+            if !completed {
+                let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+                return Ok(OfflineProduceOutcome::Yielded);
+            }
+        } else if let Some(fence) = publication_fence {
             PublicationStore::fenced(self.store.as_ref(), fence.clone())
                 .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes)
                 .await
+                .map_err(|error| error.to_string())?;
         } else {
             self.store
                 .complete_cache_entry(&hash, &cache.node_id, published.bytes)
                 .await
+                .map_err(|error| error.to_string())?;
         }
-        .map_err(|error| error.to_string())?;
+        drop(publication_guard);
+        let _ = quarantine_remove_cache_tree(&temp, 3).await;
         tracing::info!(
             recipe = %hash,
             file = file.id,
@@ -4497,9 +6848,10 @@ impl TranscodeManager {
     /// being preempted. `Ok(None)` means nothing publishable was produced.
     async fn produce_into(
         &self,
-        temp: &std::path::Path,
+        temp: &plurx_core::fs_secure::SecureDirectory,
         hash: &str,
         request: &PortableProduction<'_>,
+        subtitle_handle: Option<&std::fs::File>,
     ) -> Result<Option<Published>, String> {
         let PortableProduction {
             file,
@@ -4510,14 +6862,30 @@ impl TranscodeManager {
             cancelled,
             offline_package_id,
             publication_fence: _,
+            pretranscode_fence: _,
+            expected_policy_generation: _,
+            expected_source_snapshot: _,
+            bound_source,
         } = request.clone();
-        tokio::fs::create_dir_all(temp)
-            .await
-            .map_err(|e| format!("creating {}: {e}", temp.display()))?;
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
-        let mut parts = resume_parts(temp).await;
+        let mut parts = resume_parts(temp).await?;
+        let mut retained_segments = parts.iter().map(|part| part.segments.len()).sum::<usize>();
+        let mut retained_duration_ms = parts
+            .iter()
+            .try_fold(0_i64, |total, part| total.checked_add(part.duration_ms()))
+            .ok_or("retained transcode duration overflow")?;
+        if let Ok(assembled) = temp.open_child_directory(ASSEMBLED_DIR).await {
+            if let Some(published) = assembled_publication(&assembled, parts.len()).await {
+                tracing::info!(
+                    recipe = %hash,
+                    segments = published.segments,
+                    "resuming an assembled generation awaiting integrity publication"
+                );
+                return Ok(Some(published));
+            }
+        }
         if !parts.is_empty() {
             tracing::info!(
                 recipe = %hash, parts = parts.len(),
@@ -4531,6 +6899,9 @@ impl TranscodeManager {
         let mut spawned = 0usize;
 
         while spawned < PRODUCER_MAX_PARTS {
+            if parts.len() >= MAX_RETAINED_PART_DIRECTORIES {
+                return Err("retained transcode exceeds its part bound".to_owned());
+            }
             if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                 return Ok(None);
             }
@@ -4583,10 +6954,11 @@ impl TranscodeManager {
             };
             spawned += 1;
 
-            let part_dir = temp.join(crate::produce::part_dir(parts.len()));
-            tokio::fs::create_dir_all(&part_dir)
+            let part_name = crate::produce::part_dir(parts.len());
+            let part_dir = temp
+                .create_child_directory(&part_name)
                 .await
-                .map_err(|e| format!("creating {}: {e}", part_dir.display()))?;
+                .map_err(|e| format!("creating {part_name}: {e}"))?;
             let resume_ms = crate::produce::resume_at_ms(&parts);
             let part_opts = TranscodeOptions {
                 start_seconds: resume_ms as f64 / 1000.0,
@@ -4602,12 +6974,21 @@ impl TranscodeManager {
             // hardware is a second a viewer might want it. The value is
             // [`ProducerTuning::pacing`], which is `unpaced()` everywhere
             // except the one test that has to interrupt this encoder.
+            let mut descriptor_file;
+            let (ffmpeg_file, bound_source_fd) = if let Some(source) = &bound_source {
+                use std::os::fd::AsRawFd;
+                descriptor_file = file.clone();
+                descriptor_file.path = std::path::PathBuf::from("/dev/fd/3");
+                (&descriptor_file, Some(source.handle.as_raw_fd()))
+            } else {
+                (file, None)
+            };
             let args = transcode::hls_args(
-                file,
+                ffmpeg_file,
                 encoder,
                 &part_opts,
                 self.producer.pacing,
-                &part_dir.to_string_lossy(),
+                &format!("/dev/fd/4/{part_name}"),
             );
             tracing::info!(
                 recipe = %hash, part = parts.len(), from_s = part_opts.start_seconds,
@@ -4622,6 +7003,11 @@ impl TranscodeManager {
                 Arc::clone(&progress),
                 generation,
                 &self.runtime_cache,
+                FfmpegDescriptors {
+                    source: bound_source_fd,
+                    output: Some(temp.raw_fd()),
+                    subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                },
             )?;
 
             let ended = self
@@ -4632,6 +7018,24 @@ impl TranscodeManager {
             let part = read_part(&part_dir).await;
             let produced = !part.is_empty();
             if produced {
+                if parts.len().saturating_add(1) > MAX_RETAINED_PART_DIRECTORIES {
+                    let _ = remove_staged_child(temp, &part_name).await;
+                    return Err("produced transcode exceeds its part bound".to_owned());
+                }
+                let next_segments = retained_segments.saturating_add(part.segments.len());
+                let next_duration_ms = retained_duration_ms
+                    .checked_add(part.duration_ms())
+                    .ok_or("produced transcode duration overflow")?;
+                if next_segments >= plurx_core::transcode::manifest::MAX_OBJECTS
+                    || next_duration_ms > MAX_RETAINED_TOTAL_DURATION_MS
+                {
+                    let _ = remove_staged_child(temp, &part_name).await;
+                    return Err(
+                        "produced transcode exceeds its aggregate generation bound".to_owned()
+                    );
+                }
+                retained_segments = next_segments;
+                retained_duration_ms = next_duration_ms;
                 parts.push(part);
                 if let (Some(package_id), Some(duration_ms)) = (
                     offline_package_id,
@@ -4670,7 +7074,7 @@ impl TranscodeManager {
                     // A part that produced nothing leaves an empty directory
                     // that the next part must not reuse a number with.
                     if !produced {
-                        let _ = tokio::fs::remove_dir_all(&part_dir).await;
+                        let _ = remove_staged_child(temp, &part_name).await;
                     }
                     if yield_to_offline
                         && self
@@ -5500,6 +7904,7 @@ impl TranscodeManager {
         auto_height_from_prior(current, source_height, prior, unix_ms())
     }
 
+    #[cfg(test)]
     pub async fn auto_height_for_file(
         &self,
         file: Option<&plurx_core::domain::MediaFile>,
@@ -5599,21 +8004,27 @@ impl TranscodeManager {
     /// The admin's playback language preferences (Settings → Playback
     /// defaults), falling back to English/English/Auto.
     pub async fn lang_prefs(&self) -> plurx_core::tracks::LangPrefs {
+        self.try_lang_prefs().await.unwrap_or_default()
+    }
+
+    async fn try_lang_prefs(
+        &self,
+    ) -> Result<plurx_core::tracks::LangPrefs, plurx_core::error::StoreError> {
         let mut prefs = plurx_core::tracks::LangPrefs::default();
-        if let Ok(Some(v)) = self.store.get_setting(keys::AUDIO_LANG).await {
+        if let Some(v) = self.store.get_setting(keys::AUDIO_LANG).await? {
             if !v.trim().is_empty() {
                 prefs.audio_lang = v.trim().to_owned();
             }
         }
-        if let Ok(Some(v)) = self.store.get_setting(keys::SUB_LANG).await {
+        if let Some(v) = self.store.get_setting(keys::SUB_LANG).await? {
             if !v.trim().is_empty() {
                 prefs.sub_lang = v.trim().to_owned();
             }
         }
-        if let Ok(Some(v)) = self.store.get_setting(keys::SUB_MODE).await {
+        if let Some(v) = self.store.get_setting(keys::SUB_MODE).await? {
             prefs.sub_mode = plurx_core::tracks::SubMode::parse(v.trim());
         }
-        prefs
+        Ok(prefs)
     }
 
     /// Kill any session belonging to the same player instance.
@@ -5912,7 +8323,8 @@ impl TranscodeManager {
                 return Err(unsupported_build_error(reason));
             }
         }
-        self.ensure_text_subtitle(&file, subtitle_burn.as_ref())
+        let subtitle_handle = self
+            .ensure_text_subtitle(&file, subtitle_burn.as_ref())
             .await?;
 
         // Claim a hardware slot before spawning anything. An iGPU has one
@@ -5993,6 +8405,12 @@ impl TranscodeManager {
             Arc::clone(&progress),
             generation,
             &self.runtime_cache,
+            FfmpegDescriptors {
+                subtitle: subtitle_handle
+                    .as_ref()
+                    .map(std::os::fd::AsRawFd::as_raw_fd),
+                ..FfmpegDescriptors::default()
+            },
         )?;
 
         tracing::info!(
@@ -6014,9 +8432,14 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
+            subtitle_handle,
+            cache_manifest: None,
+            cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
             file_id,
             item_id: file.item_id,
@@ -6067,10 +8490,12 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
             .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            return Err("this node lost quorum serving authority".to_owned());
+        }
         self.emit_session_event(
             &session_id,
             &session,
@@ -6282,7 +8707,9 @@ impl TranscodeManager {
                 "retrying on software"
             }
         );
-        let _replacement = session.kill_child_for_replacement().await;
+        let Some(_replacement) = session.kill_child_for_replacement().await else {
+            return opts.effective_rate_control;
+        };
         clear_session_dir(dir).await;
         if !downgrade_pipeline {
             // The slot belonged to the encoder that just died, not
@@ -6318,6 +8745,13 @@ impl TranscodeManager {
             Arc::clone(&session.progress),
             generation,
             runtime_cache,
+            FfmpegDescriptors {
+                subtitle: session
+                    .subtitle_handle
+                    .as_ref()
+                    .map(std::os::fd::AsRawFd::as_raw_fd),
+                ..FfmpegDescriptors::default()
+            },
         ) {
             Ok(child) => {
                 *session.child.lock().await = Some(child);
@@ -6493,6 +8927,7 @@ impl TranscodeManager {
                         Arc::clone(&progress),
                         generation,
                         &self.runtime_cache,
+                        FfmpegDescriptors::default(),
                     )?;
                     (child, None)
                 }
@@ -6511,6 +8946,7 @@ impl TranscodeManager {
                 Arc::clone(&progress),
                 generation,
                 &self.runtime_cache,
+                FfmpegDescriptors::default(),
             )?;
             (child, None)
         };
@@ -6539,9 +8975,14 @@ impl TranscodeManager {
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            activity_detail_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
+            subtitle_handle: None,
+            cache_manifest: None,
+            cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
             file_id,
             item_id: file.item_id,
@@ -6586,10 +9027,12 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
-        self.sessions
-            .lock()
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
             .await
-            .insert(session_id.clone(), Arc::clone(&session));
+        {
+            return Err("this node lost quorum serving authority".to_owned());
+        }
         self.emit_session_event(
             &session_id,
             &session,
@@ -6690,6 +9133,7 @@ impl TranscodeManager {
                             progress,
                             generation,
                             &runtime_cache,
+                            FfmpegDescriptors::default(),
                         ) {
                             Ok(child) => {
                                 *session.child.lock().await = Some(child);
@@ -6758,17 +9202,87 @@ impl TranscodeManager {
     /// would relabel a stream mid-play. The method is fixed when the session
     /// is created and never moves.
     pub async fn list_deliveries(&self) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        self.list_deliveries_bounded(usize::MAX).await
+    }
+
+    /// A diagnostics-safe prefix that bounds the expensive per-session
+    /// telemetry reads before they begin.
+    pub async fn list_deliveries_bounded(
+        &self,
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let candidates = self.delivery_candidates_bounded(limit).await;
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let mut details = self
+            .delivery_details_bounded(&ids, limit)
+            .await
+            .into_iter()
+            .map(|detail| (detail.0.id.clone(), detail))
+            .collect::<HashMap<_, _>>();
+        candidates
+            .into_iter()
+            .filter_map(|candidate| details.remove(&candidate.id))
+            .collect()
+    }
+
+    /// Top-K session identities without awaiting any per-session telemetry.
+    pub async fn delivery_candidates_bounded(&self, limit: usize) -> Vec<DeliveryCandidate> {
+        let sessions = self.sessions.lock().await;
+        let ids = crate::delivery::newest_ids_bounded(
+            sessions
+                .iter()
+                .map(|(id, session)| (id.as_str(), session.started_unix)),
+            limit,
+        );
+        let mut candidates = ids
+            .into_iter()
+            .filter_map(|id| {
+                sessions.get(&id).map(|session| DeliveryCandidate {
+                    id,
+                    started_unix: session.started_unix,
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .started_unix
+                .cmp(&left.started_unix)
+                .then(left.id.cmp(&right.id))
+        });
+        candidates
+    }
+
+    /// Enrich only explicitly selected sessions. Clone the Arcs under the map
+    /// lock, then release it before awaiting any session-owned lock.
+    pub async fn delivery_details_bounded(
+        &self,
+        ids: &[String],
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            ids.iter()
+                .take(limit)
+                .filter_map(|id| {
+                    sessions
+                        .get(id)
+                        .cloned()
+                        .map(|session| (id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
-        let sessions = self.sessions.lock().await;
-        let mut out = Vec::with_capacity(sessions.len());
-        for (id, s) in sessions.iter() {
+        let mut out = Vec::with_capacity(selected.len());
+        for (id, s) in selected {
             out.push((
-                session_info(id, s, limits, global_live_bytes, global_ahead_bytes).await,
+                session_info(&id, &s, limits, global_live_bytes, global_ahead_bytes).await,
                 s.method,
             ));
         }
-        out.sort_by_key(|(s, _)| s.started_unix);
         out
     }
 
@@ -6869,6 +9383,7 @@ impl TranscodeManager {
             if still_live {
                 session.retired.store(true, Release);
                 sessions.remove(session_id);
+                self.active_session_count.store(sessions.len(), Relaxed);
             }
             still_live
         };
@@ -6880,6 +9395,26 @@ impl TranscodeManager {
         session.kill_child().await;
         session.discard_dir().await;
         true
+    }
+
+    /// Publish a newly spawned session only while the process-local serving
+    /// fence is open. The post-insert load and the loss loop's pre-snapshot
+    /// store cover both orderings: either that snapshot sees this session or
+    /// this method observes the closed fence and retires it itself.
+    async fn register_session(&self, session_id: &str, session: Arc<Session>) -> bool {
+        let admitted_generation = self.serving_loss_generation.load(Acquire);
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id.to_owned(), Arc::clone(&session));
+            self.active_session_count.store(sessions.len(), Relaxed);
+        }
+        if self.serving_ready.load(Acquire)
+            && self.serving_loss_generation.load(Acquire) == admitted_generation
+        {
+            return true;
+        }
+        let _ = self.retire_session(session_id, &session).await;
+        false
     }
 
     /// End one session now. True if it existed.
@@ -6914,6 +9449,52 @@ impl TranscodeManager {
         .await;
         tracing::info!(%session_id, reason, "transcode session ended");
         true
+    }
+
+    async fn stop_all_sessions_for_serving_fence(&self) {
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect::<Vec<_>>();
+        futures_util::future::join_all(sessions.into_iter().map(
+            |(session_id, session)| async move {
+                if self.retire_session(&session_id, &session).await {
+                    // Do not publish a Store-backed playback event here: quorum
+                    // loss is exactly the condition that triggered teardown.
+                    tracing::warn!(%session_id, "transcode session self-fenced after quorum loss");
+                }
+            },
+        ))
+        .await;
+    }
+
+    /// Kill every mutable HLS producer on the first loss transition. The
+    /// watch is process-local and changes synchronously with readiness, so
+    /// teardown never waits for another Store request to time out.
+    pub(crate) async fn serving_fence_loop(
+        self: Arc<Self>,
+        mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    ) {
+        loop {
+            let state = *serving.borrow_and_update();
+            let previous_generation = self.serving_loss_generation.load(Acquire);
+            if !state.ready || state.loss_generation != previous_generation {
+                // Keep the gate closed until the old generation is fully
+                // retired. Any insertion after the snapshot observes false
+                // in its post-insert check and retires itself.
+                self.serving_ready.store(false, Release);
+                self.serving_loss_generation
+                    .store(state.loss_generation, Release);
+                self.stop_all_sessions_for_serving_fence().await;
+            }
+            self.serving_ready.store(state.ready, Release);
+            if serving.changed().await.is_err() {
+                break;
+            }
+        }
     }
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
@@ -7009,7 +9590,6 @@ impl TranscodeManager {
         let Some(session) = self.touch(session_id, "playlist").await else {
             return Err(PlaylistError::SessionGone);
         };
-        let path = session.dir.join("index.m3u8");
         // Hold the request until the playlist exists. On the transcode path
         // that is a beat after ffmpeg starts; on the copy path it is the
         // publish gate filling (COPY_PUBLISH_GATE_SECS), which on a
@@ -7039,7 +9619,19 @@ impl TranscodeManager {
             if session.failed.load(Relaxed) {
                 return Err(session.failure_reason());
             }
-            if let Ok(bytes) = tokio::fs::read(&path).await {
+            let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
+                manifest
+                    .read_verified_playlist(&session.dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                plurx_core::transcode::manifest::read_bounded_playlist(&session.dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            if let Some(bytes) = playlist_bytes {
                 if !bytes.is_empty() {
                     // ffmpeg rewrites an EVENT playlist after each segment. Do
                     // not let hls.js race away with the first one-segment
@@ -7112,6 +9704,19 @@ impl TranscodeManager {
                     ));
                 }
             }
+            if session.cached {
+                tracing::error!(
+                    session = %session_id,
+                    "cached playlist was missing, empty, oversized, or failed its manifest"
+                );
+                self.fail_cached_session_integrity(
+                    session_id,
+                    &session,
+                    "playlist_object_mismatch",
+                )
+                .await;
+                return Err(session.failure_reason());
+            }
             // The stall watchdog deliberately grants a cold encoder its full
             // startup grace, so it cannot surface a process that has already
             // told us startup is impossible. This request polls much sooner
@@ -7181,12 +9786,18 @@ impl TranscodeManager {
     /// response stream, and opening it *here* closes the window where the
     /// retention sweep could unlink the path between resolving it and reading
     /// it: an unlinked file that is already open stays readable.
-    pub async fn segment(&self, session_id: &str, name: &str) -> Option<SegmentFile> {
+    pub async fn segment(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<Option<SegmentFile>, SegmentOpenError> {
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
-            return None;
+            return Ok(None);
         }
-        let session = self.touch(session_id, "segment").await?;
+        let Some(session) = self.touch(session_id, "segment").await else {
+            return Ok(None);
+        };
         let path = session.dir.join(name);
         let idx = segment_index(name);
         let first_retained = session.segments.lock().await.first_retained_index();
@@ -7216,14 +9827,75 @@ impl TranscodeManager {
                 },
             )
             .await;
-            return None;
+            return Ok(None);
         }
+
+        let mut authenticated_cached_file = if let Some(manifest) = &session.cache_manifest {
+            // A valid HLS-shaped name is not proof that this generation ever
+            // published it. Client probes and stale playlist requests are an
+            // ordinary miss; only a listed object whose bytes fail validation
+            // can convict and retire the generation.
+            if !manifest.contains_object(name) {
+                return Ok(None);
+            }
+            match manifest.open_verified_object(&session.dir, name).await {
+                Ok(Some(opened)) => Some(opened),
+                Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
+                Ok(None) | Err(_) => {
+                    tracing::error!(
+                        session = %session_id,
+                        segment = name,
+                        "cached object failed its generation manifest"
+                    );
+                    self.emit_session_event(
+                        session_id,
+                        &session,
+                        "segment_unavailable",
+                        SessionEventFields {
+                            reason: Some("cache_integrity"),
+                            extra: Some(serde_json::json!({"segment": name}).to_string()),
+                            ..SessionEventFields::default()
+                        },
+                    )
+                    .await;
+                    self.fail_cached_session_integrity(
+                        session_id,
+                        &session,
+                        "segment_object_mismatch",
+                    )
+                    .await;
+                    return Ok(None);
+                }
+            }
+        } else {
+            None
+        };
 
         let started_waiting = Instant::now();
         let deadline = Instant::now() + SEGMENT_WAIT;
         loop {
-            if let Ok(file) = tokio::fs::File::open(&path).await {
-                let len = file.metadata().await.ok()?.len();
+            let opened = if let Some(opened) = authenticated_cached_file.take() {
+                Some((opened.file, Some(opened.bytes), Some(opened.lease)))
+            } else if session.cached {
+                plurx_core::transcode::manifest::open_bounded_regular_object(&session.dir, name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(file, len)| (file, Some(len), None))
+            } else {
+                tokio::fs::File::open(&path)
+                    .await
+                    .ok()
+                    .map(|file| (file, None, None))
+            };
+            if let Some((file, authenticated_len, snapshot_lease)) = opened {
+                let len = match authenticated_len {
+                    Some(len) => len,
+                    None => match file.metadata().await {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => return Ok(None),
+                    },
+                };
                 let waited = started_waiting.elapsed();
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
@@ -7283,12 +9955,13 @@ impl TranscodeManager {
                     name,
                     encoder,
                     len,
+                    snapshot_lease,
                 );
-                return Some(SegmentFile {
+                return Ok(Some(SegmentFile {
                     file,
                     len,
                     delivery,
-                });
+                }));
             }
             // Give up if the session was declared dead, or ffmpeg has exited and
             // the file still isn't there.
@@ -7325,7 +9998,7 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
             let exited = {
                 let mut child = session.child.lock().await;
@@ -7375,7 +10048,7 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -7802,6 +10475,43 @@ fn unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+fn read_scratch_sample(
+    generation: &AtomicU64,
+    bytes: &AtomicI64,
+    sampled_at_unix_ms: &AtomicI64,
+) -> (i64, i64) {
+    for _ in 0..3 {
+        let before = generation.load(Acquire);
+        if before & 1 != 0 {
+            std::hint::spin_loop();
+            continue;
+        }
+        let bytes = bytes.load(Relaxed);
+        let sampled_at = sampled_at_unix_ms.load(Relaxed);
+        // Conventional seqlock reader ordering: data loads must complete
+        // before the relaxed validation read, while the fence pairs with the
+        // writer's release publication.
+        std::sync::atomic::fence(Acquire);
+        let after = generation.load(Relaxed);
+        if before == after {
+            return (bytes, sampled_at);
+        }
+    }
+    (0, 0)
+}
+
+fn fresh_scratch_bytes(bytes: i64, sampled_at_unix_ms: i64, now_unix_ms: i64) -> i64 {
+    let max_age_ms = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).unwrap_or(i64::MAX);
+    if sampled_at_unix_ms > 0
+        && now_unix_ms >= sampled_at_unix_ms
+        && now_unix_ms.saturating_sub(sampled_at_unix_ms) <= max_age_ms
+    {
+        bytes.max(0)
+    } else {
+        0
+    }
 }
 
 fn bitrate_for_height(height: i64) -> u32 {
@@ -8254,10 +10964,14 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_verdict_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         watchdog_transition_pause: std::sync::Mutex::new(None),
+        activity_detail_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         retirement_started: AtomicBool::new(false),
         cached: false,
         _cache_reader: None,
+        subtitle_handle: None,
+        cache_manifest: None,
+        cache_location: None,
         last_request: Mutex::new(LastRequest::now("test-start")),
         file_id: 1,
         item_id: 1,
@@ -8305,6 +11019,109 @@ fn test_session(dir: PathBuf) -> Session {
 mod tests {
     use super::*;
 
+    #[test]
+    fn scratch_capacity_fails_closed_when_the_background_sample_expires() {
+        let sampled_at = 10_000;
+        let max_age = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).expect("age fits i64");
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at), 4096);
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age),
+            4096
+        );
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age + 1),
+            0
+        );
+        assert_eq!(fresh_scratch_bytes(4096, 0, sampled_at), 0);
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at - 1), 0);
+    }
+
+    #[test]
+    fn scratch_capacity_rejects_an_in_progress_seqlock_publication() {
+        let generation = AtomicU64::new(2);
+        let bytes = AtomicI64::new(4096);
+        let sampled_at = AtomicI64::new(10_000);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (4096, 10_000)
+        );
+
+        generation.store(3, Release);
+        bytes.store(0, Relaxed);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_session_snapshot_does_not_wait_for_the_session_map() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = tempfile::tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager.active_session_count.store(2, Relaxed);
+        let sessions = manager.sessions.lock().await;
+        let snapshot = manager.metrics_handle();
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        let handle = std::thread::spawn(move || sent.send(snapshot.snapshot().0));
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_millis(100))
+                .expect("atomic session snapshot must not wait for the map"),
+            2
+        );
+        drop(sessions);
+        handle.join().expect("join session reader").expect("send");
+    }
+
+    #[tokio::test]
+    async fn activity_telemetry_wait_never_holds_the_session_map() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = tempfile::tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = Arc::new(test_session(dir.path().join("session")));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("selected".to_owned(), Arc::clone(&session));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let reader = Arc::clone(&manager);
+        let detail = tokio::spawn(async move {
+            reader
+                .delivery_details_bounded(&["selected".to_owned()], 1)
+                .await
+        });
+        pause.wait().await;
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
+                .await
+                .expect("another map operation must not wait on selected-session telemetry"),
+            1
+        );
+        pause.wait().await;
+        assert_eq!(detail.await.expect("activity reader").len(), 1);
+    }
+
     fn profile5_file() -> plurx_core::domain::MediaFile {
         plurx_core::domain::MediaFile {
             id: 5,
@@ -8328,6 +11145,88 @@ mod tests {
             audio_offset_ms: 0,
             probed: true,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn specifically_configured_overlapping_source_root_wins_without_trusting_nested_links() {
+        use std::os::unix::fs::symlink;
+
+        let broad = tempfile::tempdir().expect("broad library root");
+        let relocated = tempfile::tempdir().expect("relocated library root");
+        let source = relocated.path().join("movie.mkv");
+        tokio::fs::write(&source, b"bound source")
+            .await
+            .expect("source bytes");
+        symlink(relocated.path(), broad.path().join("nas")).expect("configured relocation");
+        let metadata = tokio::fs::metadata(&source).await.expect("source metadata");
+        let mut file = profile5_file();
+        file.path = broad.path().join("nas/movie.mkv");
+        file.size = metadata.len() as i64;
+        file.mtime = metadata
+            .modified()
+            .expect("modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix modified time")
+            .as_secs() as i64;
+
+        assert!(
+            pretranscode_source_snapshot(&file, &[broad.path().to_path_buf()])
+                .await
+                .is_none(),
+            "an unconfigured nested symlink remains outside the broad root's authority"
+        );
+        assert!(
+            pretranscode_source_snapshot(
+                &file,
+                &[broad.path().to_path_buf(), broad.path().join("nas"),],
+            )
+            .await
+            .is_some(),
+            "the longest explicitly configured root authorizes its canonical relocation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bound_source_rejects_same_size_same_mtime_path_replacement() {
+        let root = tempfile::tempdir().expect("library root");
+        let source = root.path().join("movie.mkv");
+        tokio::fs::write(&source, b"original media")
+            .await
+            .expect("source bytes");
+        let metadata = std::fs::metadata(&source).expect("source metadata");
+        let modified = metadata.modified().expect("source modified time");
+        let mut file = profile5_file();
+        file.path = source.clone();
+        file.size = metadata.len() as i64;
+        file.mtime = LocalSourceSnapshot::from_metadata(&metadata).modified_secs;
+        let bound = pretranscode_source_snapshot(&file, &[root.path().to_path_buf()])
+            .await
+            .expect("bound source");
+
+        let replacement = root.path().join("replacement.mkv");
+        std::fs::write(&replacement, b"replaced media").expect("replacement bytes");
+        let replacement_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle");
+        replacement_file
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .expect("preserve mtime");
+        std::fs::rename(&replacement, &source).expect("replace pathname");
+
+        let replacement_metadata = std::fs::metadata(&source).expect("replacement metadata");
+        assert_eq!(replacement_metadata.len(), metadata.len());
+        assert_eq!(
+            LocalSourceSnapshot::from_metadata(&replacement_metadata).modified_secs,
+            file.mtime
+        );
+        assert_eq!(
+            bound_source_snapshot(Some(&bound)).await,
+            None,
+            "the old descriptor cannot authorize bytes at a replaced pathname"
+        );
     }
 
     #[test]
@@ -9986,6 +12885,104 @@ mod tests {
         assert!(parse_playlist("").is_empty());
     }
 
+    #[test]
+    fn retained_vod_validation_rejects_every_unpaired_playlist_uri() {
+        let valid = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n";
+        assert!(validated_vod_part(valid).is_some());
+        assert!(validated_vod_part(
+            "#EXTM3U\nstray.ts\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:1.0,\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:1.0,\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+        for injected in [
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"https://attacker.invalid/key\"",
+            "#EXT-X-MAP:URI=\"init.mp4\"",
+            "#EXT-X-BYTERANGE:1024@0",
+        ] {
+            let playlist =
+                format!("#EXTM3U\n{injected}\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n");
+            assert!(
+                validated_vod_part(&playlist).is_none(),
+                "legacy adoption must reject {injected}"
+            );
+        }
+        assert!(validated_vod_part(
+            "#EXTM3U\n#EXTINF:2.0,\n#EXT-X-VERSION:3\nseg00000.ts\n#EXT-X-ENDLIST\n"
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn resumable_and_assembled_publications_reject_empty_segments() {
+        let directory = tempfile::tempdir().expect("generation");
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n",
+        )
+        .await
+        .expect("playlist");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"")
+            .await
+            .expect("empty segment");
+        let capability = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("generation capability");
+
+        assert!(
+            read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+                .await
+                .is_none(),
+            "an empty resumable segment must not become a checkpoint"
+        );
+        assert!(
+            assembled_publication(&capability, 1).await.is_none(),
+            "an empty assembled segment must not become a published generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_part_validation_rejects_overwritten_extinf_but_allows_killed_tail() {
+        let directory = tempfile::tempdir().expect("retained part");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
+            .await
+            .expect("segment");
+        let capability = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("part capability");
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:1.0,\n#EXTINF:2.0,\nseg00000.ts\n",
+        )
+        .await
+        .expect("ambiguous playlist");
+        assert!(
+            read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+                .await
+                .is_none(),
+            "a second EXTINF must not overwrite persisted resume authority"
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:3.0,\n",
+        )
+        .await
+        .expect("killed tail playlist");
+        let (part, _) = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+            .await
+            .expect("one unmatched killed tail is droppable");
+        assert_eq!(part.segments, ["seg00000.ts"]);
+        assert_eq!(part.durations_ms, [2_000]);
+    }
+
     /// A live EVENT playlist needs both more than one segment and enough media
     /// runway before its first response. A long first segment alone still
     /// leaves hls.js at the writer edge, while a completed short title must not
@@ -10562,6 +13559,7 @@ mod tests {
             "seg00001.m4s",
             "test".to_owned(),
             1_024,
+            None,
         );
 
         delivery.note_read(512, Duration::from_millis(300));
@@ -11022,7 +14020,10 @@ mod tests {
             .spawn()
             .expect("spawn false");
         let session = watchdog_session(dir.path(), Some(child), false);
-        let _replacement = session.kill_child_for_replacement().await;
+        let _replacement = session
+            .kill_child_for_replacement()
+            .await
+            .expect("a live session may replace its child");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = TranscodeManager::new(
             store,
@@ -11568,7 +14569,11 @@ mod tests {
                 .expect("published segment")
                 .name
                 .clone();
-            assert!(mgr.segment(&info.session_id, &newest).await.is_some());
+            assert!(mgr
+                .segment(&info.session_id, &newest)
+                .await
+                .expect("segment admission")
+                .is_some());
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
@@ -12200,10 +15205,14 @@ mod tests {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached,
             _cache_reader: None,
+            subtitle_handle: None,
+            cache_manifest: None,
+            cache_location: None,
             last_request: Mutex::new(LastRequest::now("test-start")),
             file_id: 1,
             item_id: 1,
@@ -12241,6 +15250,107 @@ mod tests {
             typeless_sliding: false,
             first_slide_logged: AtomicBool::new(false),
         })
+    }
+
+    #[tokio::test]
+    async fn serving_fence_kills_existing_and_transition_racing_children() {
+        use plurx_core::store::SqliteStore;
+
+        let root = tempfile::tempdir().expect("serving-fence root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let existing = watchdog_session(
+            &root.path().join("existing"),
+            Some(long_running_child()),
+            false,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("existing".to_owned(), Arc::clone(&existing));
+
+        let (serving_tx, serving_rx) =
+            tokio::sync::watch::channel(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 0,
+            });
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(serving_rx));
+        // Publish loss and recovery without yielding. A boolean watch could
+        // coalesce this to `true` and preserve the old child; the generation
+        // makes the lost authority permanent for generation zero.
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: false,
+                loss_generation: 1,
+            })
+            .expect("publish quorum loss");
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 1,
+            })
+            .expect("publish quorum recovery");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stopped = existing
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+                if existing.retired.load(Acquire)
+                    && stopped
+                    && manager.sessions.lock().await.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("existing child must be retired promptly");
+
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: false,
+                loss_generation: 2,
+            })
+            .expect("publish second quorum loss");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager.serving_ready.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager gate must close");
+
+        // This insertion linearizes after the fence loop's false store and
+        // after its first snapshot. `register_session` is the other half of
+        // the race proof: the late child must retire itself.
+        let late = watchdog_session(&root.path().join("late"), Some(long_running_child()), false);
+        assert!(
+            !manager.register_session("late", Arc::clone(&late)).await,
+            "a transition-racing session must not publish"
+        );
+        assert!(late.retired.load(Acquire));
+        assert!(manager.sessions.lock().await.is_empty());
+        assert!(
+            late.child
+                .lock()
+                .await
+                .as_mut()
+                .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some())),
+            "the rejected late child must already be reaped"
+        );
+
+        drop(serving_tx);
+        fence_loop.await.expect("serving fence loop");
     }
 
     /// A process that outlives the test unless the watchdog kills it.
@@ -12388,7 +15498,10 @@ mod tests {
             .watchdog_verdict_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let replacement = session.kill_child_for_replacement().await;
+        let replacement = session
+            .kill_child_for_replacement()
+            .await
+            .expect("a live session may replace its child");
         session.progress.begin_attempt();
         *session.child.lock().await = Some(long_running_child());
         drop(replacement);
@@ -12677,6 +15790,91 @@ mod tests {
         );
     }
 
+    /// The inverse transition ordering matters too: a hardware fallback can
+    /// decide to downgrade immediately before the serving fence retires its
+    /// session, then arrive at `child_transition` only after teardown. The
+    /// real downgrade entry point must treat that work as stale instead of
+    /// installing a new ffmpeg process into an unregistered session.
+    #[tokio::test]
+    async fn retirement_wins_before_production_fallback_and_prevents_successor() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = tempfile::tempdir().expect("session dir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let predecessor_pid = session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(tokio::process::Child::id)
+            .expect("placeholder process id");
+        let predecessor_generation = session.progress.generation();
+        mgr.sessions
+            .lock()
+            .await
+            .insert("retirement-first".into(), Arc::clone(&session));
+
+        assert!(mgr.stop_session("retirement-first", "test").await);
+        // Scratch presence is not authority. Recreate it so this regression
+        // proves the monotonic retirement verdict is what rejects fallback.
+        tokio::fs::create_dir_all(&session.dir)
+            .await
+            .expect("recreate stale scratch");
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let sw_pool = mgr.admissions.software_pool();
+        let _ = TranscodeManager::downgrade_one_step(
+            &session,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &sw_pool,
+            dir.path(),
+            "retirement-first",
+            &mgr.runtime_cache,
+        )
+        .await;
+
+        assert!(session.retired.load(Acquire));
+        assert!(
+            mgr.sessions.lock().await.get("retirement-first").is_none(),
+            "the retired session must remain unregistered"
+        );
+        let mut child = session.child.lock().await;
+        assert!(
+            child.is_some(),
+            "retirement must retain the reaped predecessor handle"
+        );
+        assert_eq!(
+            session.progress.generation(),
+            predecessor_generation,
+            "fallback must not begin or publish a successor process after retirement (predecessor pid {predecessor_pid})"
+        );
+        assert!(
+            child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the retired predecessor must remain dead"
+        );
+    }
+
     /// Flow control SIGSTOPs a session that has run far enough ahead; that is
     /// health, not a stall — for as long as it lasts. And the resume path
     /// re-baselines the clock, so the suspension itself can never be read
@@ -12830,7 +16028,288 @@ mod tests {
         let dir = root.join(rel);
         tokio::fs::create_dir_all(&dir).await.expect("mkdir");
         seeded_session_dir(&dir, 3, 2.0).await;
+        let playlist_path = dir.join("index.m3u8");
+        let playlist = tokio::fs::read_to_string(&playlist_path)
+            .await
+            .expect("read seeded playlist")
+            .replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD")
+            + "#EXT-X-ENDLIST\n";
+        tokio::fs::write(&playlist_path, playlist)
+            .await
+            .expect("finish seeded VOD playlist");
         dir
+    }
+
+    async fn complete_manifest_cache(
+        store: &Arc<dyn Store>,
+        file_id: i64,
+        recipe: &str,
+        relative: &str,
+        manifest_digest: &str,
+    ) {
+        use plurx_core::cluster::coordination::LeaseClaim;
+        use plurx_core::domain::{
+            NewPretranscodeJob, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+        };
+
+        let job_id = "00000000-0000-4000-8000-000000000601";
+        let lease_now = unix_ms();
+        let lease = match store
+            .acquire_lease(
+                "transcode-manifest-session",
+                "scheduler",
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
+            .await
+            .expect("candidate lease")
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            other => panic!("candidate lease held: {other:?}"),
+        };
+        let requirements = serde_json::to_string(&PretranscodeRequirements {
+            version: PretranscodeRequirements::VERSION,
+            decoder: "hevc".to_owned(),
+            acceptable_encoder_families: vec!["software".to_owned()],
+            output_contract: "hls-mpegts-v1".to_owned(),
+            tone_map: false,
+            output_grade: "sdr".to_owned(),
+            scratch_bytes: 1,
+        })
+        .expect("requirements");
+        assert!(store
+            .enqueue_pretranscode_job(
+                &NewPretranscodeJob {
+                    id: job_id.to_owned(),
+                    dedupe_key: "transcode-manifest-session".to_owned(),
+                    file_id,
+                    source_size: 1,
+                    source_mtime: 1,
+                    target_height: 1080,
+                    policy_generation: "session-integrity-v1".to_owned(),
+                    requirements_json: requirements,
+                    reason: "recent".to_owned(),
+                    priority: 100,
+                    not_before_ms: lease_now,
+                    created_at_ms: lease_now,
+                },
+                &lease,
+                &lease
+                    .publication_successor()
+                    .expect("publication successor"),
+            )
+            .await
+            .expect("enqueue manifest session"));
+        let claimed = store
+            .claim_pretranscode_job(
+                NODE,
+                &PretranscodeWorkerCapabilities {
+                    version: PretranscodeRequirements::VERSION,
+                    decoders: vec!["hevc".to_owned()],
+                    encoder_families: vec!["software".to_owned()],
+                    max_target_height: 2_160,
+                    output_contracts: vec!["hls-mpegts-v1".to_owned()],
+                    tone_map: false,
+                    output_grades: vec!["sdr".to_owned()],
+                    scratch_bytes: 2,
+                },
+                &[],
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
+            .await
+            .expect("claim manifest session")
+            .expect("manifest session job");
+        assert!(store
+            .complete_pretranscode_job(
+                &claimed,
+                recipe,
+                CACHE_RECIPE_VERSION,
+                relative,
+                1_234,
+                None,
+                manifest_digest,
+                lease_now.saturating_add(1),
+            )
+            .await
+            .expect("complete manifest session"));
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_safe_segment_cannot_evict_a_valid_cached_generation() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let relative = "fa/manifest-session";
+        let dir = seed_cache_dir(cache.path(), relative).await;
+        let manifest = plurx_core::transcode::manifest::publish(
+            &dir,
+            "00000000-0000-4000-8000-000000000601:1",
+            &[
+                "index.m3u8".to_owned(),
+                "seg00000.ts".to_owned(),
+                "seg00001.ts".to_owned(),
+                "seg00002.ts".to_owned(),
+            ],
+        )
+        .await
+        .expect("publish generation manifest");
+        complete_manifest_cache(&store, file_id, &hash, relative, &manifest.manifest_digest).await;
+
+        let info = mgr
+            .start(file_id, 1080, 0.0, None, None, "paul", "pb-manifest")
+            .await
+            .expect("cached start");
+        assert_eq!(info.encoder, "cached");
+        assert!(mgr
+            .segment(&info.session_id, "seg99999.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
+        assert_eq!(
+            mgr.active_sessions().await,
+            1,
+            "an unlisted probe retired the valid session"
+        );
+        assert!(
+            store
+                .cache_hit(&hash, NODE)
+                .await
+                .expect("cache lookup")
+                .is_some(),
+            "an unlisted probe invalidated the valid cache location"
+        );
+        assert!(mgr
+            .segment(&info.session_id, "seg00000.ts")
+            .await
+            .expect("segment admission")
+            .is_some());
+
+        tokio::fs::write(dir.join("seg00001.ts"), b"corrupt listed object")
+            .await
+            .expect("corrupt listed segment");
+        assert!(mgr
+            .segment(&info.session_id, "seg00001.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
+        assert_eq!(mgr.active_sessions().await, 0);
+        assert!(
+            store
+                .cache_hit(&hash, NODE)
+                .await
+                .expect("cache lookup")
+                .is_none(),
+            "a listed corrupt object did not invalidate the exact generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_offer_claims_only_a_byte_verified_complete_generation() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let relative = "fb/media-offer";
+        let dir = seed_cache_dir(cache.path(), relative).await;
+        let manifest = plurx_core::transcode::manifest::publish(
+            &dir,
+            "00000000-0000-4000-8000-000000000601:1",
+            &[
+                "index.m3u8".to_owned(),
+                "seg00000.ts".to_owned(),
+                "seg00001.ts".to_owned(),
+                "seg00002.ts".to_owned(),
+            ],
+        )
+        .await
+        .expect("publish generation manifest");
+        complete_manifest_cache(&store, file_id, &hash, relative, &manifest.manifest_digest).await;
+        let encoder = mgr.encoder().await;
+        let opts = mgr.options_for_tone_map(
+            encoder,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+
+        assert!(
+            !mgr.verified_cache_hit(&file, &opts, encoder).await,
+            "an offer fails closed while its single verifier is running"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mgr.verified_cache_hit(&file, &opts, encoder).await {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background cache-offer verdict");
+        tokio::fs::write(dir.join("index.m3u8"), b"corrupt")
+            .await
+            .expect("corrupt playlist");
+        mgr.cache_offer_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&hash);
+        assert!(!mgr.verified_cache_hit(&file, &opts, encoder).await);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if store
+                    .cache_hit(&hash, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background invalidation verdict");
+    }
+
+    #[tokio::test]
+    async fn media_offer_never_opens_an_unproved_profile_five_source() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dovi_reshape(true);
+        let mut file = profile5_file();
+        file.path = work.path().join("sleeping-nas/movie.mkv");
+
+        assert!(matches!(
+            manager
+                .media_offer_probe(&file, 1080, 0.0, None, None, false)
+                .await,
+            Err("source_proof_unavailable")
+        ));
+        assert!(
+            !file.path.exists(),
+            "offer fanout created or materialized the absent source path"
+        );
     }
 
     /// The three ways a lookup can go, and only one of them is a hit.
@@ -13787,8 +17266,10 @@ mod tests {
             if let Ok(mut entries) = tokio::fs::read_dir(&staging).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let dir = entry.path().join(crate::produce::part_dir(index));
-                    if !read_part(&dir).await.is_empty() {
-                        return;
+                    if let Ok(dir) = plurx_core::fs_secure::SecureDirectory::open(&dir).await {
+                        if !read_part(&dir).await.is_empty() {
+                            return;
+                        }
                     }
                 }
             }
@@ -13890,6 +17371,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn speculative_policy_generation_tracks_replicated_track_preferences() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        let base = mgr.pretranscode_policy_generation().await;
+        store
+            .put_setting(keys::AUDIO_LANG, "jpn")
+            .await
+            .expect("audio");
+        let audio = mgr.pretranscode_policy_generation().await;
+        assert_ne!(base, audio);
+        store
+            .put_setting(keys::AUDIO_LANG, "ja")
+            .await
+            .expect("alias");
+        assert_eq!(
+            audio,
+            mgr.pretranscode_policy_generation().await,
+            "equivalent language aliases should not enqueue replacement work"
+        );
+        store
+            .put_setting(keys::SUB_LANG, "spa")
+            .await
+            .expect("subs");
+        let subtitles = mgr.pretranscode_policy_generation().await;
+        assert_ne!(audio, subtitles);
+        store
+            .put_setting(keys::SUB_MODE, "always")
+            .await
+            .expect("subtitle mode");
+        let subtitle_mode = mgr.pretranscode_policy_generation().await;
+        assert_ne!(subtitles, subtitle_mode);
+        store
+            .put_setting(keys::HWACCEL, "qsv")
+            .await
+            .expect("encoder");
+        assert_ne!(subtitle_mode, mgr.pretranscode_policy_generation().await);
+    }
+
+    #[tokio::test]
     async fn manager_reads_prefs_and_runs_session_lifecycle() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
@@ -13927,8 +17455,16 @@ mod tests {
             Err(PlaylistError::SessionGone),
             "an id with no session is gone, not a stream that failed to build"
         );
-        assert!(mgr.segment("missing", "seg00000.ts").await.is_none());
-        assert!(mgr.segment("missing", "../evil").await.is_none());
+        assert!(mgr
+            .segment("missing", "seg00000.ts")
+            .await
+            .expect("segment admission")
+            .is_none());
+        assert!(mgr
+            .segment("missing", "../evil")
+            .await
+            .expect("segment admission")
+            .is_none());
         assert!(!mgr.stop_session("missing", "test").await);
 
         // A real start spawns ffmpeg (it fails async on the fake path, but the

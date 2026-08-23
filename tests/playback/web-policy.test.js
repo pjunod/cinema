@@ -83,6 +83,27 @@ function test(name, run) {
   }
 }
 
+test("playback info exposes and remembers the shared three-mode contract", () => {
+  for (const mode of ["mini", "standard", "debug"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`data-stats-mode=["']${mode}["']`),
+      `${mode} must remain selectable in the shipped player`,
+    );
+  }
+  assert.match(SHIPPED_UI, /localStorage\.setItem\("plurx_stats_mode",mode\)/);
+  assert.match(SHIPPED_UI, /STATS_MODE==="debug"\?debugHtml:standardHtml/);
+  for (const tone of ["good", "warn", "bad", "muted"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`\\.statsov \\.stat-${tone}`),
+      `${tone} playback diagnostics must have a visible text treatment`,
+    );
+  }
+  assert.match(SHIPPED_UI, /function statsRunwayTone\(seconds,suspended\)/);
+  assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
+});
+
 test("estimated skip markers are hedged without rebuilding each tick", () => {
   let writes = 0;
   const skip = {
@@ -1435,7 +1456,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "newRequestId",
     "logout",
     [
-      'const API="/api/v1"; let TOKEN="token";',
+      'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
       shippedSource("api"),
       shippedSource("openSession"),

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["712c44cf"]
+points = ["cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Store contracts require Settings to read one replicated settings snapshot plus its optional cache aggregate, require Activity display rows to come from one joined query independent of package cardinality, and exercise those attempted Hiqlite call-family bounds against three voters; restoring per-key settings reads or per-package display lookups violates the explicit counters while the backend-neutral assertions retain the joined field semantics."

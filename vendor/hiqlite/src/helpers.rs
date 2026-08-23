@@ -125,12 +125,11 @@ pub async fn change_membership(
     }
 }
 
-/// Ask this voter to start an election immediately.
+/// Ask this voter to queue an election immediately.
 ///
-/// OpenRaft 0.9 has no dedicated leader-transfer API. Triggering an election
-/// on the intended successor is its supported pre-emptive handoff primitive:
-/// the winning higher term makes the old leader step down before membership
-/// removes it.
+/// OpenRaft 0.9 has no dedicated leader-transfer API. A successful call means
+/// only that this voter accepted the command; the campaign can still lose to
+/// an active leader lease, so callers must independently observe its outcome.
 pub async fn trigger_election(
     state: &Arc<AppState>,
     raft_type: &RaftType,

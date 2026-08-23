@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2f77fcfa"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained two-voter lifecycle asks the surviving leader to remove its peer and requires the production quorum-loss refusal. Routing that request through the leader makes the assertion independent of which original observer remains after the preceding removal; restoring observer routing can accidentally ask a node to remove itself and exercise the self-leave guard instead of the quorum invariant."

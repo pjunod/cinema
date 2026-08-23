@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0ec7c08c"]
+points = ["persistence.upgrades"]
+checks = ["cluster-auth", "database-upgrades", "rust-gate"]
+reason = "The retained deterministic watermark age, exact lease-boundary, regression, and concurrent-publication tests use the synthetic elapsed-time helper, while the ordinary library build proves that helper is absent outside test configurations."

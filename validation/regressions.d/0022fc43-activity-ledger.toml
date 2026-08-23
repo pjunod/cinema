@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0022fc43"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history-regressions check requires this ledger-only correction to remain mapped to the validation framework while its referenced runtime hook commit remains mapped to the cluster activity checks."
