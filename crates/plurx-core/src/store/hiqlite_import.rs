@@ -1980,6 +1980,11 @@ mod tests {
     fn replicated_tables_exclude_node_local_and_derived_state() {
         let names = TABLES.iter().map(|table| table.name).collect::<Vec<_>>();
         assert!(!names.contains(&"playback_events"));
+        assert!(
+            !names.contains(&"fragment_indexes"),
+            "a fragment index describes one machine's ffmpeg output; replicating \
+             it would let one node's byte counts place another node's landings"
+        );
         assert!(!names.contains(&"items_fts"));
         assert!(!names.contains(&"offline_lease_guards"));
         assert!(names.contains(&"media_session_requests"));

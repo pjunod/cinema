@@ -11,6 +11,7 @@
 mod apikeys;
 mod cache;
 mod coordination;
+mod fragindex;
 mod library;
 mod media;
 mod offline;
@@ -801,6 +802,12 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX cache_consumer_pins_expiry
         ON cache_consumer_pins(storage_id, expires_at_ms);",
+    // v27: node-local fragment indexes. No foreign key to `files` on purpose:
+    // an index outlives a rescan that renumbers nothing, and its own identity
+    // columns already refuse to answer for a file that changed. The hiqlite
+    // backend carries this exact table in its per-voter sidecar rather than
+    // replicating one machine's ffmpeg output through Raft.
+    crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1713,7 +1720,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 26,
+            version, 27,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

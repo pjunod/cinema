@@ -489,6 +489,7 @@ mod tests {
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
+        ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
         ("library.rs", include_str!("sqlite/library.rs")),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),

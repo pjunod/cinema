@@ -43,7 +43,9 @@ use plurx_core::domain::{
     ProbeResult, ReadingStateWrite, TraktAuth,
 };
 use plurx_core::error::StoreError;
+use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
+use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
@@ -321,6 +323,11 @@ const TELEMETRY_METHODS: &[&str] = &[
     "record_playback_event",
     "prune_playback_events",
     "playback_events",
+];
+const FRAGMENT_INDEX_METHODS: &[&str] = &[
+    "put_fragment_index",
+    "fragment_index",
+    "forget_fragment_index",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
     "observe_network_prior",
@@ -6316,6 +6323,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX transcode_cache_storage_generation;
              DROP TABLE cache_consumer_pins;
              DROP TABLE cache_storage_members;
+             DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
              DROP TRIGGER library_roots_paths_au;
@@ -7798,6 +7806,7 @@ fn contract_inventory_matches_every_store_method() {
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
+        FRAGMENT_INDEX_METHODS,
         COORDINATION_METHODS,
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
@@ -7808,11 +7817,96 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 221, "review the Store method count");
+    assert_eq!(declared.len(), 224, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn fragment_index_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");
+        let index = FragmentIndex::new(
+            16_000,
+            vec![
+                IndexRow {
+                    dts: 0,
+                    duration: 28_016,
+                    bytes: 104_452,
+                    class: CutClass::CleanIdr,
+                },
+                IndexRow {
+                    dts: 28_016,
+                    duration: 28_032,
+                    bytes: 110_038,
+                    class: CutClass::Dirty,
+                },
+            ],
+            "abc123",
+            identity.clone(),
+        );
+
+        assert_eq!(
+            store
+                .fragment_index(42, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing index: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        store
+            .put_fragment_index(42, &index)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store an index: {error}"));
+        let read = store
+            .fragment_index(42, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the index: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the index it just stored"));
+        assert_eq!(read, index, "backend {backend}");
+
+        // Invalidation is by mismatch, never by deletion: a changed file or a
+        // changed video pipeline simply stops matching. A backend that ignored
+        // either half would serve byte counts describing a stream that is no
+        // longer produced, and the landing matcher compares exactly those.
+        let moved_on = SourceIdentity::new(8_192, 1_700_000_000_000, "fingerprint");
+        assert_eq!(
+            store
+                .fragment_index(42, &moved_on)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a resized source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        let repiped = SourceIdentity::new(4_096, 1_700_000_000_000, "other-pipeline");
+        assert_eq!(
+            store
+                .fragment_index(42, &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a repiped source: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        assert!(
+            store
+                .forget_fragment_index(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the index: {error}")),
+            "backend {backend}"
+        );
+        assert!(
+            !store
+                .forget_fragment_index(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget it twice: {error}")),
+            "backend {backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
