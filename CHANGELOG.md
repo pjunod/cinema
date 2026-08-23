@@ -34,6 +34,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A file's segmentation is now computed once and kept, instead of being
+  re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
+  from a fragment index — one row per fragment of the production-shaped
+  video-only copy pipe — and a repositioned producer finds its place in that
+  index by matching three consecutive output byte counts, because M0 measured
+  that a repositioned generation's timestamps carry no film time at all. The
+  index is node-local on both backends, packed at twenty bytes a row, and
+  invalidated by mismatch rather than by deletion: a changed file or a changed
+  video pipeline simply stops matching. The background job that builds them is
+  bounded and ships off, because M0-P1 has not yet priced a full read of a
+  library over NFS. Nothing serves from any of this yet; a file without an
+  index keeps today's presentation.
+
 - **The VOD presentation plan's feasibility spike ran, and it stopped the
   build.** Three harnesses under `scripts/` measure what the plan assumed:
   `vod-plan-probe` builds the plan's fragment index from the

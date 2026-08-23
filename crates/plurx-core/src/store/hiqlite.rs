@@ -1611,6 +1611,34 @@ impl HiqliteAuthStore {
 }
 
 #[async_trait]
+impl crate::store::FragmentIndexStore for HiqliteAuthStore {
+    async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: &crate::segplan::FragmentIndex,
+    ) -> Result<(), StoreError> {
+        let now_ms = self.clock.now()?;
+        self.telemetry
+            .put_fragment_index(file_id, index.clone(), now_ms)
+            .await
+    }
+
+    async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError> {
+        self.telemetry
+            .fragment_index(file_id, identity.clone())
+            .await
+    }
+
+    async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
+        self.telemetry.forget_fragment_index(file_id).await
+    }
+}
+
+#[async_trait]
 impl PlaybackTelemetryStore for HiqliteAuthStore {
     async fn record_playback_event(&self, event: &PlaybackEvent) -> Result<i64, StoreError> {
         self.telemetry.record(event.clone()).await
