@@ -21,6 +21,7 @@ mod progressive;
 mod reader_formats;
 mod schedule;
 mod serving_fence;
+mod shared_cache;
 mod state;
 mod storeprobe;
 mod subtitles;
@@ -444,6 +445,7 @@ async fn boot(
     let state = build_state(
         &config,
         identity.node_id,
+        instance_id.clone(),
         credential_key,
         replication,
         membership,
@@ -795,6 +797,7 @@ fn probe_preference(hwaccel_pref: &str) -> String {
 fn build_state(
     config: &Config,
     node_id: String,
+    cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
@@ -813,6 +816,9 @@ fn build_state(
             credential_key,
             replication,
             membership,
+            cluster_id,
+            shared_cache_dir: config.cluster.shared_cache_dir.clone(),
+            shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
         },
         store,
@@ -872,6 +878,7 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.media_pool)
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
+    tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
     // Answers "can you read this package's source?" while a peer is being
@@ -2407,6 +2414,7 @@ mod startup_tests {
         build_state(
             &config,
             "test-node".to_owned(),
+            "test-cluster".to_owned(),
             Arc::new(plurx_core::secrets::CredentialKey::generate()),
             plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             plurx_core::cluster::membership::MembershipManager::unavailable(),

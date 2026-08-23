@@ -35,7 +35,7 @@ use crate::media_sessions::{
     unix_ms, worker_session_request_is_valid, RelayHeaders, RelayRequest, RelayResource,
     RemoteAbortRequest, RemoteStartRequest, RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW,
     ACTIVATION_FAST_RECONCILIATION, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
-    OWNER_ASSIGNMENT_DEADLINE, START_DEADLINE,
+    OWNER_ASSIGNMENT_DEADLINE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE,
 };
 use crate::state::AppState;
 use crate::transcode::{ClusterReplacementGuard, PlaylistError};
@@ -720,6 +720,24 @@ pub async fn create(
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
+    if owner_node_id == state.node_id {
+        let provisional_pin_ms =
+            i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
+        if !state
+            .transcode
+            .pin_shared_session(
+                &info.session_id,
+                &incarnation_id,
+                1,
+                unix_ms().saturating_add(provisional_pin_ms),
+            )
+            .await?
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "shared cache generation changed before session activation".to_owned(),
+            ));
+        }
+    }
     match tokio::time::timeout(
         OWNER_ASSIGNMENT_DEADLINE,
         state.store.assign_media_session_request_owner(
