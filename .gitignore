@@ -22,6 +22,10 @@ clients/apple/build/
 # checkouts are reset to the remote — an untracked report is the one thing in
 # them worth keeping, so name it here rather than sweeping it by hand.
 perf-report-*.txt
+# An ffmpeg output target, not a file: a probe that names `pipe:1` and gets
+# spawned with a working directory instead of a pipe leaves a one-line file
+# behind. It has been committed by `git add -A` twice.
+pipe:[0-9]*
 # Merge residue. A .orig sitting in a checkout means someone resolved a
 # conflict there; git leaves them behind and nothing cleans them up.
 *.orig

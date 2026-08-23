@@ -15,6 +15,7 @@ data class Server(
     val name: String? = null,
     val version: String? = null,
     val instance_id: String? = null,
+    val node_urls: List<String> = emptyList(),
 )
 
 @Serializable

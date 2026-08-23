@@ -1,0 +1,24 @@
+global
+    log stdout format raw local0
+
+defaults
+    mode http
+    log global
+    option httplog
+    timeout connect 2s
+    timeout client 75s
+    timeout server 75s
+
+frontend plurx_http
+    bind :32400
+    default_backend plurx_ready_voters
+
+backend plurx_ready_voters
+    balance leastconn
+    option httpchk GET /readyz
+    http-check expect status 200
+    cookie PLURX_NODE insert indirect nocache httponly
+    default-server inter 10s fall 3 rise 2 slowstart 10s
+    server plurx-a 192.0.2.11:32400 check cookie a
+    server plurx-b 192.0.2.12:32400 check cookie b
+    server plurx-c 192.0.2.13:32400 check cookie c

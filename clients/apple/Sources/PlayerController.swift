@@ -1366,6 +1366,8 @@ final class PlayerController: ObservableObject {
     private var playbackNoticeTask: Task<Void, Never>?
     private var started = false
     private var sessionId: String?
+    private var activeMediaPath: String?
+    private var activeMediaAuthenticated = false
     private var lastReportedMs = 0
     private var usesDirectTimeline = false
     private var canRetryCurrentItemWithHDRBase = false
@@ -1866,6 +1868,7 @@ final class PlayerController: ObservableObject {
     private func reloadOffline(at positionMs: Int) async {
         guard let offlineAssetURL, started else { return }
         isChangingStream = true
+        Session.shared.resetMediaFailover()
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         await loadOffline(url: offlineAssetURL, startMs: positionMs)
@@ -2410,7 +2413,10 @@ final class PlayerController: ObservableObject {
             // Direct play has no session, so the decision's answer stands for
             // the whole playback (MEDIA-BADGES-PLAN.md §3.2).
             deliveredRange = decision.deliveredDynamicRange
-            url = Session.shared.mediaURL(decision.delivery?.url ?? decision.playUrl)
+            let deliveryPath = decision.delivery?.url ?? decision.playUrl
+            activeMediaPath = clusterRelativeMediaPath(deliveryPath)
+            activeMediaAuthenticated = true
+            url = Session.shared.mediaURL(deliveryPath)
             if startMs > 0 { seekAfterAttach = startMs }
         } else {
             let copy = !forceTranscode
@@ -2513,6 +2519,8 @@ final class PlayerController: ObservableObject {
                 )
             }
             sessionId = hls.sessionId
+            activeMediaPath = clusterRelativeMediaPath(hls.playlistUrl)
+            activeMediaAuthenticated = false
             // The authoritative normalized answer for this session, and the
             // rung the next stall reopen is measured against.
             sessionHeight = hls.height
@@ -3539,6 +3547,9 @@ final class PlayerController: ObservableObject {
             eventStatus: event?.errorStatusCode,
             eventComment: event?.errorComment
         )
+        if started, !isCompatibilityFailure, await retryMediaOnNextNode(item) {
+            return
+        }
         // Evaluated before anything recovers, because the log has to go out
         // before the ladder's own reopen replaces this item. An established
         // HDR delivery reconnects itself instead of descending, so it buys no
@@ -3577,6 +3588,65 @@ final class PlayerController: ObservableObject {
             : Self.playbackStartFailureTitle
         playbackError = item.error?.localizedDescription
             ?? PlaybackPreparationError.failed.localizedDescription
+    }
+
+    /// Reattach the exact media path through another ingress. The existing
+    /// session capability and delivery mode stay intact, so this path never
+    /// consumes the HDR/codec compatibility ladder.
+    private func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
+        #if os(iOS)
+        if offlineId != nil { return false }
+        #endif
+        guard player.currentItem === failedItem,
+              let path = activeMediaPath,
+              let url = Session.shared.nextMediaFailoverURL(
+                path,
+                authenticated: activeMediaAuthenticated
+              ) else { return false }
+        let resume = usesDirectTimeline ? currentMs : nil
+        let resumesPlayback = wantsPlayback
+        isChangingStream = true
+        let item = AVPlayerItem(url: url)
+        Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
+        #if os(iOS)
+        item.externalMetadata = [titleMetadata(title)]
+        #endif
+        observeEnd(of: item)
+        observeStatus(of: item)
+        pgsOverlayItemGeneration &+= 1
+        pgsOverlayWindowTask?.cancel()
+        pgsOverlayWindow = nil
+        player.replaceCurrentItem(with: item)
+        player.play()
+        if let resume {
+            do { try await seekWhenReady(item, ms: resume) }
+            catch {
+                // The status observer will drive the next node or terminal
+                // surface after this transition leaves its suppression window.
+            }
+        }
+        await applyPreferredAudioSelection(to: item)
+        await applyNativeSubtitleSelection(selectedSubtitle, to: item)
+        if resumesPlayback { player.play() } else { player.pause() }
+        isPlaying = resumesPlayback
+        isChangingStream = false
+        if item.status == .failed {
+            await handleItemFailure(item)
+        }
+        return true
+    }
+
+    private func clusterRelativeMediaPath(_ value: String) -> String? {
+        if value.hasPrefix("/"), !value.hasPrefix("//") { return value }
+        guard let candidate = URLComponents(string: value),
+              let current = URLComponents(string: Session.shared.origin),
+              candidate.scheme?.lowercased() == current.scheme?.lowercased(),
+              candidate.host?.lowercased() == current.host?.lowercased(),
+              candidate.port == current.port else { return nil }
+        var path = candidate.percentEncodedPath
+        if path.isEmpty { path = "/" }
+        if let query = candidate.percentEncodedQuery { path += "?\(query)" }
+        return path
     }
 
     private func reportPlaybackFailure(

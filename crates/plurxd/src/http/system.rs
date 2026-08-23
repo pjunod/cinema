@@ -39,6 +39,10 @@ pub struct ServerInfo {
     /// True when an Android APK is published (so the web UI shows the download
     /// link on Android). See `web::android_apk_path`.
     pub android_app: bool,
+    /// Reachable alternative ingress origins for this same replicated
+    /// instance. The current origin remains first client-side; these bounded
+    /// node-specific URLs are transport failover candidates, never redirects.
+    pub node_urls: Vec<String>,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -46,6 +50,11 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let instance_id = state.store.instance_id().await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
+    let node_urls = state
+        .membership
+        .reachable_peer_http_urls()
+        .await
+        .unwrap_or_default();
     Ok(Json(ServerInfo {
         name: state.server_name.clone(),
         version: crate::version::SEMVER,
@@ -55,6 +64,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
+        node_urls,
     }))
 }
 
@@ -2555,9 +2565,10 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{raft_metrics}{process_metrics}{playback_metrics}",
+         {scans}{store_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
+        takeover_metrics = crate::media_sessions::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
     );
     (
