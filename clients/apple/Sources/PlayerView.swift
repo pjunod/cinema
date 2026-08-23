@@ -353,6 +353,8 @@ enum TVPlaybackInfoPresentation {
     static let panelMaxWidth: CGFloat = 1_480
     static let titleFontSize: CGFloat = 32
     static let valueFontSize: CGFloat = 19
+    // No longer read by any view — the ledger sizes its section boxes from
+    // their content. Retained because AppleClientTests asserts on it.
     static let cardMinimumHeight: CGFloat = 238
     static let debugPanelMaxWidth: CGFloat = 1_620
     static let debugPanelMaxHeight: CGFloat = 850
@@ -2199,9 +2201,147 @@ private enum PlaybackStatTone {
     }
 }
 
+/// Where a ledger section sits in the panel. The column is assigned
+/// structurally rather than measured, so the rendered order is always the
+/// declared order no matter how long the values happen to be this second.
+private enum PlaybackLedgerColumn: Equatable {
+    case left
+    case right
+}
+
+/// Whether a row belongs in the two-column grid or in the notes strip that
+/// spans the panel underneath it. Sentence-shaped values leave the grid so
+/// they can never stretch a column.
+private enum PlaybackLedgerPlacement: Equatable {
+    case grid
+    case notes
+}
+
+/// One label/value pair. Rows are plain data rather than views so the
+/// alignment and density decisions below can inspect them before anything is
+/// laid out.
+private struct PlaybackLedgerRow: Identifiable {
+    var section: String = ""
+    let label: String
+    let value: String
+    var tone: PlaybackStatTone = .neutral
+    var placement: PlaybackLedgerPlacement = .grid
+
+    var id: String { "\(section)·\(label)" }
+
+    /// Values that read as a sentence rather than a datum. These are routed
+    /// out of the grid by name; anything else long and multi-word follows the
+    /// same route by measurement.
+    static let noteLabels: Set<String> = [
+        "Session",
+        "Reason",
+        "Video",
+        "Audio",
+        "Dynamic range",
+        "Transport",
+        "Waiting reason",
+        "Last request",
+    ]
+
+    static func resolvedPlacement(label: String, value: String) -> PlaybackLedgerPlacement {
+        if noteLabels.contains(label) { return .notes }
+        if value.count > 26 && value.contains(" ") { return .notes }
+        return .grid
+    }
+}
+
+/// A section aligns as a unit: a column of numbers reads as a column only if
+/// every value in it shares the same edge and the same digit width.
+private struct PlaybackLedgerSection: Identifiable {
+    let id: String
+    let title: String
+    let column: PlaybackLedgerColumn
+    let placeholder: String?
+    /// Set on sections whose heading carries meaning the notes strip cannot.
+    /// SERVER on cached VOD holds exactly one sentence-shaped row: without
+    /// this the whole box disappears and "already transcoded" surfaces under
+    /// Notes, which reads as "no server section" rather than "cached".
+    let keepsNotesInBox: Bool
+    let rows: [PlaybackLedgerRow]
+
+    init(
+        _ title: String,
+        column: PlaybackLedgerColumn,
+        placeholder: String? = nil,
+        keepsNotesInBox: Bool = false,
+        rows: [PlaybackLedgerRow]
+    ) {
+        self.id = title
+        self.title = title
+        self.column = column
+        self.placeholder = placeholder
+        self.keepsNotesInBox = keepsNotesInBox
+        self.rows = rows.map { row in
+            var copy = row
+            copy.section = title
+            return copy
+        }
+    }
+
+    var gridRows: [PlaybackLedgerRow] {
+        rows.filter { $0.placement == .grid }
+    }
+
+    var noteRows: [PlaybackLedgerRow] {
+        rows.filter { $0.placement == .notes }
+    }
+
+    /// True when this section draws its own note rows inside its box instead
+    /// of sending them down to the shared strip.
+    var ownsNotes: Bool {
+        keepsNotesInBox && gridRows.isEmpty && placeholder == nil && !noteRows.isEmpty
+    }
+
+    /// The note rows that reach the strip under the columns.
+    var stripNoteRows: [PlaybackLedgerRow] {
+        ownsNotes ? [] : noteRows
+    }
+
+    /// A section box is drawn only when it has grid rows to show, a
+    /// placeholder to explain their absence, or notes it keeps for itself.
+    /// A section that contributes only notes otherwise reaches the notes
+    /// strip.
+    var rendersBox: Bool {
+        !gridRows.isEmpty || placeholder != nil || ownsNotes
+    }
+
+    var prefersNumericAlignment: Bool {
+        let visible = gridRows
+        guard !visible.isEmpty else { return false }
+        let numeric = visible.filter { PlaybackLedgerSection.isNumeric($0.value) }.count
+        return Double(numeric) >= Double(visible.count) * 0.7
+    }
+
+    /// Sixteen short server values waste two thirds of a television column as
+    /// one list, so a long section of short values folds into two sub-columns.
+    var prefersDenseColumns: Bool {
+        let visible = gridRows
+        return visible.count >= 10 && visible.allSatisfy { $0.value.count <= 12 }
+    }
+
+    /// The em dash counts as numeric so a section does not change alignment
+    /// the moment a value it is still waiting for arrives.
+    static func isNumeric(_ value: String) -> Bool {
+        if value == "—" { return true }
+        guard let first = value.first else { return false }
+        return first.isNumber
+    }
+}
+
 /// The same three playback-info levels used by the web and Android players.
 /// Each client renders them natively, but Mini, Standard, and Debug keep the
 /// same job and information hierarchy on every screen size.
+///
+/// Standard and Debug share one ledger: a header, two structurally assigned
+/// columns of label/value rows, and a notes strip for the sentence-shaped
+/// values. Only the field set and a handful of platform metrics change
+/// between them, so switching mode grows the same block downward from the
+/// same top-trailing corner instead of relaying the screen.
 private struct PlaybackStatsView: View {
     @ObservedObject var controller: PlayerController
     @Binding var mode: PlaybackStatsMode
@@ -2211,9 +2351,14 @@ private struct PlaybackStatsView: View {
     @FocusState private var dismissFocused: Bool
     #endif
 
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
     /// This panel floats over the video, so its contrast must not follow the
     /// app's light/dark palette. A fixed dark surface keeps the white copy
     /// readable in every appearance and over both bright and dark frames.
+    /// It also carries the whole contrast job — there is no scrim behind it.
     private let panelSurface = Palette.playerChrome.opacity(0.96)
     private let labelColor = Color.white.opacity(0.82)
 
@@ -2221,14 +2366,8 @@ private struct PlaybackStatsView: View {
         Group {
             if mode == .mini {
                 miniBody
-            } else if mode == .debug {
-                debugBody
             } else {
-                #if os(tvOS)
-                televisionBody
-                #else
-                compactBody
-                #endif
+                ledgerBody
             }
         }
     }
@@ -2282,34 +2421,51 @@ private struct PlaybackStatsView: View {
         #endif
     }
 
+    private var closeButton: some View {
+        Button(action: onDismiss) {
+            Image(systemName: "xmark")
+                .font(.system(size: modeFontSize, weight: .bold))
+                .padding(modeVerticalPadding)
+                .foregroundStyle(.white.opacity(0.72))
+                .background(.white.opacity(0.07), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close playback info")
+    }
+
+    // MARK: - Mini
+
+    /// One horizontal line inside a bounded panel: method, position, the
+    /// three facts, and a health pill, all separated by hairlines.
     private var miniBody: some View {
-        VStack(alignment: .leading, spacing: miniSpacing) {
+        miniShrinkWrap(
             HStack(spacing: miniSpacing) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(controller.methodLabel)
-                        .font(.system(size: miniTitleSize, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text("\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))")
-                        .font(.system(size: miniDetailSize, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.62))
+                Text(controller.methodLabel)
+                    .font(.system(size: miniTitleSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                miniDivider
+
+                Text("\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))")
+                    .font(.system(size: miniDetailSize, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+
+                ForEach(miniFacts) { fact in
+                    miniDivider
+                    miniFact(fact)
                 }
 
-                Spacer(minLength: miniSpacing)
-                miniHealth
-                modeSelector
-                closeButton
-            }
+                miniDivider
 
-            HStack(spacing: miniSpacing) {
-                miniFact("Playing", miniPlayingSummary, tone: playbackTone)
-                miniFact("Buffer", miniBufferSummary, tone: bufferTone)
-                miniFact("Network", miniNetworkSummary, tone: networkTone)
+                miniHealth
+                miniControls
             }
-        }
-        .padding(.horizontal, miniHorizontalPadding)
-        .padding(.vertical, miniVerticalPadding)
-        .frame(maxWidth: miniMaxWidth)
+            .padding(.horizontal, miniHorizontalPadding)
+            .padding(.vertical, miniVerticalPadding)
+        )
         .background(panelSurface, in: RoundedRectangle(cornerRadius: miniCornerRadius))
         .overlay {
             RoundedRectangle(cornerRadius: miniCornerRadius)
@@ -2320,36 +2476,72 @@ private struct PlaybackStatsView: View {
         .padding(miniOuterPadding)
     }
 
+    /// The controls are the one part of the line that must never compress,
+    /// so they carry the layout priority and the facts absorb the squeeze.
+    private var miniControls: some View {
+        HStack(spacing: miniSpacing) {
+            modeSelector
+            closeButton
+        }
+        .layoutPriority(1)
+    }
+
+    /// The line is bounded, never free-running. `fixedSize` used to stand
+    /// here on the television, which proposed every child its ideal width and
+    /// so made the `lineLimit` and `minimumScaleFactor` on the fact values
+    /// inert: a long method label beside a long summary simply kept growing,
+    /// and because the panel is trailing-aligned it bled off the leading
+    /// edge. A width bound gives those modifiers something to work against
+    /// again — the values scale and truncate inside it instead.
+    private func miniShrinkWrap<V: View>(_ view: V) -> some View {
+        view.frame(maxWidth: miniMaxWidth)
+    }
+
+    private var miniDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.16))
+            .frame(width: 1, height: miniDividerHeight)
+            .accessibilityHidden(true)
+    }
+
+    private var miniFacts: [PlaybackLedgerRow] {
+        [
+            PlaybackLedgerRow(label: "Playing", value: miniPlayingSummary, tone: playbackTone),
+            PlaybackLedgerRow(label: "Buffer", value: miniBufferSummary, tone: bufferTone),
+            PlaybackLedgerRow(label: "Network", value: miniNetworkSummary, tone: networkTone),
+        ]
+    }
+
+    private func miniFact(_ fact: PlaybackLedgerRow) -> some View {
+        HStack(spacing: 5) {
+            Text(fact.label.uppercased())
+                .font(.system(size: miniLabelSize, weight: .bold, design: .rounded))
+                .tracking(0.8)
+                .foregroundStyle(.white.opacity(0.42))
+                .lineLimit(1)
+            Text(fact.value)
+                .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
+                .foregroundStyle(fact.tone.color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private var miniHealth: some View {
         let stalls = controller.stalls ?? 0
-        return HStack(spacing: 7) {
+        return HStack(spacing: 5) {
             Circle()
                 .fill(stalls > 0 ? Color.orange : Color.green)
                 .frame(width: miniHealthDotSize, height: miniHealthDotSize)
             Text(stalls > 0 ? "\(stalls) stall\(stalls == 1 ? "" : "s")" : "Healthy")
                 .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
                 .foregroundStyle(playbackTone.color)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private func miniFact(
-        _ label: String,
-        _ value: String,
-        tone: PlaybackStatTone = .neutral
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label.uppercased())
-                .font(.system(size: miniLabelSize, weight: .bold, design: .rounded))
-                .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.42))
-            Text(value)
-                .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(tone.color)
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, miniPillHorizontalPadding)
+        .padding(.vertical, miniPillVerticalPadding)
+        .background(.white.opacity(0.07), in: Capsule())
         .accessibilityElement(children: .combine)
     }
 
@@ -2426,6 +2618,30 @@ private struct PlaybackStatsView: View {
         #endif
     }
 
+    private var miniDividerHeight: CGFloat {
+        #if os(tvOS)
+        22
+        #else
+        14
+        #endif
+    }
+
+    private var miniPillHorizontalPadding: CGFloat {
+        #if os(tvOS)
+        11
+        #else
+        8
+        #endif
+    }
+
+    private var miniPillVerticalPadding: CGFloat {
+        #if os(tvOS)
+        5
+        #else
+        3
+        #endif
+    }
+
     private var miniHorizontalPadding: CGFloat {
         #if os(tvOS)
         18
@@ -2442,6 +2658,9 @@ private struct PlaybackStatsView: View {
         #endif
     }
 
+    /// The upper bound on the shrink-wrapped line. Without it the values'
+    /// `minimumScaleFactor` never engages, because nothing ever proposes the
+    /// line a width narrower than it asked for.
     private var miniMaxWidth: CGFloat {
         #if os(tvOS)
         1_240
@@ -2466,111 +2685,179 @@ private struct PlaybackStatsView: View {
         #endif
     }
 
-    private var closeButton: some View {
-        Button(action: onDismiss) {
-            Image(systemName: "xmark")
-                .font(.system(size: modeFontSize, weight: .bold))
-                .padding(modeVerticalPadding)
-                .foregroundStyle(.white.opacity(0.72))
-                .background(.white.opacity(0.07), in: Circle())
+    // MARK: - Ledger shell
+
+    /// Anchored to the top-trailing corner in every mode and clipped short of
+    /// the transport controls, so growing from Standard to Debug extends the
+    /// same block downward instead of moving it.
+    private var ledgerBody: some View {
+        GeometryReader { geometry in
+            let insets = geometry.safeAreaInsets
+            let usableWidth = max(
+                0,
+                geometry.size.width - insets.leading - insets.trailing - (ledgerEdgeInset * 2)
+            )
+            let usableHeight = max(
+                0,
+                geometry.size.height - insets.top - insets.bottom
+                    - (ledgerEdgeInset * 2) - ledgerTransportReserve
+            )
+            let panelWidth = max(0, min(ledgerMaxWidth, usableWidth * ledgerWidthFraction))
+            let panelHeight = max(0, min(ledgerMaxHeight, usableHeight))
+
+            ZStack {
+                ledgerBackdrop
+
+                ledgerInitialFocus(
+                    ledgerPanel
+                        .frame(width: panelWidth)
+                        .frame(maxHeight: panelHeight, alignment: .top)
+                        .padding(.top, insets.top + ledgerEdgeInset)
+                        .padding(.trailing, insets.trailing + ledgerEdgeInset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                )
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Close playback info")
     }
 
-    #if os(tvOS)
-    private var televisionBody: some View {
-        ZStack {
-            Color.black.opacity(0.52)
+    /// The visual scrim is gone — the panel carries the whole contrast job —
+    /// but on the phone the scrim was also doing layout work: Debug was a
+    /// modal surface, and the old `Color.black.opacity(0.52)` absorbed every
+    /// tap that missed the panel. Without something hit-testable those taps
+    /// now reach the transport controls behind it. The old scrim carried no
+    /// tap gesture, so neither does this: taps are swallowed, not acted on.
+    /// Standard never had a scrim on the phone and does not get one here.
+    /// The television keeps focus out of the controls by disabling them at
+    /// the call site instead, so it needs nothing.
+    @ViewBuilder
+    private var ledgerBackdrop: some View {
+        #if os(iOS)
+        if mode == .debug {
+            Color.clear
+                .contentShape(Rectangle())
                 .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 18) {
-                televisionHeader
-
-                HStack(alignment: .top, spacing: 14) {
-                    sourceCard
-                    outputCard
-                    serverCard
-                }
-
-                if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Palette.accent)
-                        Text(reasons.joined(separator: " · "))
-                            .foregroundStyle(.white.opacity(0.78))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-                    }
-                    .font(.system(size: 16, weight: .medium, design: .rounded))
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Playback reason, \(reasons.joined(separator: "; "))")
-                }
-            }
-            .padding(.horizontal, 30)
-            .padding(.vertical, 24)
-            .frame(maxWidth: TVPlaybackInfoPresentation.panelMaxWidth)
-            .background(
-                panelSurface,
-                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(.white.opacity(0.12), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.55), radius: 38, y: 18)
-            .padding(.horizontal, 58)
-            .padding(.vertical, 44)
+                .accessibilityHidden(true)
         }
-        .onAppear {
+        #else
+        EmptyView()
+        #endif
+    }
+
+    /// The remote lands on Done in every mode. Debug used to wire no initial
+    /// focus at all, which left the panel unreachable.
+    private func ledgerInitialFocus<V: View>(_ view: V) -> some View {
+        #if os(tvOS)
+        return view.onAppear {
             Task { @MainActor in
                 await Task.yield()
                 dismissFocused = true
             }
         }
+        #else
+        return view
+        #endif
     }
 
-    private var televisionHeader: some View {
-        HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Playback info")
-                    .font(.system(
-                        size: TVPlaybackInfoPresentation.titleFontSize,
-                        weight: .bold,
-                        design: .rounded
-                    ))
-                    .foregroundStyle(.white)
+    private var ledgerPanel: some View {
+        VStack(alignment: .leading, spacing: ledgerSpacing) {
+            let sections = mode == .debug ? debugSections : standardSections
 
-                HStack(spacing: 8) {
-                    Text(controller.methodLabel)
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Palette.accent)
+            ledgerHeader
 
-                    Text("·")
-                        .foregroundStyle(.white.opacity(0.35))
+            Divider().overlay(.white.opacity(0.12))
 
-                    Text("\(formatTime(controller.currentMs)) of \(formatTime(controller.knownDurationMs))")
-                        .font(.system(size: 17, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
-                }
+            // The ledger is meant to fit without scrolling — the panel then
+            // shrink-wraps to its content instead of reserving the whole
+            // height. The ScrollView is the safety net for smaller outputs.
+            ViewThatFits(in: .vertical) {
+                ledgerColumns(sections)
+                ScrollView { ledgerColumns(sections) }
             }
+        }
+        .padding(ledgerPanelPadding)
+        .background(
+            panelSurface,
+            in: RoundedRectangle(cornerRadius: ledgerCornerRadius, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: ledgerCornerRadius, style: .continuous)
+                .stroke(.white.opacity(0.13), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.58), radius: 28, y: 12)
+    }
 
-            Spacer(minLength: 12)
-
+    private var ledgerHeader: some View {
+        HStack(alignment: .center, spacing: ledgerSpacing) {
+            ledgerTitleBlock
+            Spacer(minLength: ledgerSpacing)
+            ledgerHeaderHealth
             modeSelector
-
-            playbackHealth
-
-            Button(action: onDismiss) {
-                Label("Done", systemImage: "xmark")
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-            }
-            .buttonStyle(TVReadableButtonStyle(prominent: false))
-            .focused($dismissFocused)
-            .accessibilityLabel("Close playback info")
+            ledgerDismissControl
         }
     }
 
+    private var ledgerTitleBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(mode == .debug ? "Playback debug" : "Playback info")
+                .font(ledgerTitleFont)
+                .foregroundStyle(.white)
+            ledgerSubtitle
+        }
+    }
+
+    @ViewBuilder
+    private var ledgerSubtitle: some View {
+        #if os(tvOS)
+        if mode == .standard {
+            HStack(spacing: 8) {
+                Text(controller.methodLabel)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Palette.accent)
+
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+
+                Text("\(formatTime(controller.currentMs)) of \(formatTime(controller.knownDurationMs))")
+                    .font(.system(size: 17, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+        }
+        #else
+        if mode == .debug {
+            Text("Live player, network, and server diagnostics")
+                .font(.system(size: ledgerDetailSize, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.56))
+        }
+        #endif
+    }
+
+    @ViewBuilder
+    private var ledgerHeaderHealth: some View {
+        #if os(tvOS)
+        if mode == .standard {
+            playbackHealth
+        }
+        #else
+        EmptyView()
+        #endif
+    }
+
+    @ViewBuilder
+    private var ledgerDismissControl: some View {
+        #if os(tvOS)
+        Button(action: onDismiss) {
+            Label("Done", systemImage: "xmark")
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+        }
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .focused($dismissFocused)
+        .accessibilityLabel("Close playback info")
+        #else
+        closeButton
+        #endif
+    }
+
+    #if os(tvOS)
     private var playbackHealth: some View {
         let stalls = controller.stalls
         let label = TVPlaybackInfoPresentation.healthLabel(stalls: stalls)
@@ -2596,521 +2883,679 @@ private struct PlaybackStatsView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Playback health, \(label)")
     }
+    #endif
 
-    private var sourceCard: some View {
-        televisionCard("Source", systemImage: "film.stack") {
-            if let source = controller.decision?.source {
-                let resolution = source.width.flatMap { width in
-                    source.height.map { "\(width) × \($0)" }
-                } ?? "Unknown"
-                let video = [
-                    source.videoCodec?.uppercased(),
-                    source.bitDepth.map { "\($0)-bit" },
-                    source.hdrFormat ?? source.hdr?.uppercased(),
-                ]
-                    .compactMap { $0 }
-                    .joined(separator: " · ")
-                televisionRow("Resolution", resolution)
-                televisionRow("Video", video.isEmpty ? "Unknown" : video)
-                televisionRow("Container", source.container?.uppercased() ?? "Unknown")
-                if let bitrate = source.bitrate {
-                    televisionRow("Bitrate", bitRate(bitrate))
+    // MARK: - Ledger layout
+
+    @ViewBuilder
+    private func ledgerColumns(_ sections: [PlaybackLedgerSection]) -> some View {
+        VStack(alignment: .leading, spacing: ledgerSpacing) {
+            if ledgerUsesTwoColumns {
+                HStack(alignment: .top, spacing: ledgerColumnGap) {
+                    ledgerColumn(sections.filter { $0.column == .left })
+                    ledgerColumn(sections.filter { $0.column == .right })
                 }
             } else {
-                televisionEmpty("Waiting for source details")
-            }
-        }
-    }
-
-    private var outputCard: some View {
-        televisionCard("Playing", systemImage: "play.rectangle.on.rectangle") {
-            let size = controller.presentationSize
-            if size.width > 0 && size.height > 0 {
-                televisionRow("Output", "\(Int(size.width)) × \(Int(size.height))")
-            }
-            if let range = PlayerView.dynamicRangeSummary(
-                source: controller.decision?.source,
-                delivered: controller.deliveredRange,
-                displayHDR: Caps.displayIsHDR,
-                reasons: controller.decision?.reasons
-            ) {
-                televisionRow("Dynamic range", range)
-            }
-            if let bitrate = controller.observedBitrate, bitrate > 0 {
-                televisionRow("Observed bitrate", bitRate(Int(bitrate)))
-            } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-                televisionRow("Stream bitrate", bitRate(Int(bitrate)))
-            }
-            if let subtitle = controller.selectedSubtitle,
-               let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-                televisionRow("Subtitles", subtitleDescription(track, index: subtitle))
-            } else {
-                televisionRow("Subtitles", "Off")
-            }
-        }
-    }
-
-    private var serverCard: some View {
-        televisionCard("Server", systemImage: "server.rack") {
-            if controller.isVOD && controller.methodLabel.contains("cached") {
-                televisionRow("Status", "Served from cache", tone: .good)
-            } else if let status = controller.sessionStatus {
-                televisionRow(
-                    "Status",
-                    (status.suspended ?? false) ? "Holding buffer" : "Active",
-                    tone: .good
+                ledgerColumn(
+                    sections.filter { $0.column == .left }
+                        + sections.filter { $0.column == .right }
                 )
-                if let encoder = status.encoder ?? controller.encoder {
-                    televisionRow("Encoder", encoder)
-                }
-                if let speed = status.recentSpeed ?? status.speed {
-                    televisionRow(
-                        "Encode speed",
-                        String(format: "%.2f×", speed),
-                        tone: encodeTone(speed: speed, status: status)
-                    )
-                }
-                if let ahead = status.aheadSeconds {
-                    let held = (status.suspended ?? false)
-                        ? " · held\(holdReleaseDescription(status))"
-                        : ""
-                    televisionRow(
-                        "Buffer ahead",
-                        "\(max(0, ahead)) s\(held)",
-                        tone: runwayTone(Double(ahead), suspended: status.suspended ?? false)
-                    )
-                }
-                if let delivered = status.deliveredBps {
-                    televisionRow("Delivery", bitRate(delivered))
-                }
-                if let bytes = status.deliveredBytes {
-                    televisionRow("Transferred", byteCount(bytes))
-                }
-            } else {
-                televisionEmpty("Waiting for server details")
+            }
+
+            ledgerNotes(sections)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func ledgerColumn(_ sections: [PlaybackLedgerSection]) -> some View {
+        VStack(alignment: .leading, spacing: ledgerSpacing) {
+            ForEach(sections.filter { $0.rendersBox }) { section in
+                ledgerSection(section)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func televisionCard<Content: View>(
-        _ title: String,
-        systemImage: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Label(title.uppercased(), systemImage: systemImage)
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .tracking(1.15)
-                .foregroundStyle(.white.opacity(0.58))
+    private func ledgerSection(_ section: PlaybackLedgerSection) -> some View {
+        ledgerFocusable(
+            VStack(alignment: .leading, spacing: ledgerRowSpacing) {
+                Text(section.title.uppercased())
+                    .font(.system(size: ledgerSectionSize, weight: .bold, design: .rounded))
+                    .tracking(1)
+                    .foregroundStyle(Palette.accent)
 
-            content()
-        }
-        .padding(17)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: TVPlaybackInfoPresentation.cardMinimumHeight,
-            alignment: .topLeading
+                ledgerSectionRows(section)
+            }
+            .padding(ledgerSectionPadding)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(
+                .white.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: ledgerSectionCornerRadius, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: ledgerSectionCornerRadius, style: .continuous)
+                    .stroke(.white.opacity(0.07), lineWidth: 1)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(section.title)
         )
-        .background(
-            .white.opacity(0.055),
-            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(.white.opacity(0.08), lineWidth: 1)
-        }
-        .accessibilityElement(children: .contain)
     }
 
-    private func televisionRow(
-        _ label: String,
-        _ value: String,
-        tone: PlaybackStatTone = .neutral
+    /// The ledger is sized to fit a 1080p canvas without scrolling, but the
+    /// ScrollView stays as a safety net for smaller outputs. A section has to
+    /// be focusable or the remote can never reach the part that scrolled off.
+    private func ledgerFocusable<V: View>(_ view: V) -> some View {
+        #if os(tvOS)
+        return view.focusable(true)
+        #else
+        return view
+        #endif
+    }
+
+    @ViewBuilder
+    private func ledgerSectionRows(_ section: PlaybackLedgerSection) -> some View {
+        let rows = section.gridRows
+        if rows.isEmpty {
+            if let placeholder = section.placeholder {
+                Text(placeholder)
+                    .font(ledgerValueFont)
+                    .foregroundStyle(.white.opacity(0.48))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // Reached only when the section owns its notes; a section with
+                // nothing at all never draws a box in the first place.
+                ForEach(section.noteRows) { row in
+                    ledgerNoteRow(row)
+                }
+            }
+        } else if ledgerAllowsDenseColumns && section.prefersDenseColumns {
+            let split = (rows.count + 1) / 2
+            HStack(alignment: .top, spacing: ledgerColumnGap) {
+                ledgerRowStack(Array(rows.prefix(split)), section: section, dense: true)
+                ledgerRowStack(Array(rows.dropFirst(split)), section: section, dense: true)
+            }
+        } else {
+            ledgerRowStack(rows, section: section, dense: false)
+        }
+    }
+
+    private func ledgerRowStack(
+        _ rows: [PlaybackLedgerRow],
+        section: PlaybackLedgerSection,
+        dense: Bool
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.48))
-            Text(value)
-                .font(.system(
-                    size: TVPlaybackInfoPresentation.valueFontSize,
-                    weight: .semibold,
-                    design: .rounded
-                ))
-                .foregroundStyle(tone.color)
-                .lineLimit(2)
-                .minimumScaleFactor(0.82)
+        VStack(alignment: .leading, spacing: ledgerRowSpacing) {
+            ForEach(rows) { row in
+                ledgerGridRow(row, numeric: section.prefersNumericAlignment, dense: dense)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// Label in a fixed gutter, value filling the rest on the same baseline.
+    /// Grid values are capped at a fixed number of lines so nothing here can
+    /// stretch a column again — the long ones live in the notes strip.
+    private func ledgerGridRow(
+        _ row: PlaybackLedgerRow,
+        numeric: Bool,
+        dense: Bool
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: ledgerRowGap) {
+            Text(row.label)
+                .font(ledgerLabelFont)
+                .foregroundStyle(ledgerLabelColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(
+                    width: dense ? ledgerDenseGutterWidth : ledgerGutterWidth,
+                    alignment: .leading
+                )
+
+            ledgerValueText(row, numeric: numeric)
+                .lineLimit(ledgerGridValueLineLimit)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: numeric ? .trailing : .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 
-    private func televisionEmpty(_ message: String) -> some View {
-        Text(message)
-            .font(.system(size: 17, weight: .medium, design: .rounded))
-            .foregroundStyle(.white.opacity(0.48))
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    #else
-    private var compactBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Text("Playback info")
-                        .font(.system(.headline, design: .monospaced))
-                        .foregroundColor(.white)
-                    Spacer()
-                    modeSelector
-                    closeButton
-                }
-                Divider().overlay(Palette.outline)
-                row("Method", controller.methodLabel)
-                row("Position", "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))")
-                sourceRows
-                outputRows
-                serverRows
-                if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-                    row("Reason", reasons.joined(separator: "; "))
-                }
-            }
-            .padding(10)
-        }
-        .frame(maxWidth: 400, maxHeight: 380)
-        .background(panelSurface, in: RoundedRectangle(cornerRadius: 10))
-    }
-    #endif
-
-    private var debugBody: some View {
-        GeometryReader { geometry in
-            let panelWidth = min(
-                debugMaxWidth,
-                max(0, geometry.size.width - (debugOuterPadding * 2))
-            )
-            let panelHeight = min(
-                debugMaxHeight,
-                max(0, geometry.size.height - (debugOuterPadding * 2))
-            )
-
-            ZStack {
-                Color.black.opacity(0.52)
-                    .ignoresSafeArea()
-
-                VStack(alignment: .leading, spacing: debugSpacing) {
-                    HStack(spacing: debugSpacing) {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text("Playback debug")
-                                .font(.system(
-                                    size: debugTitleSize,
-                                    weight: .bold,
-                                    design: .rounded
-                                ))
-                                .foregroundStyle(.white)
-                            #if !os(tvOS)
-                            Text("Live player, network, and server diagnostics")
-                                .font(.system(
-                                    size: debugDetailSize,
-                                    weight: .medium,
-                                    design: .rounded
-                                ))
-                                .foregroundStyle(.white.opacity(0.56))
-                            #endif
-                        }
-                        Spacer(minLength: debugSpacing)
-                        modeSelector
-                        closeButton
-                    }
-
+    @ViewBuilder
+    private func ledgerNotes(_ sections: [PlaybackLedgerSection]) -> some View {
+        let notes = sections.flatMap { $0.stripNoteRows }
+        if !notes.isEmpty {
+            // The strip is the last child of the column stack, so on the
+            // television it has to be focusable for the same reason a section
+            // does: with nothing focusable below the final section box the
+            // remote can never scroll far enough to reveal it.
+            ledgerFocusable(
+                VStack(alignment: .leading, spacing: ledgerRowSpacing) {
                     Divider().overlay(.white.opacity(0.12))
 
-                    ScrollView {
-                        #if os(tvOS)
-                        debugTelevisionColumns
-                        #else
-                        LazyVGrid(
-                            columns: [GridItem(
-                                .adaptive(minimum: debugColumnWidth),
-                                spacing: debugSpacing
-                            )],
-                            alignment: .leading,
-                            spacing: debugSpacing
-                        ) {
-                            debugPlaybackSection
-                            debugSourceSection
-                            debugDecodingSection
-                            debugNetworkSection
-                            debugServerSection
-                        }
-                        #endif
+                    Text("Notes")
+                        .font(.system(size: ledgerSectionSize, weight: .bold, design: .rounded))
+                        .tracking(1)
+                        .foregroundStyle(.white.opacity(0.5))
+
+                    ForEach(notes) { row in
+                        ledgerNoteRow(row)
                     }
                 }
-                .padding(debugPanelPadding)
-                .frame(width: panelWidth, height: panelHeight)
-                .background(
-                    panelSurface,
-                    in: RoundedRectangle(cornerRadius: debugCornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: debugCornerRadius, style: .continuous)
-                        .stroke(.white.opacity(0.13), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.58), radius: 28, y: 12)
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Notes")
+            )
         }
     }
 
-    #if os(tvOS)
-    private var debugTelevisionColumns: some View {
-        HStack(alignment: .top, spacing: debugSpacing) {
-            VStack(spacing: debugSpacing) {
-                debugPlaybackSection
-                debugNetworkSection
-            }
-            .frame(maxWidth: .infinity, alignment: .top)
+    /// The gutter is the hanging indent: wrapped lines line up under the
+    /// first line of the value, never under the label.
+    private func ledgerNoteRow(_ row: PlaybackLedgerRow) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: ledgerRowGap) {
+            Text(row.label)
+                .font(ledgerLabelFont)
+                .foregroundStyle(ledgerLabelColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: ledgerGutterWidth, alignment: .leading)
 
-            VStack(spacing: debugSpacing) {
-                debugSourceSection
-                debugDecodingSection
-            }
-            .frame(maxWidth: .infinity, alignment: .top)
-
-            debugServerSection
-                .frame(maxWidth: .infinity, alignment: .top)
+            ledgerValueText(row, numeric: false)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(ledgerNoteAccessibilityLabel(row))
     }
-    #endif
 
-    private var debugPlaybackSection: some View {
-        debugSection("Playback") {
-            debugRow("Build", buildLabel)
-            debugRow("Method", controller.methodLabel)
-            debugRow(
+    /// The decision reason used to be a footer that announced itself as one
+    /// sentence. As a note row the combined children would read out the bare
+    /// word "Reason" first, so it keeps the footer's spoken form.
+    private func ledgerNoteAccessibilityLabel(_ row: PlaybackLedgerRow) -> String {
+        row.label == "Reason"
+            ? "Playback reason, \(row.value)"
+            : "\(row.label), \(row.value)"
+    }
+
+    private func ledgerValueText(_ row: PlaybackLedgerRow, numeric: Bool) -> some View {
+        let text = Text(row.value)
+            .font(numeric ? ledgerValueFont.monospacedDigit() : ledgerValueFont)
+            .foregroundStyle(row.tone.color)
+        #if os(iOS)
+        return text.textSelection(.enabled)
+        #else
+        return text
+        #endif
+    }
+
+    // MARK: - Debug field set
+
+    private var debugSections: [PlaybackLedgerSection] {
+        [
+            PlaybackLedgerSection("Playback", column: .left, rows: debugPlaybackRows),
+            PlaybackLedgerSection("Source", column: .left, rows: debugSourceRows),
+            PlaybackLedgerSection("Now decoding", column: .left, rows: debugDecodingRows),
+            PlaybackLedgerSection("Network", column: .right, rows: debugNetworkRows),
+            PlaybackLedgerSection(
+                "Server",
+                column: .right,
+                keepsNotesInBox: true,
+                rows: debugServerRows
+            ),
+        ]
+    }
+
+    private var debugPlaybackRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow("Build", buildLabel),
+            ledgerRow("Method", controller.methodLabel),
+            ledgerRow(
                 "Transport",
                 controller.currentSessionId == nil
                     ? "Continuous file · range requests · Apple AVPlayer"
                     : "Segmented HLS · Apple AVPlayer"
-            )
-            debugRow(
+            ),
+            ledgerRow(
                 "Position",
                 "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
-            )
-            debugRow("File ID", controller.decision.map { "#\($0.fileId)" } ?? "—")
-            if let session = controller.currentSessionId {
-                debugRow("Session", session)
-            }
-            if let reasons = controller.decision?.reasons, !reasons.isEmpty {
-                debugRow("Reason", reasons.joined(separator: "; "))
-            }
+            ),
+            ledgerRow("File ID", controller.decision.map { "#\($0.fileId)" } ?? "—"),
+        ]
+        if let session = controller.currentSessionId {
+            rows.append(ledgerRow("Session", session))
         }
+        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
+            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
+        }
+        return rows
     }
 
-    private var debugSourceSection: some View {
-        debugSection("Source") {
-            if let source = controller.decision?.source {
-                let video = [
-                    source.videoCodec?.uppercased(),
-                    source.videoProfile,
-                    source.bitDepth.map { "\($0)-bit" },
-                    source.hdrFormat ?? source.hdr?.uppercased(),
-                ].compactMap { $0 }.joined(separator: " · ")
-                debugRow("Video", video.isEmpty ? "—" : video)
-                debugRow(
-                    "Resolution",
-                    source.width.flatMap { width in source.height.map { "\(width)×\($0)" } } ?? "—"
-                )
-                debugRow("Bitrate", source.bitrate.map(bitRate) ?? "—")
-                debugRow("Container", source.container?.uppercased() ?? "—")
-            }
-            if let audio = selectedAudioDescription {
-                debugRow("Audio", audio)
-            }
-            debugRow("AV offset", "\(controller.decision?.audioOffsetMs ?? 0) ms")
+    private var debugSourceRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = []
+        if let source = controller.decision?.source {
+            let video = [
+                source.videoCodec?.uppercased(),
+                source.videoProfile,
+                source.bitDepth.map { "\($0)-bit" },
+                source.hdrFormat ?? source.hdr?.uppercased(),
+            ].compactMap { $0 }.joined(separator: " · ")
+            rows.append(ledgerRow("Video", video.isEmpty ? "—" : video))
+            rows.append(ledgerRow(
+                "Resolution",
+                source.width.flatMap { width in source.height.map { "\(width)×\($0)" } } ?? "—"
+            ))
+            rows.append(ledgerRow("Bitrate", source.bitrate.map(bitRate) ?? "—"))
+            rows.append(ledgerRow("Container", source.container?.uppercased() ?? "—"))
         }
+        if let audio = selectedAudioDescription {
+            rows.append(ledgerRow("Audio", audio))
+        }
+        rows.append(ledgerRow("AV offset", "\(controller.decision?.audioOffsetMs ?? 0) ms"))
+        return rows
     }
 
-    private var debugDecodingSection: some View {
+    private var debugDecodingRows: [PlaybackLedgerRow] {
         let snapshot = controller.currentDiagnosticSnapshot
-        return debugSection("Now decoding") {
-            let size = controller.presentationSize
-            debugRow(
+        let size = controller.presentationSize
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow(
                 "Resolution",
                 size.width > 0 && size.height > 0
                     ? "\(Int(size.width))×\(Int(size.height))"
                     : "—"
             )
-            if let range = PlayerView.dynamicRangeSummary(
-                source: controller.decision?.source,
-                delivered: controller.deliveredRange,
-                displayHDR: Caps.displayIsHDR,
-                reasons: controller.decision?.reasons
-            ) {
-                debugRow("Dynamic range", range)
-            }
-            debugRow(
-                "Buffer",
-                snapshot.runway.map { String(format: "%.1f s", $0) } ?? "—",
-                tone: runwayTone(snapshot.runway)
-            )
-            debugRow(
-                "Player state",
-                snapshot.timeControlStatus ?? "unknown",
-                tone: playerStateTone(snapshot.timeControlStatus)
-            )
-            if let waiting = snapshot.waitingReason {
-                debugRow("Waiting reason", waiting, tone: .warning)
-            }
-            debugRow(
-                "Buffer empty",
-                yesNo(snapshot.playbackBufferEmpty),
-                tone: snapshot.playbackBufferEmpty == true ? .critical : .good
-            )
-            debugRow(
-                "Likely to keep up",
-                yesNo(snapshot.playbackLikelyToKeepUp),
-                tone: snapshot.playbackLikelyToKeepUp == false ? .critical : .good
-            )
-            debugRow("Buffer full", yesNo(snapshot.playbackBufferFull))
-            debugRow(
-                "Stalls",
-                snapshot.accessStalls.map(String.init) ?? "—",
-                tone: stallTone(snapshot.accessStalls)
-            )
-            debugRow("Subtitles", selectedSubtitleDescription)
+        ]
+        if let range = PlayerView.dynamicRangeSummary(
+            source: controller.decision?.source,
+            delivered: controller.deliveredRange,
+            displayHDR: Caps.displayIsHDR,
+            reasons: controller.decision?.reasons
+        ) {
+            rows.append(ledgerRow("Dynamic range", range))
         }
+        rows.append(ledgerRow(
+            "Buffer",
+            snapshot.runway.map { String(format: "%.1f s", $0) } ?? "—",
+            tone: runwayTone(snapshot.runway)
+        ))
+        rows.append(ledgerRow(
+            "Player state",
+            snapshot.timeControlStatus ?? "unknown",
+            tone: playerStateTone(snapshot.timeControlStatus)
+        ))
+        if let waiting = snapshot.waitingReason {
+            rows.append(ledgerRow("Waiting reason", waiting, tone: .warning))
+        }
+        rows.append(ledgerRow(
+            "Buffer empty",
+            yesNo(snapshot.playbackBufferEmpty),
+            tone: snapshot.playbackBufferEmpty == true ? .critical : .good
+        ))
+        rows.append(ledgerRow(
+            "Likely to keep up",
+            yesNo(snapshot.playbackLikelyToKeepUp),
+            tone: snapshot.playbackLikelyToKeepUp == false ? .critical : .good
+        ))
+        rows.append(ledgerRow("Buffer full", yesNo(snapshot.playbackBufferFull)))
+        rows.append(ledgerRow(
+            "Stalls",
+            snapshot.accessStalls.map(String.init) ?? "—",
+            tone: stallTone(snapshot.accessStalls)
+        ))
+        rows.append(ledgerRow("Subtitles", selectedSubtitleDescription))
+        return rows
     }
 
-    private var debugNetworkSection: some View {
+    private var debugNetworkRows: [PlaybackLedgerRow] {
         let snapshot = controller.currentDiagnosticSnapshot
-        return debugSection("Network") {
-            debugRow(
+        return [
+            ledgerRow(
                 "Delivery rate",
                 controller.sessionStatus?.deliveredBps.map(bitRate) ?? "—",
                 tone: networkTone
-            )
-            debugRow("Observed rate", snapshot.observedBitrateBps.map { bitRate(Int($0)) } ?? "—")
-            debugRow("Stream rate", snapshot.indicatedBitrateBps.map { bitRate(Int($0)) } ?? "—")
-            debugRow("Requests", snapshot.mediaRequests.map(String.init) ?? "—")
-            debugRow(
+            ),
+            ledgerRow("Observed rate", snapshot.observedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
+            ledgerRow("Stream rate", snapshot.indicatedBitrateBps.map { bitRate(Int($0)) } ?? "—"),
+            ledgerRow("Requests", snapshot.mediaRequests.map(String.init) ?? "—"),
+            ledgerRow(
                 "Downloaded media",
                 snapshot.downloadedDuration.map { String(format: "%.1f s", $0) } ?? "—"
-            )
-            debugRow("Transferred", snapshot.bytesTransferred.map(byteCount) ?? "—")
-            debugRow(
+            ),
+            ledgerRow("Transferred", snapshot.bytesTransferred.map(byteCount) ?? "—"),
+            ledgerRow(
                 "Transfer time",
                 snapshot.transferDuration.map { String(format: "%.2f s", $0) } ?? "—"
-            )
-        }
+            ),
+        ]
     }
 
-    private var debugServerSection: some View {
-        debugSection("Server") {
-            if controller.isVOD {
-                debugRow("Stream", "Already transcoded · served from cache", tone: .good)
-            } else if let status = controller.sessionStatus {
-                debugRow("Encoder", status.encoder ?? controller.encoder ?? "—")
-                let speed = status.recentSpeed ?? status.speed
-                debugRow(
-                    "Encode speed",
-                    speed.map { String(format: "%.2f×", $0) } ?? "—",
-                    tone: speed.map { encodeTone(speed: $0, status: status) } ?? .muted
+    private var debugServerRows: [PlaybackLedgerRow] {
+        if controller.isVOD {
+            return [
+                ledgerRow("Stream", "Already transcoded · served from cache", tone: .good)
+            ]
+        }
+        guard let status = controller.sessionStatus else {
+            return [ledgerRow("Status", "No server-side session", tone: .muted)]
+        }
+        let speed = status.recentSpeed ?? status.speed
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow("Encoder", status.encoder ?? controller.encoder ?? "—"),
+            ledgerRow(
+                "Encode speed",
+                speed.map { String(format: "%.2f×", $0) } ?? "—",
+                tone: speed.map { encodeTone(speed: $0, status: status) } ?? .muted
+            ),
+            ledgerRow(
+                "Server ahead",
+                status.aheadSeconds.map { "\(max(0, $0)) s" } ?? "—",
+                tone: runwayTone(
+                    status.aheadSeconds.map(Double.init),
+                    suspended: status.suspended ?? false
                 )
-                debugRow(
+            ),
+            ledgerRow("Ahead bytes", status.aheadBytes.map(byteCount) ?? "—"),
+            ledgerRow("Produced", status.outTimeMs.map { formatTime($0) } ?? "—"),
+            ledgerRow("Pacing", status.readrate.map { String(format: "%.2f×", $0) } ?? "—"),
+            ledgerRow(
+                "Held",
+                yesNo(status.suspended),
+                tone: status.suspended == true ? .good : .neutral
+            ),
+        ]
+        if let reason = status.holdReason {
+            rows.append(ledgerRow("Hold reason", reason, tone: .good))
+        }
+        rows.append(ledgerRow(
+            "Suspend count",
+            status.suspendCount.map(String.init) ?? "0",
+            tone: (status.suspendCount ?? 0) > 8 ? .warning : .neutral
+        ))
+        rows.append(ledgerRow("Delivered", status.deliveredBytes.map(byteCount) ?? "—"))
+        rows.append(ledgerRow(
+            "Delivery idle",
+            status.deliveredIdleMs.map { "\($0) ms" } ?? "—",
+            tone: idleTone(
+                status.deliveredIdleMs,
+                suspended: status.suspended ?? false
+            )
+        ))
+        if let request = status.lastRequest {
+            rows.append(ledgerRow("Last request", request))
+        }
+        rows.append(ledgerRow(
+            "Request idle",
+            status.idleSeconds.map { "\($0) s" } ?? "—",
+            tone: requestIdleTone(
+                status.idleSeconds,
+                suspended: status.suspended ?? false
+            )
+        ))
+        if let shape = status.playlistShape {
+            rows.append(ledgerRow("Playlist", shape))
+        }
+        rows.append(ledgerRow("Published end", status.publishedEndMs.map { "\($0) ms" } ?? "—"))
+        rows.append(ledgerRow("Fetched end", status.fetchedEndMs.map { "\($0) ms" } ?? "—"))
+        return rows
+    }
+
+    // MARK: - Standard field set
+
+    /// Standard keeps each platform's own field set and value text; only the
+    /// arrangement is shared.
+    private var standardSections: [PlaybackLedgerSection] {
+        #if os(tvOS)
+        return televisionStandardSections
+        #else
+        return compactStandardSections
+        #endif
+    }
+
+    #if os(tvOS)
+    private var televisionStandardSections: [PlaybackLedgerSection] {
+        [
+            PlaybackLedgerSection("Playback", column: .left, rows: televisionPlaybackRows),
+            PlaybackLedgerSection(
+                "Source",
+                column: .left,
+                placeholder: "Waiting for source details",
+                rows: televisionSourceRows
+            ),
+            PlaybackLedgerSection("Now decoding", column: .left, rows: televisionDecodingRows),
+            PlaybackLedgerSection(
+                "Server",
+                column: .right,
+                placeholder: "Waiting for server details",
+                rows: televisionServerRows
+            ),
+        ]
+    }
+
+    /// The header already carries method and position on the television, so
+    /// this section exists only to route the decision reason into the notes.
+    private var televisionPlaybackRows: [PlaybackLedgerRow] {
+        guard let reasons = controller.decision?.reasons, !reasons.isEmpty else { return [] }
+        return [ledgerRow("Reason", reasons.joined(separator: " · "))]
+    }
+
+    private var televisionSourceRows: [PlaybackLedgerRow] {
+        guard let source = controller.decision?.source else { return [] }
+        let resolution = source.width.flatMap { width in
+            source.height.map { "\(width) × \($0)" }
+        } ?? "Unknown"
+        let video = [
+            source.videoCodec?.uppercased(),
+            source.bitDepth.map { "\($0)-bit" },
+            source.hdrFormat ?? source.hdr?.uppercased(),
+        ]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow("Resolution", resolution),
+            ledgerRow("Video", video.isEmpty ? "Unknown" : video),
+            ledgerRow("Container", source.container?.uppercased() ?? "Unknown"),
+        ]
+        if let bitrate = source.bitrate {
+            rows.append(ledgerRow("Bitrate", bitRate(bitrate)))
+        }
+        return rows
+    }
+
+    private var televisionDecodingRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = []
+        let size = controller.presentationSize
+        if size.width > 0 && size.height > 0 {
+            rows.append(ledgerRow("Output", "\(Int(size.width)) × \(Int(size.height))"))
+        }
+        if let range = PlayerView.dynamicRangeSummary(
+            source: controller.decision?.source,
+            delivered: controller.deliveredRange,
+            displayHDR: Caps.displayIsHDR,
+            reasons: controller.decision?.reasons
+        ) {
+            rows.append(ledgerRow("Dynamic range", range))
+        }
+        if let bitrate = controller.observedBitrate, bitrate > 0 {
+            rows.append(ledgerRow("Observed bitrate", bitRate(Int(bitrate))))
+        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
+            rows.append(ledgerRow("Stream bitrate", bitRate(Int(bitrate))))
+        }
+        if let subtitle = controller.selectedSubtitle,
+           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
+            rows.append(ledgerRow("Subtitles", subtitleDescription(track, index: subtitle)))
+        } else {
+            rows.append(ledgerRow("Subtitles", "Off"))
+        }
+        return rows
+    }
+
+    private var televisionServerRows: [PlaybackLedgerRow] {
+        if controller.isVOD && controller.methodLabel.contains("cached") {
+            return [ledgerRow("Status", "Served from cache", tone: .good)]
+        }
+        guard let status = controller.sessionStatus else { return [] }
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow(
+                "Status",
+                (status.suspended ?? false) ? "Holding buffer" : "Active",
+                tone: .good
+            )
+        ]
+        if let encoder = status.encoder ?? controller.encoder {
+            rows.append(ledgerRow("Encoder", encoder))
+        }
+        if let speed = status.recentSpeed ?? status.speed {
+            rows.append(ledgerRow(
+                "Encode speed",
+                String(format: "%.2f×", speed),
+                tone: encodeTone(speed: speed, status: status)
+            ))
+        }
+        if let ahead = status.aheadSeconds {
+            let held = (status.suspended ?? false)
+                ? " · held\(holdReleaseDescription(status))"
+                : ""
+            rows.append(ledgerRow(
+                "Buffer ahead",
+                "\(max(0, ahead)) s\(held)",
+                tone: runwayTone(Double(ahead), suspended: status.suspended ?? false)
+            ))
+        }
+        if let delivered = status.deliveredBps {
+            rows.append(ledgerRow("Delivery", bitRate(delivered)))
+        }
+        if let bytes = status.deliveredBytes {
+            rows.append(ledgerRow("Transferred", byteCount(bytes)))
+        }
+        return rows
+    }
+    #else
+    private var compactStandardSections: [PlaybackLedgerSection] {
+        [
+            PlaybackLedgerSection("Playback", column: .left, rows: compactPlaybackRows),
+            PlaybackLedgerSection("Source", column: .left, rows: compactSourceRows),
+            PlaybackLedgerSection("Now decoding", column: .left, rows: compactDecodingRows),
+            PlaybackLedgerSection(
+                "Server",
+                column: .right,
+                keepsNotesInBox: true,
+                rows: compactServerRows
+            ),
+        ]
+    }
+
+    private var compactPlaybackRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow("Method", controller.methodLabel),
+            ledgerRow(
+                "Position",
+                "\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))"
+            ),
+        ]
+        if let reasons = controller.decision?.reasons, !reasons.isEmpty {
+            rows.append(ledgerRow("Reason", reasons.joined(separator: "; ")))
+        }
+        return rows
+    }
+
+    private var compactSourceRows: [PlaybackLedgerRow] {
+        guard let source = controller.decision?.source else { return [] }
+        let resolution = source.width.flatMap { width in
+            source.height.map { "\(width)×\($0)" }
+        } ?? "—"
+        let video = [
+            source.videoCodec?.uppercased(),
+            source.bitDepth.map { "\($0)-bit" },
+            source.hdrFormat ?? source.hdr?.uppercased(),
+        ]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+        var rows: [PlaybackLedgerRow] = [
+            ledgerRow("Source", "\(resolution) · \(video.isEmpty ? "—" : video)"),
+            ledgerRow("Container", source.container?.uppercased() ?? "—"),
+        ]
+        if let bitrate = source.bitrate {
+            rows.append(ledgerRow("Source rate", bitRate(bitrate)))
+        }
+        return rows
+    }
+
+    private var compactDecodingRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = []
+        let size = controller.presentationSize
+        if size.width > 0 && size.height > 0 {
+            rows.append(ledgerRow("Output", "\(Int(size.width))×\(Int(size.height))"))
+        }
+        // The badge says it in three characters; this says it in words, with
+        // the server's own reason for the difference.
+        if let range = PlayerView.dynamicRangeSummary(
+            source: controller.decision?.source,
+            delivered: controller.deliveredRange,
+            displayHDR: Caps.displayIsHDR,
+            reasons: controller.decision?.reasons
+        ) {
+            rows.append(ledgerRow("Dynamic range", range))
+        }
+        if let bitrate = controller.observedBitrate, bitrate > 0 {
+            rows.append(ledgerRow("Observed rate", bitRate(Int(bitrate))))
+        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
+            rows.append(ledgerRow("Stream rate", bitRate(Int(bitrate))))
+        }
+        if let stalls = controller.stalls {
+            rows.append(ledgerRow("Player stalls", String(stalls)))
+        }
+        return rows
+    }
+
+    private var compactServerRows: [PlaybackLedgerRow] {
+        var rows: [PlaybackLedgerRow] = []
+        if controller.isVOD && controller.methodLabel.contains("cached") {
+            rows.append(ledgerRow("Server", "Already transcoded · served from cache"))
+        } else if let status = controller.sessionStatus {
+            if let encoder = status.encoder ?? controller.encoder {
+                rows.append(ledgerRow("Encoder", encoder))
+            }
+            if let speed = status.recentSpeed ?? status.speed {
+                rows.append(ledgerRow("Encode speed", String(format: "%.2f×", speed)))
+            }
+            if let ahead = status.aheadSeconds {
+                let release = holdReleaseDescription(status)
+                rows.append(ledgerRow(
                     "Server ahead",
-                    status.aheadSeconds.map { "\(max(0, $0)) s" } ?? "—",
-                    tone: runwayTone(
-                        status.aheadSeconds.map(Double.init),
-                        suspended: status.suspended ?? false
-                    )
-                )
-                debugRow("Ahead bytes", status.aheadBytes.map(byteCount) ?? "—")
-                debugRow("Produced", status.outTimeMs.map { formatTime($0) } ?? "—")
-                debugRow("Pacing", status.readrate.map { String(format: "%.2f×", $0) } ?? "—")
-                debugRow(
-                    "Held",
-                    yesNo(status.suspended),
-                    tone: status.suspended == true ? .good : .neutral
-                )
-                if let reason = status.holdReason {
-                    debugRow("Hold reason", reason, tone: .good)
-                }
-                debugRow(
-                    "Suspend count",
-                    status.suspendCount.map(String.init) ?? "0",
-                    tone: (status.suspendCount ?? 0) > 8 ? .warning : .neutral
-                )
-                debugRow("Delivered", status.deliveredBytes.map(byteCount) ?? "—")
-                debugRow(
-                    "Delivery idle",
-                    status.deliveredIdleMs.map { "\($0) ms" } ?? "—",
-                    tone: idleTone(
-                        status.deliveredIdleMs,
-                        suspended: status.suspended ?? false
-                    )
-                )
-                if let request = status.lastRequest { debugRow("Last request", request) }
-                debugRow(
-                    "Request idle",
-                    status.idleSeconds.map { "\($0) s" } ?? "—",
-                    tone: requestIdleTone(
-                        status.idleSeconds,
-                        suspended: status.suspended ?? false
-                    )
-                )
-                if let shape = status.playlistShape { debugRow("Playlist", shape) }
-                debugRow("Published end", status.publishedEndMs.map { "\($0) ms" } ?? "—")
-                debugRow("Fetched end", status.fetchedEndMs.map { "\($0) ms" } ?? "—")
-            } else {
-                debugRow("Status", "No server-side session", tone: .muted)
+                    "\(max(0, ahead)) s\((status.suspended ?? false) ? " · held\(release)" : "")"
+                ))
+            }
+            if let delivered = status.deliveredBps {
+                rows.append(ledgerRow("Delivery rate", bitRate(delivered)))
+            }
+            if let bytes = status.deliveredBytes {
+                rows.append(ledgerRow("Delivered", byteCount(bytes)))
             }
         }
-    }
-
-    private func debugSection<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: debugRowSpacing) {
-            Text(title.uppercased())
-                .font(.system(size: debugSectionSize, weight: .bold, design: .rounded))
-                .tracking(1)
-                .foregroundStyle(Palette.accent)
-            content()
+        if let subtitle = controller.selectedSubtitle,
+           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
+            rows.append(ledgerRow("Subtitles", subtitleDescription(track, index: subtitle)))
         }
-        .padding(debugSectionPadding)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(
-            .white.opacity(0.045),
-            in: RoundedRectangle(cornerRadius: debugSectionCornerRadius, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: debugSectionCornerRadius, style: .continuous)
-                .stroke(.white.opacity(0.07), lineWidth: 1)
-        }
+        return rows
     }
+    #endif
 
-    private func debugRow(
+    private func ledgerRow(
         _ label: String,
         _ value: String,
         tone: PlaybackStatTone = .neutral
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: debugRowGap) {
-            Text(label)
-                .font(.system(size: debugLabelSize, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
-                .frame(width: debugLabelWidth, alignment: .leading)
-            #if os(iOS)
-            Text(value)
-                .font(.system(size: debugValueSize, weight: .medium, design: .monospaced))
-                .foregroundStyle(tone.color)
-                .textSelection(.enabled)
-            #else
-            Text(value)
-                .font(.system(size: debugValueSize, weight: .medium, design: .monospaced))
-                .foregroundStyle(tone.color)
-            #endif
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
+    ) -> PlaybackLedgerRow {
+        PlaybackLedgerRow(
+            label: label,
+            value: value,
+            tone: tone,
+            placement: PlaybackLedgerRow.resolvedPlacement(label: label, value: value)
+        )
     }
+
+    // MARK: - Shared values
 
     private var selectedAudioDescription: String? {
         let track = controller.audioTracks.first(where: { $0.index == controller.selectedAudio })
@@ -3235,201 +3680,6 @@ private struct PlaybackStatsView: View {
         }
     }
 
-    private var debugSpacing: CGFloat {
-        #if os(tvOS)
-        12
-        #else
-        8
-        #endif
-    }
-
-    private var debugRowSpacing: CGFloat {
-        #if os(tvOS)
-        7
-        #else
-        5
-        #endif
-    }
-
-    private var debugRowGap: CGFloat {
-        #if os(tvOS)
-        8
-        #else
-        6
-        #endif
-    }
-
-    private var debugLabelWidth: CGFloat {
-        #if os(tvOS)
-        104
-        #else
-        86
-        #endif
-    }
-
-    private var debugTitleSize: CGFloat {
-        #if os(tvOS)
-        26
-        #else
-        17
-        #endif
-    }
-
-    private var debugDetailSize: CGFloat {
-        #if os(tvOS)
-        14
-        #else
-        10
-        #endif
-    }
-
-    private var debugSectionSize: CGFloat {
-        #if os(tvOS)
-        14
-        #else
-        10
-        #endif
-    }
-
-    private var debugLabelSize: CGFloat {
-        #if os(tvOS)
-        12
-        #else
-        9
-        #endif
-    }
-
-    private var debugValueSize: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        10
-        #endif
-    }
-
-    private var debugColumnWidth: CGFloat {
-        #if os(tvOS)
-        300
-        #else
-        230
-        #endif
-    }
-
-    private var debugPanelPadding: CGFloat {
-        #if os(tvOS)
-        20
-        #else
-        12
-        #endif
-    }
-
-    private var debugSectionPadding: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        9
-        #endif
-    }
-
-    private var debugMaxWidth: CGFloat {
-        #if os(tvOS)
-        TVPlaybackInfoPresentation.debugPanelMaxWidth
-        #else
-        760
-        #endif
-    }
-
-    private var debugMaxHeight: CGFloat {
-        #if os(tvOS)
-        TVPlaybackInfoPresentation.debugPanelMaxHeight
-        #else
-        680
-        #endif
-    }
-
-    private var debugCornerRadius: CGFloat {
-        #if os(tvOS)
-        20
-        #else
-        12
-        #endif
-    }
-
-    private var debugSectionCornerRadius: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        9
-        #endif
-    }
-
-    private var debugOuterPadding: CGFloat {
-        #if os(tvOS)
-        TVPlaybackInfoPresentation.debugEdgeInset
-        #else
-        10
-        #endif
-    }
-
-    @ViewBuilder
-    private var sourceRows: some View {
-        if let source = controller.decision?.source {
-            let resolution = source.width.flatMap { width in source.height.map { "\(width)×\($0)" } } ?? "—"
-            let video = [source.videoCodec?.uppercased(), source.bitDepth.map { "\($0)-bit" },
-                         source.hdrFormat ?? source.hdr?.uppercased()]
-                .compactMap { $0 }.joined(separator: " · ")
-            row("Source", "\(resolution) · \(video.isEmpty ? "—" : video)")
-            row("Container", source.container?.uppercased() ?? "—")
-            if let bitrate = source.bitrate { row("Source rate", bitRate(bitrate)) }
-        }
-    }
-
-    @ViewBuilder
-    private var outputRows: some View {
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            row("Output", "\(Int(size.width))×\(Int(size.height))")
-        }
-        // The badge says it in three characters; this says it in words, with
-        // the server's own reason for the difference.
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: controller.decision?.reasons
-        ) {
-            row("Dynamic range", range)
-        }
-        if let bitrate = controller.observedBitrate, bitrate > 0 {
-            row("Observed rate", bitRate(Int(bitrate)))
-        } else if let bitrate = controller.indicatedBitrate, bitrate > 0 {
-            row("Stream rate", bitRate(Int(bitrate)))
-        }
-        if let stalls = controller.stalls { row("Player stalls", String(stalls)) }
-    }
-
-    @ViewBuilder
-    private var serverRows: some View {
-        if controller.isVOD && controller.methodLabel.contains("cached") {
-            row("Server", "Already transcoded · served from cache")
-        } else if let status = controller.sessionStatus {
-            if let encoder = status.encoder ?? controller.encoder { row("Encoder", encoder) }
-            if let speed = status.recentSpeed ?? status.speed {
-                row("Encode speed", String(format: "%.2f×", speed))
-            }
-            if let ahead = status.aheadSeconds {
-                let release = holdReleaseDescription(status)
-                row("Server ahead", "\(max(0, ahead)) s\((status.suspended ?? false) ? " · held\(release)" : "")")
-            }
-            if let delivered = status.deliveredBps { row("Delivery rate", bitRate(delivered)) }
-            if let bytes = status.deliveredBytes { row("Delivered", byteCount(bytes)) }
-        }
-        if let subtitle = controller.selectedSubtitle,
-           let track = controller.subtitles.first(where: { $0.index == subtitle }) {
-            row("Subtitles", subtitleDescription(track, index: subtitle))
-        }
-    }
-
     private func subtitleDescription(_ track: SubtitleTrack, index: Int) -> String {
         let delivery = track.isPGSOverlay
             ? (controller.pgsOverlayStatus.label ?? "PGS overlay")
@@ -3452,23 +3702,235 @@ private struct PlaybackStatsView: View {
         }
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(label)
-                .foregroundColor(labelColor)
-                .frame(width: 100, alignment: .leading)
-            Text(value)
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .font(.system(.caption, design: .monospaced))
-    }
-
     private func bitRate(_ bits: Int) -> String {
         String(format: "%.2f Mb/s", Double(bits) / 1_000_000.0)
     }
 
     private func byteCount(_ bytes: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    // MARK: - Ledger metrics
+
+    /// Two columns need real width. A phone has none to spare, so there the
+    /// sections stack in declared order instead of splitting.
+    private var ledgerUsesTwoColumns: Bool {
+        #if os(iOS)
+        return horizontalSizeClass != .compact
+        #else
+        return true
+        #endif
+    }
+
+    /// The television reads its grid from across a room and holds every value
+    /// to one line. A phone's value column is around 160pt wide — half that
+    /// once the sections split into two columns — which cuts values the notes
+    /// strip does not claim, so the compact size class gets a second line.
+    /// It stays a hard cap: two lines cannot stretch a column either.
+    private var ledgerGridValueLineLimit: Int {
+        #if os(iOS)
+        return horizontalSizeClass == .compact ? 2 : 1
+        #else
+        return 1
+        #endif
+    }
+
+    /// Two-up inside a section only works where the sub-columns stay wide
+    /// enough to hold a short value without wrapping.
+    private var ledgerAllowsDenseColumns: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private var ledgerTitleFont: Font {
+        #if os(tvOS)
+        return mode == .debug
+            ? .system(size: 26, weight: .bold, design: .rounded)
+            : .system(
+                size: TVPlaybackInfoPresentation.titleFontSize,
+                weight: .bold,
+                design: .rounded
+            )
+        #else
+        return mode == .debug
+            ? .system(size: 17, weight: .bold, design: .rounded)
+            : .system(.headline, design: .monospaced)
+        #endif
+    }
+
+    private var ledgerLabelFont: Font {
+        #if os(tvOS)
+        return mode == .debug
+            ? .system(size: 12, weight: .medium, design: .monospaced)
+            : .system(size: 14, weight: .medium, design: .rounded)
+        #else
+        return mode == .debug
+            ? .system(size: 9, weight: .medium, design: .monospaced)
+            : .system(.caption, design: .monospaced)
+        #endif
+    }
+
+    private var ledgerValueFont: Font {
+        #if os(tvOS)
+        return mode == .debug
+            ? .system(size: 13, weight: .medium, design: .monospaced)
+            : .system(
+                size: TVPlaybackInfoPresentation.valueFontSize,
+                weight: .semibold,
+                design: .rounded
+            )
+        #else
+        return mode == .debug
+            ? .system(size: 10, weight: .medium, design: .monospaced)
+            : .system(.caption, design: .monospaced)
+        #endif
+    }
+
+    private var ledgerLabelColor: Color {
+        mode == .debug ? .white.opacity(0.45) : labelColor
+    }
+
+    private var ledgerSectionSize: CGFloat {
+        #if os(tvOS)
+        return mode == .debug ? 14 : 15
+        #else
+        return mode == .debug ? 10 : 11
+        #endif
+    }
+
+    private var ledgerDetailSize: CGFloat {
+        #if os(tvOS)
+        14
+        #else
+        10
+        #endif
+    }
+
+    private var ledgerGutterWidth: CGFloat {
+        #if os(tvOS)
+        return mode == .debug ? 104 : 140
+        #else
+        return mode == .debug ? 86 : 100
+        #endif
+    }
+
+    private var ledgerDenseGutterWidth: CGFloat {
+        #if os(tvOS)
+        88
+        #else
+        70
+        #endif
+    }
+
+    private var ledgerSpacing: CGFloat {
+        #if os(tvOS)
+        12
+        #else
+        8
+        #endif
+    }
+
+    private var ledgerColumnGap: CGFloat {
+        #if os(tvOS)
+        18
+        #else
+        10
+        #endif
+    }
+
+    private var ledgerRowSpacing: CGFloat {
+        #if os(tvOS)
+        7
+        #else
+        5
+        #endif
+    }
+
+    private var ledgerRowGap: CGFloat {
+        #if os(tvOS)
+        8
+        #else
+        6
+        #endif
+    }
+
+    private var ledgerPanelPadding: CGFloat {
+        #if os(tvOS)
+        20
+        #else
+        12
+        #endif
+    }
+
+    private var ledgerSectionPadding: CGFloat {
+        #if os(tvOS)
+        13
+        #else
+        9
+        #endif
+    }
+
+    private var ledgerCornerRadius: CGFloat {
+        #if os(tvOS)
+        20
+        #else
+        12
+        #endif
+    }
+
+    private var ledgerSectionCornerRadius: CGFloat {
+        #if os(tvOS)
+        13
+        #else
+        9
+        #endif
+    }
+
+    private var ledgerEdgeInset: CGFloat {
+        #if os(tvOS)
+        return TVPlaybackInfoPresentation.debugEdgeInset
+        #else
+        return 10
+        #endif
+    }
+
+    private var ledgerWidthFraction: CGFloat {
+        #if os(tvOS)
+        return mode == .debug ? 0.66 : 0.52
+        #else
+        return 0.94
+        #endif
+    }
+
+    private var ledgerMaxWidth: CGFloat {
+        #if os(tvOS)
+        return mode == .debug
+            ? TVPlaybackInfoPresentation.debugPanelMaxWidth
+            : TVPlaybackInfoPresentation.panelMaxWidth
+        #else
+        return mode == .debug ? 760 : 560
+        #endif
+    }
+
+    private var ledgerMaxHeight: CGFloat {
+        #if os(tvOS)
+        return TVPlaybackInfoPresentation.debugPanelMaxHeight
+        #else
+        return 680
+        #endif
+    }
+
+    /// The panel stops short of the transport controls rather than floating
+    /// over them. This is the height of the transport row plus the overlay's
+    /// own padding, not the whole now-playing header beside it.
+    private var ledgerTransportReserve: CGFloat {
+        #if os(tvOS)
+        200
+        #else
+        130
+        #endif
     }
 }
