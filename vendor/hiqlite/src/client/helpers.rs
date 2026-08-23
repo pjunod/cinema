@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 use tokio::time;
 use tracing::{debug, error, warn};
 
+const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl Client {
     #[inline(always)]
     pub(crate) async fn build_addr(
@@ -144,24 +146,91 @@ impl Client {
         metrics: RaftMetrics<NodeId, Node>,
         leader: &Arc<RwLock<(NodeId, String)>>,
     ) -> Result<(), Error> {
-        let leader_id = match metrics.current_leader {
-            None => {
-                return Err(Error::Connect("Leader vote is in progress".to_string()));
-            }
-            Some(leader_id) => leader_id,
-        };
-
-        let leader_filtered = metrics
-            .membership_config
-            .nodes()
-            .filter(|(id, _)| *id == &leader_id)
-            .collect::<Vec<_>>();
-        assert_eq!(leader_filtered.len(), 1);
+        let (leader_id, node) = Self::leader_from_metrics(metrics)?;
 
         let mut lock = leader.write().await;
-        *lock = (*leader_filtered[0].0, leader_filtered[0].1.addr_api.clone());
+        *lock = (leader_id, node.addr_api);
 
         Ok(())
+    }
+
+    fn leader_from_metrics(metrics: RaftMetrics<NodeId, Node>) -> Result<(NodeId, Node), Error> {
+        let leader_id = metrics
+            .current_leader
+            .ok_or_else(|| Error::Connect("Leader vote is in progress".to_string()))?;
+        let mut leaders = metrics
+            .membership_config
+            .nodes()
+            .filter(|(id, _)| **id == leader_id);
+        let (_, node) = leaders.next().ok_or_else(|| {
+            Error::Config("Raft leader is absent from the authenticated membership".into())
+        })?;
+        if leaders.next().is_some() {
+            return Err(Error::Config(
+                "Raft leader is duplicated in the authenticated membership".into(),
+            ));
+        }
+        Ok((leader_id, node.clone()))
+    }
+
+    async fn discover_active_leader(
+        &self,
+        leader: &Arc<RwLock<(NodeId, String)>>,
+    ) -> Result<(NodeId, Node), Error> {
+        loop {
+            if let Some(state) = &self.inner.state {
+                #[cfg(feature = "sqlite")]
+                if Arc::ptr_eq(leader, &self.inner.leader_db) {
+                    let metrics = state.raft_db.raft.metrics().borrow().clone();
+                    match Self::leader_from_metrics(metrics) {
+                        Ok(found) => return Ok(found),
+                        Err(err) => warn!("Find DB leader error: {}", err),
+                    }
+                }
+
+                #[cfg(feature = "cache")]
+                if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+                    let metrics = state.raft_cache.raft.metrics().borrow().clone();
+                    match Self::leader_from_metrics(metrics) {
+                        Ok(found) => return Ok(found),
+                        Err(err) => warn!("Find cache leader error: {}", err),
+                    }
+                }
+            } else {
+                for addr in &self.inner.nodes {
+                    let scheme = if self.inner.tls_config.is_some() {
+                        "https"
+                    } else {
+                        "http"
+                    };
+
+                    #[cfg(feature = "sqlite")]
+                    if Arc::ptr_eq(leader, &self.inner.leader_db) {
+                        let url = format!("{scheme}://{addr}/cluster/metrics/sqlite");
+                        match self.get_metrics_remote(url).await {
+                            Ok(metrics) => match Self::leader_from_metrics(metrics) {
+                                Ok(found) => return Ok(found),
+                                Err(err) => warn!("Find DB leader error: {}", err),
+                            },
+                            Err(err) => error!("Error looking up DB metrics: {}", err),
+                        }
+                    }
+
+                    #[cfg(feature = "cache")]
+                    if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+                        let url = format!("{scheme}://{addr}/cluster/metrics/cache");
+                        match self.get_metrics_remote(url).await {
+                            Ok(metrics) => match Self::leader_from_metrics(metrics) {
+                                Ok(found) => return Ok(found),
+                                Err(err) => warn!("Find cache leader error: {}", err),
+                            },
+                            Err(err) => error!("Error looking up Cache metrics: {}", err),
+                        }
+                    }
+                }
+            }
+            time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Check if this instance is the current Raft cluster leader for the database.
@@ -231,24 +300,22 @@ impl Client {
         lock: &Arc<RwLock<(NodeId, String)>>,
         tx: &flume::Sender<ClientStreamReq>,
     ) -> bool {
-        let mut was_leader_error = false;
+        let Some((leader_id, node)) = err.is_forward_to_leader() else {
+            return false;
+        };
 
-        if let Some((id, node)) = err.is_forward_to_leader()
-            && let Some(leader_id) = id
-            && let Some(node) = node
-        {
-            was_leader_error = true;
+        if self.inner.proxy_mode {
+            // Reconnect through the same proxy endpoint. The proxy owns leader
+            // discovery; accepting an advertised node (or trying to discover
+            // a leader when the responder has none) would silently escape the
+            // caller's network and trust boundary.
+            tx.send_async(ClientStreamReq::LeaderChange((None, None)))
+                .await
+                .expect("the Client API WebSocket Manager to always be running");
+            return true;
+        }
 
-            if self.inner.proxy_mode {
-                // Reconnect through the same proxy endpoint. The proxy owns
-                // leader discovery; accepting the advertised node here would
-                // silently escape the caller's network and trust boundary.
-                tx.send_async(ClientStreamReq::LeaderChange((None, None)))
-                    .await
-                    .expect("the Client API WebSocket Manager to always be running");
-                return true;
-            }
-
+        if let (Some(leader_id), Some(node)) = (leader_id, node.clone()) {
             let api_addr = node.addr_api.clone();
             {
                 let mut lock = lock.write().await;
@@ -258,14 +325,38 @@ impl Client {
                     *lock = (leader_id, api_addr.clone());
                 }
             }
-
-            if was_leader_error {
-                tx.send_async(ClientStreamReq::LeaderChange((id, Some(node.clone()))))
-                    .await
-                    .expect("the Client API WebSocket Manager to always be running");
+            tx.send_async(ClientStreamReq::LeaderChange((Some(leader_id), Some(node))))
+                .await
+                .expect("the Client API WebSocket Manager to always be running");
+        } else {
+            // A resumed follower can reject a write before it has learned the
+            // new leader, yielding ForwardToLeader(None, None). That response
+            // is definitive evidence the write was not accepted. Recover in a
+            // detached, explicitly bounded task so raw Client callers cannot
+            // hang forever and cancellation by a higher-level timeout cannot
+            // interrupt recovery. Discovery is side-effect-free; only the
+            // stream manager atomically applies the authenticated result.
+            let client = self.clone();
+            let leader = Arc::clone(lock);
+            let tx = tx.clone();
+            let recovered = tokio::spawn(async move {
+                time::timeout(LEADER_RETRY_RECOVERY_TIMEOUT, async move {
+                    let (leader_id, node) = client.discover_active_leader(&leader).await?;
+                    tx.send_async(ClientStreamReq::LeaderChange((Some(leader_id), Some(node))))
+                        .await
+                        .expect("the Client API WebSocket Manager to always be running");
+                    Ok::<(), Error>(())
+                })
+                .await
+                .is_ok_and(|result| result.is_ok())
+            })
+            .await
+            .unwrap_or(false);
+            if !recovered {
+                return false;
             }
         }
 
-        was_leader_error
+        true
     }
 }

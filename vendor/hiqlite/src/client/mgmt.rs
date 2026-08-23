@@ -236,7 +236,10 @@ impl Client {
     }
 
     // This is separated from the `self.send_with_retry_db()` to avoid recursion on leader unreachable
-    async fn get_metrics_remote(&self, url: String) -> Result<RaftMetrics<NodeId, Node>, Error> {
+    pub(crate) async fn get_metrics_remote(
+        &self,
+        url: String,
+    ) -> Result<RaftMetrics<NodeId, Node>, Error> {
         // This should never be called if we have a local client with its own replicated data
         debug_assert!(
             self.inner.state.is_none(),
