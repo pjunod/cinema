@@ -350,6 +350,9 @@ slices:
   than the acceptance budget, a pinned isolated load-generator placement,
   per-node resource captures, medians, the pre-registered paired confidence
   intervals above, and reviewed budgets;
+  the remote/container runner, resource capture, campaign schema, and
+  pre-registered stopping validator are implemented separately from the raw
+  hardware evidence so CI cannot be mistaken for the named result;
 - **P2a — observer-safe metrics snapshots:** remove Store calls from the scrape
   path before Store instrumentation can observe itself;
 - **P2b — Store primitives:** RAII timing for `local_read`, `authority_read`,
