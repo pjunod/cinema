@@ -298,6 +298,8 @@ pub struct AppState {
     pub store: Arc<dyn Store>,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    /// Monotonic, Store-free authority for mutable media and readiness.
+    pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
     /// Bounded authenticated client for node-local activity snapshots.
@@ -425,6 +427,7 @@ impl AppState {
             replication,
             membership,
         } = config;
+        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -477,6 +480,7 @@ impl AppState {
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
             ),
+            serving,
             membership,
             media_pool,
             server_name,

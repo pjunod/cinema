@@ -1151,6 +1151,14 @@ impl GenerationManifest {
         if bytes != expected.bytes || hex::encode(hasher.finalize()) != expected.sha256 {
             return Ok(None);
         }
+        // Tokio may report the final `write_all` as accepted while its
+        // blocking file write is still in flight. Drain that write before
+        // Linux seals the memfd; otherwise the seal can win the race, leave
+        // an empty snapshot, and defer the write failure behind the seek.
+        snapshot
+            .flush()
+            .await
+            .map_err(|error| format!("flushing authenticated snapshot: {error}"))?;
         crate::fs_secure::seal_anonymous_memory_file(&snapshot)
             .map_err(|error| format!("sealing authenticated memory snapshot: {error}"))?;
         snapshot

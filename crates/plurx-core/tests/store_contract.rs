@@ -2433,7 +2433,7 @@ async fn open_contract_hiqlite_store(cluster: &ContractCluster) -> HiqliteAuthSt
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -2638,7 +2638,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -2678,6 +2678,9 @@ async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
     let cluster = ContractCluster::start().await;
     let mut opened = Vec::<Arc<dyn Store>>::new();
     for ordinal in 0..3 {
+        // These are direct voter addresses, not proxies. Rotating the roster
+        // deliberately puts a follower first for two clients; ordinary remote
+        // mode must discover the leader instead of pinning that first voter.
         let mut addresses = cluster.addresses.clone();
         addresses.rotate_left(ordinal);
         let client = Client::remote(
@@ -2685,7 +2688,7 @@ async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
             true,
             true,
             CONTRACT_API_SECRET.to_owned(),
-            true,
+            false,
             None,
         )
         .await
@@ -2742,7 +2745,7 @@ async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -2752,7 +2755,7 @@ async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -2935,7 +2938,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3003,7 +3006,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3015,7 +3018,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3540,7 +3543,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3697,7 +3700,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3839,7 +3842,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
@@ -3955,7 +3958,7 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
         true,
         true,
         CONTRACT_API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await
