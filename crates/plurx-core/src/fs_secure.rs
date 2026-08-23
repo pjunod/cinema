@@ -429,8 +429,11 @@ impl SecureDirectory {
                 libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )?);
             let before = file_identity(&file)?;
-            if !file.metadata()?.is_file() || before.size > max_bytes {
+            if !file.metadata()?.is_file() {
                 return Err(io::Error::other("bounded child is not a regular file"));
+            }
+            if before.size > max_bytes {
+                return Err(io::Error::other("bounded child exceeds its byte cap"));
             }
             let mut bytes = Vec::with_capacity(before.size as usize);
             std::io::Read::by_ref(&mut file)
@@ -811,6 +814,28 @@ impl SecureDirectory {
         .await
         .map_err(io::Error::other)?
     }
+}
+
+/// Remove one empty directory beneath a held parent directory.
+///
+/// The operation stays relative to the parent capability, refuses symlinks,
+/// and fails with `DirectoryNotEmpty` when a concurrent producer has placed a
+/// new child in the directory. It is therefore safe for housekeeping to use
+/// after removing the final known cache generation from a fanout prefix.
+pub async fn remove_empty_directory_child(directory: &Path, name: &str) -> io::Result<()> {
+    let directory = directory.to_owned();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let directory = open_directory_nofollow_blocking(&directory)?;
+        let name = child_name(&name)?;
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        directory.sync_all()
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 fn clear_directory_capability(

@@ -6013,14 +6013,17 @@ impl TranscodeManager {
         let temp_parent = temp
             .parent()
             .ok_or("cache staging directory has no parent")?;
-        ensure_cache_directory(&cache.dir, temp_parent).await?;
         let staging_identity = temp
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .ok_or("cache staging directory has no safe identity")?;
+        // Take the shared-parent guard before checking or creating `tmp`.
+        // Empty-parent cleanup is otherwise able to unlink it in the gap
+        // between this check and the first staging child installation.
         let Some(_staging_guard) = self.cache_readers.begin_staging(staging_identity) else {
             return Ok(OfflineProduceOutcome::Yielded);
         };
+        ensure_cache_directory(&cache.dir, temp_parent).await?;
         let taken = if pretranscode_fence.is_some() {
             true
         } else if let Some(fence) = publication_fence {
@@ -6197,9 +6200,19 @@ impl TranscodeManager {
             None
         };
         let final_dir = cache.dir.join(&relative);
-        if let Some(parent) = final_dir.parent() {
-            ensure_cache_directory(&cache.dir, parent).await?;
-        }
+        // Protect both recipe eviction and the final path across rename ->
+        // durable completion. This is intentionally acquired before ensuring
+        // the shared fanout parent: the parent guard closes its otherwise
+        // empty ensure -> child-install race with orphan cleanup.
+        let identity = final_dir
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or("cache publication has no safe final-directory identity")?;
+        let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
+            return Ok(OfflineProduceOutcome::Yielded);
+        };
+        let final_parent = final_dir.parent().ok_or("final generation has no parent")?;
+        ensure_cache_directory(&cache.dir, final_parent).await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return Ok(OfflineProduceOutcome::Yielded);
         }
@@ -6213,18 +6226,6 @@ impl TranscodeManager {
                 return Ok(OfflineProduceOutcome::SourceChanged);
             }
         }
-        // Protect both recipe eviction and the final path across rename ->
-        // durable completion. Queue publication has no incomplete cache row;
-        // other producers do, but the same guard also closes the inventory
-        // snapshot -> claim/rename race in orphan cleanup.
-        let identity = final_dir
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or("cache publication has no safe final-directory identity")?;
-        let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
-            return Ok(OfflineProduceOutcome::Yielded);
-        };
-        let final_parent = final_dir.parent().ok_or("final generation has no parent")?;
         staging
             .rename_child_to(ASSEMBLED_DIR, final_parent, identity)
             .await
@@ -15041,6 +15042,15 @@ mod tests {
         let dir = root.join(rel);
         tokio::fs::create_dir_all(&dir).await.expect("mkdir");
         seeded_session_dir(&dir, 3, 2.0).await;
+        let playlist_path = dir.join("index.m3u8");
+        let playlist = tokio::fs::read_to_string(&playlist_path)
+            .await
+            .expect("read seeded playlist")
+            .replace("#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-PLAYLIST-TYPE:VOD")
+            + "#EXT-X-ENDLIST\n";
+        tokio::fs::write(&playlist_path, playlist)
+            .await
+            .expect("finish seeded VOD playlist");
         dir
     }
 
@@ -15057,8 +15067,14 @@ mod tests {
         };
 
         let job_id = "00000000-0000-4000-8000-000000000601";
+        let lease_now = unix_ms();
         let lease = match store
-            .acquire_lease("transcode-manifest-session", "scheduler", 100, 2_000)
+            .acquire_lease(
+                "transcode-manifest-session",
+                "scheduler",
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
             .await
             .expect("candidate lease")
         {

@@ -3011,13 +3011,19 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
     let takeover_start = Arc::clone(&start);
     let successor_claim = async {
         takeover_start.wait().await;
+        // The stale cleanup is itself a fenced publication and may advance
+        // the exact lease token by one revision before this acquisition is
+        // applied. Take over at that latest possible expiry so both legal
+        // transaction orders remain part of the race instead of treating the
+        // cleanup winner as an unexpected held lease.
+        let takeover_at = departed_replacement.expires_at_unix_ms;
         let successor = acquired(
             store_b
                 .acquire_lease(
                     "candidate:pretranscode",
                     "successor-node",
-                    departed_current.expires_at_unix_ms,
-                    departed_current.expires_at_unix_ms.saturating_add(90_000),
+                    takeover_at,
+                    takeover_at.saturating_add(90_000),
                 )
                 .await
                 .expect("acquire successor cache producer lease"),

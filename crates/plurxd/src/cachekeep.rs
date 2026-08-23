@@ -102,6 +102,15 @@ pub struct CacheReadGuard {
 pub(crate) struct CachePublicationGuard {
     _recipe: CacheReadGuard,
     _final_directory: CacheReadGuard,
+    _parent_directory: CacheReadGuard,
+}
+
+/// A staging producer protects both its recipe-specific child and the shared
+/// `tmp` parent. Orphan cleanup is allowed to remove empty shared parents, but
+/// never between a producer's parent check and child installation.
+pub(crate) struct CacheStagingGuard {
+    _staging_directory: CacheReadGuard,
+    _parent_directory: CacheReadGuard,
 }
 
 pub(crate) struct CacheEvictionGuard {
@@ -183,19 +192,30 @@ impl ActiveCacheReaders {
         recipe: &str,
         final_directory: &str,
     ) -> Option<CachePublicationGuard> {
+        let parent = recipe.get(..2)?;
+        if !final_directory.starts_with(parent) {
+            return None;
+        }
         let recipe = self.begin_guard(recipe, false)?;
         let final_directory = self.begin_guard(final_directory, false)?;
+        let parent_directory = self.begin_guard(&cache_parent_key(parent), false)?;
         Some(CachePublicationGuard {
             _recipe: recipe,
             _final_directory: final_directory,
+            _parent_directory: parent_directory,
         })
     }
 
     /// Exclude orphan cleanup from a producer's resumable directory. Fenced
     /// producers key staging by canonical recipe; queue producers key it by
     /// job-stable directory name, matching the orphan walk below.
-    pub(crate) fn begin_staging(&self, staging_directory: &str) -> Option<CacheReadGuard> {
-        self.begin_guard(staging_recipe(staging_directory), false)
+    pub(crate) fn begin_staging(&self, staging_directory: &str) -> Option<CacheStagingGuard> {
+        let staging_directory = self.begin_guard(staging_recipe(staging_directory), false)?;
+        let parent_directory = self.begin_guard(&cache_parent_key(STAGING), false)?;
+        Some(CacheStagingGuard {
+            _staging_directory: staging_directory,
+            _parent_directory: parent_directory,
+        })
     }
 
     /// Claim a recipe for removal. Active readers make eviction skip it; the
@@ -348,6 +368,10 @@ fn reserve_scrub_bytes(remaining: &mut u64, bytes: u64) -> bool {
 /// half-built asset as a leftover and remove it mid-encode — a producer losing
 /// hours of work to the housekeeping job that runs beside it.
 pub const STAGING: &str = "tmp";
+
+fn cache_parent_key(name: &str) -> String {
+    format!("cache-parent:{name}")
+}
 
 /// The staging directory for one recipe. Deterministic, so a later pass can
 /// find what an earlier one left and resume from it.
@@ -538,7 +562,16 @@ struct OwnershipSnapshot {
     paths: HashSet<PathBuf>,
     claimed_recipes: HashSet<String>,
     queue_jobs: HashSet<String>,
+    has_owners: bool,
     complete: bool,
+}
+
+/// A complete inventory is authoritative even when it is empty. An
+/// incomplete inventory may still protect and recheck positive owners, but an
+/// incomplete empty result contains no fact that authorizes filesystem
+/// deletion and must fail closed.
+fn orphan_inventory_authorized(snapshot: &OwnershipSnapshot) -> bool {
+    snapshot.complete || snapshot.has_owners
 }
 
 async fn ownership_snapshot(
@@ -557,6 +590,7 @@ async fn ownership_snapshot(
         .into_iter()
         .filter(|entry| entry.storage_class == "local")
         .collect::<Vec<_>>();
+    let has_owners = !local_rows.is_empty() || !queue_jobs.is_empty();
     let mut paths = HashSet::new();
     for entry in &local_rows {
         if let Some(path) = validated_entry_dir(root, &entry.relative_dir).await {
@@ -572,14 +606,38 @@ async fn ownership_snapshot(
         paths,
         claimed_recipes,
         queue_jobs,
+        has_owners,
         complete: inventory.complete,
     })
+}
+
+async fn remove_empty_cache_parent(readers: &ActiveCacheReaders, root: &Path, parent: &Path) {
+    if parent.parent() != Some(root) {
+        return;
+    }
+    let Some(name) = parent.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(_parent_eviction) = readers.begin_eviction(&cache_parent_key(name)) else {
+        // A producer acquires this shared-parent read guard before ensuring the
+        // directory exists and holds it until its child has been installed.
+        return;
+    };
+    if let Err(error) = plurx_core::fs_secure::remove_empty_directory_child(root, name).await {
+        if !matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+        ) {
+            tracing::warn!(dir = %parent.display(), %error, "cache: could not remove empty cache parent");
+        }
+    }
 }
 
 async fn delete_final_batch(
     store: &Arc<dyn Store>,
     root: &Path,
     node_id: &str,
+    readers: &ActiveCacheReaders,
     batch: &mut Vec<OrphanCandidate>,
 ) -> (usize, usize) {
     let relative_dirs = batch
@@ -645,6 +703,7 @@ async fn delete_final_batch(
         if quarantine_and_remove(candidate).await {
             removed += 1;
             tracing::info!(dir = %candidate.path.display(), "cache: removed an unclaimed directory");
+            remove_empty_cache_parent(readers, root, &candidate.parent).await;
         } else {
             kept += 1;
         }
@@ -655,7 +714,9 @@ async fn delete_final_batch(
 
 async fn delete_staging_batch(
     store: &Arc<dyn Store>,
+    root: &Path,
     node_id: &str,
+    readers: &ActiveCacheReaders,
     batch: &mut Vec<OrphanCandidate>,
 ) -> (usize, usize) {
     let recipes = batch
@@ -699,6 +760,7 @@ async fn delete_staging_batch(
         if quarantine_and_remove(candidate).await {
             removed += 1;
             tracing::info!(dir = %candidate.path.display(), "cache: removed staging for a recipe nothing claims");
+            remove_empty_cache_parent(readers, root, &candidate.parent).await;
         } else {
             kept += 1;
         }
@@ -1143,7 +1205,7 @@ async fn forget(
     node_id: &str,
     entry: &CachedTranscode,
 ) -> bool {
-    let Some(dir) = validated_entry_dir(root, &entry.relative_dir).await else {
+    let Some(dir) = entry_dir(root, &entry.relative_dir) else {
         // A row whose path escapes the root cannot be trusted to name what to
         // delete. Drop the row and leave the bytes, wherever they are.
         tracing::warn!(
@@ -1288,9 +1350,20 @@ async fn sweep_orphan_dirs(
             return (0, 0, 0, 0);
         }
     };
+    let authorized = orphan_inventory_authorized(&snapshot);
     let known = snapshot.paths;
     let claimed_recipes = snapshot.claimed_recipes;
     let queue_staging = snapshot.queue_jobs;
+    if !authorized {
+        // An incomplete all-empty answer contains no positive fact binding
+        // this node's durable identity to the filesystem tree. A complete
+        // empty inventory, by contrast, authoritatively says every candidate
+        // is an orphan and is allowed to proceed to exact rechecks.
+        tracing::warn!(
+            "cache: filesystem owner inventory is incomplete and empty; skipping orphan sweep"
+        );
+        return (0, 0, 0, 0);
+    }
     if !snapshot.complete {
         tracing::warn!(
             limit = 10_000,
@@ -1465,14 +1538,16 @@ async fn sweep_orphan_dirs(
     while !final_candidates.is_empty() {
         let take = final_candidates.len().min(ORPHAN_RECHECK_BATCH);
         let mut batch = final_candidates.drain(..take).collect::<Vec<_>>();
-        let (batch_removed, _) = delete_final_batch(store, root, node_id, &mut batch).await;
+        let (batch_removed, _) =
+            delete_final_batch(store, root, node_id, readers, &mut batch).await;
         removed += batch_removed;
         ownership_rechecks += 1;
     }
     while !staging_candidates.is_empty() {
         let take = staging_candidates.len().min(ORPHAN_RECHECK_BATCH);
         let mut batch = staging_candidates.drain(..take).collect::<Vec<_>>();
-        let (batch_removed, _) = delete_staging_batch(store, node_id, &mut batch).await;
+        let (batch_removed, _) =
+            delete_staging_batch(store, root, node_id, readers, &mut batch).await;
         removed += batch_removed;
         ownership_rechecks += 1;
     }
@@ -1501,6 +1576,13 @@ mod tests {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    fn lease_now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
             .unwrap_or(0)
     }
 
@@ -1684,12 +1766,13 @@ mod tests {
         bytes: i64,
         manifest_digest: &str,
     ) {
+        let lease_now = lease_now_ms();
         let lease = match store
             .acquire_lease(
                 &format!("cachekeep-scrub-{job_id}"),
                 "scheduler",
-                100,
-                2_000,
+                lease_now,
+                lease_now.saturating_add(90_000),
             )
             .await
             .expect("candidate lease")
@@ -1877,6 +1960,48 @@ mod tests {
         assert_eq!(out.evicted, 1);
         assert_eq!(out.bytes_after, 0);
         assert!(!dir.exists());
+    }
+
+    /// A corrupt row may lexically name a cache child while an intermediate
+    /// component has been replaced by a symlink. Every eviction operation
+    /// resolves the chain with component-wise `O_NOFOLLOW`; it must keep the
+    /// row and leave the symlink target completely untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eviction_rejects_an_intermediate_symlink_without_touching_its_target() {
+        let (store, file) = store().await;
+        let root = root();
+        let outside = tempfile::tempdir().expect("outside");
+        let victim = outside.path().join("victim");
+        tokio::fs::create_dir_all(&victim).await.expect("victim");
+        tokio::fs::write(victim.join("index.m3u8"), b"outside sentinel")
+            .await
+            .expect("sentinel");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("aa"))
+            .expect("intermediate symlink");
+
+        let recipe = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(store
+            .claim_cache_entry(recipe, file, 1, NODE, "aa/victim")
+            .await
+            .expect("corrupt cache row"));
+        store
+            .complete_cache_entry(recipe, NODE, 16)
+            .await
+            .expect("complete corrupt row");
+        store
+            .put_setting(keys::CACHE_MAX_GB, "0")
+            .await
+            .expect("zero budget");
+
+        let out = sweep(&store, root.path(), NODE, unix_now()).await;
+        assert_eq!(out.evicted, 0);
+        assert!(victim.join("index.m3u8").exists());
+        assert!(store
+            .cache_hit(recipe, NODE)
+            .await
+            .expect("retained unsafe row")
+            .is_some());
     }
 
     /// A claim is either a producer at work or a producer that died, and only
@@ -2095,8 +2220,8 @@ mod tests {
     async fn staging_with_no_claim_behind_it_is_reclaimed() {
         let (store, file) = store().await;
         let root = root();
-        // One positive local owner makes this a complete inventory rather than
-        // the ambiguous empty-Ok case pinned separately below.
+        // A neighboring owner proves that cleanup stays candidate-specific;
+        // the broad inventory itself is complete with or without this row.
         entry(&store, root.path(), file, "aakeep", 1).await;
         let abandoned = staging_dir(root.path(), "bbabandoned");
         tokio::fs::create_dir_all(&abandoned).await.expect("mkdir");
@@ -2113,12 +2238,60 @@ mod tests {
         );
     }
 
+    /// Producers acquire a shared-parent guard before ensuring either `tmp`
+    /// or a fanout prefix. This models the vulnerable instant before their
+    /// first child exists: cleanup may observe an empty parent, but must not
+    /// unlink it until the producer has installed or abandoned its child.
+    #[tokio::test]
+    async fn producer_guards_close_empty_shared_parent_removal_gaps() {
+        let root = root();
+        let readers = ActiveCacheReaders::default();
+        let recipe = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let final_name = format!("{recipe}-f1");
+        let prefix = root.path().join("aa");
+        tokio::fs::create_dir_all(&prefix).await.expect("fanout");
+
+        let publication = readers
+            .begin_publication(recipe, &final_name)
+            .expect("publication guard");
+        remove_empty_cache_parent(&readers, root.path(), &prefix).await;
+        assert!(prefix.exists(), "cleanup unlinked a publisher's fanout");
+        drop(publication);
+        remove_empty_cache_parent(&readers, root.path(), &prefix).await;
+        assert!(!prefix.exists(), "released empty fanout was retained");
+
+        let staging_parent = root.path().join(STAGING);
+        tokio::fs::create_dir_all(&staging_parent)
+            .await
+            .expect("staging parent");
+        let staging = readers
+            .begin_staging(recipe)
+            .expect("staging producer guard");
+        remove_empty_cache_parent(&readers, root.path(), &staging_parent).await;
+        assert!(
+            staging_parent.exists(),
+            "cleanup unlinked a producer's staging parent"
+        );
+        drop(staging);
+        remove_empty_cache_parent(&readers, root.path(), &staging_parent).await;
+        assert!(
+            !staging_parent.exists(),
+            "released empty staging parent was retained"
+        );
+    }
+
     #[tokio::test]
     async fn queue_staging_survives_local_yield_and_is_reclaimed_after_remote_takeover() {
         let (store, file) = store().await;
         let root = root();
+        let lease_now = lease_now_ms();
         let lease = match store
-            .acquire_lease("candidate:pretranscode", "scheduler", 100, 2_000)
+            .acquire_lease(
+                "candidate:pretranscode",
+                "scheduler",
+                lease_now,
+                lease_now.saturating_add(90_000),
+            )
             .await
             .expect("candidate lease")
         {
@@ -2584,7 +2757,7 @@ mod tests {
             _eviction: Some(eviction),
         }];
         assert_eq!(
-            delete_final_batch(&store, root.path(), NODE, &mut batch).await,
+            delete_final_batch(&store, root.path(), NODE, &readers, &mut batch).await,
             (0, 1),
             "stale inventory would delete a generation published after its snapshot"
         );
@@ -2623,7 +2796,7 @@ mod tests {
             _eviction: Some(eviction),
         }];
         assert_eq!(
-            delete_staging_batch(&store, NODE, &mut batch).await,
+            delete_staging_batch(&store, root.path(), NODE, &readers, &mut batch).await,
             (0, 1),
             "stale staging inventory ignored a producer that claimed after its snapshot"
         );
@@ -2809,11 +2982,11 @@ mod tests {
         );
     }
 
-    /// `Ok([])` is not proof that nobody owns a filesystem tree. A backend
-    /// returning an incomplete empty inventory must not turn one orphan pass
-    /// into a recursive deletion of every cached byte.
+    /// The broad inventory contract marks a complete empty answer as
+    /// authoritative. Exact candidate rechecks still run before deletion, so
+    /// a node with no durable owners can reclaim otherwise invisible bytes.
     #[tokio::test]
-    async fn an_empty_ownership_inventory_fails_closed() {
+    async fn a_complete_empty_ownership_inventory_authorizes_exact_cleanup() {
         let (store, _file) = store().await;
         let root = root();
         let orphan = root.path().join("aa/aaunverified");
@@ -2823,11 +2996,38 @@ mod tests {
             .expect("bytes");
 
         let out = sweep(&store, root.path(), NODE, unix_now()).await;
-        assert_eq!(out.orphans, 0);
+        assert_eq!(out.orphans, 1);
         assert!(
-            orphan.exists(),
-            "an empty ownership answer deleted the whole cache inventory"
+            !orphan.exists(),
+            "a complete empty inventory did not reclaim an exact orphan"
         );
+    }
+
+    #[test]
+    fn an_incomplete_empty_ownership_inventory_fails_closed() {
+        let incomplete_empty = OwnershipSnapshot {
+            paths: HashSet::new(),
+            claimed_recipes: HashSet::new(),
+            queue_jobs: HashSet::new(),
+            has_owners: false,
+            complete: false,
+        };
+        assert!(!orphan_inventory_authorized(&incomplete_empty));
+
+        let complete_empty = OwnershipSnapshot {
+            complete: true,
+            ..incomplete_empty
+        };
+        assert!(orphan_inventory_authorized(&complete_empty));
+
+        let incomplete_with_positive_owner = OwnershipSnapshot {
+            paths: HashSet::new(),
+            claimed_recipes: HashSet::from(["working".to_owned()]),
+            queue_jobs: HashSet::new(),
+            has_owners: true,
+            complete: false,
+        };
+        assert!(orphan_inventory_authorized(&incomplete_with_positive_owner));
     }
 
     /// The sweep runs against a server that has never produced anything far

@@ -349,9 +349,12 @@ async fn quarantine_corrupt_artwork_with(
             tracing::warn!(filename, "quarantined corrupt content-addressed artwork");
         }
     } else {
+        // The quarantine inode itself changed after we inspected the original.
+        // An exclusive rename preserves it when a newer target won the race,
+        // leaving the bounded orphan sweep—not this stale request—as the only
+        // authority allowed to remove the untrusted replacement.
         let restored =
-            plurx_core::fs_secure::restore_child_noreplace(artwork_dir, &quarantine, filename)
-                .await;
+            plurx_core::fs_secure::rename_child_noreplace(artwork_dir, &quarantine, filename).await;
         tracing::warn!(
             filename,
             ?restored,

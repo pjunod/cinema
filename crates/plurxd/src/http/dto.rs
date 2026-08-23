@@ -54,6 +54,9 @@ pub struct RevisionDto {
 #[derive(Serialize)]
 pub struct ReadingDto {
     pub file_id: i64,
+    /// Lossless decimal spelling for JavaScript clients. Keep the numeric
+    /// field for wire compatibility with native clients.
+    pub file_id_text: String,
     pub revision: RevisionDto,
     pub locator: serde_json::Value,
     pub progression: f64,
@@ -67,6 +70,7 @@ impl TryFrom<ReadingState> for ReadingDto {
     fn try_from(state: ReadingState) -> Result<Self, Self::Error> {
         Ok(Self {
             file_id: state.file_id,
+            file_id_text: state.file_id.to_string(),
             revision: RevisionDto {
                 size: state.file_size,
                 mtime: state.file_mtime,
@@ -82,6 +86,8 @@ impl TryFrom<ReadingState> for ReadingDto {
 #[derive(Serialize)]
 pub struct ItemDto {
     pub id: i64,
+    /// Lossless decimal spelling for route construction in JavaScript.
+    pub id_text: String,
     pub library_id: i64,
     pub kind: ItemKind,
     pub parent_id: Option<i64>,
@@ -214,6 +220,7 @@ impl From<Item> for ItemDto {
     fn from(item: Item) -> Self {
         ItemDto {
             id: item.id,
+            id_text: item.id.to_string(),
             library_id: item.library_id,
             kind: item.kind,
             parent_id: item.parent_id,
@@ -309,6 +316,8 @@ pub fn in_progress_dto(item: InProgressItem) -> ItemDto {
 #[derive(Serialize)]
 pub struct FileDto {
     pub id: i64,
+    /// Lossless decimal spelling for route construction in JavaScript.
+    pub id_text: String,
     pub filename: String,
     pub size: i64,
     pub duration_ms: Option<i64>,
@@ -495,6 +504,7 @@ impl FileDto {
             .unwrap_or_default();
         FileDto {
             id: f.id,
+            id_text: f.id.to_string(),
             filename,
             size: f.size,
             duration_ms: f.duration_ms,

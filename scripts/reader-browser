@@ -29,6 +29,8 @@ SelfHost = HARNESS["SelfHost"]
 api = HARNESS["api"]
 Fail = HARNESS["Fail"]
 free_port = HARNESS["free_port"]
+HIGH_ITEM_ID = 2**53 + 1001
+HIGH_FILE_ID = 2**53 + 2001
 
 
 class ProbeHandler(BaseHTTPRequestHandler):
@@ -98,6 +100,18 @@ def write_epub(path, probe_origin):
             archive.writestr(name, body, compress_type=zipfile.ZIP_DEFLATED)
 
 
+def reader_book(host, library_id):
+    listing = api(host.base_url, f"/libraries/{library_id}/items?limit=20&sort=title", host.token)
+    books = [item for item in listing["items"] if item["kind"] == "book"]
+    if len(books) != 1:
+        raise Fail(f"expected one reader fixture book, got {books}")
+    detail = api(host.base_url, f"/items/{books[0]['id']}", host.token)
+    files = [file for file in detail["files"] if file["filename"].lower().endswith(".epub")]
+    if len(files) != 1:
+        raise Fail(f"expected one EPUB file, got {detail['files']}")
+    return books[0], files[0]
+
+
 def add_book(host, epub):
     library = api(host.base_url, "/libraries", host.token, "POST", {
         "name": "Reader Proof Books", "kind": "books", "paths": [str(epub.parent)], "anime": False,
@@ -110,15 +124,59 @@ def add_book(host, epub):
         time.sleep(0.25)
     else:
         raise Fail("reader fixture library never finished scanning")
-    listing = api(host.base_url, f"/libraries/{library['id']}/items?limit=20&sort=title", host.token)
-    books = [item for item in listing["items"] if item["kind"] == "book"]
-    if len(books) != 1:
-        raise Fail(f"expected one reader fixture book, got {books}")
-    detail = api(host.base_url, f"/items/{books[0]['id']}", host.token)
-    files = [file for file in detail["files"] if file["filename"].lower().endswith(".epub")]
-    if len(files) != 1:
-        raise Fail(f"expected one EPUB file, got {detail['files']}")
-    return books[0], files[0]
+    book, file = reader_book(host, library["id"])
+    return library["id"], book, file
+
+
+class ReaderSelfHost(SelfHost):
+    """Seed lossless-ID reader rows before the SQLite-to-Hiqlite activation."""
+
+    def __init__(self, args, epub, probe_origin):
+        super().__init__(args)
+        self.epub = epub
+        self.probe_origin = probe_origin
+        self.reader_library_id = None
+        self.reader_item_id = None
+        self.reader_file_id = None
+
+    def seed(self):
+        super().seed()
+        # `SelfHost.start()` may regenerate its cached media corpus before
+        # this hook, so create the reader fixture here rather than before it.
+        write_epub(self.epub, self.probe_origin)
+        library_id, book, file = add_book(self, self.epub)
+        self.reader_library_id = library_id
+        self.reader_item_id = book["id"]
+        self.reader_file_id = file["id"]
+
+    def freeze_database(self):
+        # Base SelfHost stops the seed process before calling this hook. Remap
+        # the isolated book and file while SQLite can defer their foreign keys,
+        # then let the ordinary freeze/import path activate those exact ids.
+        source = self.data_dir / "plurx.db"
+        db = sqlite3.connect(source)
+        try:
+            db.execute("PRAGMA foreign_keys = ON")
+            db.execute("PRAGMA defer_foreign_keys = ON")
+            db.execute("BEGIN")
+            db.execute(
+                "UPDATE items SET id = ? WHERE id = ?",
+                (HIGH_ITEM_ID, self.reader_item_id),
+            )
+            db.execute(
+                "UPDATE files SET item_id = ?, id = ? WHERE id = ?",
+                (HIGH_ITEM_ID, HIGH_FILE_ID, self.reader_file_id),
+            )
+            violations = db.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise Fail(f"high-id reader fixture broke foreign keys: {violations}")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        super().freeze_database()
 
 
 def state(host, book, file, token=None):
@@ -276,7 +334,12 @@ def run_browser(host, book, file, epub, probe, other_token):
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(f"page: {error}"))
         page.on("console", lambda message: errors.append(f"console: {message.text}") if message.type == "error" else None)
-        page.goto(f"{host.base_url}/#/item/{book['id']}", wait_until="networkidle")
+        # Enter through a JSON-rendered library card. This is the precision
+        # boundary a direct fixture URL skips: ItemDto.id has already crossed
+        # response.json(), so the card must route through id_text.
+        page.goto(f"{host.base_url}/#/library/{book['library_id']}", wait_until="networkidle")
+        page.locator(".poster").filter(has_text=book["title"]).first.click()
+        page.wait_for_url(f"**/#/item/{book['id']}")
         read = page.get_by_role("button", name="Read", exact=True)
         read.wait_for()
         read.click()
@@ -384,7 +447,7 @@ def run_browser(host, book, file, epub, probe, other_token):
         assert native_page.evaluate("localStorage.getItem('plurx_token')") is None, "native shell persisted bearer"
         native_page.evaluate(
             "([token,item,file])=>startNativeReader(token,item,file)",
-            [host.token, book["id"], file["id"]],
+            [host.token, str(book["id"]), str(file.get("id_text", file["id"]))],
         )
         native_page.locator("#reader-loading").wait_for(state="hidden")
         native_frame = native_page.frame_locator("#reader-frame")
@@ -452,7 +515,7 @@ def run_browser(host, book, file, epub, probe, other_token):
         other_page.goto(f"{host.base_url}/?native-reader=1", wait_until="networkidle")
         other_page.evaluate(
             "([token,item,file])=>startNativeReader(token,item,file)",
-            [other_token, book["id"], file["id"]],
+            [other_token, str(book["id"]), str(file.get("id_text", file["id"]))],
         )
         other_page.locator("#reader-loading").wait_for(state="hidden")
         other_frame = other_page.frame_locator("#reader-frame")
@@ -510,17 +573,24 @@ def main(argv):
         out=args.out, port=args.port, ffmpeg=args.ffmpeg, server_bin=args.server_bin,
         library=None, item=None, player_item=None, search_query=None,
     )
-    host = SelfHost(host_args)
     probe_port = free_port(32514)
+    probe_origin = f"http://127.0.0.1:{probe_port}"
+    epub = Path(args.out).resolve() / "media" / "books" / "Cinema Reader Proof.epub"
+    host = ReaderSelfHost(host_args, epub, probe_origin)
     probe = ThreadingHTTPServer(("127.0.0.1", probe_port), ProbeHandler)
     probe_thread = threading.Thread(target=probe.serve_forever, daemon=True)
     probe_thread.start()
     try:
         ProbeHandler.hits.clear()
         host.start()
-        epub = Path(args.out).resolve() / "media" / "books" / "Cinema Reader Proof.epub"
-        write_epub(epub, f"http://127.0.0.1:{probe_port}")
-        book, file = add_book(host, epub)
+        book, file = reader_book(host, host.reader_library_id)
+        if book["id"] != HIGH_ITEM_ID or file["id"] != HIGH_FILE_ID:
+            raise Fail(
+                "activated reader fixture lost its high identifiers: "
+                f"item={book['id']} file={file['id']}"
+            )
+        if book.get("id_text") != str(HIGH_ITEM_ID) or file.get("id_text") != str(HIGH_FILE_ID):
+            raise Fail(f"reader DTOs lost exact identifier spellings: book={book} file={file}")
         api(host.base_url, "/users", host.token, "POST", {
             "username": "reader-other", "password": "reader-other-password", "is_admin": False,
         })
