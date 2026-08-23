@@ -1335,39 +1335,71 @@ pub async fn anonymous_file_in_directory(directory: &Path) -> io::Result<tokio::
     .map_err(io::Error::other)?
 }
 
-/// Create a pathname-free memory-backed file for authenticated response
-/// snapshots. Linux uses a sealable memfd; macOS uses `SHM_ANON`. Neither
-/// consumes free space from the media cache filesystem.
-pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
-    #[cfg(target_os = "linux")]
-    let raw_fd = {
-        let name = CString::new("plurx-authenticated-object").expect("static memfd name");
-        unsafe {
-            libc::syscall(
-                libc::SYS_memfd_create,
-                name.as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            ) as i32
-        }
-    };
-    #[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
+fn anonymous_snapshot_file() -> io::Result<File> {
+    let name = CString::new("plurx-authenticated-object").expect("static memfd name");
     let raw_fd = unsafe {
-        // Darwin defines SHM_ANON as the sentinel pointer `(char *)1`; the
-        // libc crate does not currently expose that macro.
-        libc::shm_open(
-            std::ptr::dangling::<libc::c_char>(),
-            libc::O_RDWR | libc::O_CLOEXEC,
-            0o600,
-        )
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as i32
     };
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let raw_fd = -1;
-
     if raw_fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    Ok(tokio::fs::File::from_std(File::from(fd)))
+    Ok(File::from(unsafe { OwnedFd::from_raw_fd(raw_fd) }))
+}
+
+#[cfg(target_os = "macos")]
+fn anonymous_snapshot_file() -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // macOS 26 rejects the historical SHM_ANON `(char *)1` sentinel with
+    // EFAULT, while a sandbox may also reject named POSIX shared memory.
+    // Create one owner-only random temporary file and unlink it before the
+    // descriptor escapes, retaining no pathname an attacker can reopen.
+    let directory = std::env::temp_dir();
+    for _ in 0..8 {
+        let path = directory.join(format!(
+            ".plurx-authenticated-object-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path);
+        match opened {
+            Ok(file) => {
+                std::fs::remove_file(&path)?;
+                return Ok(file);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "authenticated snapshot name collided repeatedly",
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn anonymous_snapshot_file() -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "authenticated response snapshots are unsupported on this platform",
+    ))
+}
+
+/// Create a pathname-free file for authenticated response snapshots. Linux
+/// uses a sealable memfd; macOS immediately unlinks an owner-only temporary
+/// object. Neither consumes free space from the media cache filesystem.
+pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
+    anonymous_snapshot_file().map(tokio::fs::File::from_std)
 }
 
 /// Seal a completed Linux memfd against every later write/resize. macOS's
