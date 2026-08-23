@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P3 delivered; P4 is next ·
+**Status:** P0–P4 delivered; P5 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -966,6 +966,21 @@ changing which node starts a session. This isolates observation from action.
 peer cannot exceed the 200 ms offer budget · heterogeneous fixtures reject an
 incapable idle node and prefer a byte-verified cache holder · scratch-full,
 stale-source, and saturated-egress nodes do not win.
+
+**Delivered:** voter requests now bind sender, target, timestamp, method,
+normalized route, and raw-body digest to the durable node key. The daemon polls
+privacy-safe capability snapshots every ten seconds, gives each response only
+the remainder of its signed fifteen-second lifetime, and collects only reachable
+peers under bounded transport deadlines. Successful snapshots are marked
+`Cache-Control: private, no-store`. The daemon shortlists heterogeneous peers
+from memory and collects non-reserving offers under one common 200 ms deadline.
+Admin diagnostics expose the directory and ranked reasons, while the live start
+path remains unchanged. A cache advantage requires the exact complete
+generation's fenced manifest and verified VOD playlist. A bounded background
+probe refreshes the most-specific configured library-root readability; offer
+fan-out consults only that age-limited signal, replicated media facts, recent
+file availability, local capacity, and local cache bytes, so an offer never
+opens a candidate source path.
 
 ### 8.6 P5 — place and proxy new HLS sessions
 

@@ -303,6 +303,9 @@ pub struct AppState {
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
+    /// Fresh, authenticated media-capability snapshots and diagnostics-only
+    /// placement offers. P4 observes candidates; it never starts a session.
+    pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -467,6 +470,7 @@ impl AppState {
         ));
         let offline =
             OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
+        let media_pool = crate::media_pool::MediaPool::new(membership.clone());
         AppState {
             store,
             replication,
@@ -474,6 +478,7 @@ impl AppState {
                 membership.clone(),
             ),
             membership,
+            media_pool,
             server_name,
             node_id,
             artwork_dir,

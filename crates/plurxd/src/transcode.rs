@@ -4310,6 +4310,42 @@ pub(crate) struct TranscodeMetrics {
     active_cache: crate::cachekeep::ActiveCacheMetrics,
 }
 
+/// Bounded local facts published in the cluster media snapshot. None of these
+/// fields require reading a library source path.
+pub(crate) struct MediaNodeRuntime {
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) scratch_target_bytes: u64,
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) encoder_families: Vec<String>,
+    pub(crate) max_target_height: i64,
+    pub(crate) decoders: Vec<String>,
+    pub(crate) tone_map_pipelines: Vec<String>,
+    pub(crate) hardware_slots_used: usize,
+    pub(crate) hardware_slots_max: usize,
+    pub(crate) software_threads_used: usize,
+    pub(crate) software_threads_max: usize,
+    pub(crate) live_waiting: bool,
+    pub(crate) background_active: bool,
+}
+
+/// Node-local answer to a diagnostics-only offer request. Calculating it does
+/// not reserve capacity or open the media source.
+pub(crate) struct MediaOfferProbe {
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) decoder_supported: bool,
+    pub(crate) target_supported: bool,
+    pub(crate) cache_hit: bool,
+    pub(crate) background_active: bool,
+    pub(crate) free_hardware_slots: usize,
+    pub(crate) free_software_threads: usize,
+    pub(crate) encoder: String,
+    pub(crate) pipeline: String,
+    pub(crate) recent_speed: Option<f64>,
+}
+
 impl TranscodeMetrics {
     pub(crate) fn snapshot(&self) -> (usize, usize) {
         (
@@ -4510,6 +4546,130 @@ impl TranscodeManager {
                 .and_then(|cache| available_cache_scratch_bytes(&cache.dir))
                 .unwrap_or(0),
         }
+    }
+
+    /// Snapshot media capacity without probing a source mount.
+    pub(crate) async fn media_node_runtime(&self) -> MediaNodeRuntime {
+        const SCRATCH_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+        let capabilities = self.pretranscode_capabilities();
+        let (hardware_slots_used, hardware_slots_max) = self.hardware_slots().await;
+        let software_threads_max = self.software_budget().await;
+        let software_threads_used = self.admissions.software_in_use();
+        let session_pressure_limit = hardware_slots_max
+            .saturating_add((software_threads_max / 2).max(1))
+            .max(1);
+        let mut tone_map_pipelines = capabilities
+            .tone_map
+            .then(|| vec![self.pipeline.name().to_owned()])
+            .unwrap_or_default();
+        if self.dovi_passthrough {
+            tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
+        }
+        MediaNodeRuntime {
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            scratch_target_bytes: SCRATCH_TARGET_BYTES,
+            active_sessions: self.active_session_count.load(Relaxed),
+            session_pressure_limit,
+            encoder_families: capabilities.encoder_families,
+            max_target_height: capabilities.max_target_height,
+            decoders: capabilities.decoders,
+            tone_map_pipelines,
+            hardware_slots_used,
+            hardware_slots_max,
+            software_threads_used,
+            software_threads_max,
+            live_waiting: self.admissions.live_is_waiting(),
+            background_active: self.admissions.background_is_active(),
+        }
+    }
+
+    /// Inspect whether this node could service one request. Offers are
+    /// intentionally non-reserving and never stat/open `file.path`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn media_offer_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        start_seconds: f64,
+        audio_override: Option<i64>,
+        subtitle_override: Option<i64>,
+        hdr10: bool,
+    ) -> Result<MediaOfferProbe, &'static str> {
+        let needs_source_proof =
+            Self::needs_dovi_reshape(file).map_err(|_| "unsupported_source")?;
+        if needs_source_proof {
+            if !self.dovi_reshape {
+                return Err("incapable");
+            }
+            let proof = self
+                .dovi_proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&Self::dovi_proof_key(file))
+                .copied();
+            if proof != Some(true) {
+                // The authoritative live path may create this proof for the
+                // selected node. Diagnostics fan-out must never be what opens
+                // every candidate's source mount.
+                return Err("source_proof_unavailable");
+            }
+        }
+        let capabilities = self.pretranscode_capabilities();
+        let decoder_supported = crate::media_pool::decoder_contract(file).is_some_and(|decoder| {
+            capabilities
+                .decoders
+                .iter()
+                .any(|candidate| candidate == decoder || candidate == "*")
+        });
+        let geometry_supported =
+            (MIN_HEIGHT..=capabilities.max_target_height).contains(&target_height);
+        let Tracks {
+            audio_index,
+            subtitle_burn,
+        } = self
+            .select_tracks(file, audio_override, subtitle_override)
+            .await;
+        let (encoder, grade) = self
+            .encoder_and_grade_for(file, hdr10, target_height)
+            .await
+            .map_err(|_| "incapable")?;
+        let target_supported = geometry_supported && (!hdr10 || grade == OutputGrade::Hdr10);
+        let opts = self.live_lookup_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            start_seconds,
+            audio_index,
+            subtitle_burn,
+            None,
+            grade,
+        );
+        let cache_hit = self.verified_cache_hit(file, &opts, encoder).await;
+        let (hardware_used, hardware_max) = self.hardware_slots().await;
+        let software_max = self.software_budget().await;
+        let software_used = self.admissions.software_in_use();
+        let active_sessions = self.active_session_count.load(Relaxed);
+        let session_pressure_limit = hardware_max
+            .saturating_add((software_max / 2).max(1))
+            .max(1);
+        let workload = Workload::of(file, target_height);
+        Ok(MediaOfferProbe {
+            active_sessions,
+            session_pressure_limit,
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            decoder_supported,
+            target_supported,
+            cache_hit,
+            background_active: self.admissions.background_is_active(),
+            free_hardware_slots: hardware_max.saturating_sub(hardware_used),
+            free_software_threads: software_max.saturating_sub(software_used),
+            encoder: encoder.family_name().to_owned(),
+            pipeline: opts.pipeline.name().to_owned(),
+            recent_speed: self
+                .admissions
+                .recent_speed(&workload.class(encoder.family_name())),
+        })
     }
 
     /// Identity for every mutable input that can change a speculative recipe
@@ -5254,6 +5414,90 @@ impl TranscodeManager {
             "cached media failed an integrity check".to_owned(),
         ));
         let _ = self.retire_session(session_id, session).await;
+    }
+
+    /// Prove that the complete local generation for this exact recipe is
+    /// byte-verified. This is the non-reserving subset of `serve_cached`: it
+    /// neither creates a session nor updates last-used metadata.
+    async fn verified_cache_hit(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> bool {
+        let Some(cache) = self.cache.as_ref() else {
+            return false;
+        };
+        let Some(mut digest) = self.digest() else {
+            return false;
+        };
+        let hash = self
+            .effective_recipe(&mut digest, file, opts, encoder, false)
+            .hash();
+        let Some(_lookup) = self.cache_readers.begin_lookup(&hash) else {
+            return false;
+        };
+        let Some(hit) = self
+            .store
+            .cache_hit(&hash, &cache.node_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+        // Legacy completions do not carry a byte inventory and therefore
+        // cannot make the stronger cluster placement claim.
+        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+            return false;
+        };
+        let identity = CachedLocationIdentity {
+            recipe_hash: hash.clone(),
+            node_id: cache.node_id.clone(),
+            storage_class: hit.storage_class.clone(),
+            relative_dir: hit.relative_dir.clone(),
+            manifest_digest: hit.manifest_digest.clone(),
+        };
+        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
+        else {
+            self.invalidate_cache_location(&identity, "unsafe_relative_path")
+                .await;
+            return false;
+        };
+        let manifest = match crate::manifest_cache::load(
+            crate::manifest_cache::GenerationKey {
+                cache_root: cache.dir.clone(),
+                node_id: cache.node_id.clone(),
+                recipe_hash: hash,
+                storage_class: hit.storage_class,
+                relative_dir: hit.relative_dir,
+                manifest_digest: expected_manifest,
+            },
+            &dir,
+        )
+        .await
+        {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                self.invalidate_cache_location(&identity, "manifest_invalid")
+                    .await;
+                return false;
+            }
+        };
+        let playlist_valid = manifest
+            .read_verified_playlist(&dir, "index.m3u8")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(validated_vod_part)
+            .is_some();
+        if !playlist_valid {
+            self.invalidate_cache_location(&identity, "playlist_invalid_vod")
+                .await;
+        }
+        playlist_valid
     }
 
     /// Serve a finished transcode, if this exact one has already been made.
@@ -15410,6 +15654,83 @@ mod tests {
                 .expect("cache lookup")
                 .is_none(),
             "a listed corrupt object did not invalidate the exact generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_offer_claims_only_a_byte_verified_complete_generation() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let relative = "fb/media-offer";
+        let dir = seed_cache_dir(cache.path(), relative).await;
+        let manifest = plurx_core::transcode::manifest::publish(
+            &dir,
+            "00000000-0000-4000-8000-000000000601:1",
+            &[
+                "index.m3u8".to_owned(),
+                "seg00000.ts".to_owned(),
+                "seg00001.ts".to_owned(),
+                "seg00002.ts".to_owned(),
+            ],
+        )
+        .await
+        .expect("publish generation manifest");
+        complete_manifest_cache(&store, file_id, &hash, relative, &manifest.manifest_digest).await;
+        let encoder = mgr.encoder().await;
+        let opts = mgr.options_for_tone_map(
+            encoder,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+
+        assert!(mgr.verified_cache_hit(&file, &opts, encoder).await);
+        tokio::fs::write(dir.join("index.m3u8"), b"corrupt")
+            .await
+            .expect("corrupt playlist");
+        assert!(!mgr.verified_cache_hit(&file, &opts, encoder).await);
+        assert!(store
+            .cache_hit(&hash, NODE)
+            .await
+            .expect("cache lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn media_offer_never_opens_an_unproved_profile_five_source() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dovi_reshape(true);
+        let mut file = profile5_file();
+        file.path = work.path().join("sleeping-nas/movie.mkv");
+
+        assert!(matches!(
+            manager
+                .media_offer_probe(&file, 1080, 0.0, None, None, false)
+                .await,
+            Err("source_proof_unavailable")
+        ));
+        assert!(
+            !file.path.exists(),
+            "offer fanout created or materialized the absent source path"
         );
     }
 

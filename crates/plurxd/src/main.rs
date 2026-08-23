@@ -7,6 +7,7 @@ mod http;
 mod job_lease;
 mod logbuf;
 mod manifest_cache;
+mod media_pool;
 mod meter;
 mod offline;
 mod pgs_overlay;
@@ -847,6 +848,11 @@ fn spawn_background_loops(
     let replication = state.replication.clone();
     tokio::spawn(replication.passive_metrics_loop(background_shutdown.cancelled_owned()));
     tokio::spawn(state.membership.clone().heartbeat_loop());
+    tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.media_pool)
+            .root_readability_loop(std::sync::Arc::clone(&state.store)),
+    );
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
     // possible, so this runs whether or not a removal is in progress.

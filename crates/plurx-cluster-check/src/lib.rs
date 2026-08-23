@@ -33,8 +33,8 @@ use hmac::{Hmac, Mac};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::cluster::membership::{
     join_token_digest, ActivityPeerAuth, ActivitySigningKey, ArtworkPeerAuth, ClusterAvailability,
-    ClusterPeer, FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError,
-    MembershipManager, MembershipStatus, RedeemJoinRequest,
+    ClusterPeer, FinalizeJoinRequest, InternalPeerAuth, IssuedJoinToken, JoinSecrets,
+    MembershipError, MembershipManager, MembershipStatus, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -1202,6 +1202,116 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         match cluster.request(2, request).await? {
             Response::Flag { value: false } => {}
             response => bail!("invalid activity authority was accepted: {response:?}"),
+        }
+    }
+    let offer_body = br#"{"protocol_version":1,"request_fingerprint":"fixture"}"#.to_vec();
+    let exact_auth = match cluster
+        .request(
+            1,
+            Request::SignInternalPeerRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: now,
+                method: "POST".to_owned(),
+                path: "/internal/v1/media/offers".to_owned(),
+                body: offer_body.clone(),
+            },
+        )
+        .await?
+    {
+        Response::InternalPeerAuth { auth } => auth,
+        response => bail!("unexpected exact peer signature response: {response:?}"),
+    };
+    match cluster
+        .request(
+            2,
+            Request::AuthorizeInternalPeerRequest {
+                auth: exact_auth.clone(),
+                method: "POST".to_owned(),
+                path: "/internal/v1/media/offers".to_owned(),
+                body: offer_body.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("peer rejected exact internal authority: {response:?}"),
+    }
+    let stale_exact = match cluster
+        .request(
+            1,
+            Request::SignInternalPeerRequest {
+                target_node_id: "node-2".to_owned(),
+                timestamp_ms: stale_time,
+                method: "POST".to_owned(),
+                path: "/internal/v1/media/offers".to_owned(),
+                body: offer_body.clone(),
+            },
+        )
+        .await?
+    {
+        Response::InternalPeerAuth { auth } => auth,
+        response => bail!("unexpected stale exact signature response: {response:?}"),
+    };
+    let mut forged_exact = exact_auth.clone();
+    forged_exact.signature = "00".repeat(64);
+    for (target, auth, method, path, body) in [
+        (
+            2,
+            forged_exact,
+            "POST",
+            "/internal/v1/media/offers",
+            offer_body.clone(),
+        ),
+        (
+            2,
+            stale_exact,
+            "POST",
+            "/internal/v1/media/offers",
+            offer_body.clone(),
+        ),
+        (
+            2,
+            exact_auth.clone(),
+            "GET",
+            "/internal/v1/media/offers",
+            offer_body.clone(),
+        ),
+        (
+            2,
+            exact_auth.clone(),
+            "POST",
+            "/internal/v1/media/snapshot",
+            offer_body.clone(),
+        ),
+        (
+            2,
+            exact_auth.clone(),
+            "POST",
+            "/internal/v1/media/offers",
+            b"mutated".to_vec(),
+        ),
+        (
+            3,
+            exact_auth,
+            "POST",
+            "/internal/v1/media/offers",
+            offer_body,
+        ),
+    ] {
+        match cluster
+            .request(
+                target,
+                Request::AuthorizeInternalPeerRequest {
+                    auth,
+                    method: method.to_owned(),
+                    path: path.to_owned(),
+                    body,
+                },
+            )
+            .await?
+        {
+            Response::Flag { value: false } => {}
+            response => bail!("invalid exact internal authority was accepted: {response:?}"),
         }
     }
     let public_status = serde_json::to_string(&status)?;
@@ -3262,6 +3372,19 @@ pub enum Request {
     AuthorizeActivityRequest {
         auth: ActivityPeerAuth,
     },
+    SignInternalPeerRequest {
+        target_node_id: String,
+        timestamp_ms: i64,
+        method: String,
+        path: String,
+        body: Vec<u8>,
+    },
+    AuthorizeInternalPeerRequest {
+        auth: InternalPeerAuth,
+        method: String,
+        path: String,
+        body: Vec<u8>,
+    },
     ActivityPeers,
     ArtworkPeerUrls,
     RejectDuplicateArtworkUrl {
@@ -3420,6 +3543,9 @@ pub enum Response {
     },
     ActivityAuth {
         auth: ActivityPeerAuth,
+    },
+    InternalPeerAuth {
+        auth: InternalPeerAuth,
     },
     ActivityPeers {
         peers: Vec<(String, Option<String>, bool)>,
@@ -4928,6 +5054,31 @@ async fn handle_request(
         Request::AuthorizeActivityRequest { auth } => Ok(Response::Flag {
             value: membership_ref(membership)?
                 .authorize_activity_request(&auth)
+                .await?,
+        }),
+        Request::SignInternalPeerRequest {
+            target_node_id,
+            timestamp_ms,
+            method,
+            path,
+            body,
+        } => Ok(Response::InternalPeerAuth {
+            auth: membership_ref(membership)?.sign_internal_peer_request(
+                &target_node_id,
+                timestamp_ms,
+                &method,
+                &path,
+                &body,
+            )?,
+        }),
+        Request::AuthorizeInternalPeerRequest {
+            auth,
+            method,
+            path,
+            body,
+        } => Ok(Response::Flag {
+            value: membership_ref(membership)?
+                .authorize_internal_peer_request(&auth, &method, &path, &body)
                 .await?,
         }),
         Request::ActivityPeers => Ok(Response::ActivityPeers {
