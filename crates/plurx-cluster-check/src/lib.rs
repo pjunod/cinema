@@ -580,7 +580,23 @@ async fn run_singleton_takeover_case() -> Result<()> {
     paused.resume()?;
     wait_singleton_outcome(&mut cluster, old_owner, &["lease_lost"]).await?;
     provider.release_old_owner();
-    wait_stale_singleton_replay_rejected(cluster, old_owner, &authoritative_old).await?;
+    // SIGCONT can precede the resumed voter's remote Hiqlite client becoming
+    // usable. Poll the existing read-only readiness query first, then dispatch
+    // the stale mutation exactly once: retrying an ambiguous write timeout
+    // could leave its detached server task running behind a later rejection.
+    cluster.wait_for_ready(old_owner).await?;
+    match cluster
+        .request(
+            old_owner,
+            Request::ReplaySingletonLease {
+                lease: authoritative_old.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("authoritative stale singleton rejection not observed: {response:?}"),
+    }
     wait_singleton_cleanup(&mut cluster, *successor_node).await?;
     wait_singleton_cleanup(&mut cluster, old_owner).await?;
 
@@ -612,41 +628,6 @@ async fn run_singleton_takeover_case() -> Result<()> {
     );
     provider.shutdown().await;
     cluster.shutdown_all().await
-}
-
-/// A SIGCONT'ed voter can briefly be reconnecting its Hiqlite client even
-/// after its provider task has observed lease loss. A timeout is not proof of
-/// rejection, so retry the exact stale token until the live process returns
-/// the authoritative fenced result. Any successful replay still fails the
-/// proof immediately.
-async fn wait_stale_singleton_replay_rejected(
-    cluster: &mut ClusterProcesses,
-    node_id: u64,
-    lease: &Lease,
-) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match cluster
-            .request(
-                node_id,
-                Request::ReplaySingletonLease {
-                    lease: lease.clone(),
-                },
-            )
-            .await?
-        {
-            Response::Flag { value: false } => return Ok(()),
-            Response::Error { message }
-                if message.contains("replicated store operation timed out")
-                    && Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            response => {
-                bail!("the pre-takeover lease published after takeover: {response:?}")
-            }
-        }
-    }
 }
 
 async fn start_singleton_probe(
