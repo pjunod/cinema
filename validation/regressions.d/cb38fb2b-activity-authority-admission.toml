@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cb38fb2b"]
+points = ["cluster.auth", "cluster.membership", "server.api"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained cluster lifecycle recreates the old shared-HMAC impersonation exploit and requires distinct activity keys to reject it, while the Rust gate preserves the established v4 artwork HMAC wire during rolling upgrades. Invalid activity signatures are rejected from a bounded local verifier cache before consensus, valid retained-key authority checks are rate-limited, and the ninth-peer fixture proves no fresh deadline is granted after the first concurrency window expires. Reverting the correction restores mixed-version artwork failure, consensus amplification, false-positive security evidence, or reset peer deadlines."
