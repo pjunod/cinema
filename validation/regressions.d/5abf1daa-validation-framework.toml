@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5abf1daa"]
+points = ["validation.framework"]
+checks = ["catalog-contract", "history-regressions"]
+reason = "The catalog contract keeps web-only paths out of the cluster-auth lane, and the history audit binds that retained scope assertion to the corrective validation mapping."
