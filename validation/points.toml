@@ -386,9 +386,33 @@ paths = [
   "crates/plurx-core/src/cluster/membership.rs",
   "crates/plurxd/src/http/cluster.rs",
   "crates/plurxd/src/http/internal_activity.rs",
+  "crates/plurxd/src/http/internal_media.rs",
+  "crates/plurxd/src/http/peer_transport.rs",
+  "crates/plurxd/src/media_pool.rs",
+  "crates/plurxd/src/playstart.rs",
+  "crates/plurxd/src/transcode.rs",
 ]
 checks = ["rust-gate", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
+
+[[points]]
+id = "cluster.media-observation"
+title = "Authenticated media snapshots and bounded offers"
+contract = "Exact voter media requests bind sender, target, timestamp, random nonce, method, normalized route, and the raw-body digest; forged, stale, replayed, cross-target, mutated, household-bearer, redirected, oversized, or deadline-exceeding requests fail closed without rejecting identical concurrent requests that carry distinct signed nonces. Successful capability snapshots are privacy-safe and private/no-store, poll every bounded reachable peer immediately under one common transport deadline, and retain only the remainder of their signed fifteen-second lifetime. Heterogeneous peers are shortlisted from memory before diagnostics-only offers run under one common 200 ms deadline. Offers reserve nothing, never open a candidate source path, validate requested tracks against the exact file snapshot, read an age-limited fail-closed seqlock-published background scratch sample, and require a fenced byte-verified generation before claiming a cache hit. When reachable remote candidates exist, tracked library-root probe children convert supported relative roots into command-safe absolute paths, force symlinks to resolve as directories, and provide age-limited readability evidence under one common deadline; timed-out probes remain registered until reaped, the exact deadline cannot promote delayed success, and the fixed child ceiling reserves one complete replacement generation beyond the configured-root limit. Recent file availability is the other source signal. Incapable, scratch-full, stale-source, saturated-egress, or otherwise ineligible nodes cannot outrank an eligible peer. Observation does not change which node starts a live session."
+paths = [
+  "crates/plurxd/src/admission.rs",
+  "crates/plurxd/src/http/internal_activity.rs",
+  "crates/plurxd/src/http/internal_media.rs",
+  "crates/plurxd/src/http/mod.rs",
+  "crates/plurxd/src/http/peer_transport.rs",
+  "crates/plurxd/src/main.rs",
+  "crates/plurxd/src/media_pool.rs",
+  "crates/plurxd/src/playstart.rs",
+  "crates/plurxd/src/state.rs",
+  "crates/plurxd/src/transcode.rs",
+]
+checks = ["rust-gate", "cluster-auth", "security-boundaries"]
+depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
 id = "cluster.page-reads"

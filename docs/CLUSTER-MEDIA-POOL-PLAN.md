@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P3 delivered; P4 is next ·
+**Status:** P0–P4 delivered; P5 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -966,6 +966,33 @@ changing which node starts a session. This isolates observation from action.
 peer cannot exceed the 200 ms offer budget · heterogeneous fixtures reject an
 incapable idle node and prefer a byte-verified cache holder · scratch-full,
 stale-source, and saturated-egress nodes do not win.
+
+**Delivered:** voter requests now bind sender, target, timestamp, random nonce,
+method, normalized route, and raw-body digest to the durable node key; a
+bounded per-sender window rejects replay of an already accepted signed nonce
+without conflating identical concurrent requests. The daemon polls
+privacy-safe capability snapshots every ten seconds, gives each response only
+the remainder of its signed fifteen-second lifetime, and collects only reachable
+peers immediately under one common bounded transport deadline, so failed early
+peers cannot starve a healthy later voter. Successful snapshots are marked
+`Cache-Control: private, no-store`. The daemon shortlists heterogeneous peers
+from memory and collects non-reserving offers under one common 200 ms deadline.
+Admin diagnostics expose the directory and ranked reasons, while the live start
+path remains unchanged. A cache advantage requires the exact complete
+generation's fenced manifest and verified VOD playlist. Cache scratch capacity
+is sampled by one non-accumulating background OS worker and expires fail-closed,
+keeping a hard cache mount and an indefinitely stale positive result out of the
+async offer deadline. When a reachable remote candidate exists, tracked child
+processes refresh command-safe absolute projections of both absolute and
+cwd-relative library roots under one common deadline. Probing `root/.` forces
+command-line symlinks to resolve to directories. A timed-out probe is signalled
+but remains registered until the OS confirms exit; the fixed global process
+bound reserves one complete configured generation beyond the root limit, so
+one retired generation cannot block its replacement. Offer
+fan-out consults only that age-limited signal, replicated media facts, recent
+file availability, local capacity, and local cache bytes, so an offer never
+opens a candidate source path. Requested audio and subtitle indices must exist
+in the exact replicated file snapshot before a node can answer eligible.
 
 ### 8.6 P5 — place and proxy new HLS sessions
 

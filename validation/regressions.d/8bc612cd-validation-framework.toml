@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8bc612cd"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This validation-only corrective commit maps the retained media-observation evidence without changing production behavior."

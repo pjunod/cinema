@@ -16,11 +16,13 @@ mod extract;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
+pub(crate) mod internal_media;
 mod items;
 mod keys;
 mod libraries;
 mod network;
 mod offline;
+pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
@@ -99,6 +101,11 @@ pub fn router(state: AppState) -> Router {
         // exception: their single-use token is its own narrow credential.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/media", get(internal_media::directory))
+        .route(
+            "/cluster/media/offers",
+            post(internal_media::diagnostic_offers),
+        )
         .route("/cluster/leave", post(cluster::leave))
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
@@ -284,6 +291,15 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            crate::media_pool::SNAPSHOT_PATH,
+            get(internal_media::snapshot),
+        )
+        .route(
+            crate::media_pool::OFFERS_PATH,
+            post(internal_media::offers)
+                .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
         .nest("/api/v1", api)
         .merge(plex_routes)
         .fallback(web::fallback)
@@ -2608,8 +2624,18 @@ mod tests {
         let app = test_app();
         let (status, _) = call(&app, get("/api/v1/cluster/nodes", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(&app, get("/api/v1/cluster/media", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
+        let (status, media) = call(&app, get("/api/v1/cluster/media", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(media["protocol_version"], 1);
+        assert_eq!(media["nodes"].as_array().map(Vec::len), Some(1));
+        assert!(
+            !media.to_string().contains("path"),
+            "media directory diagnostics must not expose source paths: {media}"
+        );
         let (status, body) = call(&app, get("/api/v1/cluster/nodes", Some(&admin))).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
