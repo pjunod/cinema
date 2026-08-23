@@ -87,7 +87,14 @@ pub async fn leave(
 }
 
 async fn require_no_owned_media_sessions(state: &AppState, node_id: &str) -> Result<(), ApiError> {
-    if state.store.owned_media_sessions(node_id).await?.is_empty() {
+    let now_ms = crate::media_sessions::unix_ms();
+    state.store.maintain_media_sessions(now_ms).await?;
+    if state
+        .store
+        .owned_media_sessions(node_id, now_ms)
+        .await?
+        .is_empty()
+    {
         Ok(())
     } else {
         Err(ApiError::typed(

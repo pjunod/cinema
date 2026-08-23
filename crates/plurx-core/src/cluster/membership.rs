@@ -188,7 +188,10 @@ const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
+const MAX_INTERNAL_READ_PREVERIFY_PER_SECOND: u16 = 1_024;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
+const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
+const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
@@ -615,7 +618,8 @@ fn begin_removal_attempt_sql() -> String {
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
          SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE} \
            AND NOT EXISTS (SELECT 1 FROM media_sessions \
-             WHERE owner_node_id = $1 AND state = 'active')"
+             WHERE owner_node_id = $1 AND state = 'active' \
+               AND lease_expires_at_ms > $3)"
     )
 }
 
@@ -730,6 +734,8 @@ struct ReplicatedMembership {
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
+    internal_read_preverify: Mutex<InternalReadAdmission>,
+    internal_read_authority: tokio::sync::Mutex<BTreeMap<String, Instant>>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -742,6 +748,11 @@ struct ReplicatedMembership {
 struct ActivityAuthAdmission {
     window_started: Instant,
     checks: u8,
+}
+
+struct InternalReadAdmission {
+    window_started: Instant,
+    checks: u16,
 }
 
 #[derive(Default)]
@@ -774,6 +785,20 @@ impl ActivityAuthAdmission {
             self.checks = 0;
         }
         if self.checks >= maximum {
+            return false;
+        }
+        self.checks += 1;
+        true
+    }
+}
+
+impl InternalReadAdmission {
+    fn admit(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
+            self.window_started = now;
+            self.checks = 0;
+        }
+        if self.checks >= MAX_INTERNAL_READ_PREVERIFY_PER_SECOND {
             return false;
         }
         self.checks += 1;
@@ -880,6 +905,11 @@ impl MembershipManager {
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_replays: Mutex::new(BTreeMap::new()),
+                internal_read_preverify: Mutex::new(InternalReadAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
+                internal_read_authority: tokio::sync::Mutex::new(BTreeMap::new()),
                 activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -1596,6 +1626,11 @@ impl MembershipManager {
                 MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
             })?
             .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_read_authority
+            .lock()
+            .await
+            .retain(|node_id, _| keys.contains_key(node_id));
         *inner.activity_public_keys.lock().map_err(|_| {
             MembershipError::Internal("activity public-key lock was poisoned".to_owned())
         })? = keys;
@@ -2005,6 +2040,23 @@ impl MembershipManager {
             .collect())
     }
 
+    /// Number of committed voters, including this node. Media rollout gates
+    /// compare this with the bounded peer directory so a missing, legacy, or
+    /// over-limit voter fails closed instead of being silently omitted.
+    pub async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(1);
+        };
+        Ok(inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .voter_ids()
+            .take(MAX_ACTIVITY_PEERS.saturating_add(2))
+            .count())
+    }
+
     /// Sign one short-lived, sender-and-target-bound activity request with
     /// this node's private key.
     pub fn sign_activity_request(
@@ -2140,6 +2192,87 @@ impl MembershipManager {
             .await
     }
 
+    /// Authenticate an idempotent read-only relay. Replaying one of these
+    /// signed requests can only repeat a capability-scoped media read, so the
+    /// mutation replay cache is deliberately reserved for start/abort/delete.
+    /// Signature verification remains mandatory and globally rate-bounded;
+    /// the live-voter proof is cached for one second per sender behind a
+    /// single-flight mutex so segment bursts do not become Raft read bursts.
+    pub async fn authorize_internal_peer_read_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if auth.target_node_id != inner.identity.node_id
+            || now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64
+            || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || !canonical_internal_auth_nonce(&auth.nonce)
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
+        {
+            return Ok(false);
+        }
+        if !inner
+            .internal_read_preverify
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal(
+                    "internal read preverification lock was poisoned".to_owned(),
+                )
+            })?
+            .admit(Instant::now())
+        {
+            return Ok(false);
+        }
+        let Some(message) = internal_peer_auth_message(
+            &auth.node_id,
+            &auth.target_node_id,
+            auth.timestamp_ms,
+            &auth.nonce,
+            method,
+            path,
+            body,
+        ) else {
+            return Ok(false);
+        };
+        let signature = match hex::decode(&auth.signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
+        };
+        if !self
+            .activity_signature_is_valid(&auth.node_id, &message, &signature)
+            .await?
+        {
+            return Ok(false);
+        }
+        let observed = Instant::now();
+        let mut authority = inner.internal_read_authority.lock().await;
+        authority.retain(|_, expires_at| *expires_at > observed);
+        if authority
+            .get(&auth.node_id)
+            .is_some_and(|expires_at| *expires_at > observed)
+        {
+            return Ok(true);
+        }
+        let live = self
+            .verify_live_activity_authority(&auth.node_id, now)
+            .await?;
+        if live {
+            if authority.len() >= MAX_ACTIVITY_PEERS && !authority.contains_key(&auth.node_id) {
+                if let Some(evicted) = authority.keys().next().cloned() {
+                    authority.remove(&evicted);
+                }
+            }
+            authority.insert(auth.node_id.clone(), observed + INTERNAL_READ_AUTHORITY_TTL);
+        }
+        Ok(live)
+    }
+
     async fn activity_signature_is_valid(
         &self,
         node_id: &str,
@@ -2218,6 +2351,7 @@ impl MembershipManager {
                     MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
                 })?
                 .remove(&evicted);
+            inner.internal_read_authority.lock().await.remove(&evicted);
         }
         Ok(true)
     }
@@ -2701,7 +2835,7 @@ impl MembershipManager {
                 ),
                 (
                     begin_removal_attempt_sql(),
-                    params!(node_id, attempt_id.as_str()),
+                    params!(node_id, attempt_id.as_str(), now),
                 ),
                 (
                     BEGIN_REMOVAL_INTENT_SQL.to_owned(),
@@ -2737,8 +2871,9 @@ impl MembershipManager {
                 .client
                 .query_consistent_map::<CountRow, _>(
                     "SELECT COUNT(*) AS count FROM media_sessions \
-                     WHERE owner_node_id = $1 AND state = 'active'",
-                    params!(node_id),
+                     WHERE owner_node_id = $1 AND state = 'active' \
+                       AND lease_expires_at_ms > $2",
+                    params!(node_id, now),
                 )
                 .await?;
             if active_sessions.first().is_some_and(|row| row.count > 0) {
@@ -2916,6 +3051,7 @@ impl MembershipManager {
         if let Ok(mut replays) = inner.internal_auth_replays.lock() {
             replays.remove(node_id);
         }
+        inner.internal_read_authority.lock().await.remove(node_id);
         if let Err(error) = inner
             .client
             .execute(
@@ -4047,6 +4183,20 @@ mod tests {
     }
 
     #[test]
+    fn internal_media_read_preverification_has_a_bounded_burst() {
+        let started = Instant::now();
+        let mut admission = InternalReadAdmission {
+            window_started: started,
+            checks: 0,
+        };
+        for _ in 0..MAX_INTERNAL_READ_PREVERIFY_PER_SECOND {
+            assert!(admission.admit(started));
+        }
+        assert!(!admission.admit(started));
+        assert!(admission.admit(started + Duration::from_secs(1)));
+    }
+
+    #[test]
     fn exact_internal_replay_is_rejected_for_the_entire_auth_window() {
         let started = Instant::now();
         let mut replays = InternalAuthReplayWindow::default();
@@ -4164,11 +4314,12 @@ mod tests {
                    node_id TEXT, capability TEXT, last_seen_at INTEGER, \
                    PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
-                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                   lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
                  INSERT INTO cluster_node_capabilities VALUES (\
                    'node-a', 'membership_removal_attempt_refs_v1', 10); \
-                 INSERT INTO media_sessions VALUES ('node-a', 'active');",
+                 INSERT INTO media_sessions VALUES ('node-a', 'active', 100);",
             )
             .expect("seed active media owner");
 
@@ -4176,7 +4327,7 @@ mod tests {
             connection
                 .execute(
                     &begin_removal_attempt_sql(),
-                    rusqlite::params!["node-a", "blocked-attempt"],
+                    rusqlite::params!["node-a", "blocked-attempt", 50],
                 )
                 .expect("refuse removal while media is active"),
             0
@@ -4191,7 +4342,7 @@ mod tests {
             connection
                 .execute(
                     &begin_removal_attempt_sql(),
-                    rusqlite::params!["node-a", "admitted-attempt"],
+                    rusqlite::params!["node-a", "admitted-attempt", 50],
                 )
                 .expect("admit removal after media drains"),
             1
@@ -4242,7 +4393,8 @@ mod tests {
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
                    revision INTEGER, updated_at_ms INTEGER); \
-                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                   lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 1, 10, NULL); \
                  INSERT INTO cluster_nodes VALUES ('node-old', 2, 20, NULL); \
                  INSERT INTO cluster_nodes VALUES ('staged-join', 99, 30, NULL); \
@@ -4284,7 +4436,7 @@ mod tests {
             transaction
                 .execute(
                     &begin_removal_attempt_sql(),
-                    rusqlite::params!["blocked", "blocked-attempt"],
+                    rusqlite::params!["blocked", "blocked-attempt", 0],
                 )
                 .expect("gate mixed-version begin"),
             0

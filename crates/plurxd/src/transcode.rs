@@ -43,6 +43,14 @@ const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 
+/// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
+/// authorize playback and therefore never belong in logs, traces, metrics, or
+/// diagnostics even though they look like ordinary identifiers.
+pub(crate) fn session_log_id(session_id: &str) -> String {
+    let digest = Sha256::digest(session_id.as_bytes());
+    format!("s-{}", &hex::encode(digest)[..16])
+}
+
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
 }
@@ -970,13 +978,13 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(session = %sid, encoder = encoder_label, "transcode ffmpeg: {line}");
+                tracing::warn!(session = %session_log_id(&sid), encoder = encoder_label, "transcode ffmpeg: {line}");
             }
             // Stderr closing means the process ended. Logging it (with how long
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
             tracing::warn!(
-                session = %sid, encoder = encoder_label,
+                session = %session_log_id(&sid), encoder = encoder_label,
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1027,11 +1035,11 @@ fn spawn_ffmpeg_pipe(
                 if is_progress_line(&line) {
                     apply_progress_line(&progress, generation, &line);
                 } else {
-                    tracing::warn!(session = %sid, encoder = "copy", "transcode ffmpeg: {line}");
+                    tracing::warn!(session = %session_log_id(&sid), encoder = "copy", "transcode ffmpeg: {line}");
                 }
             }
             tracing::warn!(
-                session = %sid, encoder = "copy",
+                session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1259,7 +1267,7 @@ async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: Strin
             }
             WatchNext::Stall => {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(&sid),
                     stalled_s = session.progress.stalled_for().as_secs(),
                     produced_ms = session.progress.out_time_ms(),
                     "{}",
@@ -2097,7 +2105,7 @@ impl SegmentDelivery {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(self.session_id.clone()),
+                session_id: Some(session_log_id(&self.session_id)),
                 file_id: Some(self.session.file_id),
                 event: event.to_owned(),
                 method: Some(self.method.to_owned()),
@@ -2126,7 +2134,7 @@ impl SegmentDelivery {
         self.slow_read_reported = true;
         let waited_ms = elapsed.as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             waited_ms,
             delivered_bytes = self.delivered_bytes,
@@ -2155,7 +2163,7 @@ impl SegmentDelivery {
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2180,7 +2188,7 @@ impl SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::error!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2209,7 +2217,7 @@ impl Drop for SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -5793,7 +5801,7 @@ impl TranscodeManager {
             self.active_session_count.store(sessions.len(), Relaxed);
         }
         tracing::info!(
-            %session_id, recipe = %hash, file = file.id,
+            session = %session_log_id(&session_id), recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
         );
         self.emit_session_event(
@@ -7193,7 +7201,7 @@ impl TranscodeManager {
                                 "request {key} resolved to a target that differs from its session"
                             ));
                         }
-                        tracing::debug!(%session_id, request_id = key, "idempotent create: same session");
+                        tracing::debug!(session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
                         return Ok(Claimed::Recovered(info));
                     }
                     // Its session is gone; the entry is stale, not
@@ -7932,7 +7940,8 @@ impl TranscodeManager {
             )
             .await;
             tracing::info!(
-                %session_id, playback_id,
+                session = %session_log_id(&session_id),
+                playback = %session_log_id(playback_id),
                 "reaped superseded transcode session (this player started a new one)"
             );
         }
@@ -8250,7 +8259,7 @@ impl TranscodeManager {
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
         );
         tracing::info!(
-            %session_id, encoder = encoder.label(), pipeline = opts.pipeline.name(),
+            session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
             declined = declined.unwrap_or(""),
             build = crate::version::BUILD,
@@ -8274,7 +8283,7 @@ impl TranscodeManager {
         )?;
 
         tracing::info!(
-            %session_id, file_id, target_height, start_seconds,
+            session = %session_log_id(&session_id), file_id, target_height, start_seconds,
             encoder = encoder.label(), "started transcode session"
         );
 
@@ -8408,7 +8417,7 @@ impl TranscodeManager {
                             // says which. The speed says how much headroom it
                             // has while doing it.
                             tracing::info!(
-                                session = %sid,
+                                session = %session_log_id(&sid),
                                 speed = session.progress.speed(),
                                 "transcode producing segments (hardware path healthy)"
                             );
@@ -8439,7 +8448,7 @@ impl TranscodeManager {
                             if !suspended && !announced_slow {
                                 announced_slow = true;
                                 tracing::info!(
-                                    session = %sid,
+                                    session = %session_log_id(&sid),
                                     produced_ms = session.progress.out_time_ms(),
                                     speed = session.progress.speed(),
                                     "no finished segment yet, but the encoder is still \
@@ -8534,7 +8543,7 @@ impl TranscodeManager {
         if downgrade_pipeline {
             let Some(fallback) = opts.pipeline.fallback() else {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     pipeline = opts.pipeline.name(),
                     "renderer stalled and has no color-safe fallback; refusing to retry through a different color transform"
                 );
@@ -8552,7 +8561,7 @@ impl TranscodeManager {
             retry_opts.effective_rate_control = software_rate_control;
         }
         tracing::warn!(
-            session = %sid,
+            session = %session_log_id(sid),
             stalled_s = session.progress.stalled_for().as_secs(),
             pipeline = opts.pipeline.name(),
             retry_pipeline = retry_opts.pipeline.name(),
@@ -8617,14 +8626,14 @@ impl TranscodeManager {
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
                 tracing::info!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     encoder = retry_encoder.label(),
                     pipeline = retry_opts.pipeline.name(),
                     "fallback transcode started"
                 );
             }
             Err(e) => {
-                tracing::error!(session = %sid, "fallback transcode failed: {e}");
+                tracing::error!(session = %session_log_id(sid), "fallback transcode failed: {e}");
                 session.fail(PlaylistError::SessionFailed(
                     "the fallback encoder could not be started".into(),
                 ));
@@ -8757,7 +8766,7 @@ impl TranscodeManager {
                 options.preserve_dolby_vision,
             );
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "segmenter",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
                 build = crate::version::BUILD,
                 "copy-video HLS ffmpeg args: {}", args.join(" ")
             );
@@ -8773,7 +8782,7 @@ impl TranscodeManager {
                     // Spawning failed before any of this was decided, so there
                     // is nothing to unwind: start the legacy path here.
                     tracing::warn!(
-                        %session_id,
+                        session = %session_log_id(&session_id),
                         "copy segmenter could not start ffmpeg ({e}); using the HLS muxer"
                     );
                     let args = legacy_args();
@@ -8792,7 +8801,7 @@ impl TranscodeManager {
         } else {
             let args = legacy_args();
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "legacy",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "legacy",
                 build = crate::version::BUILD,
                 "copy-video HLS ffmpeg args: {}", args.join(" ")
             );
@@ -8918,7 +8927,7 @@ impl TranscodeManager {
                 match outcome {
                     copyseg::Outcome::Ran(counts) => {
                         tracing::info!(
-                            session = %sid, build = crate::version::BUILD,
+                            session = %session_log_id(&sid), build = crate::version::BUILD,
                             "{}", copyseg::summary(&counts)
                         );
                     }
@@ -8955,7 +8964,7 @@ impl TranscodeManager {
                             return;
                         };
                         tracing::warn!(
-                            session = %sid,
+                            session = %session_log_id(&sid),
                             "copy segmenter cannot read this stream ({reason}); \
                              falling back to ffmpeg's HLS muxer for this session"
                         );
@@ -9000,10 +9009,10 @@ impl TranscodeManager {
                                     dir.clone(),
                                     sid.clone(),
                                 );
-                                tracing::info!(session = %sid, "fallback copy started");
+                                tracing::info!(session = %session_log_id(&sid), "fallback copy started");
                             }
                             Err(e) => {
-                                tracing::error!(session = %sid, "fallback copy failed: {e}");
+                                tracing::error!(session = %session_log_id(&sid), "fallback copy failed: {e}");
                                 session.fail(PlaylistError::SessionFailed(
                                     "the fallback remux could not be started".into(),
                                 ));
@@ -9200,7 +9209,7 @@ impl TranscodeManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(session_id.to_owned()),
+                session_id: Some(session_log_id(session_id)),
                 file_id: Some(session.file_id),
                 event: event.to_owned(),
                 method: Some(method.to_owned()),
@@ -9283,7 +9292,7 @@ impl TranscodeManager {
             },
         )
         .await;
-        tracing::info!(%session_id, reason, "transcode session ended");
+        tracing::info!(session = %session_log_id(session_id), reason, "transcode session ended");
         true
     }
 
@@ -9381,7 +9390,7 @@ impl TranscodeManager {
             return false;
         }
         tracing::error!(
-            session = %session_id,
+            session = %session_log_id(session_id),
             %status,
             "HLS producer exited unsuccessfully before publishing a usable playlist; \
              failing the session"
@@ -9483,7 +9492,7 @@ impl TranscodeManager {
                                 .map(|duration| duration.as_secs() as i64)
                                 .unwrap_or(session.started_unix);
                             tracing::info!(
-                                session = %session_id,
+                                session = %session_log_id(session_id),
                                 first_retained_index,
                                 wall_seconds_since_start =
                                     now_unix.saturating_sub(session.started_unix),
@@ -9518,7 +9527,7 @@ impl TranscodeManager {
             }
             if session.cached {
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     "cached playlist was missing, empty, oversized, or failed its manifest"
                 );
                 self.fail_cached_session_integrity(
@@ -9545,7 +9554,7 @@ impl TranscodeManager {
             // recovery path must not be reported as terminal.
             if Instant::now() >= deadline {
                 tracing::warn!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "no usable HLS playlist within the startup budget; telling the client \
                      to retry rather than that the stream failed"
@@ -9615,7 +9624,7 @@ impl TranscodeManager {
         let first_retained = session.segments.lock().await.first_retained_index();
         if segment_was_pruned(idx, first_retained) {
             tracing::warn!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 segment = name,
                 first_retained_segment = ?first_retained,
                 "HLS segment request fell behind the retained playlist window"
@@ -9655,7 +9664,7 @@ impl TranscodeManager {
                 Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {
                     tracing::error!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         "cached object failed its generation manifest"
                     );
@@ -9712,7 +9721,7 @@ impl TranscodeManager {
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         waited_ms,
                         progress_idle_ms = session
@@ -9781,7 +9790,7 @@ impl TranscodeManager {
                 let failure = session.failure_reason();
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason = failure.code(),
@@ -9827,7 +9836,7 @@ impl TranscodeManager {
                     "producer_timeout"
                 };
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason,
@@ -9983,7 +9992,7 @@ impl TranscodeManager {
             *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count,
                 hold_reason = ?hold.map(|hold| hold.reason),
                 release_value = hold.map(|hold| hold.release_value),
@@ -10007,7 +10016,7 @@ impl TranscodeManager {
             let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
             let hold_reason = held.map(|(_, reason)| reason);
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
                 ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
                 "resuming transcode: the client caught up"
@@ -10151,7 +10160,7 @@ impl TranscodeManager {
                 )
                 .await;
                 tracing::info!(
-                    session_id = %id,
+                    session = %session_log_id(&id),
                     idle_seconds,
                     last_request,
                     "reaped idle transcode session"
@@ -10830,6 +10839,20 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_session_ids_are_stably_redacted_for_observability() {
+        let raw = "00000000-0000-4000-8000-0000000000d1";
+        let redacted = session_log_id(raw);
+        assert_eq!(redacted, session_log_id(raw));
+        assert_ne!(
+            redacted,
+            session_log_id("00000000-0000-4000-8000-0000000000d2")
+        );
+        assert_eq!(redacted.len(), 18);
+        assert!(redacted.starts_with("s-"));
+        assert!(!redacted.contains(raw));
+    }
 
     #[test]
     fn scratch_capacity_fails_closed_when_the_background_sample_expires() {

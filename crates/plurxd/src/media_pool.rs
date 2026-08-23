@@ -23,7 +23,7 @@ use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-pub(crate) const PROTOCOL_VERSION: i64 = 1;
+pub(crate) const PROTOCOL_VERSION: i64 = 2;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -599,6 +599,45 @@ impl MediaPool {
         }
     }
 
+    /// Remote starts remain off until an operator opts in and every committed
+    /// voter has a fresh snapshot for this exact protocol. Comparing the peer
+    /// directory with the Raft voter count makes missing HTTP rows, stale
+    /// heartbeats, oversized clusters, and rolling old binaries fail closed.
+    pub(crate) async fn remote_placement_ready(&self, state: &AppState) -> bool {
+        if state
+            .store
+            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some("1")
+        {
+            return false;
+        }
+        self.expire().await;
+        let deadline = deadline_after(SNAPSHOT_DEADLINE);
+        let directory = tokio::time::timeout_at(deadline, async {
+            tokio::join!(
+                self.membership.activity_peers(),
+                self.membership.activity_voter_count()
+            )
+        })
+        .await;
+        let Ok((Ok(peers), Ok(voter_count))) = directory else {
+            return false;
+        };
+        if voter_count != peers.len().saturating_add(1) {
+            return false;
+        }
+        remote_directory_ready(
+            &peers,
+            voter_count,
+            &self.snapshots.read().await,
+            tokio::time::Instant::now(),
+        )
+    }
+
     pub(crate) async fn offers(
         &self,
         state: &AppState,
@@ -693,6 +732,22 @@ impl MediaPool {
             offers,
         }
     }
+}
+
+fn remote_directory_ready(
+    peers: &[ActivityPeer],
+    voter_count: usize,
+    snapshots: &BTreeMap<String, CachedSnapshot>,
+    now: tokio::time::Instant,
+) -> bool {
+    voter_count == peers.len().saturating_add(1)
+        && peers.iter().all(|peer| {
+            peer.reachable
+                && peer.http_base.is_some()
+                && snapshots.get(&peer.node_id).is_some_and(|cached| {
+                    cached.snapshot.protocol_version == PROTOCOL_VERSION && now <= cached.expires_at
+                })
+        })
 }
 
 async fn fetch_snapshot(
@@ -1321,6 +1376,32 @@ mod tests {
         let mut incompatible = accepted;
         incompatible.protocol_version = PROTOCOL_VERSION.saturating_add(1);
         assert!(!snapshot_is_bounded(&incompatible, "peer-a"));
+    }
+
+    #[test]
+    fn remote_placement_requires_every_voter_on_the_current_protocol() {
+        let now = tokio::time::Instant::now();
+        let peers = vec![ActivityPeer {
+            node_id: "peer-a".to_owned(),
+            http_base: Some("http://peer-a:8080".to_owned()),
+            reachable: true,
+        }];
+        let mut snapshots = BTreeMap::from([(
+            "peer-a".to_owned(),
+            CachedSnapshot {
+                snapshot: snapshot("peer-a", &["h264"], 1080),
+                expires_at: now + Duration::from_secs(1),
+            },
+        )]);
+        assert!(remote_directory_ready(&peers, 2, &snapshots, now));
+        assert!(!remote_directory_ready(&peers, 3, &snapshots, now));
+
+        snapshots
+            .get_mut("peer-a")
+            .expect("peer snapshot")
+            .snapshot
+            .protocol_version = PROTOCOL_VERSION - 1;
+        assert!(!remote_directory_ready(&peers, 2, &snapshots, now));
     }
 
     #[test]

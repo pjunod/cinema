@@ -18,7 +18,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
     MediaFile, MediaSessionActivation, MediaSessionRequestClaim, MediaSessionRoute, SubtitleStream,
@@ -30,8 +30,8 @@ use super::error::ApiError;
 use super::extract::AuthUser;
 use crate::media_pool::MediaOfferRequest;
 use crate::media_sessions::{
-    unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, LEASE_TTL_MS,
+    unix_ms, RelayHeaders, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
+    RemoteStartResponse, LEASE_TTL_MS, START_DEADLINE,
 };
 use crate::state::AppState;
 use crate::transcode::PlaylistError;
@@ -282,8 +282,10 @@ pub async fn create(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
-    if req.playback_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("playback_id is required".into()));
+    if !valid_playback_id(&req.playback_id) {
+        return Err(ApiError::BadRequest(
+            "playback_id must contain 1 to 128 safe characters".into(),
+        ));
     }
     // The source height answers three things now: Auto, the ladder in the
     // response, and the snap's source-height escape. One read, from the read
@@ -374,7 +376,9 @@ pub async fn create(
             MediaSessionRequestClaim::Acquired {
                 incarnation_id: acquired,
             } => incarnation_id = acquired,
-            MediaSessionRequestClaim::Resolved(route) if route.state == "active" => {
+            MediaSessionRequestClaim::Resolved(route)
+                if route.state == "active" && route.lease_expires_at_ms > now_ms =>
+            {
                 return serde_json::from_str::<StartResponse>(&route.response_json)
                     .map(Json)
                     .map_err(ApiError::from);
@@ -409,11 +413,13 @@ pub async fn create(
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
+    let placement_deadline = super::peer_transport::deadline_after(START_DEADLINE);
 
     // A stall reopen must stay with its existing worker in P5: the normalized
     // predecessor state is process-local and automatic migration does not
@@ -423,7 +429,7 @@ pub async fn create(
         .as_deref()
         .filter(|value| uuid::Uuid::parse_str(value).is_ok())
     {
-        state
+        let durable = state
             .media_sessions
             .route(previous_session_id)
             .await?
@@ -432,12 +438,31 @@ pub async fn create(
                     && route.state == "active"
                     && route.lease_expires_at_ms > unix_ms()
             })
-            .map(|route| route.owner_node_id)
+            .map(|route| route.owner_node_id);
+        if durable.is_some() {
+            durable
+        } else if state
+            .transcode
+            .active_session_ids()
+            .await
+            .iter()
+            .any(|session_id| session_id == previous_session_id)
+        {
+            // A session created by the pre-P5 binary has no durable route.
+            // Its reopen state is nevertheless process-local, so pin that
+            // rolling-upgrade legacy predecessor to this node rather than
+            // ranking a peer that cannot possess it.
+            Some(state.node_id.clone())
+        } else {
+            None
+        }
     } else {
         None
     };
     let mut owner_candidates = if let Some(owner) = pinned_owner {
         vec![owner]
+    } else if !state.media_pool.remote_placement_ready(&state).await {
+        vec![state.node_id.clone()]
     } else {
         match MediaOfferRequest::new(
             source.as_ref().ok_or(ApiError::NotFound("file"))?,
@@ -473,17 +498,32 @@ pub async fn create(
     let mut started = None;
     let mut last_error = None;
     for candidate in owner_candidates {
+        if tokio::time::Instant::now() >= placement_deadline {
+            last_error = Some(ApiError::ServiceUnavailable(
+                "media worker placement exceeded its common deadline".to_owned(),
+            ));
+            break;
+        }
         let result = if candidate == state.node_id {
-            state
-                .transcode
-                .create_session(&remote_request.request, &user.username)
-                .await
-                .map(RemoteStartResponse::from)
-                .map_err(|error| session_start_error(id, error))
+            match tokio::time::timeout_at(
+                placement_deadline,
+                state
+                    .transcode
+                    .create_session(&remote_request.request, &user.username),
+            )
+            .await
+            {
+                Ok(result) => result
+                    .map(RemoteStartResponse::from)
+                    .map_err(|error| session_start_error(id, error)),
+                Err(_) => Err(ApiError::ServiceUnavailable(
+                    "local media worker exceeded the placement deadline".to_owned(),
+                )),
+            }
         } else {
             state
                 .media_sessions
-                .start_remote(&candidate, &remote_request)
+                .start_remote(&candidate, &remote_request, placement_deadline)
                 .await
                 .map_err(|error| {
                     ApiError::ServiceUnavailable(format!(
@@ -648,6 +688,14 @@ pub async fn create(
     Ok(Json(response))
 }
 
+fn valid_playback_id(playback_id: &str) -> bool {
+    !playback_id.trim().is_empty()
+        && playback_id.len() <= 128
+        && !playback_id
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+}
+
 async fn abort_started_session(
     state: &AppState,
     owner_node_id: &str,
@@ -691,6 +739,7 @@ async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
                 &RelayRequest {
                     session_id: route.session_id.clone(),
                     resource: RelayResource::Delete,
+                    headers: RelayHeaders::default(),
                 },
             )
             .await;
@@ -723,6 +772,7 @@ async fn relay_if_remote(
     state: &AppState,
     session_id: &str,
     resource: RelayResource,
+    headers: RelayHeaders,
 ) -> Result<Option<Response>, ApiError> {
     let Some(route) = state.media_sessions.route(session_id).await? else {
         // A process upgraded with already-live sessions has no durable row;
@@ -746,6 +796,7 @@ async fn relay_if_remote(
             &RelayRequest {
                 session_id: session_id.to_owned(),
                 resource,
+                headers,
             },
         )
         .await
@@ -797,7 +848,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             subtitle_vtt_local(state, &request.session_id, index, &segment).await
         }
         RelayResource::Segment { segment } => {
-            segment_local(state, &request.session_id, &segment).await
+            segment_local(state, &request.session_id, &segment, &request.headers).await
         }
         RelayResource::Delete => {
             state
@@ -910,8 +961,16 @@ pub async fn start(
 pub async fn status(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if let Some(response) = relay_if_remote(&state, &session, RelayResource::Status).await? {
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::Status,
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
         return Ok(response);
     }
     status_local(&state, &session)
@@ -1013,6 +1072,7 @@ pub async fn playlist(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
     Query(query): Query<PlaylistQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(response) = relay_if_remote(
         &state,
@@ -1021,6 +1081,7 @@ pub async fn playlist(
             native: query.native,
             subtitle: query.subtitle,
         },
+        RelayHeaders::from_http(&headers),
     )
     .await?
     {
@@ -1053,6 +1114,7 @@ pub async fn master_playlist_response(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
     Query(query): Query<PlaylistQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(response) = relay_if_remote(
         &state,
@@ -1061,6 +1123,7 @@ pub async fn master_playlist_response(
             subtitle: query.subtitle,
             diagnostic: query.diagnostic.clone(),
         },
+        RelayHeaders::from_http(&headers),
     )
     .await?
     {
@@ -1086,7 +1149,7 @@ async fn master_playlist_response_local(
     // multivariant subtitle group.
     if query.diagnostic.is_none() && should_serve_high_tier_media_playlist(&file, &context) {
         tracing::info!(
-            session_id = %session,
+            session = %crate::transcode::session_log_id(session),
             codecs = %context.codecs,
             "serving high-tier HEVC through the direct media-playlist envelope"
         );
@@ -1121,7 +1184,7 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
         }
     };
     tracing::warn!(
-        session = %session,
+        session = %crate::transcode::session_log_id(session),
         code = err.code(),
         retryable = err.retryable(),
         "HLS playlist request refused: {}",
@@ -1134,8 +1197,16 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
 pub async fn video_playlist(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if let Some(response) = relay_if_remote(&state, &session, RelayResource::VideoPlaylist).await? {
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::VideoPlaylist,
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
         return Ok(response);
     }
     video_playlist_local(&state, &session).await
@@ -1156,9 +1227,15 @@ async fn video_playlist_local(state: &AppState, session: &str) -> Result<Respons
 pub async fn subtitle_playlist(
     State(state): State<AppState>,
     AxPath((session, index)): AxPath<(String, i64)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if let Some(response) =
-        relay_if_remote(&state, &session, RelayResource::SubtitlePlaylist { index }).await?
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::SubtitlePlaylist { index },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
     {
         return Ok(response);
     }
@@ -1198,6 +1275,7 @@ async fn subtitle_playlist_local(
 pub async fn subtitle_vtt(
     State(state): State<AppState>,
     AxPath((session, index, segment)): AxPath<(String, i64, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(response) = relay_if_remote(
         &state,
@@ -1206,6 +1284,7 @@ pub async fn subtitle_vtt(
             index,
             segment: segment.clone(),
         },
+        RelayHeaders::from_http(&headers),
     )
     .await?
     {
@@ -1245,7 +1324,7 @@ async fn subtitle_vtt_local(
         match crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index).await {
             Ok(Some(bytes)) => {
                 tracing::info!(
-                    session_id = %session,
+                    session = %crate::transcode::session_log_id(session),
                     file_id = file.id,
                     index,
                     codec = %track.codec,
@@ -1268,7 +1347,7 @@ async fn subtitle_vtt_local(
                 // ready instead of pinning the temporary empty answer.
                 crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
                 tracing::debug!(
-                    session_id = %session,
+                    session = %crate::transcode::session_log_id(session),
                     file_id = file.id,
                     index,
                     "serving an empty subtitle segment while its sidecar cache warms"
@@ -2163,6 +2242,7 @@ fn slice_webvtt(
 pub async fn segment(
     State(state): State<AppState>,
     AxPath((session, seg)): AxPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(response) = relay_if_remote(
         &state,
@@ -2170,18 +2250,70 @@ pub async fn segment(
         RelayResource::Segment {
             segment: seg.clone(),
         },
+        RelayHeaders::from_http(&headers),
     )
     .await?
     {
         return Ok(response);
     }
-    segment_local(&state, &session, &seg).await
+    segment_local(&state, &session, &seg, &RelayHeaders::from_http(&headers)).await
 }
 
-async fn segment_local(state: &AppState, session: &str, seg: &str) -> Result<Response, ApiError> {
+fn requested_byte_range(value: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let raw = raw.strip_prefix("bytes=").ok_or(())?;
+    if raw.contains(',') || len == 0 {
+        return Err(());
+    }
+    let (start, end) = raw.split_once('-').ok_or(())?;
+    let (start, end) = if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (len.saturating_sub(suffix.min(len)), len - 1)
+    } else {
+        let start = start.parse::<u64>().map_err(|_| ())?;
+        if start >= len {
+            return Err(());
+        }
+        let end = if end.is_empty() {
+            len - 1
+        } else {
+            end.parse::<u64>().map_err(|_| ())?.min(len - 1)
+        };
+        if end < start {
+            return Err(());
+        }
+        (start, end)
+    };
+    Ok(Some((start, end)))
+}
+
+fn segment_etag(session: &str, segment: &str, len: u64) -> String {
+    format!("\"{session}-{segment}-{len:x}\"")
+}
+
+fn etag_matches(request: Option<&str>, etag: &str) -> bool {
+    request.is_some_and(|request| {
+        request
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == "*" || candidate == etag)
+    })
+}
+
+async fn segment_local(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
 
-    let opened = match state.transcode.segment(session, seg).await {
+    let mut opened = match state.transcode.segment(session, seg).await {
         Ok(Some(opened)) => opened,
         Ok(None) => return Err(ApiError::NotFound("segment")),
         Err(crate::transcode::SegmentOpenError::Capacity) => {
@@ -2193,6 +2325,35 @@ async fn segment_local(state: &AppState, session: &str, seg: &str) -> Result<Res
         }
     };
     let content_type = segment_content_type(seg);
+    let etag = segment_etag(session, seg, opened.len);
+    if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, immutable".to_owned(),
+                ),
+            ],
+        )
+            .into_response());
+    }
+    let requested_range = match requested_byte_range(headers.range.as_deref(), opened.len) {
+        Ok(range) => range,
+        Err(()) => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_RANGE, format!("bytes */{}", opened.len)),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::ETAG, etag),
+                ],
+            )
+                .into_response())
+        }
+    };
     if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
@@ -2220,34 +2381,57 @@ async fn segment_local(state: &AppState, session: &str, seg: &str) -> Result<Res
         if let Ok((_, file)) = session_file(state, session).await {
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
-                    session_id = %session,
+                    session = %crate::transcode::session_log_id(session),
                     "translated the HEVC High-tier initialization record for Apple HLS"
                 );
             }
         }
-        return Ok((
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, content_type.to_owned()),
-                (header::CONTENT_LENGTH, init.len().to_string()),
+        let (status, body, content_range) = match requested_range {
+            Some((start, end)) => {
+                let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
+                let end = usize::try_from(end).map_err(|_| ApiError::NotFound("segment"))?;
                 (
-                    header::CACHE_CONTROL,
-                    "private, max-age=3600, immutable".to_owned(),
-                ),
-            ],
-            init,
-        )
-            .into_response());
+                    StatusCode::PARTIAL_CONTENT,
+                    init[start..=end].to_vec(),
+                    Some(format!("bytes {start}-{end}/{}", init.len())),
+                )
+            }
+            None => (StatusCode::OK, init, None),
+        };
+        let mut response = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, body.len())
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private, max-age=3600, immutable");
+        if let Some(content_range) = content_range {
+            response = response.header(header::CONTENT_RANGE, content_range);
+        }
+        return response
+            .body(Body::from(body))
+            .map_err(|error| ApiError::Internal(error.to_string()));
     }
     if seg == "init.mp4" && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
-            session_id = %session,
+            session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,
             limit_bytes = APPLE_INIT_REWRITE_LIMIT_BYTES,
             "skipped Apple HEVC tier normalization because init.mp4 exceeds the inspection bound"
         );
     }
-    let opened_len = opened.len;
+    let (status, start, end) = requested_range
+        .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
+        .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
+    if start > 0 {
+        opened
+            .file
+            .seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
+    let opened_len = end.saturating_sub(start).saturating_add(1);
+    let total_len = opened.len;
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let delivery = opened.delivery;
     // The tracker rides the stream state rather than the handler, so it is
@@ -2278,28 +2462,27 @@ async fn segment_local(state: &AppState, session: &str, seg: &str) -> Result<Res
             }
         },
     );
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, content_type.to_owned()),
-            (header::CONTENT_LENGTH, opened_len.to_string()),
-            // A finished segment never changes: ffmpeg writes `.tmp` and
-            // renames, and nothing rewrites the final name. The URI carries a
-            // session id, so the bytes behind it are unique to this session and
-            // safe to hold — `private` because that id is a capability, and
-            // `immutable` so a reload or a retry costs nothing. (The playlist
-            // stays `no-store`: it grows for the session's whole life.)
-            (
-                header::CACHE_CONTROL,
-                "private, max-age=3600, immutable".to_owned(),
-            ),
-        ],
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, opened_len)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, etag)
+        // A finished segment never changes: ffmpeg writes `.tmp` and
+        // renames. The URI carries a capability-scoped session id.
+        .header(header::CACHE_CONTROL, "private, max-age=3600, immutable");
+    if status == StatusCode::PARTIAL_CONTENT {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total_len}"),
+        );
+    }
+    response
         // Streamed rather than buffered: a 4K copy segment is ~35 MB, and
         // reading it into memory before the first byte goes out is an
         // allocation and a copy per request for data on its way to a socket.
-        Body::from_stream(stream),
-    )
-        .into_response())
+        .body(Body::from_stream(stream))
+        .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
 /// MIME types from Apple's HLS authoring profile. An initialization section
@@ -2321,6 +2504,35 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+
+    #[test]
+    fn public_playback_ids_and_segment_ranges_are_bounded() {
+        assert!(valid_playback_id("player-a"));
+        assert!(!valid_playback_id("   "));
+        assert!(!valid_playback_id("player\r\nforged"));
+        assert!(!valid_playback_id(&"p".repeat(129)));
+
+        assert_eq!(requested_byte_range(None, 100), Ok(None));
+        assert_eq!(
+            requested_byte_range(Some("bytes=10-19"), 100),
+            Ok(Some((10, 19)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=90-"), 100),
+            Ok(Some((90, 99)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=-10"), 100),
+            Ok(Some((90, 99)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=-200"), 100),
+            Ok(Some((0, 99)))
+        );
+        assert_eq!(requested_byte_range(Some("bytes=10-9"), 100), Err(()));
+        assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
+        assert_eq!(requested_byte_range(Some("bytes=0-1,3-4"), 100), Err(()));
+    }
 
     // ---- segment delivery, through the real response ------------------------
     //

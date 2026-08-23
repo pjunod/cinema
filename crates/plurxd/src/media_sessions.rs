@@ -26,19 +26,21 @@ pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
-const START_DEADLINE: Duration = Duration::from_secs(50);
+pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
 const LEASE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const LEASE_TTL_MS: i64 = 12_000;
-pub(crate) const ACTIVATION_CONFIRMATION_DELAY: Duration = Duration::from_secs(8);
+pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
+const LEASE_RENEWAL_BATCH: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
+    pub protocol_version: i64,
     pub incarnation_id: String,
     pub user_id: i64,
     pub request: SessionRequest,
@@ -46,7 +48,8 @@ pub(crate) struct RemoteStartRequest {
 
 impl RemoteStartRequest {
     pub(crate) fn is_valid(&self) -> bool {
-        uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
+        self.protocol_version == crate::media_pool::PROTOCOL_VERSION
+            && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
             && self.user_id > 0
             && self.request.request_id.as_deref() == Some(self.incarnation_id.as_str())
             && self.request.file_id > 0
@@ -188,6 +191,42 @@ pub(crate) enum RelayResource {
     Delete,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelayHeaders {
+    pub range: Option<String>,
+    pub if_none_match: Option<String>,
+    pub if_modified_since: Option<String>,
+}
+
+impl RelayHeaders {
+    pub(crate) fn from_http(headers: &axum::http::HeaderMap) -> Self {
+        let value = |name: axum::http::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| value.len() <= 1_024)
+                .map(str::to_owned)
+        };
+        Self {
+            range: value(axum::http::header::RANGE),
+            if_none_match: value(axum::http::header::IF_NONE_MATCH),
+            if_modified_since: value(axum::http::header::IF_MODIFIED_SINCE),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        [&self.range, &self.if_none_match, &self.if_modified_since]
+            .into_iter()
+            .flatten()
+            .all(|value| {
+                value.len() <= 1_024
+                    && !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+                    && value.parse::<axum::http::HeaderValue>().is_ok()
+            })
+    }
+}
+
 impl RelayResource {
     pub(crate) fn is_valid(&self) -> bool {
         match self {
@@ -219,11 +258,15 @@ impl RelayResource {
 pub(crate) struct RelayRequest {
     pub session_id: String,
     pub resource: RelayResource,
+    #[serde(default)]
+    pub headers: RelayHeaders,
 }
 
 impl RelayRequest {
     pub(crate) fn is_valid(&self) -> bool {
-        uuid::Uuid::parse_str(&self.session_id).is_ok() && self.resource.is_valid()
+        uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self.resource.is_valid()
+            && self.headers.is_valid()
     }
 }
 
@@ -331,10 +374,14 @@ impl MediaSessionCoordinator {
         std::mem::take(&mut *self.lease_seeds.lock().await)
     }
 
-    async fn peer_base(&self, node_id: &str) -> Result<String, PeerTransportError> {
-        self.membership
-            .activity_peers()
+    async fn peer_base(
+        &self,
+        node_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<String, PeerTransportError> {
+        tokio::time::timeout_at(deadline, self.membership.activity_peers())
             .await
+            .map_err(|_| PeerTransportError::TimedOut)?
             .map_err(|_| PeerTransportError::Unreachable)?
             .into_iter()
             .find(|peer| peer.node_id == node_id && peer.reachable)
@@ -346,12 +393,16 @@ impl MediaSessionCoordinator {
         &self,
         owner_node_id: &str,
         request: &RemoteStartRequest,
+        deadline: tokio::time::Instant,
     ) -> Result<RemoteStartResponse, PeerTransportError> {
         let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
             return Err(PeerTransportError::InvalidResponse);
         }
-        let base = self.peer_base(owner_node_id).await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::TimedOut);
+        }
+        let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport
             .request(
@@ -360,7 +411,7 @@ impl MediaSessionCoordinator {
                 reqwest::Method::POST,
                 START_PATH,
                 body,
-                deadline_after(START_DEADLINE),
+                deadline,
                 MAX_START_RESPONSE_BYTES,
                 PeerAuthMode::ExactRequest,
             )
@@ -382,7 +433,8 @@ impl MediaSessionCoordinator {
         let Ok(body) = serde_json::to_vec(request) else {
             return;
         };
-        let Ok(base) = self.peer_base(owner_node_id).await else {
+        let deadline = deadline_after(ABORT_DEADLINE);
+        let Ok(base) = self.peer_base(owner_node_id, deadline).await else {
             return;
         };
         let _ = self
@@ -393,7 +445,7 @@ impl MediaSessionCoordinator {
                 reqwest::Method::POST,
                 ABORT_PATH,
                 body,
-                deadline_after(ABORT_DEADLINE),
+                deadline,
                 1_024,
                 PeerAuthMode::ExactRequest,
             )
@@ -409,7 +461,8 @@ impl MediaSessionCoordinator {
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
             return Err(PeerTransportError::InvalidResponse);
         }
-        let base = self.peer_base(owner_node_id).await?;
+        let deadline = deadline_after(RELAY_HEADERS_DEADLINE);
+        let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport
             .request_stream(
@@ -418,7 +471,7 @@ impl MediaSessionCoordinator {
                 reqwest::Method::POST,
                 RELAY_PATH,
                 body,
-                deadline_after(RELAY_HEADERS_DEADLINE),
+                deadline,
                 PeerAuthMode::ExactRequest,
             )
             .await?;
@@ -438,6 +491,7 @@ fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTra
         header::ACCEPT_RANGES,
         header::ETAG,
         header::LAST_MODIFIED,
+        header::CONTENT_DISPOSITION,
     ] {
         if let Some(value) = response.headers().get(name.as_str()) {
             let name = HeaderName::from_bytes(name.as_str().as_bytes())
@@ -479,7 +533,14 @@ pub(crate) async fn lease_loop(state: AppState) {
             .collect::<HashSet<_>>();
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
-        let routes = match state.store.owned_media_sessions(&state.node_id).await {
+        if let Err(error) = state.store.maintain_media_sessions(now_ms).await {
+            tracing::debug!(%error, "media-session lifecycle maintenance unavailable");
+        }
+        let routes = match state
+            .store
+            .owned_media_sessions(&state.node_id, now_ms)
+            .await
+        {
             Ok(routes) => routes,
             Err(error) => {
                 tracing::debug!(%error, "media-session lease inventory unavailable");
@@ -532,60 +593,62 @@ pub(crate) async fn lease_loop(state: AppState) {
             .iter()
             .filter(|route| live.contains(&route.session_id))
             .collect::<Vec<_>>();
-        let renewals = active
-            .iter()
-            .map(|route| MediaSessionRenewal {
-                incarnation_id: route.incarnation_id.clone(),
-                owner_epoch: route.owner_epoch,
-            })
-            .collect::<Vec<_>>();
-        match state
-            .store
-            .renew_media_sessions(
-                &state.node_id,
-                &renewals,
-                now_ms,
-                now_ms.saturating_add(LEASE_TTL_MS),
-            )
-            .await
-        {
-            Ok(renewed) => {
-                let renewed = renewed.into_iter().collect::<HashSet<_>>();
-                for route in active {
-                    if renewed.contains(&route.incarnation_id) {
-                        known.insert(
-                            route.incarnation_id.clone(),
-                            (
-                                route.session_id.clone(),
-                                now_ms.saturating_add(LEASE_TTL_MS),
-                            ),
-                        );
-                    } else {
-                        state
-                            .transcode
-                            .stop_session(&route.session_id, "cluster lease lost")
-                            .await;
-                        state
-                            .media_sessions
-                            .invalidate_route(&route.session_id)
-                            .await;
-                        known.remove(&route.incarnation_id);
+        for chunk in renewal_chunks(&active) {
+            let renewals = chunk
+                .iter()
+                .map(|route| MediaSessionRenewal {
+                    incarnation_id: route.incarnation_id.clone(),
+                    owner_epoch: route.owner_epoch,
+                })
+                .collect::<Vec<_>>();
+            match state
+                .store
+                .renew_media_sessions(
+                    &state.node_id,
+                    &renewals,
+                    now_ms,
+                    now_ms.saturating_add(LEASE_TTL_MS),
+                )
+                .await
+            {
+                Ok(renewed) => {
+                    let renewed = renewed.into_iter().collect::<HashSet<_>>();
+                    for route in chunk {
+                        if renewed.contains(&route.incarnation_id) {
+                            known.insert(
+                                route.incarnation_id.clone(),
+                                (
+                                    route.session_id.clone(),
+                                    now_ms.saturating_add(LEASE_TTL_MS),
+                                ),
+                            );
+                        } else {
+                            state
+                                .transcode
+                                .stop_session(&route.session_id, "cluster lease lost")
+                                .await;
+                            state
+                                .media_sessions
+                                .invalidate_route(&route.session_id)
+                                .await;
+                            known.remove(&route.incarnation_id);
+                        }
                     }
                 }
-            }
-            Err(error) => {
-                tracing::debug!(%error, "media-session lease renewal unavailable");
-                for route in active {
-                    if route.lease_expires_at_ms <= now_ms {
-                        state
-                            .transcode
-                            .stop_session(&route.session_id, "cluster lease expired")
-                            .await;
-                        state
-                            .media_sessions
-                            .invalidate_route(&route.session_id)
-                            .await;
-                        known.remove(&route.incarnation_id);
+                Err(error) => {
+                    tracing::debug!(%error, "media-session lease renewal chunk unavailable");
+                    for route in chunk {
+                        if route.lease_expires_at_ms <= now_ms {
+                            state
+                                .transcode
+                                .stop_session(&route.session_id, "cluster lease expired")
+                                .await;
+                            state
+                                .media_sessions
+                                .invalidate_route(&route.session_id)
+                                .await;
+                            known.remove(&route.incarnation_id);
+                        }
                     }
                 }
             }
@@ -607,6 +670,10 @@ pub(crate) async fn lease_loop(state: AppState) {
     }
 }
 
+fn renewal_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {
+    items.chunks(LEASE_RENEWAL_BATCH)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +689,7 @@ mod tests {
     fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: 7,
             request: SessionRequest {
@@ -661,6 +729,10 @@ mod tests {
     fn remote_start_contract_rejects_unfenced_or_noncanonical_inputs() {
         let request = valid_start_request();
         assert!(request.is_valid());
+
+        let mut incompatible = request.clone();
+        incompatible.protocol_version = crate::media_pool::PROTOCOL_VERSION.saturating_sub(1);
+        assert!(!incompatible.is_valid());
 
         let mut mismatched = request.clone();
         mismatched.request.request_id = Some("00000000-0000-4000-8000-0000000000ff".to_owned());
@@ -710,6 +782,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn relay_headers_and_renewal_batches_stay_bounded() {
+        let headers = RelayHeaders {
+            range: Some("bytes=0-99".to_owned()),
+            if_none_match: Some("\"generation\"".to_owned()),
+            if_modified_since: Some("Sun, 23 Aug 2026 08:00:00 GMT".to_owned()),
+        };
+        assert!(headers.is_valid());
+        assert!(!RelayHeaders {
+            range: Some("bytes=0-1\r\nx-forged: true".to_owned()),
+            ..RelayHeaders::default()
+        }
+        .is_valid());
+        assert!(!RelayHeaders {
+            if_none_match: Some("x".repeat(1_025)),
+            ..RelayHeaders::default()
+        }
+        .is_valid());
+
+        let routes = vec![(); LEASE_RENEWAL_BATCH * 2 + 1];
+        assert_eq!(
+            renewal_chunks(&routes)
+                .map(|chunk| chunk.len())
+                .collect::<Vec<_>>(),
+            vec![LEASE_RENEWAL_BATCH, LEASE_RENEWAL_BATCH, 1]
+        );
+    }
+
     #[tokio::test]
     async fn relay_forwards_only_media_headers_without_buffering_the_body() {
         let app = Router::new().route(
@@ -723,6 +823,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "video/mp2t")
                     .header(header::CACHE_CONTROL, "private, max-age=1")
                     .header(header::CONTENT_RANGE, "bytes 0-4/10")
+                    .header(header::CONTENT_DISPOSITION, "inline; filename=segment.ts")
                     .header(header::SET_COOKIE, "peer-secret=must-not-leak")
                     .header(header::CONNECTION, "close")
                     .header("x-peer-internal", "must-not-leak")
@@ -752,6 +853,7 @@ mod tests {
             Some(&"video/mp2t".parse().expect("content type"))
         );
         assert!(relayed.headers().get(header::CONTENT_RANGE).is_some());
+        assert!(relayed.headers().get(header::CONTENT_DISPOSITION).is_some());
         assert!(relayed.headers().get(header::SET_COOKIE).is_none());
         assert!(relayed.headers().get(header::CONNECTION).is_none());
         assert!(relayed.headers().get("x-peer-internal").is_none());
