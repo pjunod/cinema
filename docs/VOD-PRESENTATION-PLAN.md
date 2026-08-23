@@ -1,7 +1,11 @@
 # VOD presentation — every title is a film, not a broadcast
 
-**Status:** PROPOSED, review requests changes — nothing here is built ·
+**Status:** PROPOSED v2 — review blockers B1–B6 + S1 resolved in this
+revision, awaiting re-review; nothing here is built ·
 **Review:** [VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)
+· **Response:**
+[VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md](VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md)
+(finding-by-finding assessment; B5's factual premise refuted there)
 · **Supersedes:** the live-HLS presentation contract in
 [PLAYBACK.md](PLAYBACK.md) once executed · **Companions:**
 [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md) (rung policy, unchanged by this
@@ -13,8 +17,9 @@ the map**
 How to work this plan: read §0–§2 before anything else — §2 is the contract
 and everything after it is consequences. Milestones (§8) go in order; each
 ends with an acceptance check that is a runnable command or an observable
-fact on a named machine. M0 is a measurement spike that can still change two
-decisions (D1, D6 in §9); do not start M1 until M0's numbers are recorded.
+fact on a named machine. M0 is a feasibility-and-measurement spike that can
+still change three decisions (D1, D4, D6 in §9) — and M0-P0 is a proof, not
+a measurement; do not start M1 until M0's results are recorded.
 If a step seems to require changing something §7 forbids, **stop and flag it
 instead of improvising** — the guardrails are load-bearing.
 
@@ -96,16 +101,16 @@ Two facts make this feasible rather than aspirational. First, segment
 durations are knowable upfront on both paths: the transcode path already
 forces keyframes on a fixed 2 s grid (`-force_key_frames
 expr:gte(t,n_forced*2)` + `-hls_time 2`, `plurx-core/src/transcode/mod.rs:
-1030-1067`), and on the copy path the cut decision (`CutPolicy`,
-`plurx-core/src/fmp4.rs:1699`) is **pure** — given a one-pass index of the
-source's random-access points and per-GOP byte sizes, the entire
-segmentation (names, durations, byte ranges) is deterministic before any
-media is read. `scripts/gop-census` already walks exactly this structure.
-Second, the hard server pieces exist in embryo: request-blocking segment
-serving (`SEGMENT_WAIT`, `transcode.rs:97` — today 20 s for
-listed-not-yet-written segments), a completed-VOD assembly path
-(`produce::assemble` → `publish_from` → `complete_cache_entry`), and
-reader-guarded eviction (`cachekeep.rs`).
+1030-1067`), and on the copy path a whole-title **fragment index** built by
+the production-shaped copy pipe (the same pipe `scripts/gop-census` launches
+and parses — its input is the remuxed fragment stream, not a cheap packet
+probe; review finding B1) captures every fact the cut decision needs, so the
+entire segmentation is computed once per file and persisted (§2.2). Second,
+the hard server pieces exist in embryo: request-blocking segment serving
+(`SEGMENT_WAIT`, `transcode.rs:97` — today 20 s for listed-not-yet-written
+segments), a completed-VOD assembly path (`produce::assemble` →
+`publish_from` → `complete_cache_entry`), and reader-guarded eviction
+(`cachekeep.rs`).
 
 ## 2. The presentation contract
 
@@ -137,57 +142,116 @@ shape remains in the codebase, served to clients that do not opt in
   `private, max-age=3600, immutable` for segments, unchanged
   (`http/hls.rs:531,1775`).
 
-### 2.2 The segment plan — durations known before any media is read
+### 2.2 The segment plan — normative, indexed, and film-time addressed
 
-The plan is a pure function, computed at session create (or ahead of time,
-§2.3), and it is the single source of truth for playlist text, segment
-naming, and producer scheduling.
+The plan is the single source of truth for playlist text, segment naming,
+segment timestamps, and producer scheduling. It is **normative, not
+predictive** (review B1, ledger D10): the materializing producer cuts *at*
+the plan's boundaries; it never re-decides them. That dissolves the trap
+the review caught — a cheap packet index cannot reproduce
+`fmp4::classify`'s NAL-level clean/dirty verdicts (`fmp4.rs:1556-1610`) or
+`Segmenter`'s output-byte accounting (`pending_bytes += fragment.len()`,
+`fmp4.rs:2338`) — because nothing needs to *reproduce* today's cuts; the
+plan needs boundaries that are provably clean, floor/ceiling-respecting,
+and computable upfront.
 
-- **Transcode path:** the plan is trivial — `ceil(duration / 2)` entries of
-  2.0 s, last entry the remainder, because the encoder is instructed to cut
-  exactly there. Real emitted durations jitter by ~±0.08 s against the
-  nominal EXTINF; whether every target stack tolerates that drift in a VOD
-  playlist is **M0 probe P2**, and the fallback if any stack objects is
-  D6-B: route the encode through the same fMP4 segmenter the copy path
-  uses, which yields exact durations by construction.
-- **Copy path:** the plan is `CutPolicy` replayed over a **RAP index** —
-  one sequential pass over the source's packet headers (`ffprobe
-  -select_streams v:0 -show_entries packet=pts_time,flags,size` class; no
-  decode; the same structure `scripts/gop-census` walks today). The index
-  is persisted per file (store table, computed once ever, invalidated by
-  the file's (size, mtime) recipe like the cache is) so the cost is paid
-  once per file, not per play — and it can be computed in the background at
-  scan/analyze time so most first plays never pay it either. The cold-start
-  cost of building it on demand for a never-analyzed file is **M0 probe
-  P1** and gates decision D4.
-- The plan carries per-entry `(start_ms, duration_ms, rap_byte_offset)`.
-  For copy, byte offsets let a repositioned producer start exactly at the
-  entry's RAP; for transcode, `start_ms` seeds `-ss`.
+- **Copy path — the fragment index.** The indexer runs the
+  production-shaped copy pipe (the same `copy_pipe_args` shape,
+  **video-only**, unpaced) and feeds the fragment stream through the
+  existing reader + `classify`, recording per fragment: first-sample DTS,
+  duration ticks, output byte length, and the clean/dirty verdict. This is
+  exactly what `scripts/gop-census` does today minus the census math — the
+  index is that walk, persisted. Video-only makes the index (and therefore
+  the plan) valid for **every audio selection** of the file; the byte
+  ceiling is applied to video fragment bytes with a fixed audio headroom
+  (audio adds at most bitrate × duration, bounded by the probe), proven in
+  M0-P0. The index is persisted per file, keyed by the file's identity
+  recipe like the cache, built in the background at scan/analyze time or on
+  first demand. **A file with no index keeps the legacy live presentation
+  for that watch** and converts from the next one — no cold play ever waits
+  on indexing. Index build cost is M0-P1; plan-vs-production fidelity is
+  M0-P0 and gates everything (D4).
+- **Copy plan entries** are `CutPolicy` applied over the index's clean
+  boundaries: per entry `(start_ticks, end_ticks, duration, est_bytes)`,
+  keyed by film-time DTS — not by byte offset (the copy path has no
+  byte-seek mechanism, `mod.rs:1164-1173`) and not by fragment ordinal (so
+  an ffmpeg upgrade that re-fragments differently is detected, not silently
+  misaligned).
+- **Transcode path:** `ceil(duration / 2)` entries of 2.0 s, last entry the
+  remainder — the encoder is instructed to cut exactly there. Real emitted
+  durations jitter ~±0.08 s against the nominal EXTINF; whether every stack
+  tolerates that drift in a VOD playlist is **M0-P2**, and the fallback is
+  D6-B: route the encode through the copy path's fMP4 segmenter, which cuts
+  the planned boundaries exactly.
 - Audio tails at end-of-stream follow the c58a4307 rule (trailing audio
-  split at the policy ceiling into audio-only entries) — the plan includes
-  those entries, so the final EXTINFs are honest upfront.
+  split at the policy ceiling into audio-only entries), computed from the
+  probe's per-track durations — the final EXTINFs are honest upfront.
 
-### 2.3 Segment serving — blocking materialization, never a lie
+**The media-time contract** (review B2 — a stable name is nothing without
+stable time inside the bytes):
 
-A GET for a planned segment has exactly three outcomes:
+- Every materialized segment's timeline is rebased to its plan entry's
+  film-time start. Copy: the segmenter writes the published segment's
+  `tfdt` as plan `start_ticks` and stamps `mfhd.sequence_number` = plan
+  index + 1 — it already owns both boxes when merging
+  (`fmp4.rs:1896-1944`); the producer's `-avoid_negative_ts make_zero`
+  near-zero timeline (`mod.rs:1403-1416`) is an input the segmenter
+  corrects, deterministically, no matter which process generation produced
+  the fragment. Transcode: the restarted encoder gets
+  `-output_ts_offset <plan start>` — the exact mechanism the live probe in
+  [PERF2-PLAN-REVIEW.md](PERF2-PLAN-REVIEW.md) §2 R1 validated when it
+  proved `-start_number` alone moves names, not PTS.
+- A producer repositioned to a plan boundary seeks with `-noaccurate_seek
+  -ss <boundary>` (lands at the RAP at-or-before) and the segmenter
+  discards fragments until the first whose DTS equals the boundary; a
+  mismatch (never-equal) is a typed producer failure and an index
+  invalidation, not a silent drift.
+- The rendition's `init.mp4` is written by its first process generation and
+  stored as **the** init. Every later generation's init must be
+  byte-identical or the generation is refused with a typed
+  `producer_failed` — an evicted-and-regenerated segment URI therefore
+  either serves byte-compatible media or fails loudly, never quietly
+  incompatible bytes. Init reproducibility for same-source-same-args is
+  proven in M0-P0 before this rule is relied on.
+- M2's acceptance includes the review's noncontiguous test: materialize
+  segment 0, kill the producer, materialize a far segment first, fill both
+  neighbors from separate generations, and prove continuous video/audio
+  timestamps and clean playback on hls.js, AVPlayer, and Media3.
+
+### 2.3 Segment serving — blocking materialization with one hard deadline
+
+A GET for a planned segment has exactly three outcomes, and **every blocked
+request ends through exactly one named path** (review B4 — v1 gave the wait
+a budget and an escape hatch in the same paragraph; the escape hatch is
+deleted):
 
 1. **Materialized** → 200, bytes, immediately. The overwhelmingly common
    case: the producer runs ahead of the playhead (§2.4).
-2. **Not yet materialized, within the producer's reach** → the response
-   **blocks** until the segment lands, bounded by a per-request budget
-   (default 15 s, setting `playback.vod_block_secs`; the bound and its
-   per-stack safety margins are **M0 probe P3** — hls.js's
-   `fragLoadingTimeOut` is client-configured, Media3 rides OkHttp's 60 s
-   read timeout, AVPlayer's tolerance is measured not assumed). If the
-   budget expires while the producer is healthy and progressing, the server
-   answers 200 as soon as it can rather than erroring — the client's own
-   retry (all three stacks retry fragment loads) re-enters the same wait.
+2. **Not yet materialized** → the response **blocks** until the segment
+   lands, bounded by a **hard** per-request deadline: `min(server cap,
+   the client's declared budget)`. The create body carries
+   `block_budget_secs` — what this stack's own shorter timer allows
+   (hls.js: whatever `fragLoadingTimeOut` the player configures; Media3:
+   inside OkHttp's 60 s read timeout; AVPlayer: the M0-P3 measured value);
+   the server default `playback.vod_block_secs` (15 s until P3 says
+   otherwise) caps it. **Deadline expiry answers a typed, retryable
+   `segment_pending` 503 with `Retry-After`** — never an open-ended wait,
+   never a bare 404. All three stacks retry fragment loads; M0-P3 measures
+   each stack's actual 503 handling to set budgets and retry configs, not
+   to choose the shape.
 3. **Producer dead or the request is beyond repair** → a **typed** 5xx with
-   the same refusal vocabulary the playlist path grew in `64a24854`
+   the refusal vocabulary the playlist path grew in `64a24854`
    (`producer_failed`, `session_failed`), because at that point an error is
-   the truth. Segment 404s stop being a normal-operation event: a planned
-   segment is never 404'd. (Today's bare, untyped segment 404 —
-   `http/hls.rs:1669` — survives only for genuinely unknown names.)
+   the truth. A planned segment is never 404'd; today's bare segment 404
+   (`http/hls.rs:1669`) survives only for genuinely unknown names.
+
+Bounding the wait pool (review B4's operational half): a client disconnect
+**cancels** the server-side wait (response-body drop aborts it); blocked
+GETs are capped per session (4) and globally (setting), with excess answered
+`segment_pending` immediately; N waiters on one segment coalesce into one
+unit of producer demand. M3's acceptance tests all four named cases:
+disconnect mid-wait, producer death mid-wait, ten concurrent waiters on one
+segment, and a 20-seek storm across distant segments.
 
 A far seek — a GET for a segment well beyond the producer's position —
 triggers **repositioning** (§2.4) and then blocks as case 2. The client
@@ -205,14 +269,28 @@ key discipline, which already excludes `start_seconds` on purpose
 
 - Live production writes into a cache generation. Segments are addressable
   by plan index; a generation may have **holes** (a far seek materializes
-  segment 900 while 400–899 don't exist). The generation manifest is a
-  bitmap over the plan, not a contiguous range.
-- When the bitmap becomes complete, the generation completes exactly like
-  today's `publish_from` → `complete_cache_entry` path — **which gives the
-  copy path a cache for the first time**: the second watch of a remux is a
-  pure VOD serve with no producer at all. (This also subsumes what
-  PERF2-PLAN's N3 prefix-cache milestone wanted; N3 should be re-scoped
-  against this plan rather than built separately.)
+  segment 900 while 400–899 don't exist). The manifest is per-segment
+  state, and it separates **three facts the v1 bitmap conflated** (review
+  B3): *planned* (the segment belongs to this immutable rendition),
+  *materialized now* (bytes exist and may be served), and *durably
+  admitted* (the whole rendition has been atomically published as a cache
+  hit). Eviction clears *materialized*, never *admitted*; completion
+  requires every segment *materialized simultaneously under the completed-
+  cache budget*, so an evicted hole can never be published as a hit.
+- Two budgets, named separately: the **working set** (live materialized
+  bytes, governed by the `playback.hls_ahead_max_bytes` /
+  `playback.hls_scratch_max_bytes` successors) and the **completed cache**
+  (`cache.max_gb`, 50 GB default, `PERF-PLAN.md:1681`). A rendition is
+  **admissible** only if its planned total size (the plan knows it) fits an
+  admission threshold under the completed-cache budget; admissible
+  renditions reserve their space when backfill begins. An over-budget title
+  — the plan's own 69 Mb/s reference remux is ~62 GB — is a
+  **working-set-only rendition**: still VOD-presented, never
+  cache-completed, honestly re-materialized on a later watch. So the copy
+  path gains a cache **for admissible titles** — most transcodes and
+  ordinary remuxes — not a false promise for every 4K remux. (This
+  subsumes what PERF2-PLAN's N3 prefix-cache milestone wanted; N3 should
+  be re-scoped against this plan rather than built separately.)
 - Eviction is per-segment, budgeted by the existing scratch settings
   (`playback.hls_ahead_max_bytes` / `playback.hls_scratch_max_bytes`
   semantics carry over as store budgets), and **reader-guarded**: never
@@ -251,14 +329,33 @@ the owner of media, timeline, and playlist identity.
   a one-rung-lower session (ADAPTIVE-QUALITY.md's boundary is untouched);
   it is just enormously cheaper, because the new session serves the same
   store and the same film-time addresses.
-- Create recipes are **persisted** (a small store row keyed by session id,
-  TTL ≈ title duration + slack). A playlist or segment GET naming a
-  session the reaper collected **resurrects** the handle from its persisted
-  recipe and serves normally. `session_gone` stops being reachable during
-  the life of a title; the 60 s reaper keeps its housekeeping job without
-  ever again killing a playback. A paused-for-an-hour player simply
-  resumes: its next fetch resurrects the handle, the store still holds (or
-  re-materializes) the window around its playhead.
+- Sessions persist a **lifecycle, not only a recipe** (review B6 — HLS
+  child requests are autonomous, so a predecessor's late fetch must never
+  re-animate a handle the server deliberately retired):
+
+  ```text
+  active ── idle reap ──▶ dormant ── authorized media GET ──▶ active
+    │
+    ├── explicit DELETE / supersession / admin stop ──▶ terminal
+    ├── access revoked ────────────────────────────────▶ terminal
+    └── file identity invalidated ─────────────────────▶ terminal
+
+  terminal ── any old capability GET ──▶ 410 (tombstone), never resurrection
+  ```
+
+  Only an **idle reap** produces a *dormant* handle; a playlist or segment
+  GET naming a dormant session resurrects it from the persisted recipe and
+  serves normally — so the 60 s reaper keeps its housekeeping job without
+  ever again killing a playback. Explicit DELETE, supersession by a newer
+  create, admin stop, access revocation, and file-identity invalidation
+  write a *terminal* tombstone: those ids answer typed `410 session_gone`
+  forever (tombstone rows pruned after 24 h to a plain 404), and terminal
+  transitions drop the handle's producer demand immediately. The dormant
+  TTL is **sliding** — refreshed by every authorized media GET — with the
+  supported pause named as a setting (`playback.vod_dormant_ttl_secs`,
+  default 6 h): a player paused inside that window simply resumes, its next
+  fetch re-materializing the window around its playhead. M3's acceptance
+  proves idle-reap resumption AND that each terminal cause stays terminal.
 - Flow-control accounting (per-session bytes, the global scratch cap with
   drainable-release, hold reasons in `SessionInfo`) moves its denominator
   from session scratch to store working set; the reporting surface
@@ -291,8 +388,8 @@ transcode.rs — this plan is also the excuse to start paying that file down.
 
 | Piece | Shape | Reuses |
 |---|---|---|
-| `plurx-core::segplan` | pure segment-plan builder: RAP-index type + `CutPolicy` replay for copy, grid plan for transcode; serialization for persistence | `fmp4::CutPolicy`, the `gop-census` walk |
-| RAP indexer | daemon-side one-pass probe producing the index; persisted in the store keyed by file recipe; background job at scan/analyze + on-demand at create | `pipeprobe.rs` patterns, scan job plumbing |
+| `plurx-core::segplan` | pure segment-plan builder: fragment-index type + `CutPolicy` over its clean boundaries for copy, grid plan for transcode; §2.2's media-time rules; serialization for persistence | `fmp4::CutPolicy`, `fmp4::classify`, the merger's `tfdt`/`mfhd` ownership |
+| Fragment indexer | daemon-side run of the production-shaped video-only copy pipe through the existing fmp4 reader, recording DTS/duration/bytes/verdict per fragment; persisted in the store keyed by file identity; background job at scan/analyze | the `gop-census` walk, scan job plumbing |
 | Title store | plan-indexed segment storage with bitmap manifest, per-segment reader-guarded eviction, generation completion into the cache | `cachekeep.rs`, `produce.rs::assemble`/`publish_from`, cache tables |
 | Producer scheduler | one producer per (file, recipe, rung): demand tracking from requests, suspend/resume, reposition-at-RAP, health → typed refusals | `apply_ahead_window`, the SIGSTOP machinery, watchdog serialization from PR #244 |
 | VOD serving | playlist-from-plan, blocking segment GET (three-outcome contract §2.3), session resurrection | `Manager::playlist` long-poll internals, `SEGMENT_WAIT` loop `transcode.rs:9243-9422`, typed refusals from `64a24854` |
@@ -415,10 +512,25 @@ soon enough to skip:
   exists today still fires (or has a named successor) under the VOD
   presentation — the diagnosis capability this month's work bought is not
   spent.
-- **Stop-and-flag rule:** if the store/cache unification (§2.4) fights the
-  cluster media-pool plan (CLUSTER-MEDIA-POOL-PLAN.md) or hiqlite
-  semantics anywhere, stop and flag rather than inventing a parallel
-  store — the M1c/M1d reviews are the scar.
+- **The cluster contract is decided here, not deferred** (review B5, ledger
+  D11): **a VOD rendition is bound to its owner node for its lifetime, and
+  no takeover ever reuses its URIs.** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)'s
+  accepted takeover has a survivor rebuild the recipe with its locally
+  valid encoder — protocol-compatible, not byte-identical output
+  (`CLUSTERING-PLAN.md:322-327`) — and advance discontinuity sequence,
+  which an immutable playlist cannot absorb. So on owner death, an active
+  VOD playback gets a typed `producer_failed`/`session_failed` refusal and
+  the client's existing reopen creates a **fresh rendition on a survivor**
+  — a bounded interruption, which is
+  [CLUSTER-MEDIA-POOL-PLAN.md](CLUSTER-MEDIA-POOL-PLAN.md)'s own promise —
+  and no immutable URI ever names two different byte streams. Completed
+  renditions are shared across nodes only where local digests match
+  (CLUSTERING-PLAN's existing rule). M2's review includes a cluster-aware
+  pass; M7's acceptance includes a power-pull during active VOD copy and
+  transcode playbacks. Beyond that decided boundary, the standing rule
+  holds: if the store/cache unification (§2.4) fights either cluster plan
+  or hiqlite semantics anywhere else, stop and flag rather than inventing
+  a parallel store — the M1c/M1d reviews are the scar.
 
 
 ## 8. Milestones
@@ -430,36 +542,55 @@ corrective client commits need `tests/client-fixes.toml` anchor rows.
 STATUS.html and PLAYBACK.md move in the same commit as the behavior they
 describe. Efforts are relative t-shirt sizes for one focused agent.
 
-### M0 — measurement spike (S, no product code)
+### M0 — feasibility proofs + measurement spike (S–M, no product code)
 
-Three probes plus one cost measurement, all recorded in an appendix commit
-to this doc; D1/D4/D6 are decided by these numbers, not by taste.
+One proof, then three probes, all recorded in an appendix commit to this
+doc; D1/D4/D6 are decided by these results, not by taste. **P0 runs first
+and gates the rest** (review B1: timing an index that cannot determine the
+answer is not a feasibility result).
 
-- **P1 — RAP-index cost.** Time the one-pass packet index on ≥6 real titles
-  on nynuc over NFS (biggest DV MKV included, cold cache). Go/no-go for
-  building it on demand vs requiring background pre-compute (D4).
+- **P0 — plan fidelity proof.** Build the fragment index (§2.2) and prove,
+  over the fixture corpus and ≥10 representative real files: (a) the index
+  is deterministic — two runs of the production-shaped video-only pipe
+  yield identical fragment DTS/verdict streams; (b) every planned boundary
+  the plan emits is a clean cut when the *production* pipe (with audio)
+  materializes it, and the discard-until-boundary-DTS rule always
+  converges; (c) planned `est_bytes` + audio headroom bounds the real
+  segment bytes under the ceiling; (d) `init.mp4` is byte-identical across
+  process generations for same source + args. Any (a)–(d) failure stops
+  the plan for redesign — that is the point of running it first.
+- **P1 — index cost.** Time the fragment-index build (the production-shaped
+  video-only pipe, which reads the whole file) on ≥6 real titles on nynuc
+  over NFS (biggest DV MKV included, cold cache). Decides how aggressive
+  background indexing at import must be; first plays of unindexed files use
+  the legacy presentation regardless (§2.2), so no cold play waits on this
+  number (D4).
 - **P2 — EXTINF-drift tolerance.** A synthetic VOD playlist whose EXTINFs
   are nominal 2.0 s against segments with the real ±0.08 s jitter; play on
   hls.js (playback-lab), Safari, a real AVPlayer device, and Media3.
   Decides transcode plan D6-A (nominal) vs D6-B (segmenter-exact).
-- **P3 — blocked-segment tolerance.** A stub server that delays segment
-  responses 5/15/30/60 s mid-stream; find each stack's fatal threshold.
-  Sets `playback.vod_block_secs` and the client timeout configs.
+- **P3 — blocked-fetch numbers.** A stub server that delays segment
+  responses 5/15/30/60 s mid-stream and answers deadline expiry with the
+  typed `segment_pending` 503 + `Retry-After` (§2.3); measure each stack's
+  tolerated block and its actual 503 retry behavior. Sets
+  `playback.vod_block_secs`, each client's declared `block_budget_secs`,
+  and the retry configs — the numbers, not the shape (review B4).
 - Reuse `scripts/playback-lab` for the web halves; the device halves are
   gpt runs with exact commands provided.
 
-**Acceptance:** the appendix exists with numbers and the three decisions
-marked resolved.
+**Acceptance:** the appendix exists with the P0 proofs and P1–P3 numbers,
+and D1/D4/D6 are marked resolved.
 
-### M1 — segment plan + RAP index (M)
+### M1 — segment plan + fragment index (M)
 
-`plurx-core::segplan` (pure) + the daemon indexer + persistence + the
-background job. No serving changes.
+`plurx-core::segplan` (pure plan builder over the index) + the daemon
+indexer + persistence + the background job, productionizing what P0
+prototyped. No serving changes.
 
-**Acceptance:** a replay-equivalence test proves plan == actual copyseg
-cuts, byte-for-byte segment boundaries, over the fixture corpus and ≥10
-real files (run via a `gop-census`-style script on nynuc); plan build from
-a persisted index is <100 ms; `cargo test --workspace` green.
+**Acceptance:** the P0 fidelity suite re-runs green as `cargo test`-able
+fixtures plus the nynuc real-file sweep; plan build from a persisted index
+is <100 ms; index invalidation on file-identity change is tested;
+`cargo test --workspace` green.
 
 ### M2 — title store + producer scheduler (L, the big one)
 
@@ -468,23 +599,38 @@ demand/suspend/reposition; generation completion into the cache. Legacy
 serving still the only client-visible surface — this lands dark.
 
 **Acceptance:** integration tests: two readers one producer; far-seek
-reposition materializes without a session create; eviction respects reader
-windows under a tight budget; kill-producer → typed refusal; completed
-bitmap → cache hit on the next create (copy path included — the first-ever
-copy cache hit is the headline assertion). Legacy behavior provably
-unchanged: `playback-lab normalize` base-vs-candidate byte-identical.
+reposition materializes without a session create; **the review's
+noncontiguous timestamp test** — segment 0 materialized, producer killed, a
+far segment materialized first, both neighbors filled by separate process
+generations, timestamps continuous and film-time-correct (checked at the
+fMP4/TS level here; on-device in M4–M6); eviction respects reader windows
+under a tight budget; **a synthetic title larger than both scratch budgets
+plays end to end with no false cache completion, no unbounded backfill, and
+no missing segment under any admitted row** (review B3); kill-producer →
+typed refusal; admissible completed rendition → cache hit on the next
+create (copy path included — the first-ever copy cache hit is the headline
+assertion). M2's design review includes a cluster-aware pass against
+CLUSTERING-PLAN.md and CLUSTER-MEDIA-POOL-PLAN.md (review B5). Legacy
+behavior provably unchanged: `playback-lab normalize` base-vs-candidate
+byte-identical.
 
 ### M3 — VOD serving behind the opt-in (M)
 
 `presentation: "vod"` + `playback.vod_presentation` + playlist-from-plan +
 blocking segment GET + resurrection. Curlable end to end.
 
-**Acceptance:** contract tests for §2.1/§2.3/§2.5 (immutable playlist
-bytes across the session's life; the three GET outcomes; reap → fetch →
-resurrection with zero client-visible failure); a playback-lab VOD suite
-passes; a recorded curl transcript of a full life (create → playlist →
-blocking fetch → far seek → reap → resurrect → ENDLIST-complete) goes in
-docs/PLAYBACK-TESTING.md.
+**Acceptance:** contract tests for §2.1/§2.3/§2.5: immutable playlist
+bytes across the session's life; the three GET outcomes including deadline
+expiry → typed `segment_pending` 503; **the review's four wait-pool cases**
+— client disconnect cancels the wait, producer death mid-wait answers
+typed, ten concurrent waiters on one segment coalesce to one demand, a
+20-seek storm stays inside the blocked-GET caps (review B4); idle reap →
+fetch → resurrection with zero client-visible failure, **and every terminal
+cause — DELETE, supersession, admin stop, revoked access, file replacement
+— answers 410 and never resurrects** (review B6); sliding dormant-TTL
+refresh proven. A playback-lab VOD suite passes; a recorded curl transcript
+of a full life (create → playlist → blocking fetch → far seek → reap →
+resurrect → ENDLIST-complete) goes in docs/PLAYBACK-TESTING.md.
 
 ### M4 — web adoption (M)
 
@@ -524,7 +670,11 @@ rate, session_end reasons, TTFF) against the prior week, reviewed and
 recorded in STATUS.html.
 
 **Acceptance:** the week's numbers show reopens and terminal failures down,
-not merely moved; no new event kind appears; rollback is one setting.
+not merely moved; no new event kind appears; rollback is one setting; and
+**a power-pull on the owner node during active VOD copy and VOD transcode
+playbacks proves no immutable URI changes bytes and no playlist mutates** —
+the affected clients recover through the typed-refusal → reopen path onto a
+survivor (review B5).
 
 ### M8 — the deletion pass (M, the payoff)
 
@@ -533,22 +683,43 @@ legacy-shape special cases clients no longer need, and the PLAYBACK.md
 rewrite describing the VOD contract as *the* contract with the legacy
 shape as the NULL-duration footnote.
 
+**The version floor** (review S1 — v1's opt-in seam stopped composing the
+moment the machinery it fell back on was deleted): deletion is gated on the
+fleet's server floor being proven at or above the VOD build — every node
+checked via `/api/v1/server` and recorded in STATUS.html — and post-M8
+clients carry a minimum server protocol: `vod: false` (or a missing
+`presentation` acknowledgment) from an older server renders a **typed
+"this server needs updating" refusal naming the server build**, never an
+undefined-behavior playback attempt. The compact-legacy-arm alternative was
+rejected: an indefinitely-kept "small" live arm is how the current
+35-mechanism inventory started. NULL-duration files (§2.6) still play
+post-M8: the frameworks' *native* live-HLS handling remains — what M8
+deletes is the compensation machinery around it — so those titles keep
+today's baseline behavior without its bodyguards, an accepted degradation
+for a small population that probe-at-import (§2.6's follow-up) shrinks
+toward zero.
+
 **Acceptance:** net-negative diff on all three clients with suites green;
 PLAYBACK.md's behavior table has no row whose "client must" clause exists
-to absorb playlist mutation, prune 404s, reap, or publish-gate semantics.
+to absorb playlist mutation, prune 404s, reap, or publish-gate semantics;
+a client pointed at a pre-VOD server shows the typed version refusal.
 
 ## 9. Decisions ledger
 
 Numbered so the review can attack them individually; each carries its why
 and the rejected alternative.
 
-1. **Block, don't 404/503, for planned-but-unmade segments (D1).**
-   AVPlayer demonstrably tolerates slow bytes and demonstrably distrusts
-   errors and mutation (the whole build-63 arc; PLAYBACK.md holds playlist
-   requests open for exactly this reason). Rejected: 503+Retry-After as
-   the primary path — hls.js handles it, AVPlayer's behavior is
-   version-dependent folklore. 5xx remains only for producer death, where
-   an error is true. M0-P3 bounds the budget.
+1. **Block first — behind one hard deadline — for planned-but-unmade
+   segments (D1, revised per review B4).** AVPlayer demonstrably tolerates
+   slow bytes and demonstrably distrusts errors and mutation (the whole
+   build-63 arc; PLAYBACK.md holds playlist requests open for exactly this
+   reason), so blocking stays the primary path — but the wait is bounded by
+   `min(server cap, the client's declared budget)` and expiry answers a
+   typed, retryable `segment_pending` 503 + `Retry-After`, so every request
+   ends through one named path. Rejected: v1's "answer 200 whenever we can"
+   escape hatch (an unbounded response the client cannot retry) and
+   503-as-primary (spends AVPlayer's error tolerance on the common case).
+   M0-P3 sets the numbers and proves each stack's 503 retry behavior.
 2. **Client opt-in via create body, server gate via setting (D2).** The
    rollout needs old-client/new-server and new-client/old-server to both
    keep working with zero double-serving; a per-request declaration is the
@@ -558,15 +729,24 @@ and the rejected alternative.
    finally gets cached; a parallel store would re-create the M1c scar
    (two safety mechanisms, both inert). Consequence accepted: cache
    generations learn holes/bitmaps.
-4. **Copy plan from a full persisted RAP index, not the 4-packet probe
-   (D4).** The plan must cover the whole file upfront; the probe answers
-   one seek point. Persistence + background compute amortizes the cost to
-   ~zero; M0-P1 verifies the worst case is acceptable on demand.
-5. **Sessions resurrect from persisted recipes rather than never reaping
-   (D5).** Keeps memory bounded and the reaper's real job (resource
-   housekeeping) intact while deleting its failure mode (killing
-   playback). Rejected: sessions immortal for title duration — leaks
-   producers under churn.
+4. **Copy plan from a fragment index built by the production-shaped pipe,
+   not a container-header probe (D4, revised per review B1).** Only the
+   remuxed fragment stream carries `classify`'s NAL-level clean/dirty
+   verdicts and output-shaped byte counts; an ffprobe packet index cannot
+   (`fmp4.rs:1556-1610`). The index is video-only so one plan serves every
+   audio selection, persisted per file identity, built in the background at
+   import; a file with no index keeps the legacy presentation for that
+   watch, so no cold play ever waits on indexing. M0-P0 proves fidelity
+   before M0-P1 prices it.
+5. **Sessions resurrect from persisted recipes rather than never reaping —
+   and only from the dormant state (D5, extended per review B6).** Keeps
+   memory bounded and the reaper's real job (resource housekeeping) intact
+   while deleting its failure mode (killing playback); the
+   dormant/terminal lifecycle (§2.5) keeps a deliberately retired handle
+   retired against a predecessor's late autonomous fetch. Rejected:
+   sessions immortal for title duration (leaks producers under churn) and
+   recipe-only resurrection (re-animates what DELETE/supersession/admin
+   action/revocation meant to end).
 6. **Transcode EXTINFs nominal-2.0 (D6-A) unless M0-P2 objects, then
    segmenter-exact (D6-B).** A is a no-op to the encode pipeline; B
    unifies both paths through `fmp4::Segmenter` at the cost of touching
@@ -583,6 +763,34 @@ and the rejected alternative.
 9. **`AHEAD_HORIZON` and the flow-control budgets keep today's values
    (D9).** This plan changes *what* they govern (demand-driven store
    production), not *how much*; retuning would confound the M7 comparison.
+10. **The plan is normative — the producer cuts at planned boundaries and
+    never re-decides them (D10, new per review B1).** Prediction required
+    reproducing recipe-specific runtime facts upfront, which B1 proved
+    impossible from cheap inputs; authority only requires boundaries that
+    are clean, policy-respecting, and stable, which the fragment index
+    provides. The cost — v2 cuts may differ from what today's
+    producer-driven policy would have chosen — is invisible to clients and
+    accepted. A planned boundary the materializing pipe cannot honor
+    (DTS never matches) is a typed failure plus index invalidation, never
+    a silent re-cut.
+11. **A VOD rendition is bound to its owner node; takeover never reuses
+    its URIs (D11, new per review B5).** Cross-node takeover rebuilds
+    recipes with locally valid encoders — protocol-compatible, not
+    byte-identical (`CLUSTERING-PLAN.md:322-327`) — which an immutable
+    playlist cannot absorb. Owner death = typed refusal → the client's
+    reopen builds a fresh rendition on a survivor: a bounded interruption,
+    no URI ever naming two byte streams. Rejected: byte-identical
+    cross-node production (unenforceable on a mixed fleet, §7 non-goal 4
+    of the clustering plan) and post-failure playlist mutation (breaks
+    §2.1's founding invariant).
+12. **Cache completion requires admission; over-budget titles are
+    working-set-only (D12, new per review B3).** *Planned*,
+    *materialized-now*, and *durably-admitted* are three facts, not one
+    bitmap; completion demands all segments simultaneously present under
+    the completed-cache budget, reserved before backfill. An inadmissible
+    title is still VOD-presented and honestly re-materialized on a later
+    watch. Rejected: bits that survive eviction (publishes directories
+    with holes as cache hits) and unbounded backfill.
 
 ## 10. Risks, honestly
 
@@ -590,21 +798,21 @@ and the rejected alternative.
   deep; the mitigation is that M2 lands dark behind the legacy surface with
   a byte-identical playback-lab gate, and the setting keeps rollback
   one-flag cheap through M7.
-- **RAP-index cold cost on NAS.** If M0-P1 shows minutes for huge DV
-  remuxes, on-demand first plays of never-analyzed files eat it. Mitigation
-  is the background job at import plus, if needed, a hybrid start (begin
-  producing from t=start while the index builds — the plan for segments
-  behind the playhead can finalize slightly late as long as the *playlist*
-  waits for the full plan; if that proves ugly, the fallback is legacy
-  presentation for unindexed first plays, converting to VOD from the
-  second play).
+- **Fragment-index cost on NAS.** The index reads the whole file through
+  the copy pipe, so a huge DV remux over NFS may take minutes. No first
+  play ever waits on it — unindexed files keep the legacy presentation for
+  that watch by design (§2.2) — so the real exposure is how long a library
+  takes to convert after the flip; M0-P1's numbers size the background
+  indexing job, and the M7 comparison week naturally reflects the
+  mixed-presentation fleet.
 - **EXTINF drift on some stack** → D6-B exists and is bounded.
 - **Blocked-fetch semantics on a stack we didn't measure** (older tvOS,
   odd Android forks) → the opt-in flag means an unhappy client build
   simply doesn't send it.
-- **Cluster interactions.** The store must not fight the media-pool /
-  cluster plans; §7's stop-and-flag rule covers it, and M2's review should
-  include a cluster-aware pass.
+- **Cluster interactions.** The owner-binding decision (§7, D11) settles
+  the takeover conflict review B5 found; the residual risk is the store
+  fighting the cluster plans somewhere else, which §7's narrowed
+  stop-and-flag rule and M2's cluster-aware review pass cover.
 - **Scope creep via adjacency.** The ABR estimate problem, multivariant,
   probe-at-import, and transcode.rs decomposition beyond what §3 needs are
   all *named and excluded*; the guardrails section exists because every
@@ -612,8 +820,14 @@ and the rejected alternative.
 
 ## 11. What this plan is kept honest by
 
-M2/M3's contract tests are the exhaustive claims (§2.1/§2.3/§2.5) as
-executable assertions; playback-lab normalize pins legacy invariance until
-M7; the M7 week is the empirical verdict, recorded in STATUS.html rather
-than asserted here. If the M7 numbers do not show the failure categories
-gone, M8 does not run — deletion is earned, not scheduled.
+M0-P0 is a falsifiable proof that runs before any product code; M2/M3's
+contract tests are the exhaustive claims (§2.1/§2.3/§2.5) as executable
+assertions; playback-lab normalize pins legacy invariance until M7; the M7
+week is the empirical verdict, recorded in STATUS.html rather than asserted
+here. If the M7 numbers do not show the failure categories gone, M8 does
+not run — deletion is earned, not scheduled. The review
+([VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)) and
+its response
+([VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md](VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md))
+record why v2 says what it says; a future edit that contradicts a resolved
+finding should say which one and why.
