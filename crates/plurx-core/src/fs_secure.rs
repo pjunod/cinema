@@ -1130,9 +1130,11 @@ pub async fn anonymous_file_in_directory(directory: &Path) -> io::Result<tokio::
     .map_err(io::Error::other)?
 }
 
-/// Create a pathname-free memory-backed file for authenticated response
-/// snapshots. Linux uses a sealable memfd; macOS uses `SHM_ANON`. Neither
-/// consumes free space from the media cache filesystem.
+/// Create a pathname-free file for authenticated response snapshots. Linux
+/// uses a sealable memfd. macOS creates a private system-temporary regular file
+/// and immediately unlinks it; Darwin has neither Linux's memfd nor FreeBSD's
+/// `SHM_ANON`, and its POSIX shared-memory descriptors do not provide this
+/// seekable file contract. Neither path consumes media-cache filesystem space.
 pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
     #[cfg(target_os = "linux")]
     let raw_fd = {
@@ -1146,28 +1148,55 @@ pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
         }
     };
     #[cfg(target_os = "macos")]
-    let raw_fd = unsafe {
-        // Darwin defines SHM_ANON as the sentinel pointer `(char *)1`; the
-        // libc crate does not currently expose that macro.
-        libc::shm_open(
-            std::ptr::dangling::<libc::c_char>(),
-            libc::O_RDWR | libc::O_CLOEXEC,
-            0o600,
-        )
+    let raw_fd = {
+        let template_path = std::env::temp_dir().join(".plurx-authenticated-XXXXXX");
+        let template = CString::new(template_path.as_os_str().as_bytes())
+            .map_err(|_| invalid_path("temporary directory contains a NUL byte"))?;
+        let mut template = template.into_bytes_with_nul();
+        // SAFETY: the mutable buffer is NUL terminated, ends in six Xs, and
+        // remains alive while mkstemp replaces those bytes in place.
+        let temporary_fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
+        if temporary_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: mkstemp left a NUL-terminated pathname in `template`.
+        let temporary_name = unsafe { CStr::from_ptr(template.as_ptr().cast()) };
+        // SAFETY: `temporary_fd` is owned here and `temporary_name` names the
+        // file mkstemp created. Either failure path closes the fd.
+        if unsafe { libc::fcntl(temporary_fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::unlink(temporary_name.as_ptr());
+                libc::close(temporary_fd);
+            }
+            return Err(error);
+        }
+        if unsafe { libc::unlink(temporary_name.as_ptr()) } != 0 {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(temporary_fd) };
+            return Err(error);
+        }
+        temporary_fd
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let raw_fd = -1;
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "anonymous memory files are unsupported on this platform",
+    ));
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if raw_fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Ok(tokio::fs::File::from_std(File::from(fd)))
 }
 
 /// Seal a completed Linux memfd against every later write/resize. macOS's
-/// anonymous shared-memory object has no public name and remains private to
-/// this process; plurx retains only the read path after this call.
+/// unlinked snapshot has no public name and remains private to this process;
+/// plurx retains only the read path after this call.
 pub fn seal_anonymous_memory_file(file: &tokio::fs::File) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -1619,6 +1648,24 @@ pub async fn restore_child_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn anonymous_memory_file_round_trips_after_sealing() {
+        let expected = b"authenticated snapshot";
+        let mut file = anonymous_memory_file().expect("anonymous memory file");
+
+        file.write_all(expected).await.expect("write snapshot");
+        seal_anonymous_memory_file(&file).expect("seal snapshot");
+        file.seek(SeekFrom::Start(0))
+            .await
+            .expect("rewind snapshot");
+
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).await.expect("read snapshot");
+        assert_eq!(actual, expected);
+    }
 
     #[tokio::test]
     async fn bounded_tree_removal_preflights_before_unlinking_any_entry() {
