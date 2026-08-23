@@ -982,10 +982,11 @@ path remains unchanged. A cache advantage requires the exact complete
 generation's fenced manifest and verified VOD playlist. Cache scratch capacity
 is sampled by one non-accumulating background OS worker and expires fail-closed,
 keeping a hard cache mount and an indefinitely stale positive result out of the
-async offer deadline. When a reachable remote candidate exists, disposable
-child processes refresh the most-specific configured library-root readability
-under one common deadline; timed-out and removed roots cannot retain daemon
-worker admission. Offer
+async offer deadline. When a reachable remote candidate exists, tracked child
+processes refresh absolute, command-line-symlink-following library roots under
+one common deadline. A timed-out probe is signalled but remains registered
+until the OS confirms exit, so a hard mount can reduce future evidence but
+cannot cause resubmission or exceed the fixed global process bound. Offer
 fan-out consults only that age-limited signal, replicated media facts, recent
 file availability, local capacity, and local cache bytes, so an offer never
 opens a candidate source path. Requested audio and subtitle indices must exist

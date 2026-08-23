@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{stream, StreamExt};
@@ -245,12 +245,23 @@ struct RootReadability {
     observed_at: tokio::time::Instant,
 }
 
+struct RootProbe {
+    child: tokio::process::Child,
+    kill_sent: bool,
+}
+
+#[derive(Default)]
+struct RootProbeRegistry {
+    running: BTreeMap<PathBuf, RootProbe>,
+}
+
 #[derive(Clone)]
 pub(crate) struct MediaPool {
     membership: MembershipManager,
     transport: PeerTransport,
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
+    root_probes: Arc<Mutex<RootProbeRegistry>>,
 }
 
 impl MediaPool {
@@ -260,6 +271,7 @@ impl MediaPool {
             membership,
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
+            root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
         })
     }
 
@@ -325,33 +337,128 @@ impl MediaPool {
                 return;
             }
         };
-        let roots = libraries
-            .into_iter()
-            .flat_map(|library| library.paths)
-            .filter(|root| !root.as_os_str().is_empty())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .take(MAX_LIBRARY_ROOTS)
-            .collect::<BTreeSet<_>>();
+        let roots = bounded_absolute_roots(libraries.into_iter().flat_map(|library| library.paths));
         self.root_readability
             .write()
             .await
             .retain(|root, _| roots.contains(root));
+        let mut outcomes = self.reap_root_probes();
+        outcomes.extend(self.start_root_probes(&roots));
         let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
-        let outcomes = stream::iter(roots.into_iter().map(|root| async move {
-            let result = probe_library_root(&root, deadline).await;
-            (
-                root,
-                RootReadability {
-                    readable: result.readable,
-                    observed_at: result.observed_at,
-                },
-            )
-        }))
-        .buffer_unordered(MAX_LIBRARY_ROOTS)
-        .collect::<BTreeMap<_, _>>()
-        .await;
-        *self.root_readability.write().await = outcomes;
+        while tokio::time::Instant::now() < deadline && self.has_running_root_probe(&roots) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            outcomes.extend(self.reap_root_probes());
+        }
+        self.signal_timed_out_root_probes(&roots);
+        outcomes.extend(self.reap_root_probes());
+        let mut readability = self.root_readability.write().await;
+        for (root, fact) in outcomes {
+            if roots.contains(&root) {
+                readability.insert(root, fact);
+            }
+        }
+    }
+
+    fn start_root_probes(&self, roots: &BTreeSet<PathBuf>) -> Vec<(PathBuf, RootReadability)> {
+        let mut immediate = Vec::new();
+        let mut registry = self
+            .root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for root in roots {
+            if registry.running.contains_key(root) || registry.running.len() >= MAX_LIBRARY_ROOTS {
+                continue;
+            }
+            match spawn_library_root_probe(root) {
+                Ok(child) => {
+                    registry.running.insert(
+                        root.clone(),
+                        RootProbe {
+                            child,
+                            kill_sent: false,
+                        },
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(%error, path = %root.display(), "could not start media root probe");
+                    immediate.push((
+                        root.clone(),
+                        RootReadability {
+                            readable: false,
+                            observed_at: tokio::time::Instant::now(),
+                        },
+                    ));
+                }
+            }
+        }
+        immediate
+    }
+
+    fn reap_root_probes(&self) -> Vec<(PathBuf, RootReadability)> {
+        let mut registry = self
+            .root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let completed = registry
+            .running
+            .iter_mut()
+            .filter_map(|(root, probe)| match probe.child.try_wait() {
+                Ok(Some(status)) => {
+                    // Once the common deadline fired this observation is
+                    // permanently failed, even if the process happened to
+                    // finish successfully before the later reap. A delayed
+                    // success must never acquire a fresh TTL.
+                    Some((root.clone(), status.success() && !probe.kill_sent))
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(%error, path = %root.display(), "could not reap media root probe");
+                    if !probe.kill_sent {
+                        let _ = probe.child.start_kill();
+                        probe.kill_sent = true;
+                    }
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for (root, _) in &completed {
+            registry.running.remove(root);
+        }
+        let observed_at = tokio::time::Instant::now();
+        completed
+            .into_iter()
+            .map(|(root, readable)| {
+                (
+                    root,
+                    RootReadability {
+                        readable,
+                        observed_at,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn has_running_root_probe(&self, roots: &BTreeSet<PathBuf>) -> bool {
+        self.root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running
+            .iter()
+            .any(|(root, probe)| roots.contains(root) && !probe.kill_sent)
+    }
+
+    fn signal_timed_out_root_probes(&self, roots: &BTreeSet<PathBuf>) {
+        let mut registry = self
+            .root_probes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (root, probe) in &mut registry.running {
+            if roots.contains(root) && !probe.kill_sent {
+                let _ = probe.child.start_kill();
+                probe.kill_sent = true;
+            }
+        }
     }
 
     async fn root_likely_readable(&self, path: &Path) -> bool {
@@ -557,17 +664,29 @@ async fn fetch_snapshot(
     accepted_snapshot(snapshot, &peer.node_id)
 }
 
-struct RootProbeObservation {
-    readable: bool,
-    observed_at: tokio::time::Instant,
+fn bounded_absolute_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTreeSet<PathBuf> {
+    roots
+        .into_iter()
+        // An absolute root is both the storage contract and the command-line
+        // grammar boundary: expression-like relative values such as
+        // `-delete` must never become `find` arguments.
+        .filter(|root| root.is_absolute())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(MAX_LIBRARY_ROOTS)
+        .collect()
 }
 
-/// Probe inside a disposable process rather than Tokio's shared blocking
-/// pool. A hard mount can make a filesystem syscall uncancellable; the child
-/// is an isolation boundary the daemon can signal and forget at the common
-/// deadline, so removed roots never retain in-process worker admission.
-async fn probe_library_root(root: &Path, deadline: tokio::time::Instant) -> RootProbeObservation {
-    let mut child = match tokio::process::Command::new("find")
+/// Spawn one tracked root probe. `-H` follows a command-line symlink root, so
+/// success means the target directory was actually enumerated rather than
+/// merely observing the symlink object. Callers retain the child until
+/// `try_wait` confirms exit: SIGKILL cannot immediately release a process in
+/// uninterruptible filesystem I/O, and dropping/resubmitting it would turn a
+/// hard mount into unbounded PID growth.
+fn spawn_library_root_probe(root: &Path) -> std::io::Result<tokio::process::Child> {
+    debug_assert!(root.is_absolute());
+    tokio::process::Command::new("find")
+        .arg("-H")
         .arg(root)
         .args(["-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])
         .stdin(Stdio::null())
@@ -575,29 +694,6 @@ async fn probe_library_root(root: &Path, deadline: tokio::time::Instant) -> Root
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => {
-            return RootProbeObservation {
-                readable: false,
-                observed_at: tokio::time::Instant::now(),
-            }
-        }
-    };
-    let readable = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(Ok(status)) => status.success(),
-        Ok(Err(_)) => false,
-        Err(_) => {
-            let _ = child.start_kill();
-            false
-        }
-    };
-    RootProbeObservation {
-        readable,
-        // Stamp completion, not channel consumption. The result is installed
-        // immediately by this same future, so its TTL cannot restart later.
-        observed_at: tokio::time::Instant::now(),
-    }
 }
 
 async fn fetch_offer(
@@ -1252,6 +1348,21 @@ mod tests {
             http_base: Some("http://peer:32400".to_owned()),
             reachable: true,
         }]));
+    }
+
+    #[test]
+    fn root_probe_command_accepts_only_bounded_absolute_paths() {
+        let roots = bounded_absolute_roots([
+            PathBuf::from("-delete"),
+            PathBuf::from("relative/library"),
+            PathBuf::from("/media/library"),
+        ]);
+        assert_eq!(roots, BTreeSet::from([PathBuf::from("/media/library")]));
+
+        let bounded = bounded_absolute_roots(
+            (0..=MAX_LIBRARY_ROOTS).map(|index| PathBuf::from(format!("/media/{index}"))),
+        );
+        assert_eq!(bounded.len(), MAX_LIBRARY_ROOTS);
     }
 
     #[tokio::test]

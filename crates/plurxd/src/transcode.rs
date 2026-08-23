@@ -4250,6 +4250,9 @@ pub struct TranscodeManager {
     /// positive sample fails closed once it is too old, including while a
     /// later `statvfs` call remains stuck on a hard mount.
     scratch_sampled_at_unix_ms: AtomicI64,
+    /// Even outside publication, odd while the two sample atomics change.
+    /// Readers accept bytes only when both generation reads match.
+    scratch_sample_generation: AtomicU64,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -4404,6 +4407,7 @@ impl TranscodeManager {
             cache: None,
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
+            scratch_sample_generation: AtomicU64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             sessions: Mutex::new(HashMap::new()),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -4550,9 +4554,10 @@ impl TranscodeManager {
                 tokio::select! {
                     sample = &mut receiver => {
                         let sample = sample.ok().flatten().unwrap_or(0).max(0);
-                        self.scratch_sampled_at_unix_ms.store(0, Release);
-                        self.scratch_bytes_free.store(sample, Release);
-                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Release);
+                        self.scratch_sample_generation.fetch_add(1, AcqRel);
+                        self.scratch_bytes_free.store(sample, Relaxed);
+                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+                        self.scratch_sample_generation.fetch_add(1, Release);
                         break;
                     }
                     _ = interval.tick() => {
@@ -4595,11 +4600,14 @@ impl TranscodeManager {
             // explicit fallback), but an operator can still disable mapping.
             tone_map: self.pipeline.handles(Some("hdr10")) && tone_map_pref() != ToneMap::None,
             output_grades: vec!["sdr".to_owned()],
-            scratch_bytes: fresh_scratch_bytes(
-                self.scratch_bytes_free.load(Acquire),
-                self.scratch_sampled_at_unix_ms.load(Acquire),
-                unix_ms(),
-            ),
+            scratch_bytes: {
+                let (bytes, sampled_at) = read_scratch_sample(
+                    &self.scratch_sample_generation,
+                    &self.scratch_bytes_free,
+                    &self.scratch_sampled_at_unix_ms,
+                );
+                fresh_scratch_bytes(bytes, sampled_at, unix_ms())
+            },
         }
     }
 
@@ -10245,6 +10253,27 @@ fn unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn read_scratch_sample(
+    generation: &AtomicU64,
+    bytes: &AtomicI64,
+    sampled_at_unix_ms: &AtomicI64,
+) -> (i64, i64) {
+    for _ in 0..3 {
+        let before = generation.load(Acquire);
+        if before & 1 != 0 {
+            std::hint::spin_loop();
+            continue;
+        }
+        let bytes = bytes.load(Relaxed);
+        let sampled_at = sampled_at_unix_ms.load(Relaxed);
+        let after = generation.load(Acquire);
+        if before == after {
+            return (bytes, sampled_at);
+        }
+    }
+    (0, 0)
+}
+
 fn fresh_scratch_bytes(bytes: i64, sampled_at_unix_ms: i64, now_unix_ms: i64) -> i64 {
     let max_age_ms = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).unwrap_or(i64::MAX);
     if sampled_at_unix_ms > 0
@@ -10777,6 +10806,24 @@ mod tests {
         );
         assert_eq!(fresh_scratch_bytes(4096, 0, sampled_at), 0);
         assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at - 1), 0);
+    }
+
+    #[test]
+    fn scratch_capacity_rejects_an_in_progress_seqlock_publication() {
+        let generation = AtomicU64::new(2);
+        let bytes = AtomicI64::new(4096);
+        let sampled_at = AtomicI64::new(10_000);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (4096, 10_000)
+        );
+
+        generation.store(3, Release);
+        bytes.store(0, Relaxed);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (0, 0)
+        );
     }
 
     #[tokio::test]
