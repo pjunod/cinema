@@ -2799,6 +2799,40 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["cluster_media_pool_enabled"], false);
         assert_eq!(body["cluster_media_pool_ready"], false);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "conflict");
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
 
         let leave_body = json!({ "node_id": "test-node" });
         let (status, _) = call(

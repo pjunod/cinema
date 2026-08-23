@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P6 delivered; P7 is next ·
+**Status:** P0–P7 delivered; P8 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -1156,6 +1156,17 @@ URI with different bytes, and every newly advertised URI retrievable after the
 old disk disappears. An incapable survivor cannot claim; delete racing takeover
 leaves no replacement child; 80 concurrent sessions stay within the named Raft
 budget.
+
+**Delivered:** owner renewals now publish bounded monotone produced, fetched,
+and next-sequence frontiers. Expired active routes remain recoverable for one
+minute and eligible survivors start a bounded-overlap provisional worker before
+an exact owner/epoch/lease CAS advances the fence. The winner retains the
+stable public session bearer, starts at the next unused segment sequence, uses
+a generation-specific fMP4 map, and publishes exactly one HLS discontinuity;
+losers stop their provisional workers. The separately gated rollout is off by
+default, requires effective P5 placement readiness, and disabling placement
+also disables takeover. Direct-play range delivery remains stateless through a
+healthy ingress.
 
 ### 8.9 P8 — finish operations and native-client consumption
 

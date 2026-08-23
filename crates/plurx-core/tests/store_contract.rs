@@ -37,10 +37,10 @@ use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
     ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
-    MediaSessionRequestClaim, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
-    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingStateWrite, TraktAuth,
+    MediaSessionRequestClaim, MediaSessionTakeover, MetadataPatch, NetworkPriorObservation,
+    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
+    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
@@ -318,6 +318,8 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "media_session_route",
     "media_session_route_by_incarnation",
     "renew_media_sessions",
+    "expired_media_sessions",
+    "claim_media_session_takeover",
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
@@ -916,6 +918,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: r#"{"version":1}"#.to_owned(),
                 response_json: r#"{"session":"a"}"#.to_owned(),
+                media_origin_ms: 12_500,
                 now_ms: 130,
                 lease_expires_at_ms: 330,
             })
@@ -970,6 +973,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-b".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 145,
                 lease_expires_at_ms: 345,
             })
@@ -1002,6 +1006,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 150,
                 lease_expires_at_ms: 350,
             })
@@ -1061,6 +1066,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 160,
                 lease_expires_at_ms: 360,
             })
@@ -1083,6 +1089,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 161,
                 lease_expires_at_ms: 361,
             })
@@ -1129,6 +1136,9 @@ async fn media_session_contract_runs_through_dyn_store() {
                     &[MediaSessionRenewal {
                         incarnation_id: incarnation_a2.to_owned(),
                         owner_epoch: 1,
+                        produced_playable_through_ms: 20_000,
+                        fetched_through_ms: 10_000,
+                        media_sequence: 5,
                     }],
                     200,
                     400,
@@ -1138,6 +1148,17 @@ async fn media_session_contract_runs_through_dyn_store() {
             vec![incarnation_a2.to_owned()],
             "{backend}"
         );
+        let renewed_route = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect renewed frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(
+            renewed_route.produced_playable_through_ms, 20_000,
+            "{backend}"
+        );
+        assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(renewed_route.media_sequence, 5, "{backend}");
         assert!(!store
             .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
             .await
@@ -1148,6 +1169,9 @@ async fn media_session_contract_runs_through_dyn_store() {
                 &[MediaSessionRenewal {
                     incarnation_id: incarnation_a2.to_owned(),
                     owner_epoch: 1,
+                    produced_playable_through_ms: 30_000,
+                    fetched_through_ms: 15_000,
+                    media_sequence: 6,
                 }],
                 400,
                 500,
@@ -1170,6 +1194,54 @@ async fn media_session_contract_runs_through_dyn_store() {
                 .is_empty(),
             "{backend}: owner inventory must exclude an expired lease"
         );
+
+        let expired = store
+            .expired_media_sessions(399, 64)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
+        let expired_b = expired
+            .iter()
+            .find(|route| route.session_id == session_b)
+            .unwrap_or_else(|| panic!("{backend}: expired route must be offered for takeover"));
+        assert_eq!(expired_b.owner_epoch, 1, "{backend}");
+        let takeover = MediaSessionTakeover {
+            incarnation_id: incarnation_b.to_owned(),
+            expected_owner_node_id: "node-b".to_owned(),
+            expected_owner_epoch: 1,
+            next_owner_node_id: "node-c".to_owned(),
+            now_ms: 399,
+            lease_expires_at_ms: 600,
+        };
+        let taken = store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim expired session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: eligible survivor must win takeover"));
+        assert_eq!(taken.session_id, session_b, "{backend}");
+        assert_eq!(taken.owner_node_id, "node-c", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+        assert_eq!(taken.discontinuity_sequence, 1, "{backend}");
+        assert!(store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay takeover CAS: {error}"))
+            .is_none());
+        assert!(store
+            .renew_media_sessions(
+                "node-b",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_b.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 1,
+                    fetched_through_ms: 1,
+                    media_sequence: 1,
+                }],
+                400,
+                700,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale owner renewal: {error}"))
+            .is_empty());
 
         let ended = store
             .end_media_session(session_a2, 410)
@@ -1257,6 +1329,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 440,
                 lease_expires_at_ms: 640,
             })
@@ -1291,10 +1364,9 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: reject expired owner: {error}")));
 
-        // Later request claims already ran bounded maintenance at t=430 and
-        // ended node-b's expired route. Inspect it inside the 24-hour terminal
-        // retention window before advancing past that window below.
-        let maintenance_now = 999;
+        // Expired routes remain active for one bounded takeover window, then
+        // maintenance terminals an unclaimed or abandoned successor.
+        let maintenance_now = 60_601;
         store
             .maintain_media_sessions(maintenance_now)
             .await
@@ -1354,6 +1426,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                     owner_node_id: "cap-node".to_owned(),
                     recipe_json: "{}".to_owned(),
                     response_json: "{}".to_owned(),
+                    media_origin_ms: 0,
                     now_ms: 100,
                     lease_expires_at_ms: 10_000,
                 })
@@ -1424,6 +1497,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                 owner_node_id: "cap-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 1_003,
                 lease_expires_at_ms: 10_000,
             })
@@ -1513,6 +1587,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            media_origin_ms: 0,
             now_ms: 120,
             lease_expires_at_ms: 320,
         })
@@ -1578,6 +1653,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            media_origin_ms: 0,
             now_ms: 150,
             lease_expires_at_ms: 350,
         })
@@ -7589,7 +7665,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 216, "review the Store method count");
+    assert_eq!(declared.len(), 218, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -824,6 +824,7 @@ pub async fn create(
         lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
         recipe_json,
         response_json,
+        media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
     // Once activation begins, this owned task also owns the cleanup guard.

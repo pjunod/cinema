@@ -1677,6 +1677,17 @@ when the client happened to reach its holder. Enablement is still explicit:
 voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
 separates enabled, rollout-ready, and effective-ready state.
 
+P7 can replace an expired HLS owner without changing the public session URL.
+Keep this second rollout gate off until P5 placement is healthy, then enable it
+with `PUT /api/v1/settings` and
+`{"cluster_session_takeover_enabled": true}`. Enabling is refused unless remote
+placement is enabled and every committed voter publishes the current media
+protocol; disabling always succeeds. A replacement resumes behind the last
+fetched frontier with bounded overlap, advances the owner epoch, and inserts an
+HLS discontinuity before publishing new segments. Direct-play range requests
+remain stateless and continue through any healthy ingress without this worker
+replacement path.
+
 #### Optional verified shared cache
 
 P6 adds a direct shared-cache fast path without making it a cluster

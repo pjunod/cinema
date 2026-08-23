@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::SqliteStore;
+use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, OwnedMediaSessionLease,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, OwnedMediaSessionLease,
 };
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
@@ -14,8 +15,11 @@ const MAX_CURRENT_PER_USER: i64 = 64;
 const MAX_REQUEST_ROWS_PER_USER: i64 = 4_096;
 const MAX_SESSION_ROWS_PER_USER: i64 = 4_096;
 const MAX_RENEWALS: usize = 256;
+const MAX_TAKEOVER_CANDIDATES: usize = 64;
 const MAX_OWNED: i64 = 4_096;
 const MAINTENANCE_BATCH: i64 = 256;
+const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+const TAKEOVER_RECOVERY_MS: i64 = 60 * 1_000;
 const FAILED_RETENTION_MS: i64 = 60 * 60 * 1_000;
 const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
@@ -105,12 +109,40 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.owner_node_id.len() <= 256
         && activation.recipe_json.len() <= 32 * 1024
         && activation.response_json.len() <= 64 * 1024
+        && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
         && activation.lease_expires_at_ms > activation.now_ms;
     if valid {
         Ok(())
     } else {
         Err(StoreError::Task(
             "invalid media-session activation".to_owned(),
+        ))
+    }
+}
+
+fn valid_renewal(renewal: &MediaSessionRenewal) -> bool {
+    valid_uuid(&renewal.incarnation_id)
+        && renewal.owner_epoch > 0
+        && (0..=MAX_MEDIA_MILLIS).contains(&renewal.produced_playable_through_ms)
+        && (0..=renewal.produced_playable_through_ms).contains(&renewal.fetched_through_ms)
+        && renewal.media_sequence >= 0
+}
+
+fn validate_takeover(takeover: &MediaSessionTakeover) -> Result<(), StoreError> {
+    let valid = valid_uuid(&takeover.incarnation_id)
+        && !takeover.expected_owner_node_id.is_empty()
+        && takeover.expected_owner_node_id.len() <= 256
+        && !takeover.next_owner_node_id.is_empty()
+        && takeover.next_owner_node_id.len() <= 256
+        && takeover.expected_owner_node_id != takeover.next_owner_node_id
+        && takeover.expected_owner_epoch > 0
+        && takeover.expected_owner_epoch < i64::MAX
+        && takeover.lease_expires_at_ms > takeover.now_ms;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task(
+            "invalid media-session takeover".to_owned(),
         ))
     }
 }
@@ -517,7 +549,7 @@ impl MediaSessionStore for SqliteStore {
                      response_json, produced_playable_through_ms, fetched_through_ms,
                      media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
-                         0, 0, 0, 0, 0, ?10)
+                         0, 0, ?10, 0, 0, ?11)
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                     lease_expires_at_ms = excluded.lease_expires_at_ms,
                     response_json = excluded.response_json,
@@ -529,8 +561,8 @@ impl MediaSessionStore for SqliteStore {
                    AND media_sessions.owner_node_id = excluded.owner_node_id
                    AND media_sessions.owner_epoch = 1 AND media_sessions.state = 'active'
                    AND EXISTS (SELECT 1 FROM job_leases
-                     WHERE resource = ?11 AND owner_node_id = ?6 AND fence = 1
-                       AND expires_at_ms = ?7 AND expires_at_ms > ?10)",
+                     WHERE resource = ?12 AND owner_node_id = ?6 AND fence = 1
+                       AND expires_at_ms = ?7 AND expires_at_ms > ?11)",
                 params![
                     activation.incarnation_id,
                     activation.session_id,
@@ -541,6 +573,7 @@ impl MediaSessionStore for SqliteStore {
                     activation.lease_expires_at_ms,
                     activation.recipe_json,
                     activation.response_json,
+                    activation.media_origin_ms,
                     activation.now_ms,
                     lease_resource,
                 ],
@@ -679,9 +712,7 @@ impl MediaSessionStore for SqliteStore {
         if owner_node_id.is_empty()
             || owner_node_id.len() > 256
             || renewals.len() > MAX_RENEWALS
-            || renewals
-                .iter()
-                .any(|renewal| !valid_uuid(&renewal.incarnation_id) || renewal.owner_epoch <= 0)
+            || renewals.iter().any(|renewal| !valid_renewal(renewal))
             || lease_expires_at_ms <= now_ms
         {
             return Err(StoreError::Task(
@@ -714,7 +745,11 @@ impl MediaSessionStore for SqliteStore {
                 )? == 1;
                 if lease_renewed
                     && tx.execute(
-                        "UPDATE media_sessions SET lease_expires_at_ms = ?1, updated_at_ms = ?2
+                        "UPDATE media_sessions SET lease_expires_at_ms = ?1, updated_at_ms = ?2,
+                              produced_playable_through_ms = MAX(
+                                produced_playable_through_ms, ?7),
+                              fetched_through_ms = MAX(fetched_through_ms, ?8),
+                              media_sequence = MAX(media_sequence, ?9)
                       WHERE incarnation_id = ?3 AND owner_node_id = ?4 AND owner_epoch = ?5
                         AND state = 'active' AND lease_expires_at_ms > ?2
                         AND EXISTS (SELECT 1 FROM job_leases
@@ -727,6 +762,9 @@ impl MediaSessionStore for SqliteStore {
                             owner_node_id,
                             renewal.owner_epoch,
                             lease_resource,
+                            renewal.produced_playable_through_ms,
+                            renewal.fetched_through_ms,
+                            renewal.media_sequence,
                         ],
                     )? == 1
                 {
@@ -763,6 +801,154 @@ impl MediaSessionStore for SqliteStore {
             }
             tx.commit()?;
             Ok(renewed)
+        })
+        .await
+    }
+
+    async fn expired_media_sessions(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<MediaSessionRoute>, StoreError> {
+        if now_ms < 0 {
+            return Err(StoreError::Task(
+                "invalid media-session takeover inventory time".to_owned(),
+            ));
+        }
+        let limit = i64::try_from(limit.min(MAX_TAKEOVER_CANDIDATES)).unwrap_or(0);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {ROUTE_COLS} FROM media_sessions
+                  WHERE state = 'active' AND lease_expires_at_ms <= ?1
+                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2"
+            ))?;
+            let routes = statement
+                .query_map(params![now_ms, limit], route_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(routes)
+        })
+        .await
+    }
+
+    async fn claim_media_session_takeover(
+        &self,
+        takeover: &MediaSessionTakeover,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        validate_takeover(takeover)?;
+        let takeover = takeover.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let lease_resource = format!("session:{}", takeover.incarnation_id);
+            let removed_owner_key = removed_job_owner_key(&takeover.next_owner_node_id);
+            let route = tx
+                .query_row(
+                    &format!(
+                        "SELECT {ROUTE_COLS} FROM media_sessions session
+                          WHERE incarnation_id = ?1 AND owner_node_id = ?2
+                            AND owner_epoch = ?3 AND state = 'active'
+                            AND lease_expires_at_ms <= ?4
+                            AND EXISTS (SELECT 1 FROM job_leases lease
+                              WHERE lease.resource = ?5
+                                AND lease.owner_node_id = session.owner_node_id
+                                AND lease.fence = session.owner_epoch
+                                AND lease.expires_at_ms = session.lease_expires_at_ms
+                                AND lease.expires_at_ms <= ?4
+                                AND lease.fence < 9223372036854775807
+                                AND lease.revision < 9223372036854775807)"
+                    ),
+                    params![
+                        takeover.incarnation_id,
+                        takeover.expected_owner_node_id,
+                        takeover.expected_owner_epoch,
+                        takeover.now_ms,
+                        lease_resource,
+                    ],
+                    route_from_row,
+                )
+                .optional()?;
+            let Some(mut route) = route else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            let next_epoch = takeover.expected_owner_epoch.saturating_add(1);
+            if tx.execute(
+                "UPDATE job_leases
+                    SET owner_node_id = ?1, fence = ?2, revision = revision + 1,
+                        expires_at_ms = ?3, updated_at_ms = ?4
+                  WHERE resource = ?5 AND owner_node_id = ?6 AND fence = ?7
+                    AND expires_at_ms = ?8 AND expires_at_ms <= ?4
+                    AND fence < 9223372036854775807
+                    AND revision < 9223372036854775807
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = ?9)",
+                params![
+                    takeover.next_owner_node_id,
+                    next_epoch,
+                    takeover.lease_expires_at_ms,
+                    takeover.now_ms,
+                    lease_resource,
+                    takeover.expected_owner_node_id,
+                    takeover.expected_owner_epoch,
+                    route.lease_expires_at_ms,
+                    removed_owner_key,
+                ],
+            )? != 1
+            {
+                tx.rollback()?;
+                return Ok(None);
+            }
+            if tx.execute(
+                "UPDATE media_sessions
+                    SET owner_node_id = ?1, owner_epoch = ?2,
+                        lease_expires_at_ms = ?3,
+                        discontinuity_sequence = discontinuity_sequence + 1,
+                        updated_at_ms = ?4
+                  WHERE incarnation_id = ?5 AND owner_node_id = ?6 AND owner_epoch = ?7
+                    AND state = 'active' AND lease_expires_at_ms = ?8
+                    AND lease_expires_at_ms <= ?4
+                    AND discontinuity_sequence < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM job_leases
+                      WHERE resource = ?9 AND owner_node_id = ?1 AND fence = ?2
+                        AND expires_at_ms = ?3 AND updated_at_ms = ?4)",
+                params![
+                    takeover.next_owner_node_id,
+                    next_epoch,
+                    takeover.lease_expires_at_ms,
+                    takeover.now_ms,
+                    takeover.incarnation_id,
+                    takeover.expected_owner_node_id,
+                    takeover.expected_owner_epoch,
+                    route.lease_expires_at_ms,
+                    lease_resource,
+                ],
+            )? != 1
+            {
+                tx.rollback()?;
+                return Ok(None);
+            }
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+                    AND consumer_epoch = ?2
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = ?1 AND owner_node_id = ?3
+                        AND owner_epoch = ?4 AND state = 'active')",
+                params![
+                    takeover.incarnation_id,
+                    takeover.expected_owner_epoch,
+                    takeover.next_owner_node_id,
+                    next_epoch,
+                ],
+            )?;
+            route.owner_node_id = takeover.next_owner_node_id;
+            route.owner_epoch = next_epoch;
+            route.lease_expires_at_ms = takeover.lease_expires_at_ms;
+            route.discontinuity_sequence = route.discontinuity_sequence.saturating_add(1);
+            route.updated_at_ms = takeover.now_ms;
+            tx.commit()?;
+            Ok(Some(route))
         })
         .await
     }
@@ -834,14 +1020,15 @@ impl MediaSessionStore for SqliteStore {
             let tx = conn.unchecked_transaction()?;
             let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
+            let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
             tx.execute(
                 "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = ?1,
                         updated_at_ms = ?1
                   WHERE incarnation_id IN (
                     SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND lease_expires_at_ms <= ?1
+                     WHERE state = 'active' AND lease_expires_at_ms <= ?3
                      ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2)",
-                params![now_ms, MAINTENANCE_BATCH],
+                params![now_ms, MAINTENANCE_BATCH, retire_before],
             )?;
             tx.execute(
                 "DELETE FROM cache_consumer_pins
@@ -875,9 +1062,9 @@ impl MediaSessionStore for SqliteStore {
                    LEFT JOIN media_sessions session
                      ON session.incarnation_id = pointer.current_incarnation_id
                   WHERE session.incarnation_id IS NULL OR session.state != 'active'
-                     OR session.lease_expires_at_ms <= ?1
+                     OR session.lease_expires_at_ms <= ?3
                   ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT ?2)",
-                params![now_ms, MAINTENANCE_BATCH],
+                params![now_ms, MAINTENANCE_BATCH, retire_before],
             )?;
             tx.execute(
                 "DELETE FROM media_session_requests WHERE rowid IN (

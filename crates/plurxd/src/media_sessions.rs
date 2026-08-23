@@ -10,7 +10,9 @@ use axum::body::Body;
 use axum::http::{header, HeaderName, Response, StatusCode};
 use futures_util::{stream, StreamExt, TryStreamExt};
 use plurx_core::cluster::membership::MembershipManager;
-use plurx_core::domain::{MediaSessionRenewal, MediaSessionRoute, OwnedMediaSessionLease};
+use plurx_core::domain::{
+    MediaSessionRenewal, MediaSessionRoute, MediaSessionTakeover, OwnedMediaSessionLease,
+};
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
 use plurx_core::transcode::OutputGrade;
@@ -19,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use crate::http::peer_transport::{
     deadline_after, PeerAuthMode, PeerTransport, PeerTransportError,
 };
+use crate::media_pool::MediaOfferRequest;
 use crate::state::AppState;
-use crate::transcode::{SessionKind, SessionRequest, StartInfo};
+use crate::transcode::{SessionKind, SessionRequest, SessionTakeoverStart, StartInfo};
 
 pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
@@ -61,6 +64,11 @@ const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
 const STALE_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(4);
 const STALE_SETTLEMENT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const TAKEOVER_INTERVAL: Duration = Duration::from_secs(2);
+const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
+const TAKEOVER_BATCH: usize = 16;
+const TAKEOVER_FANOUT: usize = 4;
+const TAKEOVER_OVERLAP_MS: i64 = 2_000;
 
 #[derive(Clone, Copy, Debug)]
 struct StaleSettlementBackoff {
@@ -791,6 +799,11 @@ pub(crate) async fn lease_loop(state: AppState) {
             .iter()
             .filter(|route| live.contains(&route.session_id))
             .collect::<Vec<_>>();
+        let active_session_ids = active
+            .iter()
+            .map(|route| route.session_id.clone())
+            .collect::<Vec<_>>();
+        let frontiers = Arc::new(state.transcode.session_frontiers(&active_session_ids).await);
         let renewal_deadline = tokio::time::Instant::now() + LEASE_RENEWAL_DEADLINE;
         let renewal_batches = renewal_chunks(&active)
             .map(|chunk| {
@@ -803,6 +816,7 @@ pub(crate) async fn lease_loop(state: AppState) {
         let renewal_outcomes = stream::iter(renewal_batches.into_iter().map(|chunk| {
             let store = Arc::clone(&state.store);
             let owner_node_id = state.node_id.clone();
+            let frontiers = Arc::clone(&frontiers);
             async move {
                 // Inventory and fan-out time consume the existing lease. A
                 // renewal must compare against wall time at the store call,
@@ -820,9 +834,16 @@ pub(crate) async fn lease_loop(state: AppState) {
                         route.lease_expires_at_ms
                             > renewal_now_ms.saturating_add(LEASE_RENEWAL_MIN_REMAINING_MS)
                     })
-                    .map(|route| MediaSessionRenewal {
-                        incarnation_id: route.incarnation_id.clone(),
-                        owner_epoch: route.owner_epoch,
+                    .filter_map(|route| {
+                        frontiers
+                            .get(&route.session_id)
+                            .map(|frontier| MediaSessionRenewal {
+                                incarnation_id: route.incarnation_id.clone(),
+                                owner_epoch: route.owner_epoch,
+                                produced_playable_through_ms: frontier.produced_playable_through_ms,
+                                fetched_through_ms: frontier.fetched_through_ms,
+                                media_sequence: frontier.media_sequence,
+                            })
                     })
                     .collect::<Vec<_>>();
                 let outcome = tokio::time::timeout_at(
@@ -964,6 +985,208 @@ pub(crate) async fn maintenance_loop(state: AppState) {
             tracing::debug!(%error, "media-session lifecycle maintenance unavailable");
         }
     }
+}
+
+/// Contest expired session routes only after the separate replicated rollout
+/// switch is enabled. Every candidate independently proves source/pipeline
+/// eligibility; the Store CAS still admits exactly one successor epoch.
+pub(crate) async fn takeover_loop(state: AppState) {
+    let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let media_pool_enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
+        let takeover_enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
+        if !media_pool_enabled || !takeover_enabled {
+            continue;
+        }
+        let now_ms = unix_ms();
+        let routes = match tokio::time::timeout(
+            Duration::from_secs(3),
+            state.store.expired_media_sessions(now_ms, TAKEOVER_BATCH),
+        )
+        .await
+        {
+            Ok(Ok(routes)) => routes,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "media-session takeover inventory unavailable");
+                continue;
+            }
+            Err(_) => continue,
+        };
+        stream::iter(routes.into_iter().map(|route| {
+            let state = state.clone();
+            async move {
+                if let Err(error) = attempt_takeover(&state, route).await {
+                    tracing::debug!(%error, "media-session takeover candidate refused");
+                }
+            }
+        }))
+        .buffer_unordered(TAKEOVER_FANOUT)
+        .collect::<Vec<_>>()
+        .await;
+    }
+}
+
+async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
+    if route.owner_node_id == state.node_id || route.owner_epoch >= i64::MAX {
+        return Ok(());
+    }
+    let mut envelope = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
+        .map_err(|error| format!("invalid persisted takeover recipe: {error}"))?;
+    if !envelope.is_valid()
+        || envelope.incarnation_id != route.incarnation_id
+        || envelope.user_id != route.user_id
+    {
+        return Err("persisted takeover recipe no longer matches its route".to_owned());
+    }
+    let file = state
+        .store
+        .get_file(envelope.request.file_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "takeover source is missing".to_owned())?;
+    let frontier_offset_ms = route
+        .fetched_through_ms
+        .saturating_sub(TAKEOVER_OVERLAP_MS)
+        .clamp(0, route.produced_playable_through_ms);
+    let restart_ms = route.media_origin_ms.saturating_add(frontier_offset_ms);
+    envelope.request.start_seconds = restart_ms as f64 / 1_000.0;
+    envelope.request.request_id = None;
+    envelope.request.previous_session_id = None;
+    envelope.request.reopen_reason = None;
+    let target_height = match envelope.request.kind {
+        SessionKind::Transcode { height } => height,
+        SessionKind::Copy { .. } => file.height.unwrap_or(crate::transcode::MIN_HEIGHT),
+    }
+    .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let offer_request = MediaOfferRequest::new(
+        &file,
+        target_height,
+        restart_ms,
+        envelope.request.audio_index,
+        envelope.request.subtitle_burn,
+        envelope.request.hdr10,
+    )
+    .map_err(str::to_owned)?;
+    let offers = state.media_pool.offers(state, offer_request).await;
+    if offers.selected_node_id.as_deref() != Some(state.node_id.as_str()) {
+        return Ok(());
+    }
+    let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
+    let next_epoch = route.owner_epoch.saturating_add(1);
+    // The replicated coordinate is the next unused sequence number. Reusing
+    // the previous owner's last URI for replacement bytes breaks HLS caches.
+    let start_number = route.media_sequence.max(0);
+    let user = state
+        .store
+        .get_user(route.user_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "takeover user is missing".to_owned())?;
+    let started = state
+        .transcode
+        .create_cluster_takeover_session(
+            &envelope.request,
+            route.user_id,
+            &user.username,
+            deadline,
+            SessionTakeoverStart {
+                frontier_offset_ms,
+                media_sequence: start_number,
+                discontinuity_sequence: route.discontinuity_sequence.saturating_add(1),
+                owner_epoch: next_epoch,
+            },
+        )
+        .await?;
+    let provisional_id = started.info.session_id.clone();
+    let claim_now_ms = unix_ms();
+    let claimed = match state
+        .store
+        .claim_media_session_takeover(&MediaSessionTakeover {
+            incarnation_id: route.incarnation_id.clone(),
+            expected_owner_node_id: route.owner_node_id,
+            expected_owner_epoch: route.owner_epoch,
+            next_owner_node_id: state.node_id.clone(),
+            now_ms: claim_now_ms,
+            lease_expires_at_ms: claim_now_ms.saturating_add(LEASE_TTL_MS),
+        })
+        .await
+    {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            state
+                .transcode
+                .stop_session(&provisional_id, "media-session takeover claim failed")
+                .await;
+            return Err(error.to_string());
+        }
+    };
+    let Some(claimed) = claimed else {
+        state
+            .transcode
+            .stop_session(&provisional_id, "media-session takeover lost")
+            .await;
+        return Ok(());
+    };
+    let adopted = state
+        .transcode
+        .adopt_session_id(&provisional_id, &claimed.session_id)
+        .await;
+    let pinned = if adopted {
+        match state
+            .transcode
+            .pin_shared_session(
+                &claimed.session_id,
+                &claimed.incarnation_id,
+                claimed.owner_epoch,
+                claimed.lease_expires_at_ms,
+            )
+            .await
+        {
+            Ok(pinned) => pinned,
+            Err(error) => {
+                tracing::debug!(%error, "takeover shared-cache pin unavailable");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !adopted || !pinned {
+        let local_id = if adopted {
+            claimed.session_id.as_str()
+        } else {
+            provisional_id.as_str()
+        };
+        state
+            .transcode
+            .stop_session(local_id, "media-session takeover settlement failed")
+            .await;
+        let _ = state
+            .store
+            .end_media_session(&claimed.session_id, unix_ms())
+            .await;
+        return Err("takeover winner could not publish its local worker".to_owned());
+    }
+    state.media_sessions.cache_route(claimed.clone()).await;
+    state.media_sessions.seed_owned_lease(&claimed).await;
+    drop(started.replacement);
+    Ok(())
 }
 
 fn renewal_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {

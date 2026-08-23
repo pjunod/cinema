@@ -484,6 +484,12 @@ impl SegmentIndex {
         self.segs.last().map(|s| s.end_ms)
     }
 
+    fn next_media_sequence(&self) -> i64 {
+        self.segs
+            .last()
+            .map_or(0, |segment| segment.index.saturating_add(1).max(0))
+    }
+
     /// Where a given segment ends, for turning "the client fetched segment N"
     /// into a position on the media timeline.
     fn end_ms_of(&self, index: i64) -> Option<i64> {
@@ -695,9 +701,10 @@ fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
     typeless_sliding: bool,
+    takeover: Option<SessionTakeoverStart>,
 ) -> Vec<u8> {
     let first_retained = first_retained.filter(|index| *index > 0).unwrap_or(0);
-    if first_retained == 0 && !typeless_sliding {
+    if first_retained == 0 && !typeless_sliding && takeover.is_none() {
         return raw;
     }
     let Ok(text) = std::str::from_utf8(&raw) else {
@@ -743,6 +750,7 @@ fn served_live_playlist(
 
     let mut out = String::with_capacity(text.len());
     let mut wrote_media_sequence = false;
+    let mut wrote_discontinuity_sequence = false;
     let mut wrote_start = false;
     for line in &lines[..header_end] {
         let trimmed = line.trim();
@@ -755,6 +763,18 @@ fn served_live_playlist(
         if trimmed.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
             wrote_media_sequence = true;
+        } else if trimmed.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            if let Some(takeover) = takeover {
+                let includes_boundary = first_retained <= takeover.media_sequence;
+                let sequence = takeover
+                    .discontinuity_sequence
+                    .saturating_sub(i64::from(includes_boundary));
+                out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+                wrote_discontinuity_sequence = true;
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
         } else {
             out.push_str(line);
             out.push('\n');
@@ -762,6 +782,18 @@ fn served_live_playlist(
     }
     if !wrote_media_sequence {
         out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
+    }
+    if let Some(takeover) = takeover {
+        let includes_boundary = first_retained <= takeover.media_sequence;
+        if !wrote_discontinuity_sequence {
+            let sequence = takeover
+                .discontinuity_sequence
+                .saturating_sub(i64::from(includes_boundary));
+            out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+        }
+        if includes_boundary {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
     }
     if typeless_sliding && !wrote_start {
         out.push_str("#EXT-X-START:TIME-OFFSET=0\n");
@@ -1675,6 +1707,11 @@ struct Session {
     /// Snapshot of the EVENT-to-typeless experiment at session creation. A
     /// settings edit must never mutate one URL's playlist type mid-play.
     typeless_sliding: bool,
+    /// Fenced successor coordinates for URI and playlist continuity.
+    takeover: Option<SessionTakeoverStart>,
+    /// Position of this worker's session-relative zero on the durable
+    /// incarnation timeline.
+    frontier_offset_ms: i64,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
     /// transition is evidence about the EVENT/sliding experiment.
@@ -2773,6 +2810,24 @@ pub struct SessionInfo {
     /// after resume so a flapping session cannot look healthy merely because
     /// the activity poll landed between transitions.
     pub suspend_count: u64,
+}
+
+/// Monotone failover coordinates sampled for the owner's two-second liveness
+/// batch. This intentionally excludes activity-page locks and byte accounting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionFrontier {
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_sequence: i64,
+}
+
+/// Coordinates selected before an expired incarnation is reproduced locally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionTakeoverStart {
+    pub frontier_offset_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub owner_epoch: i64,
 }
 
 /// Cheap identity used to choose the globally newest activity before walking
@@ -6415,6 +6470,8 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
+            frontier_offset_ms: 0,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -7693,7 +7750,7 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None)
+        self.create_session_inner(req, user_name, &supersession_user, None, None)
             .await
     }
 
@@ -7718,7 +7775,36 @@ impl TranscodeManager {
             ));
         }
         let info = self
-            .create_session_inner(req, user_name, &supersession_user, Some(deadline))
+            .create_session_inner(req, user_name, &supersession_user, Some(deadline), None)
+            .await?;
+        Ok(ClusterSessionStart { info, replacement })
+    }
+
+    /// Start a provisional fenced-successor generation. The caller publishes
+    /// ownership only after this method has acquired capacity and produced a
+    /// live local worker; a losing CAS stops the provisional session.
+    pub(crate) async fn create_cluster_takeover_session(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        takeover: SessionTakeoverStart,
+    ) -> Result<ClusterSessionStart, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        let info = self
+            .create_session_inner(
+                req,
+                user_name,
+                &supersession_user,
+                Some(deadline),
+                Some(takeover),
+            )
             .await?;
         Ok(ClusterSessionStart { info, replacement })
     }
@@ -7770,6 +7856,7 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
     ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
@@ -7812,6 +7899,7 @@ impl TranscodeManager {
                     user_name,
                     supersession_user,
                     replacement_deadline,
+                    takeover,
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
@@ -7834,6 +7922,7 @@ impl TranscodeManager {
                     user_name,
                     supersession_user,
                     replacement_deadline,
+                    takeover,
                     &req.playback_id,
                     req.automatic,
                 )
@@ -8736,6 +8825,7 @@ impl TranscodeManager {
             user_name,
             &supersession_user,
             None,
+            None,
             playback_id,
             false,
             false,
@@ -8865,6 +8955,7 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
@@ -8916,7 +9007,7 @@ impl TranscodeManager {
         let (mut encoder, grade) = self
             .encoder_and_grade_for(&file, hdr10, target_height)
             .await?;
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -8927,22 +9018,27 @@ impl TranscodeManager {
             None,
             grade,
         );
-        if let Some(info) = self
-            .serve_cached(
-                &file,
-                &opts,
-                encoder,
-                &item_title,
-                SessionOwner {
-                    user_name,
-                    supersession_user,
-                    playback_id,
-                    automatic,
-                },
-            )
-            .await
-        {
-            return Ok(info);
+        if let Some(takeover) = takeover {
+            opts.start_number = takeover.media_sequence;
+        }
+        if takeover.is_none() {
+            if let Some(info) = self
+                .serve_cached(
+                    &file,
+                    &opts,
+                    encoder,
+                    &item_title,
+                    SessionOwner {
+                        user_name,
+                        supersession_user,
+                        playback_id,
+                        automatic,
+                    },
+                )
+                .await
+            {
+                return Ok(info);
+            }
         }
         // Can this ffmpeg build actually burn? Asked here — after the cache
         // lookup, which needs no ffmpeg at all, and before any slot, process
@@ -9003,7 +9099,7 @@ impl TranscodeManager {
         // patched. Same builder, so the two cannot describe different sessions.
         // The software permit's thread budget rides in the same rebuild: what
         // admission reserved is exactly what x264 is told to spend.
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -9014,6 +9110,9 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
+        if let Some(takeover) = takeover {
+            opts.start_number = takeover.media_sequence;
+        }
         let pacing = self.pacing(false).await;
         let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
         let args = transcode::hls_args(&file, encoder, &opts, pacing, &dir.to_string_lossy());
@@ -9132,6 +9231,8 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
+            frontier_offset_ms: takeover.map_or(0, |value| value.frontier_offset_ms),
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9447,6 +9548,7 @@ impl TranscodeManager {
             user_name,
             &supersession_user,
             None,
+            None,
             playback_id,
             false,
         )
@@ -9464,6 +9566,7 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
@@ -9518,15 +9621,30 @@ impl TranscodeManager {
         let pacing = self.pacing(true).await;
         let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
         let legacy_args = || {
-            transcode::hls_copy_args_with_dolby_vision(
-                &file,
-                start_seconds,
-                audio_index,
-                options.transcode_audio,
-                pacing,
-                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision),
-                &dir.to_string_lossy(),
-            )
+            let dolby_vision =
+                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision);
+            match takeover {
+                Some(takeover) => transcode::hls_copy_args_with_sequence(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    takeover.media_sequence,
+                    &format!("init-e{}.mp4", takeover.owner_epoch),
+                    &dir.to_string_lossy(),
+                ),
+                None => transcode::hls_copy_args_with_dolby_vision(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    &dir.to_string_lossy(),
+                ),
+            }
         };
         let progress = Arc::new(Progress::new());
         let generation = progress.begin_attempt();
@@ -9538,7 +9656,7 @@ impl TranscodeManager {
         // leading picture at. If anything about that stream turns out to be
         // unreadable, the reader task respawns this same session on the
         // arguments below, so the worst case is exactly today's behaviour.
-        let segmenting = copyseg::supports(file.video_codec.as_deref());
+        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
         let (child, pipe_stdout) = if segmenting {
             let args = transcode::copy_pipe_args_with_dolby_vision(
                 &file,
@@ -9676,6 +9794,8 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
+            frontier_offset_ms: takeover.map_or(0, |value| value.frontier_offset_ms),
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9841,6 +9961,86 @@ impl TranscodeManager {
     /// Number of live transcode sessions (for /metrics).
     pub async fn active_sessions(&self) -> usize {
         self.sessions.lock().await.len()
+    }
+
+    /// Publish a provisional successor under the incarnation's stable bearer
+    /// capability after the replicated owner CAS succeeds.
+    pub(crate) async fn adopt_session_id(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+    ) -> bool {
+        if provisional_id == durable_session_id {
+            return self.sessions.lock().await.contains_key(durable_session_id);
+        }
+        let mut sessions = self.sessions.lock().await;
+        if sessions.contains_key(durable_session_id) {
+            return false;
+        }
+        let Some(session) = sessions.remove(provisional_id) else {
+            return false;
+        };
+        sessions.insert(durable_session_id.to_owned(), session);
+        drop(sessions);
+
+        let mut requests = self.requests.lock().expect("requests mutex");
+        for entry in requests.values_mut() {
+            if matches!(&entry.state, RequestState::Ready(id) if id == provisional_id) {
+                entry.state = RequestState::Ready(durable_session_id.to_owned());
+            }
+        }
+        true
+    }
+
+    /// Snapshot only the monotone coordinates needed by the replicated owner
+    /// heartbeat. Session identities are cloned under the map lock; the
+    /// segment locks are then sampled without holding that global lock.
+    pub(crate) async fn session_frontiers(
+        &self,
+        session_ids: &[String],
+    ) -> HashMap<String, SessionFrontier> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    sessions
+                        .get(session_id)
+                        .cloned()
+                        .map(|session| (session_id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut frontiers = HashMap::with_capacity(selected.len());
+        for (session_id, session) in selected {
+            let (local_produced_through_ms, media_sequence) = {
+                let segments = session.segments.lock().await;
+                (
+                    segments.produced_playable_end_ms().unwrap_or(0).max(0),
+                    segments.next_media_sequence(),
+                )
+            };
+            let local_fetched_through_ms = session
+                .fetched_end_ms
+                .load(Relaxed)
+                .clamp(0, local_produced_through_ms);
+            let produced_playable_through_ms = session
+                .frontier_offset_ms
+                .saturating_add(local_produced_through_ms);
+            let fetched_through_ms = session
+                .frontier_offset_ms
+                .saturating_add(local_fetched_through_ms)
+                .min(produced_playable_through_ms);
+            frontiers.insert(
+                session_id,
+                SessionFrontier {
+                    produced_playable_through_ms,
+                    fetched_through_ms,
+                    media_sequence,
+                },
+            );
+        }
+        frontiers
     }
 
     /// Every live session, paired with how it is really delivering.
@@ -10460,6 +10660,7 @@ impl TranscodeManager {
                         bytes,
                         first_retained,
                         session.typeless_sliding,
+                        session.takeover,
                     ));
                 }
             }
@@ -11794,6 +11995,8 @@ fn test_session(dir: PathBuf) -> Session {
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
         typeless_sliding: false,
+        takeover: None,
+        frontier_offset_ms: 0,
         first_slide_logged: AtomicBool::new(false),
     }
 }
@@ -13886,7 +14089,7 @@ mod tests {
                    #EXT-X-ENDLIST\n";
 
         assert_eq!(
-            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false),
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false, None),
             raw.as_bytes(),
             "before pruning the client sees the writer's EVENT playlist unchanged"
         );
@@ -13895,6 +14098,7 @@ mod tests {
             raw.as_bytes().to_vec(),
             Some(2),
             false,
+            None,
         ))
         .expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2"), "{served}");
@@ -13926,11 +14130,20 @@ mod tests {
                    seg00001.m4s\n\
                    #EXTINF:4.000,\n\
                    seg00002.m4s\n";
-        let before =
-            String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(0), true))
-                .expect("before utf8");
-        let after = String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(2), true))
-            .expect("after utf8");
+        let before = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(0),
+            true,
+            None,
+        ))
+        .expect("before utf8");
+        let after = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(2),
+            true,
+            None,
+        ))
+        .expect("after utf8");
 
         for playlist in [&before, &after] {
             assert!(
@@ -13956,6 +14169,47 @@ mod tests {
         assert!(before.contains("seg00000.m4s"), "{before}");
         assert!(!after.contains("seg00000.m4s"), "{after}");
         assert!(after.contains("seg00002.m4s"), "{after}");
+    }
+
+    #[test]
+    fn takeover_playlist_declares_one_monotone_discontinuity() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:4\n\
+                   #EXT-X-PLAYLIST-TYPE:EVENT\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg00004.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg00005.m4s\n";
+        let takeover = SessionTakeoverStart {
+            frontier_offset_ms: 8_000,
+            media_sequence: 4,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let first = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(4),
+            false,
+            Some(takeover),
+        ))
+        .expect("takeover playlist");
+        assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
+        assert!(first.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"), "{first}");
+        assert_eq!(first.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(first.contains("#EXT-X-MAP:URI=\"init-e2.mp4\""));
+
+        let slid = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(5),
+            false,
+            Some(takeover),
+        ))
+        .expect("slid takeover playlist");
+        assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
+        assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
     }
 
     // ---- the append-oriented index (review §2.6) ----------------------------
@@ -16104,6 +16358,8 @@ mod tests {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
+            frontier_offset_ms: 0,
             first_slide_logged: AtomicBool::new(false),
         })
     }

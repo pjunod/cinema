@@ -826,6 +826,8 @@ pub struct MediaSessionActivation {
     pub owner_node_id: String,
     pub recipe_json: String,
     pub response_json: String,
+    /// Exact source position represented by session-relative zero.
+    pub media_origin_ms: i64,
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
 }
@@ -841,6 +843,27 @@ pub struct MediaSessionActivationOutcome {
 pub struct MediaSessionRenewal {
     pub incarnation_id: String,
     pub owner_epoch: i64,
+    /// End of the newest complete object advertised by this owner.
+    pub produced_playable_through_ms: i64,
+    /// End of the furthest object delivered to the client.
+    pub fetched_through_ms: i64,
+    /// Next immutable HLS object number available to a successor.
+    pub media_sequence: i64,
+}
+
+/// Compare-and-swap input for transferring one expired media incarnation.
+///
+/// The existing public session id and recipe survive the handoff. Only the
+/// owner capability and its monotone epoch change; the Store increments the
+/// discontinuity sequence in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionTakeover {
+    pub incarnation_id: String,
+    pub expected_owner_node_id: String,
+    pub expected_owner_epoch: i64,
+    pub next_owner_node_id: String,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
 }
 
 /// Lean owner inventory used by the liveness loop and removal barrier.
