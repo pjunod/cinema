@@ -188,6 +188,10 @@ const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
+// Exact-request proofs are accepted on the public listener. Bound the work
+// performed before a signature is known to be genuine so forged envelopes
+// cannot fill every executor with body hashing and Ed25519 verification.
+const MAX_INTERNAL_PREVERIFY_CONCURRENCY: usize = 16;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
@@ -725,6 +729,7 @@ struct ReplicatedMembership {
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
+    internal_preverify: tokio::sync::Semaphore,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -875,6 +880,7 @@ impl MembershipManager {
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_replays: Mutex::new(BTreeMap::new()),
+                internal_preverify: tokio::sync::Semaphore::new(MAX_INTERNAL_PREVERIFY_CONCURRENCY),
                 activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -2100,6 +2106,12 @@ impl MembershipManager {
         {
             return Ok(false);
         }
+        // `try_acquire` is intentionally fail-closed. Waiting here would let
+        // unauthenticated callers manufacture a second unbounded queue in
+        // front of the post-verification per-peer limiter.
+        let Ok(_preverify) = inner.internal_preverify.try_acquire() else {
+            return Ok(false);
+        };
         let Some(message) = internal_peer_auth_message(
             &auth.node_id,
             &auth.target_node_id,
