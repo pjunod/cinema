@@ -3149,9 +3149,19 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
         .expect("reset fenced cache clock state");
     let dynamic: Arc<dyn Store> = store.clone();
     let (_, file_id) = seed_file(&dynamic, "fenced-cache-clock").await;
+    let lease_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("fenced cache lease clock after epoch")
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
     let mut lease = acquired(
         store
-            .acquire_lease("candidate:fenced-cache-clock", "clock-node", 1_000, 100_000)
+            .acquire_lease(
+                "candidate:fenced-cache-clock",
+                "clock-node",
+                lease_clock,
+                lease_clock.saturating_add(100_000),
+            )
             .await
             .expect("acquire fenced cache clock lease"),
         "hiqlite fenced cache clock",
