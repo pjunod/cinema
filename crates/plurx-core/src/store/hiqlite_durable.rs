@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS transcode_cache_locations (
     node_id       TEXT NOT NULL,
     storage_class TEXT NOT NULL CHECK (storage_class IN ('local', 'shared')),
     relative_dir  TEXT NOT NULL,
+    storage_id    TEXT NOT NULL DEFAULT '',
+    generation_id TEXT NOT NULL DEFAULT '',
     bytes         INTEGER NOT NULL,
     complete      INTEGER NOT NULL,
     manifest_digest TEXT,

@@ -95,7 +95,13 @@ pub(super) fn migration_statements() -> Vec<(String, hiqlite::Params)> {
 }
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
-    let statements = migration_statements();
+    // Fresh bootstrap creates these two columns in DURABLE_SCHEMA. Keep the
+    // ALTER statements only for the v10 -> v11 migration: bootstrap is
+    // intentionally repeatable in validation and must not add them twice.
+    let statements = migration_statements()
+        .into_iter()
+        .skip(2)
+        .collect::<Vec<_>>();
     for (sql, _) in &statements {
         validate_sql(sql)?;
     }
