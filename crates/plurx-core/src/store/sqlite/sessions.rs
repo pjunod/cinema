@@ -221,7 +221,7 @@ impl MediaSessionStore for SqliteStore {
                             route_from_row,
                         )
                         .optional()?
-                        .map(MediaSessionRequestClaim::Resolved)
+                        .map(|route| MediaSessionRequestClaim::Resolved(Box::new(route)))
                         .unwrap_or(MediaSessionRequestClaim::InFlight {
                             incarnation_id: existing_incarnation,
                             owner_node_id: owner,

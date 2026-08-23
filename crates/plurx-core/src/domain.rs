@@ -735,7 +735,7 @@ pub enum MediaSessionRequestClaim {
         owner_node_id: Option<String>,
         claim_expires_at_ms: i64,
     },
-    Resolved(MediaSessionRoute),
+    Resolved(Box<MediaSessionRoute>),
     Conflict,
     Overloaded,
 }

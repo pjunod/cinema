@@ -295,7 +295,7 @@ async fn claim_from_row(
     }
     if row.state == "resolved" {
         if let Some(route) = route_by(store, "incarnation_id", &row.incarnation_id).await? {
-            return Ok(MediaSessionRequestClaim::Resolved(route));
+            return Ok(MediaSessionRequestClaim::Resolved(Box::new(route)));
         }
     }
     if row.state == "starting" || row.state == "resolved" {
