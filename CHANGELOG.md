@@ -8,7 +8,64 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **Playback info is a top-right ledger on every client.** The panel anchored
+  to a different place in each mode and laid its sections out by measured
+  height, so the reading order was a side effect of how long the values
+  happened to be and shifted while it was open; sentence-shaped values such as
+  the transcode reason sat in the grid and stretched their column, which is
+  what left the ragged gaps between sections. Mini, Standard and Debug now all
+  anchor to the top-right corner — the only corner clear of the transport bar
+  and the subtitle band on every surface — so changing mode grows the block
+  downward from a fixed point instead of moving it. Standard and Debug lay out
+  two fixed columns, the media chain on the left and the delivery chain on the
+  right; a row's column is a property of the row and never of its value, so
+  nothing migrates under the reader's eye on the refresh tick. Sentences move
+  to a notes strip grouped by the section they came from, sections align as a
+  unit with tabular figures where the values are quantities, and Mini collapses
+  to a single line. On Apple TV the full Debug set now fits without scrolling,
+  and every section and the notes strip are focusable so the fallback is
+  reachable by remote — Debug also takes initial focus on Done, which it never
+  did before. On Android the panel sits inside the safe drawing area, so a
+  display cutout in landscape can no longer clip it, and a section renders only
+  when it has a row, which retires the empty SOURCE and NETWORK headings that
+  appeared on direct play.
+
 ### Added
+
+- **A file's segmentation is now computed once and kept, instead of being
+  re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
+  from a fragment index — one row per fragment of the production-shaped
+  video-only copy pipe — and a repositioned producer finds its place in that
+  index by matching three consecutive output byte counts, because M0 measured
+  that a repositioned generation's timestamps carry no film time at all. The
+  index is node-local on both backends, packed at twenty bytes a row, and
+  invalidated by mismatch rather than by deletion: a changed file or a changed
+  video pipeline simply stops matching. The background job that builds them is
+  bounded and ships off, because M0-P1 has not yet priced a full read of a
+  library over NFS. Nothing serves from any of this yet; a file without an
+  index keeps today's presentation.
+
+- **The VOD presentation plan's feasibility spike ran, and it stopped the
+  build.** Three harnesses under `scripts/` measure what the plan assumed:
+  `vod-plan-probe` builds the plan's fragment index from the
+  production-shaped video-only copy pipe, applies `CutPolicy` over it, then
+  materializes the full production pipe and checks the plan's boundaries,
+  byte bounds and initialization segment against real ffmpeg output;
+  `vod-probe-stub` drives the vendored hls.js through a stub HLS server that
+  can declare nominal EXTINFs over jittered media, block a segment, and
+  answer a deadline with a typed `segment_pending` 503; `vod-probe-fixtures.sh`
+  builds a nine-fixture corpus whose GOPs are deliberately not a whole number
+  of milliseconds. Plan section 12 records the results. The fragment index is
+  deterministic and describes the production fragment stream exactly, so
+  ledger D4 is upheld; blocking behind one hard deadline works on a stock web
+  player, but only when the deadline sits below the client's own first-byte
+  timeout, which sets D1's number at 8 seconds rather than 15; and hls.js
+  ignores the playlist's declared durations in favour of measured PTS, which
+  settles D6 as nominal. A repositioned producer's timestamps, however, carry
+  no film time in any configuration tested, so section 2.2's addressing rule
+  is unimplementable as written and M1 does not start.
 
 - **Cluster topology guidance and comparable three-versus-four-voter evidence
   are now executable.** Operations recommends three voters for ordinary HA,
@@ -103,10 +160,9 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - **Apple TV playback diagnostics are readable from the couch.** Playback info
-  now opens as a large three-column Source, Playing, and Server dashboard with
-  the playback method, position, and stall health visible at a glance. A
-  focused Done action keeps the Siri Remote inside the modal until dismissal;
-  iPhone and iPad retain their compact inspector.
+  carries the playback method, position, and stall health at a glance, and a
+  focused Done action keeps the Siri Remote inside the modal until dismissal.
+  Its layout is superseded by the top-right ledger described under Changed.
 
 - **Audiobook artwork refresh now uses the cover already embedded in the
   audio file.** Plurx's Books enricher inspected EPUBs only, so refreshing an

@@ -562,6 +562,7 @@ impl SharedCacheCoordinator {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // one exact cache generation identity and its two paths
     async fn abandon_publication(
         &self,
         recipe_hash: &str,

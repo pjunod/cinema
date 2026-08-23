@@ -1128,7 +1128,7 @@ fn spawn_ffmpeg_pipe(
 /// Keep the environment local to ffmpeg rather than changing the daemon's
 /// process environment, and use the data directory whose ownership plurxd has
 /// already proved by creating its session and cache directories.
-fn configure_ffmpeg_runtime(
+pub(crate) fn configure_ffmpeg_runtime(
     command: &mut tokio::process::Command,
     runtime_cache: &std::path::Path,
 ) {
@@ -4783,6 +4783,13 @@ impl TranscodeManager {
     /// and the serving path have to agree about both, and two copies of "the
     /// cache root" is how they come to disagree after somebody makes one
     /// configurable.
+    /// Where ffmpeg's own caches go, so a background child gets the same
+    /// environment a session's does — an unset `XDG_CACHE_HOME` makes
+    /// fontconfig rebuild its cache on every spawn.
+    pub fn runtime_cache_dir(&self) -> &std::path::Path {
+        self.runtime_cache.as_path()
+    }
+
     pub fn cache_location(&self) -> Option<(&std::path::Path, &str)> {
         self.cache
             .as_ref()
@@ -6307,9 +6314,7 @@ impl TranscodeManager {
         // publication. The short lookup pin bridges to the durable media
         // session pin installed before the route is exposed.
         let cache_lookup = if cache_location.storage_class == "shared" {
-            if prepared_shared.is_none() {
-                return None;
-            }
+            prepared_shared.as_ref()?;
             None
         } else {
             let Some(guard) = self.cache_readers.begin_lookup(&hash) else {

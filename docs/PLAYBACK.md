@@ -727,6 +727,54 @@ and keeps it through producer kill and scratch deletion. A replacement that won
 first is therefore published and then killed by teardown; a retirement that won
 first leaves a monotonic lifetime verdict that refuses any later replacement.
 
+## The fragment index — a file's segmentation, computed once
+
+Nothing below serves a viewer today. It is written down here because it is
+running on the server as of 2026-08-23 and an operator reading logs will see
+it, and because [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §2.2 is
+the contract it exists to satisfy.
+
+**What it is.** One row per fragment of a file, produced by the production copy
+pipe with the audio dropped and the input unpaced: first-sample decode time,
+sample duration, output bytes on the wire, and `classify`'s clean/dirty
+verdict. From it, `plurx-core::segplan` computes a whole-title segment plan
+without producing a byte of media — every segment's start, duration, and
+planned size, plus the audio tail a trailing-audio title needs and the
+`EXT-X-TARGETDURATION` that covers all of them.
+
+**How a repositioned producer finds its place.** Not by timestamp. M0 measured
+43 repositions across 9 fixtures and a repositioned copy generation's decode
+times carry no film time at all — `-avoid_negative_ts make_zero` rebases every
+generation to zero, `-copyts` does not change it, and seeking to two different
+boundaries yields the same timestamps. The producer instead matches the output
+byte counts of its first three fragments against the index and counts planned
+boundaries forward from the match. A sequence that matches nowhere, or matches
+twice, is a typed failure and an index invalidation — which is also how a
+re-fragmenting ffmpeg upgrade announces itself rather than silently
+misaligning.
+
+**When one is built.** A background job, `playback.vod_index_mins` minutes
+apart, **defaulting to 0, which is off.** M0-P1 exists to price a full read of
+a library over NFS and its numbers are not in yet. When it does run it takes at
+most four files and two minutes per pass, examines at most two hundred, gives
+up on any single file after ninety seconds, and stands down entirely while the
+pre-transcode worker is busy. A pass that ends short is discarded rather than
+stored: an index built from a partial read places every later boundary in the
+wrong part of the film.
+
+**How one stops being valid.** By mismatch, never by deletion. The stored
+identity carries the source's size and mtime *and* a fingerprint of the video
+branch's ffmpeg arguments, so a replaced file, a Dolby Vision preservation
+path, or an ffmpeg upgrade all simply stop matching. Nothing has to notice the
+change, and nothing can fail to.
+
+**Where it lives.** Node-local on both backends — SQLite migration v25,
+and a hiqlite voter's per-voter sidecar rather than Raft. An index describes
+what one machine's ffmpeg produced from one machine's copy of a file, and the
+landing match compares exactly those numbers; one node's answer governing
+another node's landings would put a viewer in the wrong part of the film with
+nothing to report it.
+
 ## Persistent stalls — one bounded recovery, with an outcome
 
 The startup watchdog diagnoses a stream that never starts. Mid-playback was

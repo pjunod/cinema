@@ -790,6 +790,9 @@ pub struct JobManager {
     /// the first for the same slots, and queuing one behind an encode that
     /// takes hours is worse than skipping it.
     producing: std::sync::atomic::AtomicBool,
+    /// A fragment-indexing pass is running on this node. Same shape and same
+    /// reason as `producing`: the question is "is one going", not "wait".
+    indexing: std::sync::atomic::AtomicBool,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -867,6 +870,31 @@ struct ArtworkSweepResult {
     repaired: usize,
     #[cfg(test)]
     claimed_ids: Vec<i64>,
+}
+
+/// Ceiling on one indexing pass. Small because indexing is never urgent and
+/// the next tick is a minute away: a library converts over hours, which is
+/// exactly the shape D4 wants, since a file without an index simply keeps
+/// today's presentation until it has one.
+const INDEX_MAX_PER_PASS: usize = 4;
+/// Files one pass will even look at. An already-indexed library attempts
+/// nothing, so without this the pass would query every file every minute for
+/// the life of the server.
+const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
+/// Wall clock one pass will spend, whatever it got through.
+const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// Per file, so one pathological NAS read gives the slot back rather than
+/// holding it until the process restarts.
+const INDEX_FILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Clears [`JobManager::indexing`] however the pass ends, including the ways a
+/// `?` or a panic would leave it set for the life of the process.
+struct IndexingGuard(Arc<JobManager>);
+
+impl Drop for IndexingGuard {
+    fn drop(&mut self) {
+        self.0.indexing.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Clears [`JobManager::producing`] however the pass ends — including the ways
@@ -1218,6 +1246,7 @@ impl JobManager {
             requests: Mutex::new(VecDeque::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
+            indexing: std::sync::atomic::AtomicBool::new(false),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
@@ -2398,6 +2427,10 @@ impl JobManager {
                 .await,
             cache_produce_mins: self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await,
             last_cache_produce: self.job_stamp(keys::JOB_LAST_CACHE_PRODUCE).await,
+            vod_index_mins: self.job_interval(keys::VOD_INDEX_MINS).await,
+            last_vod_index: self
+                .job_stamp(&self.local_job_key(keys::JOB_LAST_VOD_INDEX))
+                .await,
         };
         for job in due_jobs(now(), &libraries, global) {
             match job {
@@ -2478,6 +2511,16 @@ impl JobManager {
                     if removed > 0 {
                         tracing::info!(removed, "pruned aged playback telemetry");
                     }
+                }
+                DueJob::BuildFragmentIndexes => {
+                    // Node-local work on node-local files, so the lease is
+                    // only about not running two passes on THIS node — the
+                    // single-flight guard inside does the rest.
+                    let state = Arc::clone(self);
+                    let transcode = Arc::clone(transcode);
+                    tokio::spawn(async move {
+                        state.build_fragment_indexes(transcode).await;
+                    });
                 }
                 DueJob::ProduceCache => {
                     // Candidate generation is the singleton half. It only
@@ -2934,6 +2977,111 @@ impl JobManager {
 
     /// Non-singleton half: every idle compatible node drains distinct queue
     /// rows through the existing preemptible producer.
+    /// Build fragment indexes for files that have none.
+    ///
+    /// Bounded three ways on purpose, because this reads whole files off the
+    /// same disks a playback reads from and buys a viewer nothing today:
+    /// [`INDEX_MAX_PER_PASS`] files, [`INDEX_WINDOW`] of wall clock, and
+    /// [`INDEX_FILE_BUDGET`] per file. It also declines to start while the
+    /// pre-transcode worker is busy, for the same reason that worker declines
+    /// to start while a foreground session is.
+    ///
+    /// Nothing reads an index yet. A file without one keeps today's
+    /// presentation (plan §2.2, ledger D4), which is what lets this run — or
+    /// not run — without any client noticing either way.
+    async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        if self.indexing.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _running = IndexingGuard(Arc::clone(&self));
+        self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
+
+        let deadline = std::time::Instant::now() + INDEX_WINDOW;
+        let have_dovi = transcode.dv_strippable();
+        let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
+        let libraries = match self.store.list_libraries().await {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                tracing::warn!(error = %error, "fragment indexing could not list libraries");
+                return;
+            }
+        };
+
+        let mut built = 0usize;
+        let mut attempted = 0usize;
+        let mut examined = 0usize;
+        for library in libraries {
+            let paths = match self.store.library_file_paths(library.id).await {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tracing::warn!(library = library.id, error = %error, "listing files to index");
+                    continue;
+                }
+            };
+            for (file_id, _path) in paths {
+                // Both bounds, because they stop different runaways: a
+                // library that is already fully indexed attempts nothing and
+                // would otherwise walk every file every minute.
+                if attempted >= INDEX_MAX_PER_PASS
+                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                    || std::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                examined += 1;
+                if !transcode.pretranscode_worker_idle() {
+                    return;
+                }
+                let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                    continue;
+                };
+                if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                    continue;
+                }
+                let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+                match self.store.fragment_index(file_id, &identity).await {
+                    // Already current for this file and this pipeline.
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(file_id, error = %error, "reading a fragment index");
+                        continue;
+                    }
+                }
+                attempted += 1;
+                match crate::fragindex::build(
+                    &file,
+                    have_dovi,
+                    false,
+                    &runtime_cache,
+                    INDEX_FILE_BUDGET,
+                )
+                .await
+                {
+                    crate::fragindex::IndexOutcome::Built(index) => {
+                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                            tracing::warn!(file_id, error = %error, "storing a fragment index");
+                        } else {
+                            built += 1;
+                        }
+                    }
+                    // A short read is not an index — persisting one would put
+                    // every later boundary in the wrong part of the film — so
+                    // the next pass simply tries again.
+                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                        tracing::debug!(file_id, rows, "fragment index incomplete: {reason}");
+                    }
+                    crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                        tracing::debug!(file_id, "file cannot be indexed: {reason}");
+                    }
+                }
+            }
+        }
+        if attempted > 0 {
+            tracing::info!(attempted, built, "fragment indexing pass finished");
+        }
+    }
+
     async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         let Some((root, node)) = transcode.cache_location() else {
             return;

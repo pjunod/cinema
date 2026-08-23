@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["563700b2"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The historical regression evidence audit retains the shared-cache lint correction mapping."

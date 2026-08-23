@@ -10,7 +10,9 @@ use hiqlite::Row;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::hiqlite::{database_error, timeout_store, validate_sql, HiqliteAuthStore, TimedClient};
+use super::hiqlite::{
+    database_error, timeout_store, validate_sql, CacheTouchKey, HiqliteAuthStore, TimedClient,
+};
 use super::{
     OfflinePackageStore, OutboxEntry, TraktStore, TranscodeCacheStore, WatchedOutboxStore,
 };
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS transcode_cache_locations (
     node_id       TEXT NOT NULL,
     storage_class TEXT NOT NULL CHECK (storage_class IN ('local', 'shared')),
     relative_dir  TEXT NOT NULL,
+    storage_id    TEXT NOT NULL DEFAULT '',
+    generation_id TEXT NOT NULL DEFAULT '',
     bytes         INTEGER NOT NULL,
     complete      INTEGER NOT NULL,
     manifest_digest TEXT,
@@ -829,14 +833,25 @@ impl TranscodeCacheStore for HiqliteAuthStore {
     }
 
     async fn touch_cache_claim(&self, recipe_hash: &str, node_id: &str) -> Result<(), StoreError> {
-        let now = self.now()?;
-        self.execute(
-            "UPDATE transcode_cache_locations SET last_seen_at = $1 \
-             WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0",
-            params!(now, recipe_hash, node_id),
+        self.coalesce_cache_touch(
+            CacheTouchKey::Claim {
+                recipe_hash: recipe_hash.to_owned(),
+                node_id: node_id.to_owned(),
+            },
+            async {
+                // Read the wall clock only after this identity wins admission;
+                // queued callers must not publish their older invocation time.
+                let now = self.now()?;
+                self.execute(
+                    "UPDATE transcode_cache_locations SET last_seen_at = MAX(last_seen_at, $1) \
+                     WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0",
+                    params!(now, recipe_hash, node_id),
+                )
+                .await?;
+                Ok(())
+            },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn complete_cache_entry(
@@ -848,7 +863,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         let now = self.now()?;
         self.execute(
             "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
-                 last_used_at = $2, last_seen_at = $2 \
+                 last_used_at = MAX(last_used_at, $2), last_seen_at = MAX(last_seen_at, $2) \
              WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = 'local'",
             params!(bytes, now, recipe_hash, node_id),
         )
@@ -857,14 +872,23 @@ impl TranscodeCacheStore for HiqliteAuthStore {
     }
 
     async fn touch_cache_entry(&self, recipe_hash: &str, node_id: &str) -> Result<(), StoreError> {
-        let now = self.now()?;
-        self.execute(
-            "UPDATE transcode_cache_locations SET last_used_at = $1 \
-             WHERE recipe_hash = $2 AND node_id = $3",
-            params!(now, recipe_hash, node_id),
+        self.coalesce_cache_touch(
+            CacheTouchKey::Use {
+                recipe_hash: recipe_hash.to_owned(),
+                node_id: node_id.to_owned(),
+            },
+            async {
+                let now = self.now()?;
+                self.execute(
+                    "UPDATE transcode_cache_locations SET last_used_at = MAX(last_used_at, $1) \
+                     WHERE recipe_hash = $2 AND node_id = $3",
+                    params!(now, recipe_hash, node_id),
+                )
+                .await?;
+                Ok(())
+            },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn cache_by_age(
@@ -937,7 +961,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
             return Ok(0);
         }
         let sql = "UPDATE transcode_cache_locations
-                    SET last_seen_at = $1, scrub_object_index = $2
+                    SET last_seen_at = MAX(last_seen_at, $1), scrub_object_index = $2
                    WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = $5
                      AND relative_dir = $6 AND manifest_digest = $7 AND complete = 1";
         validate_sql(sql)?;

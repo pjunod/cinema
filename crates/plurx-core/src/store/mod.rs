@@ -15,6 +15,7 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+mod fragindex;
 mod sqlite;
 mod telemetry;
 
@@ -299,6 +300,15 @@ pub mod keys {
     /// response instead of changing from EVENT only after retention begins.
     /// Off by default until the physical-iPad control run is conclusive.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
+    /// How often, in minutes, to build fragment indexes for files that have
+    /// none. `0` is off, and off is the default until M0-P1's nynuc numbers
+    /// say what a full read of a library costs over NFS — the whole point of
+    /// that probe is to size this job, and turning it on before the numbers
+    /// return would be guessing with the operator's disks.
+    ///
+    /// Nothing reads an index yet; a file without one keeps today's
+    /// presentation, so this job is invisible to every client either way.
+    pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not
@@ -340,6 +350,9 @@ pub mod keys {
     /// upgraded server must not start encoding overnight on its own.
     pub const JOB_CACHE_PRODUCE_MINS: &str = "jobs.cache_produce_mins";
     pub const JOB_LAST_CACHE_PRODUCE: &str = "jobs.last_cache_produce";
+    /// Node-local, like the transcode-cleanup stamp: an index lives on the
+    /// node that built it, so when it last ran is a fact about that node.
+    pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
 }
 
 #[async_trait]
@@ -2054,6 +2067,39 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
 }
 
+/// Node-local fragment indexes.
+///
+/// Like [`PlaybackTelemetryStore`], these rows describe what one machine's
+/// ffmpeg produced from one machine's copy of a file, and must never be
+/// submitted to Raft: an index is a list of output byte counts, and
+/// [`crate::segplan::match_landing`] compares exactly those numbers to decide
+/// where a repositioned producer landed. One node's answer governing another
+/// node's bytes would put a viewer in the wrong part of the film with nothing
+/// to report it.
+#[async_trait]
+pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Store or replace one file's index.
+    async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: &crate::segplan::FragmentIndex,
+    ) -> Result<(), StoreError>;
+
+    /// The stored index, but only when it still describes this source.
+    ///
+    /// Invalidation is by mismatch rather than by deletion: a changed file or
+    /// a changed video pipeline simply stops matching, so nothing has to
+    /// notice the change and nothing can fail to.
+    async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError>;
+
+    /// Drop one file's index. `true` when a row was there.
+    async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -2072,6 +2118,7 @@ pub trait Store:
     + OfflinePackageStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
+    + FragmentIndexStore
     + CoordinationStore
     + FencedPublicationStore
     + MediaSessionStore
@@ -2098,6 +2145,7 @@ impl<T> Store for T where
         + OfflinePackageStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
+        + FragmentIndexStore
         + CoordinationStore
         + FencedPublicationStore
         + MediaSessionStore
