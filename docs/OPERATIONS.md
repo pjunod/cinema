@@ -533,15 +533,59 @@ scripts/cluster-named-runner cleanup \
   target/cluster-topology-named/.active-cleanup.json
 ```
 
-**Keep consensus storage separate from heavy local I/O.** Until dedicated path
-settings ship, `storage.data_dir` remains the compatibility root. On a fresh
-install, child mounts can isolate their workloads:
+### Split durable state, persistent cache, and scratch
+
+`storage.data_dir` remains the compatibility root and the only place plurx
+selects authoritative SQLite/Hiqlite state, identity, secrets, migration
+markers, or backups. Optional node-local roots isolate heavy I/O without
+changing that selection:
+
+```toml
+[storage]
+data_dir = "/srv/plurx-state"
+cache_dir = "/srv/plurx-cache"
+transcode_dir = "/var/cache/plurx-transcode"
+
+[cluster]
+read_pool_size = 4
+```
+
+When omitted, both new paths preserve the exact legacy layout. With
+`cache_dir` set, persistent children are `artwork/`, `transcode/`, and `subs/`.
+`transcode_dir` names the disposable live-session directory itself and is
+claimed only when new or empty. Plurx writes an exact
+`.plurx-transcode-scratch` marker bound to the authoritative data root, verifies
+it before every cleanup, removes only verified children, and fails startup on
+an incomplete cleanup. First ownership uses a durable non-authorizing
+`.plurx-transcode-scratch.claiming` state; restart promotes it only when the
+directory is still otherwise empty. An interrupted claim beside any other
+content fails closed and leaves every byte untouched. A populated unowned root
+is left untouched. Startup also requires scratch, authority, and every resolved
+persistent-cache child to be disjoint in both directions and to have distinct
+device/inode identities;
+symlink and bind-mount aliases are refused before cleanup. The explicit scratch
+root must be owned by the daemon uid and not group/world-writable; the marker is
+an exact daemon-owned `0600` regular file. Cleanup retains no-follow directory
+and marker descriptors throughout, so a concurrent rename, mount replacement,
+or marker swap aborts startup without touching the replacement.
+Do not mount another filesystem below the scratch root. Cross-device children
+are rejected explicitly, and same-device bind-mount children cannot pass the
+descriptor-relative quarantine step; either case fails startup rather than
+traversing the mounted tree.
+
+An available `cluster.shared_cache_dir` is a fourth persistent root. It must be
+disjoint from authority, the local cache, and scratch; its verified identity is
+held as protected throughout scratch cleanup. Plurx neither creates a missing
+shared-cache mount nor turns its absence into a startup failure: the node-local
+fallback from the shared-cache contract remains active. Never reuse one host
+directory for both shared and local cache, and never place the shared mount
+below scratch.
 
 | Path | Durability | Placement |
 |---|---|---|
-| `<data_dir>/hiqlite` plus the data-root authority set described below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
-| `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
-| `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
+| `storage.data_dir` and the authority set below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `storage.cache_dir` or the legacy cache/artwork children | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | stable local persistent storage with capacity monitoring |
+| `storage.transcode_dir` or `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; emptied only at daemon startup |
 
 Create and mount every child before the first `plurxd` start; an empty fallback
 directory on the root filesystem is not a successful installation. The
@@ -555,22 +599,33 @@ Keep every secret and marker owner-only while copying. Keep the credential key
 with the same durable backup set. If
 `cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
 that exact owner-only file is authoritative and belongs in the same backup and
-move procedure. Each voter owns its own Hiqlite storage: sharing that directory
+move procedure. Its canonical path must remain outside scratch and every
+managed cache root; startup protects the selected key inode during post-lock
+scratch cleanup so a bind alias cannot erase it. Each voter owns its own Hiqlite storage: sharing that directory
 between machines defeats Raft's independent failure model.
 
-Do not mount over a populated child directory: that merely hides its data. To
-move an existing cluster, work one non-leader voter at a time. Eject it from
-the load balancer, stop `plurxd`, copy the child contents to the intended device
-while preserving ownership, modes, timestamps, and links, mount the device,
-and verify the copied tree plus free space before restart. Restart and require
-readiness, membership catch-up, and the expected cache/artwork inventory before
-moving the next voter. On failure, stop the daemon, unmount the new device, and
-restart from the untouched original directory; delete neither copy until the
-cluster has completed a soak period. If the authoritative device changes,
-copy the whole stopped data root first and mount `cache/`, `artwork/`, and
-`transcode/` separately only after the authority-set copy is verified. This
-include-first procedure automatically preserves new control files introduced
-by a later release. Never move two voters concurrently.
+Create every configured root with the daemon uid/gid and monitor space and
+inodes independently. Do not mount over a populated child: that only hides its
+data. Move one non-leader at a time. Eject it from the load balancer, stop
+`plurxd`, copy persistent bytes with ownership, modes, timestamps, and links,
+set the new paths, and restart. Require `/readyz`, current applied-index
+catch-up, and the expected cache/offline/artwork inventory before moving the
+next voter. A full cache or scratch device may fail local work, but it must
+never cause a database to be created or relocated there.
+
+Rollback in reverse. Stop one non-leader, copy persistent bytes back to their
+legacy data-root children, remove both new strict `[storage]` keys, restart and
+prove readiness/catch-up, then continue. Do not install an older binary until
+every voter has its bytes back and its config no longer contains the new keys.
+Never move two voters concurrently and retain both verified copies through a
+soak period.
+
+`cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
+changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
+snapshot trigger, disaster-recovery log retention, heartbeat, and election
+timers remain unchanged. Compare 4, 8, and 16 with the same named workload and
+retain the smallest value whose catalogue p95 improves without a write-p99 or
+memory-budget regression. Until that artifact exists for a voter, keep 4.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
@@ -952,13 +1007,16 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Human-visible server name |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
-| `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Database, artwork, transcode cache (created if missing) |
+| `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
+| `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional persistent node-local artwork/cache/offline root; empty preserves the legacy layout under `data_dir` |
+| `PLURX_TRANSCODE_DIR` | `storage.transcode_dir` | empty | Optional disposable live-session scratch directory; emptied on startup and refused if it contains authoritative or persistent paths |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
 | `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
+| `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

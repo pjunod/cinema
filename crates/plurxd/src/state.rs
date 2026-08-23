@@ -91,7 +91,7 @@ pub struct SystemInfo {
     pub dovi_passthrough_qsv: bool,
 }
 
-/// The daemon's directories, all under the configured data dir.
+/// The daemon's managed directories across the configured storage roots.
 ///
 /// Grouped rather than passed loose because the distinction between them
 /// matters and is easy to get backwards positionally: `transcode` is scratch

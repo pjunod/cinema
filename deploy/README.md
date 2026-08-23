@@ -72,9 +72,8 @@ called `deploy`, give each of them one too.
 
 ### The data directory
 
-Everything that must survive a rebuild — the database, artwork cache and
-transcode scratch, which is to say every user, library, watch position and API
-key — lives in one directory, bind-mounted from the host:
+The authoritative database, identity, secrets, and compatibility cache layout
+live in one directory, bind-mounted from the host:
 
 ```yaml
 - ${PLURX_DATA:-/srv/plurx}:/var/lib/plurx
@@ -85,6 +84,33 @@ Create it before the first run, owned by the uid the container runs as:
 ```sh
 sudo install -d -o $(id -u) -g $(id -g) /srv/plurx
 ```
+
+To isolate heavy I/O, retain that state mount and add two host-specific
+override mounts:
+
+```yaml
+services:
+  plurxd:
+    environment:
+      PLURX_CACHE_DIR: /var/cache/plurx
+      PLURX_TRANSCODE_DIR: /var/tmp/plurx-transcode
+    volumes:
+      - /srv/plurx-cache:/var/cache/plurx
+      - /srv/plurx-scratch:/var/tmp/plurx-transcode
+```
+
+Create both with the daemon uid/gid. Cache survives restarts. Scratch must be
+empty on first start; plurx claims it with `.plurx-transcode-scratch`, then
+removes only its verified children at later starts and fails startup if cleanup
+is incomplete. The scratch mount must be owned by the container uid and not
+group/world-writable; do not bind the same host directory at a persistent path
+and the scratch path. If `PLURX_SHARED_CACHE_DIR` is configured, keep that mount
+separate from all three paths too; a missing shared mount retains node-local
+fallback and is not created by storage preflight. Neither local path is searched
+for a database. Roll back by
+stopping one non-leader, copying persistent bytes to the legacy data-root
+children, removing these settings/mounts, and proving `/readyz` before moving
+the next voter.
 
 **Why a bind mount and not a named volume.** A named volume lives at a path
 Docker chose, and pointing a container at one that does not exist yet is not an

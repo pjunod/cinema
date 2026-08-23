@@ -56,8 +56,14 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
-    /// Directory for the database and caches. Created if missing.
+    /// Authoritative database, identity, secrets, and compatibility root.
     pub data_dir: PathBuf,
+    /// Optional root for persistent node-local artwork, transcode, subtitle,
+    /// and offline bytes. Empty preserves the legacy layout under `data_dir`.
+    pub cache_dir: PathBuf,
+    /// Optional disposable live-transcode scratch directory. Empty preserves
+    /// the legacy `<data_dir>/transcode` path.
+    pub transcode_dir: PathBuf,
     /// Refuse vanished-file reconciliation above this percentage of the
     /// library's known files. `0` disables automatic deletion.
     pub scan_prune_percent: u8,
@@ -67,6 +73,8 @@ impl Default for StorageConfig {
     fn default() -> Self {
         StorageConfig {
             data_dir: PathBuf::from("./data"),
+            cache_dir: PathBuf::new(),
+            transcode_dir: PathBuf::new(),
             scan_prune_percent: DEFAULT_SCAN_PRUNE_PERCENT,
         }
     }
@@ -122,6 +130,9 @@ pub struct ClusterConfig {
     /// Maximum quorum-commit to local-applied entry gap admitted for one
     /// bounded catalogue query.
     pub bounded_replica_max_lag_entries: u64,
+    /// Local Hiqlite read-only connection pool. Four is the measured/default
+    /// baseline; the bounded knob permits retained 4/8/16 comparison runs.
+    pub read_pool_size: usize,
 }
 
 impl Default for ClusterConfig {
@@ -139,6 +150,7 @@ impl Default for ClusterConfig {
             shared_cache_id: String::new(),
             bounded_replica_reads: false,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
+            read_pool_size: 4,
         }
     }
 }
@@ -210,6 +222,12 @@ impl Config {
                 ),
             });
         }
+        if !(1..=16).contains(&config.cluster.read_pool_size) {
+            return Err(ConfigError::Value {
+                key: "cluster.read_pool_size".to_owned(),
+                message: "must be between 1 and 16".to_owned(),
+            });
+        }
         Ok(config)
     }
 
@@ -236,6 +254,12 @@ impl Config {
         }
         if let Some(dir) = env_var("PLURX_DATA_DIR") {
             self.storage.data_dir = PathBuf::from(dir);
+        }
+        if let Some(dir) = env_var("PLURX_CACHE_DIR") {
+            self.storage.cache_dir = PathBuf::from(dir);
+        }
+        if let Some(dir) = env_var("PLURX_TRANSCODE_DIR") {
+            self.storage.transcode_dir = PathBuf::from(dir);
         }
         if let Some(path) = env_var("PLURX_CREDENTIAL_KEY_FILE") {
             self.cluster.credential_key_file = PathBuf::from(path);
@@ -265,6 +289,12 @@ impl Config {
                 message: format!("`{value}` is not an integer from 0 through 100"),
             })?;
         }
+        if let Some(value) = env_var("PLURX_CLUSTER_READ_POOL_SIZE") {
+            self.cluster.read_pool_size = value.parse().map_err(|_| ConfigError::Env {
+                var: "PLURX_CLUSTER_READ_POOL_SIZE".to_owned(),
+                message: format!("`{value}` is not an integer from 1 through 16"),
+            })?;
+        }
         Ok(())
     }
 }
@@ -283,6 +313,8 @@ mod tests {
         assert_eq!(config.server.bind.port(), DEFAULT_PORT);
         assert_eq!(config.server.name, "plurx");
         assert_eq!(config.storage.data_dir, PathBuf::from("./data"));
+        assert!(config.storage.cache_dir.as_os_str().is_empty());
+        assert!(config.storage.transcode_dir.as_os_str().is_empty());
         assert_eq!(
             config.storage.scan_prune_percent,
             DEFAULT_SCAN_PRUNE_PERCENT
@@ -296,6 +328,7 @@ mod tests {
             config.cluster.bounded_replica_max_lag_entries,
             DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES
         );
+        assert_eq!(config.cluster.read_pool_size, 4);
     }
 
     #[test]
@@ -415,5 +448,34 @@ mod tests {
             Err(ConfigError::Value { key, .. })
                 if key == "cluster.bounded_replica_max_lag_entries"
         ));
+    }
+
+    #[test]
+    fn storage_roots_and_read_pool_load_with_compatibility_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+        for size in [1, 4, 8, 16] {
+            std::fs::write(
+                &path,
+                format!(
+                    "[storage]\ncache_dir = \"/cache\"\ntranscode_dir = \"/scratch\"\n\
+                     [cluster]\nread_pool_size = {size}\n"
+                ),
+            )
+            .expect("write split storage config");
+            let config = Config::load(Some(&path)).expect("load split storage config");
+            assert_eq!(config.storage.cache_dir, PathBuf::from("/cache"));
+            assert_eq!(config.storage.transcode_dir, PathBuf::from("/scratch"));
+            assert_eq!(config.cluster.read_pool_size, size);
+        }
+
+        for size in [0, 17] {
+            std::fs::write(&path, format!("[cluster]\nread_pool_size = {size}\n"))
+                .expect("write invalid read pool");
+            assert!(matches!(
+                Config::load(Some(&path)),
+                Err(ConfigError::Value { key, .. }) if key == "cluster.read_pool_size"
+            ));
+        }
     }
 }

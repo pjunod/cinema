@@ -1,6 +1,7 @@
 # plurx configuration — copy to plurx.toml (or /etc/plurx/plurx.toml).
 # Every key is optional; these are the defaults. Env vars override the file:
-#   PLURX_SERVER_NAME, PLURX_BIND, PLURX_DATA_DIR,
+#   PLURX_SERVER_NAME, PLURX_BIND, PLURX_DATA_DIR, PLURX_CACHE_DIR,
+#   PLURX_TRANSCODE_DIR, PLURX_CLUSTER_READ_POOL_SIZE,
 #   PLURX_SCAN_PRUNE_PERCENT, PLURX_CLUSTER_BOUNDED_REPLICA_READS,
 #   PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES, PLURX_CONFIG, PLURX_LOG
 
@@ -11,8 +12,17 @@ name = "plurx"
 bind = "0.0.0.0:32400"
 
 [storage]
-# Where the database and caches live. Created if missing.
+# Authoritative database, node identity, and compatibility root. Created if
+# missing. Empty cache/transcode overrides preserve the legacy child layout.
 data_dir = "./data"
+# Optional persistent node-local artwork, finished-transcode/offline, and
+# subtitle-cache root. Empty keeps them under data_dir.
+cache_dir = ""
+# Optional disposable live-session scratch. Empty uses <data_dir>/transcode.
+# An explicit root is claimed only when empty and carries an ownership marker;
+# startup refuses a populated unowned directory rather than clearing it. The
+# root must be owned by the daemon uid and not group/world-writable.
+transcode_dir = ""
 # A complete scan may remove at most this percentage of known files. Set 0 to
 # require manual cleanup; values above 100 are rejected.
 scan_prune_percent = 10
@@ -33,3 +43,6 @@ scan_prune_percent = 10
 # Fresh local reads also require commit-to-apply lag at or below this value.
 # Range: 0..10000 entries. Keep identical on every voter.
 # bounded_replica_max_lag_entries = 64
+# Local replicated read-only connection pool; accepted range is 1 through 16.
+# Keep 4 unless a retained 4/8/16 workload comparison proves another value.
+# read_pool_size = 4
