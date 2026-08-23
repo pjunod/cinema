@@ -347,7 +347,7 @@ where
     #[cfg(feature = "hiqlite-store")]
     {
         let _case = HIQLITE_CASE.lock().await;
-        let cluster = ContractCluster::start();
+        let cluster = ContractCluster::start().await;
         let store = open_contract_hiqlite_store(&cluster).await;
         store
             .validation_reset_contract_state()
@@ -2504,7 +2504,7 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -2675,7 +2675,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let mut opened = Vec::<Arc<dyn Store>>::new();
     for ordinal in 0..3 {
         let mut addresses = cluster.addresses.clone();
@@ -2719,7 +2719,7 @@ async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let bootstrap = open_contract_hiqlite_store(&cluster).await;
     bootstrap
         .validation_reset_contract_state()
@@ -2876,7 +2876,7 @@ async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let bootstrap = open_contract_hiqlite_store(&cluster).await;
     bootstrap
         .validation_reset_contract_state()
@@ -3099,7 +3099,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3192,7 +3192,7 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3306,7 +3306,7 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3418,7 +3418,7 @@ async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3534,7 +3534,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3691,7 +3691,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3833,7 +3833,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3949,7 +3949,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -4127,11 +4127,11 @@ struct ContractStartupEvent {
 
 #[cfg(feature = "hiqlite-store")]
 impl ContractCluster {
-    fn start() -> Self {
+    async fn start() -> Self {
         const ATTEMPTS: usize = 5;
         install_contract_crypto_provider();
         for attempt in 1..=ATTEMPTS {
-            match Self::try_start() {
+            match Self::try_start().await {
                 Ok(cluster) => return cluster,
                 Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
                 Err(ContractStartError::PortCollision) => {
@@ -4145,7 +4145,7 @@ impl ContractCluster {
         unreachable!("contract startup loop returns or panics")
     }
 
-    fn try_start() -> Result<Self, ContractStartError> {
+    async fn try_start() -> Result<Self, ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
         // Select the complete six-port set while all probe listeners coexist,
         // so one call cannot contain duplicate port numbers. The listeners
@@ -4271,13 +4271,31 @@ impl ContractCluster {
                 outputs.insert(event.node_id, output);
             }
         }
-        // Listener tasks are spawned before readiness, but give their stderr
-        // signal a bounded scheduling turn so an API-only bind panic cannot
-        // race three stdout READY lines and escape the retry.
-        while let Ok(event) = event_rx.recv_timeout(Duration::from_millis(250)) {
-            if let Err(error) = event.result {
+        // Local Raft health does not prove that Hiqlite's separately spawned
+        // TLS API listener bound. Positively authenticate and execute a query
+        // against every exact child address before publishing this cluster.
+        // Once an address answers with the cluster secret, a delayed API bind
+        // panic can no longer race the readiness boundary.
+        for spec in &specs {
+            let ready = tokio::time::timeout(Duration::from_secs(10), async {
+                let client = Client::remote(
+                    vec![spec.api.clone()],
+                    true,
+                    true,
+                    CONTRACT_API_SECRET.to_owned(),
+                    true,
+                    None,
+                )
+                .await?;
+                client
+                    .query_raw_one("SELECT 1 AS value", hiqlite::params!())
+                    .await
+                    .map(|_| ())
+            })
+            .await;
+            if ready.is_err() || ready.is_ok_and(|result| result.is_err()) {
                 stop_contract_starting(&mut starting);
-                return Err(error);
+                return Err(ContractStartError::PortCollision);
             }
         }
 
@@ -4835,7 +4853,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -4961,7 +4979,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -5296,7 +5314,7 @@ fn a_replicated_deadline_is_never_reported_as_a_wal_size_violation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_probe_json_import_respects_the_production_wal_limit() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -5405,7 +5423,7 @@ async fn large_probe_json_import_respects_the_production_wal_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_probe_row_larger_than_the_wal_is_refused_instead_of_crashing_the_node() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -5472,7 +5490,7 @@ async fn a_probe_row_larger_than_the_wal_is_refused_instead_of_crashing_the_node
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -6146,7 +6164,7 @@ async fn hiqlite_activation_node_process() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_import_verification_refusals_have_teeth() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
@@ -6491,7 +6509,7 @@ async fn settings_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn clustered_page_read_primitives_have_bounded_client_calls() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start();
+    let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
