@@ -4122,7 +4122,7 @@ enum ContractStartError {
 struct ContractStartupEvent {
     node_id: u64,
     result: Result<(), ContractStartError>,
-    output: ChildStdout,
+    output: Option<ChildStdout>,
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4185,11 +4185,16 @@ impl ContractCluster {
                 )
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
+                // Hiqlite's TLS API/Raft listeners bind in detached tasks and
+                // panic on EADDRINUSE after start_node has returned Ok. Keep
+                // stderr separate from the protocol stdout, but observe it so
+                // either listener's collision can reallocate the whole set.
+                .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn contract voter");
             let input = child.stdin.take().expect("contract voter stdin");
             let output = child.stdout.take().expect("contract voter stdout");
+            let stderr = child.stderr.take().expect("contract voter stderr");
             let event_tx = event_tx.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(output);
@@ -4221,15 +4226,34 @@ impl ContractCluster {
                 let _ = event_tx.send(ContractStartupEvent {
                     node_id,
                     result,
-                    output: reader.into_inner(),
+                    output: Some(reader.into_inner()),
                 });
+            });
+            let event_tx = event_tx.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) if contract_stderr_is_port_collision(&line) => {
+                            let _ = event_tx.send(ContractStartupEvent {
+                                node_id,
+                                result: Err(ContractStartError::PortCollision),
+                                output: None,
+                            });
+                            return;
+                        }
+                        Ok(_) => {}
+                    }
+                }
             });
             starting.push((node_id, child, Some(input)));
         }
-        drop(event_tx);
 
         let mut outputs = std::collections::BTreeMap::new();
-        for _ in 0..starting.len() {
+        while outputs.len() < starting.len() {
             let event = match event_rx.recv_timeout(Duration::from_secs(60)) {
                 Ok(event) => event,
                 Err(error) => {
@@ -4243,7 +4267,18 @@ impl ContractCluster {
                 stop_contract_starting(&mut starting);
                 return Err(error);
             }
-            outputs.insert(event.node_id, event.output);
+            if let Some(output) = event.output {
+                outputs.insert(event.node_id, output);
+            }
+        }
+        // Listener tasks are spawned before readiness, but give their stderr
+        // signal a bounded scheduling turn so an API-only bind panic cannot
+        // race three stdout READY lines and escape the retry.
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_millis(250)) {
+            if let Err(error) = event.result {
+                stop_contract_starting(&mut starting);
+                return Err(error);
+            }
         }
 
         let mut nodes = Vec::new();
@@ -4262,6 +4297,29 @@ impl ContractCluster {
             _nodes: nodes,
         })
     }
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn contract_stderr_is_port_collision(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("address already in use")
+        || lower.contains("addrinuse")
+        || lower.contains("os error 48")
+        || lower.contains("os error 98")
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[test]
+fn detached_tls_bind_panics_are_retryable_contract_startup() {
+    assert!(contract_stderr_is_port_collision(
+        "thread 'tokio-runtime-worker' panicked: Address already in use (os error 98)"
+    ));
+    assert!(contract_stderr_is_port_collision(
+        "called Result::unwrap() on an Err value: Os { code: 48, kind: AddrInUse }"
+    ));
+    assert!(!contract_stderr_is_port_collision(
+        "contract voter health timeout"
+    ));
 }
 
 #[cfg(feature = "hiqlite-store")]
