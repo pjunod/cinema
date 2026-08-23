@@ -1426,6 +1426,10 @@ struct Session {
     /// has decided to replace but reaches the gate after the watchdog.
     #[cfg(test)]
     watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous at the first per-session activity read. It proves
+    /// the manager registry lock was released before telemetry can wait.
+    #[cfg(test)]
+    activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -1877,6 +1881,18 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    #[cfg(test)]
+    {
+        let pause = s
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
     let (ahead, first_retained_segment, published_end_ms) = {
         let index = s.segments.lock().await;
         (
@@ -5395,6 +5411,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
@@ -7952,6 +7969,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
@@ -8490,6 +8508,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
@@ -10374,6 +10393,7 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_verdict_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         watchdog_transition_pause: std::sync::Mutex::new(None),
+        activity_detail_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
         retirement_started: AtomicBool::new(false),
         cached: false,
@@ -10473,14 +10493,18 @@ mod tests {
             .lock()
             .await
             .insert("selected".to_owned(), Arc::clone(&session));
-        let telemetry = session.segments.lock().await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
         let reader = Arc::clone(&manager);
         let detail = tokio::spawn(async move {
             reader
                 .delivery_details_bounded(&["selected".to_owned()], 1)
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        pause.wait().await;
 
         assert_eq!(
             tokio::time::timeout(Duration::from_millis(100), manager.active_sessions())
@@ -10488,7 +10512,7 @@ mod tests {
                 .expect("another map operation must not wait on selected-session telemetry"),
             1
         );
-        drop(telemetry);
+        pause.wait().await;
         assert_eq!(detail.await.expect("activity reader").len(), 1);
     }
 
@@ -14572,6 +14596,7 @@ mod tests {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached,

@@ -131,6 +131,7 @@ const MEDIA_METHODS: &[&str] = &[
     "find_child_item",
     "insert_item",
     "get_item",
+    "item_titles",
     "get_item_children",
     "list_top_items_in_genre",
     "list_top_items",
@@ -6070,7 +6071,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 192, "review the Store method count");
+    assert_eq!(declared.len(), 193, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -7092,6 +7093,29 @@ async fn media_contract_runs_through_dyn_store() {
         assert_eq!(
             store.get_item(movie).await.expect("get").expect("movie").id,
             movie
+        );
+        let titles = store
+            .item_titles(&[show, movie, movie, i64::MAX])
+            .await
+            .expect("bounded item titles");
+        assert_eq!(titles.len(), 2, "duplicates and missing ids on {backend}");
+        assert_eq!(
+            titles.get(&movie).map(String::as_str),
+            Some("The Contract Movie"),
+            "movie title on {backend}"
+        );
+        assert_eq!(
+            titles.get(&show).map(String::as_str),
+            Some("Contract Show"),
+            "show title on {backend}"
+        );
+        assert!(
+            store
+                .item_titles(&[])
+                .await
+                .expect("empty item title set")
+                .is_empty(),
+            "empty title input on {backend}"
         );
         assert_eq!(
             store.get_item_children(show).await.expect("children").len(),
