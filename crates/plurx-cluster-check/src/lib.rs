@@ -1119,12 +1119,17 @@ async fn wait_for_local_setting(
     }
 }
 
+struct MediaChild {
+    child: Child,
+    _input: ChildStdin,
+}
+
 async fn kill_media_child(
-    media: &Arc<tokio::sync::Mutex<Option<Child>>>,
+    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
     media_alive: &Arc<AtomicBool>,
 ) {
-    let child = media.lock().await.take();
-    if let Some(mut child) = child {
+    let media_child = media.lock().await.take();
+    if let Some(MediaChild { mut child, _input }) = media_child {
         if child.try_wait().ok().flatten().is_none() {
             let _ = child.kill().await;
         }
@@ -1148,7 +1153,7 @@ async fn media_child() -> Result<()> {
     }
 }
 
-fn spawn_media_child_process() -> Result<Child> {
+fn spawn_media_child_process() -> Result<MediaChild> {
     let executable = harness_executable()?;
     let mut command = Command::new(executable);
     command
@@ -1157,7 +1162,15 @@ fn spawn_media_child_process() -> Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    command.spawn().context("spawn serving media child")
+    let mut child = command.spawn().context("spawn serving media child")?;
+    let input = child
+        .stdin
+        .take()
+        .context("retain serving media child stdin")?;
+    Ok(MediaChild {
+        child,
+        _input: input,
+    })
 }
 
 async fn serving_node(launch: ServingLaunch) -> Result<()> {
@@ -1271,7 +1284,7 @@ async fn serving_node(launch: ServingLaunch) -> Result<()> {
 async fn serve_serving_http(
     mut stream: tokio::net::TcpStream,
     serving: ServingFence,
-    media: Arc<tokio::sync::Mutex<Option<Child>>>,
+    media: Arc<tokio::sync::Mutex<Option<MediaChild>>>,
     media_alive: Arc<AtomicBool>,
 ) -> Result<()> {
     const MAX_REQUEST_BYTES: usize = 8 * 1024;
@@ -1323,7 +1336,7 @@ async fn serve_serving_http(
                     if media_alive.load(AtomicOrdering::Acquire) {
                         let mut media_child = media.lock().await;
                         if let Some(child) = media_child.as_mut() {
-                            if !matches!(child.try_wait(), Ok(None)) {
+                            if !matches!(child.child.try_wait(), Ok(None)) {
                                 *media_child = None;
                                 media_alive.store(false, AtomicOrdering::Release);
                             }
