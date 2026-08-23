@@ -1,11 +1,11 @@
 # Clustering transition — from one plurxd node to Phase 4
 
-**Status:** executing — M0 through M3 are complete; M4's production fences are
-landed and its real-process singleton pause/takeover proof is staged, while the
-serving-node partition and later failover milestones remain
+**Status:** executing — M0 through M3 are complete; M4's production fences,
+real-process singleton pause/takeover proof, and distinct serving-process
+partition proof are staged, while the later client failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
-2026-08-15
+2026-08-22
 
 Companion to [PHASE3-SPIKE.md](PHASE3-SPIKE.md), which chose hiqlite and
 proved restart-at-boundary media behavior; [PERF-PLAN.md](PERF-PLAN.md) §7,
@@ -63,8 +63,8 @@ node-local FTS, and bounded root-aware reconciliation; and M1d completes the
 content-addressed source backup, fresh-target import with per-table parity,
 fsynced completion marker, and atomic one-voter activation; after that verified
 import, the daemon selects Hiqlite instead of SQLite. Membership/join,
-lease-fenced publication, replicated session ownership, serving self-fencing,
-and client failover remain open.
+lease-fenced publication and serving self-fencing are implemented. Replicated
+session takeover and client failover remain open.
 
 ## 3. Contracts — safety lives in signatures and transactions
 
@@ -355,11 +355,16 @@ silently renumbers every remaining discontinuity.
 
 ### 3.6 Quorum, discovery, and local bytes have explicit failure behavior
 
-On quorum loss or lease-renewal failure, a node fails `/readyz`, stops serving
-playlists and segments with `503` plus healthy node addresses, and terminates
-session children. It may serve immutable direct bytes only if the request does
-not mutate progress and the client already has the node list; the default is
-self-fence, because stale serving hides failed writes.
+On quorum loss or lease-renewal failure, a node fails `/readyz`, terminates
+session children, and self-fences every media byte path—including native and
+Plex direct play. M4 deliberately returns a topology-free `503` with
+`Retry-After: 1`: it has quorum proof but not yet the M5 discovery contract,
+so exposing cached peer addresses would turn stale topology into an API.
+
+M5 adds healthy node addresses to that response. Only then may an immutable
+direct-byte request remain available when it cannot mutate progress and the
+client already has the current node list; self-fence remains the default,
+because stale serving hides failed writes.
 
 Each node advertises a hostname derived from `node.id`, not `instance.id`.
 mDNS and GDM include the logical server id, node id, protocol version, and
@@ -897,7 +902,16 @@ rejected by the atomic successor-generation transaction independently of its
 former wall-clock TTL. Both live peers contest takeover, exactly
 one observes acquisition while the other observes its new fence, and the proof
 allows exactly two provider calls and at most eight post-baseline Raft entries.
-The serving-node partition acceptance above remains separate.
+The retained serving slice starts a distinct process with a remote Hiqlite
+client behind raw TCP cut-points, while all three voter processes remain
+directly reachable. Its production quorum watermark drives `/readyz`, the
+mutable-media and direct-play gates, progressive-remux cancellation, and HLS
+child retirement without a Store request on the loss path. Cutting every
+serving connection must leave `/healthz` at 200, move readiness and the
+capability to 503 with `Retry-After`, expose no cluster address, and reap the
+live child. The controller then commits a setting and reads it from every
+voter's local replica through the intact majority, restores the serving links,
+and requires readiness and capability recovery.
 
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
@@ -980,6 +994,8 @@ cargo run --locked -p plurx-cluster-check -- membership
                               # focused real-process 1 -> 3 -> 2 lifecycle
 cargo run --locked -p plurx-cluster-check -- singleton
                               # focused SIGSTOP/TTL/takeover/stale-token proof
+cargo run --locked -p plurx-cluster-check -- serving-partition
+                              # focused serving-only cut, child reap, majority-write, recovery proof
 cargo test -p plurx-core store::sqlite::tests:: -- --nocapture
                               # explicit local M2 database-upgrade gate
 ```

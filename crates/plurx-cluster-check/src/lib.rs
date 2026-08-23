@@ -74,6 +74,14 @@ use production_progress::ProgressCoalescer;
 mod production_job_lease;
 use production_job_lease::ActiveJobLease;
 
+// Compile the production daemon serving fence directly. The partition proof
+// below is a separate live process, but its readiness decision must remain the
+// exact projection used by plurxd rather than a harness imitation.
+#[allow(dead_code)]
+#[path = "../../plurxd/src/serving_fence.rs"]
+mod production_serving_fence;
+use production_serving_fence::ServingFence;
+
 mod topology;
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
@@ -215,6 +223,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("membership") => run_membership_lifecycle_case().await,
         Some("singleton") => run_singleton_takeover_case().await,
+        Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
@@ -235,6 +244,14 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             )?;
             preflight_voter(preflight).await
         }
+        Some("serving-node") => {
+            let launch: ServingLaunch = serde_json::from_str(
+                args.get(2)
+                    .context("serving-node mode requires its launch JSON")?,
+            )?;
+            serving_node(launch).await
+        }
+        Some("media-child") => media_child().await,
         Some(other) => bail!("unknown cluster-check mode {other}"),
     }
 }
@@ -288,11 +305,13 @@ async fn controller() -> Result<()> {
     run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
+    println!("cluster-check: isolated serving-node readiness and media fence");
+    run_serving_partition_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
-    println!("cluster-check: all M1b/M1c/M1d/M3/M4 singleton contracts passed");
+    println!("cluster-check: all M1b/M1c/M1d/M3/M4 serving contracts passed");
     Ok(())
 }
 
@@ -648,6 +667,712 @@ async fn run_singleton_takeover_case() -> Result<()> {
     );
     provider.shutdown().await;
     cluster.shutdown_all().await
+}
+
+const SERVING_PROOF_KEY: &str = "cluster-check.serving-partition-majority";
+
+/// A raw TCP cut-point in front of one voter API. It carries Hiqlite's TLS
+/// bytes unchanged, and partitioning cancels every accepted connection as
+/// well as refusing new ones. The voter itself remains reachable directly by
+/// the controller, which separates a serving-node partition from voter loss.
+struct TcpPartitionProxy {
+    address: String,
+    enabled: Arc<AtomicBool>,
+    connections: Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
+    shutdown: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TcpPartitionProxy {
+    async fn start(backend: String) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind((LISTEN_ADDR, 0))
+            .await
+            .context("bind serving partition proxy")?;
+        let address = listener.local_addr()?.to_string();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let connections = Arc::new(std::sync::Mutex::new(
+            tokio_util::sync::CancellationToken::new(),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task_enabled = Arc::clone(&enabled);
+        let task_connections = Arc::clone(&connections);
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = task_shutdown.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut downstream, _)) = accepted else {
+                    break;
+                };
+                if !task_enabled.load(AtomicOrdering::Acquire) {
+                    let _ = downstream.shutdown().await;
+                    continue;
+                }
+                let connection_shutdown = task_connections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    let upstream = tokio::select! {
+                        () = connection_shutdown.cancelled() => return,
+                        upstream = tokio::net::TcpStream::connect(&backend) => upstream,
+                    };
+                    let Ok(mut upstream) = upstream else {
+                        return;
+                    };
+                    tokio::select! {
+                        () = connection_shutdown.cancelled() => {}
+                        _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream) => {}
+                    }
+                    let _ = downstream.shutdown().await;
+                    let _ = upstream.shutdown().await;
+                });
+            }
+        });
+        Ok(Self {
+            address,
+            enabled,
+            connections,
+            shutdown,
+            task,
+        })
+    }
+
+    fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    fn partition(&self) {
+        self.enabled.store(false, AtomicOrdering::Release);
+        self.connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
+    }
+
+    fn restore(&self) {
+        let mut connections = self
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *connections = tokio_util::sync::CancellationToken::new();
+        self.enabled.store(true, AtomicOrdering::Release);
+    }
+
+    async fn stop(self) {
+        self.enabled.store(false, AtomicOrdering::Release);
+        self.connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
+        self.shutdown.cancel();
+        let _ = self.task.await;
+    }
+}
+
+struct ServingProcess {
+    child: Child,
+    input: ChildStdin,
+    http_base: String,
+}
+
+impl ServingProcess {
+    async fn spawn(executable: &Path, proxy_addresses: Vec<String>) -> Result<Self> {
+        let launch = ServingLaunch { proxy_addresses };
+        let mut command = Command::new(executable);
+        command
+            .arg("serving-node")
+            .arg(serde_json::to_string(&launch)?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let mut child = command.spawn().context("spawn distinct serving node")?;
+        let input = child.stdin.take().context("serving-node stdin")?;
+        let mut output = BufReader::new(child.stdout.take().context("serving-node stdout")?);
+        let mut line = String::new();
+        let bytes = tokio::time::timeout(START_TIMEOUT, output.read_line(&mut line))
+            .await
+            .context("serving-node startup timed out")??;
+        if bytes == 0 {
+            bail!(
+                "serving-node closed its startup stream: {:?}",
+                child.try_wait()?
+            );
+        }
+        let ready: ServingReady =
+            serde_json::from_str(line.trim()).context("decode serving-node startup")?;
+        Ok(Self {
+            child,
+            input,
+            http_base: format!("http://{}", ready.http_address),
+        })
+    }
+
+    async fn stop(self) -> Result<()> {
+        let Self {
+            mut child,
+            input,
+            http_base: _,
+        } = self;
+        drop(input);
+        let status = tokio::time::timeout(START_TIMEOUT, child.wait())
+            .await
+            .context("serving-node did not stop after stdin closed")??;
+        if !status.success() {
+            bail!("serving-node exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+struct HttpObservation {
+    body: String,
+    retry_after: Option<String>,
+}
+
+async fn wait_serving_http(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    expected: reqwest::StatusCode,
+) -> Result<HttpObservation> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let last = match client.get(format!("{base}{path}")).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let body = response.text().await.unwrap_or_default();
+                if status == expected {
+                    return Ok(HttpObservation { body, retry_after });
+                }
+                format!("HTTP {status}: {body}")
+            }
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() >= deadline {
+            bail!("{path} did not reach HTTP {expected}: {last}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn run_serving_partition_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("serving partition data root")?;
+    let (mut cluster, specs) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+
+    let mut proxies = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        proxies.push(TcpPartitionProxy::start(spec.api.clone()).await?);
+    }
+    let serving = ServingProcess::spawn(
+        &executable,
+        proxies.iter().map(TcpPartitionProxy::address).collect(),
+    )
+    .await?;
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
+        .build()?;
+
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/childz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":true"#) {
+        bail!(
+            "serving-node media child was not alive before partition: {}",
+            child.body
+        );
+    }
+
+    for proxy in &proxies {
+        proxy.partition();
+    }
+    let fenced = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    if fenced.body != "quorum unavailable\n" {
+        bail!(
+            "serving-node readiness returned the wrong fence body: {}",
+            fenced.body
+        );
+    }
+    let liveness = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/healthz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if liveness.body != "ok\n" {
+        bail!(
+            "isolated serving-node lost process liveness: {}",
+            liveness.body
+        );
+    }
+    let capability = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    if capability.retry_after.as_deref() != Some("1")
+        || !capability.body.contains(r#""code":"serving_fenced""#)
+        || capability.body.contains("127.0.0.1")
+    {
+        bail!(
+            "mutable media fence response was not bounded and topology-free: {}",
+            capability.body
+        );
+    }
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/childz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":false"#) {
+        bail!(
+            "serving-node media child survived quorum loss: {}",
+            child.body
+        );
+    }
+
+    let leader = cluster.leader().await?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: SERVING_PROOF_KEY.to_owned(),
+                value: "majority-committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    for node_id in 1..=3 {
+        wait_for_local_setting(
+            &mut cluster,
+            node_id,
+            SERVING_PROOF_KEY,
+            "majority-committed",
+        )
+        .await?;
+    }
+
+    for proxy in &proxies {
+        proxy.restore();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/spawn-child",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":true"#) {
+        bail!(
+            "serving-node could not admit a new-generation media child after recovery: {}",
+            child.body
+        );
+    }
+    for proxy in &proxies {
+        proxy.partition();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/childz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":false"#) {
+        bail!(
+            "new-generation media child survived the second quorum loss: {}",
+            child.body
+        );
+    }
+    for proxy in &proxies {
+        proxy.restore();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+
+    println!(
+        "CLUSTER_SERVING_PARTITION cycles=2 liveness=ok readiness=fenced capability=fenced child_killed=true majority_write=locally_converged recovery=ready"
+    );
+    serving.stop().await?;
+    for proxy in proxies {
+        proxy.stop().await;
+    }
+    cluster.shutdown_all().await
+}
+
+async fn wait_for_local_setting(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    key: &str,
+    expected: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        let response = cluster
+            .request(
+                node_id,
+                Request::ReadLocalSetting {
+                    key: key.to_owned(),
+                },
+            )
+            .await?;
+        let last = match response {
+            Response::Setting { value } if value.as_deref() == Some(expected) => return Ok(()),
+            response => format!("{response:?}"),
+        };
+        if Instant::now() >= deadline {
+            bail!(
+                "voter {node_id} did not apply setting {key:?}={expected:?} locally before the convergence deadline; last response: {last}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn kill_media_child(
+    media: &Arc<tokio::sync::Mutex<Option<Child>>>,
+    media_alive: &Arc<AtomicBool>,
+) {
+    let child = media.lock().await.take();
+    if let Some(mut child) = child {
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill().await;
+        }
+        let _ = child.wait().await;
+    }
+    media_alive.store(false, AtomicOrdering::Release);
+}
+
+/// The serving parent retains this process's stdin pipe. A normal shutdown or
+/// an assertion-driven parent kill closes that pipe, so the stand-in cannot
+/// leak beyond the process fixture even when the parent never reaches cleanup.
+async fn media_child() -> Result<()> {
+    let mut stdin = tokio::io::stdin();
+    let mut buffer = [0_u8; 128];
+    loop {
+        match stdin.read(&mut buffer).await {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn spawn_media_child_process() -> Result<Child> {
+    let executable = harness_executable()?;
+    let mut command = Command::new(executable);
+    command
+        .arg("media-child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command.spawn().context("spawn serving media child")
+}
+
+async fn serving_node(launch: ServingLaunch) -> Result<()> {
+    install_crypto_provider();
+    let client = Client::remote(
+        launch.proxy_addresses,
+        true,
+        true,
+        API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await?;
+    tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
+        .await
+        .context("serving-node remote client health timed out")?;
+    let replication = ReplicationMonitor::replicated_remote(client);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let passive = tokio::spawn(
+        replication
+            .clone()
+            .passive_metrics_loop(shutdown.clone().cancelled_owned()),
+    );
+    let serving = ServingFence::new(replication.metrics_handle());
+    let monitor = tokio::spawn(serving.clone().monitor_loop(shutdown.clone()));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !serving.is_ready() {
+        if Instant::now() >= deadline {
+            bail!("serving-node never acquired its initial quorum watermark");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let media = Arc::new(tokio::sync::Mutex::new(Some(spawn_media_child_process()?)));
+    let media_alive = Arc::new(AtomicBool::new(true));
+    let mut serving_state = serving.subscribe();
+    let fenced_media = Arc::clone(&media);
+    let fenced_media_alive = Arc::clone(&media_alive);
+    let media_shutdown = shutdown.clone();
+    let media_fence = tokio::spawn(async move {
+        let mut admitted_generation = serving_state.borrow_and_update().loss_generation;
+        loop {
+            let state = *serving_state.borrow_and_update();
+            if state.authority_lost_since(admitted_generation) {
+                kill_media_child(&fenced_media, &fenced_media_alive).await;
+                admitted_generation = state.loss_generation;
+            }
+            tokio::select! {
+                () = media_shutdown.cancelled() => break,
+                changed = serving_state.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind((LISTEN_ADDR, 0))
+        .await
+        .context("bind serving-node HTTP")?;
+    let ready = ServingReady {
+        http_address: listener.local_addr()?.to_string(),
+    };
+    let mut output = tokio::io::stdout();
+    let mut bytes = serde_json::to_vec(&ready)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+
+    let stdin_shutdown = shutdown.clone();
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buffer = [0_u8; 128];
+        loop {
+            match stdin.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        stdin_shutdown.cancel();
+    });
+    loop {
+        let accepted = tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, _) = accepted.context("accept serving-node HTTP")?;
+        let connection_serving = serving.clone();
+        let connection_media = Arc::clone(&media);
+        let connection_media_alive = Arc::clone(&media_alive);
+        tokio::spawn(async move {
+            let _ = serve_serving_http(
+                stream,
+                connection_serving,
+                connection_media,
+                connection_media_alive,
+            )
+            .await;
+        });
+    }
+
+    kill_media_child(&media, &media_alive).await;
+    let _ = stdin_task.await;
+    let _ = passive.await;
+    let _ = monitor.await;
+    let _ = media_fence.await;
+    Ok(())
+}
+
+async fn serve_serving_http(
+    mut stream: tokio::net::TcpStream,
+    serving: ServingFence,
+    media: Arc<tokio::sync::Mutex<Option<Child>>>,
+    media_alive: Arc<AtomicBool>,
+) -> Result<()> {
+    const MAX_REQUEST_BYTES: usize = 8 * 1024;
+    let mut request = Vec::with_capacity(1024);
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        if request.len() >= MAX_REQUEST_BYTES {
+            return Ok(());
+        }
+        let mut chunk = [0_u8; 1024];
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk)).await??;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let path = std::str::from_utf8(&request)
+        .ok()
+        .and_then(|request| request.lines().next())
+        .and_then(|line| {
+            let mut parts = line.split_whitespace();
+            (parts.next() == Some("GET"))
+                .then(|| parts.next())
+                .flatten()
+        })
+        .unwrap_or("/");
+    let (status, reason, content_type, body, retry_after) =
+        if let Some(policy) = serving.http_policy(path) {
+            (
+                policy.status,
+                if policy.status == 200 {
+                    "OK"
+                } else {
+                    "Service Unavailable"
+                },
+                policy.content_type,
+                policy.body.to_owned(),
+                policy.retry_after,
+            )
+        } else {
+            match path {
+                "/api/v1/hls/probe/status" => (
+                    200,
+                    "OK",
+                    "application/json",
+                    r#"{"code":"serving"}"#.to_owned(),
+                    false,
+                ),
+                "/childz" => {
+                    if media_alive.load(AtomicOrdering::Acquire) {
+                        let mut media_child = media.lock().await;
+                        if let Some(child) = media_child.as_mut() {
+                            if !matches!(child.try_wait(), Ok(None)) {
+                                *media_child = None;
+                                media_alive.store(false, AtomicOrdering::Release);
+                            }
+                        }
+                    }
+                    let alive = media_alive.load(AtomicOrdering::Acquire);
+                    (
+                        200,
+                        "OK",
+                        "application/json",
+                        format!(r#"{{"alive":{alive}}}"#),
+                        false,
+                    )
+                }
+                "/spawn-child" => {
+                    let mut media_child = media.lock().await;
+                    if media_child.is_none() {
+                        *media_child = Some(spawn_media_child_process()?);
+                        media_alive.store(true, AtomicOrdering::Release);
+                    }
+                    (
+                        200,
+                        "OK",
+                        "application/json",
+                        r#"{"alive":true}"#.to_owned(),
+                        false,
+                    )
+                }
+                _ => (
+                    404,
+                    "Not Found",
+                    "text/plain",
+                    "not found\n".to_owned(),
+                    false,
+                ),
+            }
+        };
+    let retry = if retry_after {
+        "Retry-After: 1\r\n"
+    } else {
+        ""
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{retry}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn start_singleton_probe(
@@ -3257,6 +3982,16 @@ pub struct Preflight {
     pub compatibility: ClusterCompatibility,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServingLaunch {
+    proxy_addresses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServingReady {
+    http_address: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     /// Recreate the origin/main M3 table shape and its former shared join-URL
@@ -3369,6 +4104,13 @@ pub enum Request {
     },
     ReadSingletonValue {
         local: bool,
+    },
+    PutSetting {
+        key: String,
+        value: String,
+    },
+    ReadLocalSetting {
+        key: String,
     },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
@@ -3545,6 +4287,9 @@ pub enum Response {
         cleanup_error: Option<String>,
     },
     SingletonValue {
+        value: Option<String>,
+    },
+    Setting {
         value: Option<String>,
     },
     ArtworkFenceApply {
@@ -5535,6 +6280,13 @@ async fn handle_request(
             };
             Ok(Response::SingletonValue { value })
         }
+        Request::PutSetting { ref key, ref value } => {
+            store_ref(store)?.put_setting(key, value).await?;
+            Ok(Response::Ok)
+        }
+        Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
+            value: read_local_setting(client, key).await?,
+        }),
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
             .retire_artwork_source_repair(fence)
             .await
@@ -7202,7 +7954,7 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
         true,
         true,
         API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await?;

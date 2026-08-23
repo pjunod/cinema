@@ -417,7 +417,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         true,
         true,
         payload.secrets.api.clone(),
-        true,
+        false,
         None,
     )
     .await
@@ -720,7 +720,7 @@ pub async fn connect_activated_store(config: &Config) -> Result<Arc<dyn Store>, 
     let identity = super::initialize_identity(&config.storage.data_dir, &marker.cluster_id)?;
     let secret_api = read_secret(&config.storage.data_dir.join(API_SECRET_FILENAME))?;
     let address = local_voter_api_address(config, &identity)?;
-    let client = Client::remote(vec![address], true, true, secret_api, true, None)
+    let client = Client::remote(vec![address], true, true, secret_api, false, None)
         .await
         .map_err(|error| {
             StoreError::Database(format!(
@@ -3945,6 +3945,8 @@ pub mod status {
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
     const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
+    const REMOTE_METRICS_REFRESH: Duration = Duration::from_millis(500);
+    const REMOTE_METRICS_TIMEOUT: Duration = Duration::from_millis(750);
     const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
     const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
@@ -4089,11 +4091,15 @@ pub mod status {
 
     impl PassiveRaftMetrics {
         fn new(local_source: bool) -> Self {
+            Self::new_with_sources(local_source, local_source)
+        }
+
+        fn new_with_sources(local_source: bool, watermark_source: bool) -> Self {
             Self {
                 inner: Arc::new(PassiveRaftMetricsAtomics::default()),
                 started_at: Instant::now(),
                 local_source,
-                watermark_source: local_source,
+                watermark_source,
                 snapshot_metrics: None,
             }
         }
@@ -4530,6 +4536,56 @@ pub mod status {
         }
     }
 
+    async fn run_remote_metrics_loop<F>(
+        client: Client,
+        metrics: PassiveRaftMetrics,
+        shutdown: F,
+        refresh_period: Duration,
+        request_timeout: Duration,
+    ) where
+        F: Future<Output = ()> + Send,
+    {
+        let mut refresh = tokio::time::interval(refresh_period);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = refresh.tick() => {}
+            }
+            let result = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = tokio::time::timeout(request_timeout, client.metrics_db()) => result,
+            };
+            match result {
+                Ok(Ok(source)) => {
+                    let sample = LocalDbRaftSnapshot {
+                        running: source.running_state.is_ok(),
+                        node_id: source.id,
+                        current_term: source.current_term,
+                        current_leader: source.current_leader,
+                        last_applied_term: source
+                            .last_applied
+                            .as_ref()
+                            .map(|log| log.leader_id.term),
+                        last_applied_index: source.last_applied.as_ref().map(|log| log.index),
+                    };
+                    let _ = metrics.publish(&sample);
+                }
+                Ok(Err(error)) => {
+                    metrics.record_error();
+                    tracing::debug!(error = %error, "remote Raft metrics sample failed");
+                }
+                Err(_) => {
+                    metrics.record_error();
+                    tracing::debug!("remote Raft metrics sample timed out");
+                }
+            }
+        }
+    }
+
     /// Live status reader kept beside the selected store in daemon state.
     #[derive(Clone)]
     pub struct ReplicationMonitor {
@@ -4537,6 +4593,7 @@ pub mod status {
         client: Option<Client>,
         local_metrics: Option<LocalDbRaftMetrics>,
         passive_metrics: PassiveRaftMetrics,
+        remote_metrics: bool,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -4549,6 +4606,7 @@ pub mod status {
                 client: None,
                 local_metrics: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
+                remote_metrics: false,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -4565,6 +4623,23 @@ pub mod status {
                 client: Some(client),
                 local_metrics,
                 passive_metrics,
+                remote_metrics: false,
+                previous: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Monitor a distinct serving process through a remote Hiqlite
+        /// client. Unlike the daemon's embedded-voter path this performs
+        /// bounded network sampling, but publishes the same atomics-only
+        /// quorum watermark consumed by [`PassiveRaftMetrics`].
+        #[must_use]
+        pub fn replicated_remote(client: Client) -> Self {
+            Self {
+                backend: ReplicationBackend::Replicated,
+                client: Some(client),
+                local_metrics: None,
+                passive_metrics: PassiveRaftMetrics::new_with_sources(false, true),
+                remote_metrics: true,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -4582,9 +4657,6 @@ pub mod status {
         where
             F: Future<Output = ()> + Send,
         {
-            let Some(watch) = self.local_metrics.clone() else {
-                return;
-            };
             let Some(client) = self.client.clone() else {
                 return;
             };
@@ -4596,17 +4668,39 @@ pub mod status {
             {
                 return;
             }
-            let stagger_slot = watch.snapshot().node_id.saturating_sub(1) % 5;
+            let stagger_slot = self
+                .local_metrics
+                .as_ref()
+                .map_or(0, |watch| watch.snapshot().node_id.saturating_sub(1) % 5);
             let node_stagger = Duration::from_millis(stagger_slot.saturating_mul(75));
-            let local_loop = run_passive_metrics_loop(
-                watch,
-                self.passive_metrics.clone(),
-                std::future::pending(),
-                PASSIVE_METRICS_REFRESH,
-            );
+            let local_metrics = self.local_metrics.clone();
+            let remote_metrics = self.remote_metrics;
+            let local_passive = self.passive_metrics.clone();
+            let watermark_passive = self.passive_metrics;
+            let metrics_client = client.clone();
+            let local_loop = async move {
+                if let Some(watch) = local_metrics {
+                    run_passive_metrics_loop(
+                        watch,
+                        local_passive,
+                        std::future::pending(),
+                        PASSIVE_METRICS_REFRESH,
+                    )
+                    .await;
+                } else if remote_metrics {
+                    run_remote_metrics_loop(
+                        metrics_client,
+                        local_passive,
+                        std::future::pending(),
+                        REMOTE_METRICS_REFRESH,
+                        REMOTE_METRICS_TIMEOUT,
+                    )
+                    .await;
+                }
+            };
             let watermark_loop = run_quorum_watermark_loop(
                 client,
-                self.passive_metrics,
+                watermark_passive,
                 std::future::pending(),
                 node_stagger,
                 QUORUM_WATERMARK_REFRESH,

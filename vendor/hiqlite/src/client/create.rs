@@ -55,6 +55,7 @@ impl Client {
             leader_db,
             // TODO do we even still need this for a local client? -> all raft messages should use internal API ?
             nodes: Vec::default(),
+            proxy_mode: false,
             client: None,
             #[cfg(feature = "cache")]
             tx_client_cache,
@@ -122,7 +123,9 @@ impl Client {
     /// **Note:**
     /// If your client will be unable to reach all nodes, you can run the Hiqlite Server in proxy
     /// mode like mentioned in the [README](https://github.com/sebadob/hiqlite/blob/main/README.md).
-    /// In this case, only provide the proxy's IP in the `nodes: Vec<String>`.
+    /// In this case, only provide proxy addresses in `nodes` and set `with_proxy` to `true`.
+    /// Those endpoints remain authoritative across reconnects; advertised voter addresses are
+    /// never used as a fallback.
     #[allow(clippy::too_many_arguments)]
     pub async fn remote(
         nodes: Vec<String>,
@@ -184,6 +187,7 @@ impl Client {
             #[cfg(feature = "cache")]
             leader_cache,
             nodes,
+            proxy_mode: with_proxy,
             client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
@@ -213,8 +217,8 @@ impl Client {
             inner: Arc::new(db_client),
         };
 
-        // It should be enough to check for DB proxy here. When running, the forward to leader
-        // errors should never be forwarded through the proxy.
+        // Proxy endpoints remain authoritative for this client's whole life;
+        // reconnect and ForwardToLeader handling preserve the same boundary.
         if !with_proxy {
             slf.find_set_active_leader().await;
         }

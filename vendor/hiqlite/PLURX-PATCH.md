@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries eight compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -40,8 +40,13 @@ Apache-2.0. Plurx carries seven compatibility patches for clustered deployments:
   or applied Raft order; normal reads and recovery never infer recency from UUID
   ordering, so delayed cleanup and interrupted publication cannot replace or
   delete current state.
+- Remote clients created in proxy mode retain only their configured proxy
+  endpoints across WebSocket reconnects, metrics discovery, and
+  `ForwardToLeader` responses. Directly advertised voter addresses never
+  replace that boundary, so a proxy remains an enforceable routing, partition,
+  and trust boundary after recovery.
 
-Remove this vendor when an upstream Hiqlite release contains all seven patches
+Remove this vendor when an upstream Hiqlite release contains all eight patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
 

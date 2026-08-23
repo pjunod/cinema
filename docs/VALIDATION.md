@@ -266,6 +266,28 @@ Never re-diagnose a red `cluster-auth` from elapsed time. Read which of those
 three the failure text claims, and reproduce it in isolation before treating it
 as a durable-state regression.
 
+### A live process without quorum is not ready to serve mutable media
+
+`cargo run --locked -p plurx-cluster-check -- serving-partition` starts three
+real voters plus a distinct serving process. Raw TCP cut-points isolate only
+the serving process's remote Hiqlite client; the controller retains direct
+access to every voter. The retained contract requires:
+
+- `/healthz` remains 200 while `/readyz` changes to 503 from the expired
+  production quorum watermark;
+- mutable HLS capability traffic changes to a topology-free 503 with
+  `Retry-After: 1`;
+- the serving process reaps its live media child without another Store call;
+- the intact voter majority commits a write and every voter process observes
+  it from its own local replica during the serving partition; and
+- restoring the cut-points returns readiness and capability traffic to 200;
+  a newly admitted media child is then fenced by a second cut, proving proxy
+  reconnect cannot escape the same boundary.
+
+The proof compiles the daemon's `serving_fence.rs` directly. A harness-only
+boolean would show that the test can notice its own partition, not that the
+production readiness and teardown authority does.
+
 ### A busy port is not an un-migrated store
 
 A voter's raft and API ports are chosen by binding port zero, reading the

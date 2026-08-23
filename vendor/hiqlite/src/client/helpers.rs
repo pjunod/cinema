@@ -31,6 +31,9 @@ impl Client {
     }
 
     pub(crate) async fn find_set_active_leader(&self) {
+        if self.inner.proxy_mode {
+            return;
+        }
         if let Some(state) = &self.inner.state {
             // we never need to do any remote lookups for metrics -> get can never fail
             #[cfg(feature = "sqlite")]
@@ -235,6 +238,16 @@ impl Client {
             && let Some(node) = node
         {
             was_leader_error = true;
+
+            if self.inner.proxy_mode {
+                // Reconnect through the same proxy endpoint. The proxy owns
+                // leader discovery; accepting the advertised node here would
+                // silently escape the caller's network and trust boundary.
+                tx.send_async(ClientStreamReq::LeaderChange((None, None)))
+                    .await
+                    .expect("the Client API WebSocket Manager to always be running");
+                return true;
+            }
 
             let api_addr = node.addr_api.clone();
             {

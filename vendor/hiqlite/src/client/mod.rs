@@ -55,6 +55,10 @@ pub(crate) struct DbClient {
     #[cfg(feature = "sqlite")]
     pub(crate) leader_db: Arc<RwLock<(NodeId, String)>>,
     pub(crate) nodes: Vec<String>,
+    /// Keep remote proxy endpoints authoritative across reconnects. Without
+    /// this, discovery and ForwardToLeader handling replace them with the
+    /// cluster's directly advertised node addresses.
+    pub(crate) proxy_mode: bool,
     pub(crate) client: Option<reqwest::Client>,
     #[cfg(feature = "cache")]
     pub(crate) tx_client_cache: flume::Sender<ClientStreamReq>,

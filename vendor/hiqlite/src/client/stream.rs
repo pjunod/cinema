@@ -182,8 +182,9 @@ async fn client_stream(
                 ws
             }
             Err(err) => {
-                if let Error::Connect(_) = &err {
-                    // TODO keep track if we are connected through a proxy and skip ?
+                if let Error::Connect(_) = &err
+                    && !client.inner.proxy_mode
+                {
                     client.find_set_active_leader().await;
                 }
 
