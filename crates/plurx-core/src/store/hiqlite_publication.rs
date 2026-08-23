@@ -7,10 +7,10 @@
 
 use async_trait::async_trait;
 use hiqlite::macros::params;
-use hiqlite::Row;
+use hiqlite::{Param, Row};
 
 use super::hiqlite::{database_error, HiqliteAuthStore};
-use crate::cluster::coordination::Lease;
+use crate::cluster::coordination::{unix_ms, Lease};
 use crate::domain::{
     sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemKind, MetadataPatch, NewItem,
     ProbeResult,
@@ -25,6 +25,7 @@ const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
 pub(super) fn atomic_renewal_statement(
     lease: &Lease,
     replacement: &Lease,
+    execution_time_ms: i64,
 ) -> Result<(String, hiqlite::Params), StoreError> {
     if replacement.resource != lease.resource
         || replacement.owner_node_id != lease.owner_node_id
@@ -40,7 +41,9 @@ pub(super) fn atomic_renewal_statement(
         "UPDATE job_leases
             SET revision = $1, expires_at_ms = $2, updated_at_ms = $3
           WHERE resource = $4 AND owner_node_id = $5
-            AND fence = $6 AND revision = $7 AND expires_at_ms = $8"
+            AND fence = $6 AND revision = $7 AND expires_at_ms = $8
+            AND expires_at_ms > $9
+          RETURNING resource, owner_node_id, fence, revision, expires_at_ms"
             .to_owned(),
         params!(
             lease_i64("replacement revision", replacement.revision)?,
@@ -52,17 +55,48 @@ pub(super) fn atomic_renewal_statement(
             lease.owner_node_id.as_str(),
             lease_i64("fence", lease.fence)?,
             lease_i64("revision", lease.revision)?,
-            lease.expires_at_unix_ms
+            lease.expires_at_unix_ms,
+            execution_time_ms
         ),
     ))
 }
 
-pub(super) fn require_atomic_renewal(results: &[usize], lease: &Lease) -> Result<(), StoreError> {
-    if results.last().copied() == Some(1) {
-        Ok(())
-    } else {
-        Err(fence_rejected(lease))
+fn bind_atomic_authority(params: &mut hiqlite::Params, lease: &Lease) -> Result<(), StoreError> {
+    let expected = params!(
+        lease.resource.as_str(),
+        lease.owner_node_id.as_str(),
+        lease_i64("fence", lease.fence)?,
+        lease_i64("revision", lease.revision)?,
+        lease.expires_at_unix_ms
+    );
+    let mut matches = 0_usize;
+    let mut index = 0_usize;
+    while index + expected.len() <= params.len() {
+        if params[index..index + expected.len()] == expected {
+            for (offset, column) in [
+                "resource",
+                "owner_node_id",
+                "fence",
+                "revision",
+                "expires_at_ms",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                params[index + offset] = Param::StmtOutputNamed(0, column.into());
+            }
+            matches += 1;
+            index += expected.len();
+        } else {
+            index += 1;
+        }
     }
+    if matches == 0 {
+        return Err(StoreError::Task(
+            "atomic publication statement has no exact lease authority predicate".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn publication_row_id() -> i64 {
@@ -113,21 +147,41 @@ impl HiqliteAuthStore {
         replacement: &Lease,
         mut statements: Vec<(String, hiqlite::Params)>,
     ) -> Result<Vec<usize>, StoreError> {
-        // Every preceding mutation is gated on the exact predecessor lease.
-        // Renew last: a replay then sees neither the predecessor nor an
-        // operation-specific authority, so it cannot mutate before returning
-        // FenceRejected. One Raft transaction keeps the mutations and renewal
-        // indivisible to every other writer.
-        statements.push(atomic_renewal_statement(lease, replacement)?);
-        let results = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        require_atomic_renewal(&results, lease)?;
-        Ok(results)
+        if statements.is_empty() {
+            return Err(StoreError::Task(
+                "atomic publication requires at least one mutation".to_owned(),
+            ));
+        }
+        // Lease expiries use Unix milliseconds. HiqliteAuthStore's injectable
+        // clock deliberately uses Unix seconds for ordinary record metadata,
+        // so it must not be reused for this authority boundary.
+        let renewal = atomic_renewal_statement(lease, replacement, unix_ms()?)?;
+        for (_, params) in &mut statements {
+            // Renewal is statement zero. Each mutation gets its authority
+            // values from that statement's returned row, not caller input.
+            // If the exact predecessor is stale or expired, renewal returns
+            // no row and Hiqlite rolls the transaction back when this output
+            // cannot be bound.
+            bind_atomic_authority(params, lease)?;
+        }
+        statements.insert(0, renewal);
+        let transaction = self.client().txn(statements).await;
+        let results = match transaction {
+            Ok(results) => results,
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("StmtIndex(0) does not have observable row output") =>
+            {
+                return Err(fence_rejected(lease));
+            }
+            Err(error) => return Err(error),
+        }
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+        debug_assert_eq!(results.first().copied(), Some(1));
+        Ok(results.into_iter().skip(1).collect())
     }
 }
 

@@ -1282,6 +1282,45 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             Some("successor".to_owned()),
             "{backend}: successor wins after stale owner resumes"
         );
+
+        let expiring_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("publication expiry clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let expired = acquired(
+            store
+                .acquire_lease(
+                    "contract:expired-publication",
+                    "node-expired",
+                    expiring_now,
+                    expiring_now.saturating_add(100),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: acquire expiring lease: {error}")),
+            backend,
+        );
+        let expired_replacement = publication_successor(&expired);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(matches!(
+            store
+                .put_setting_fenced(
+                    "contract.expired-publication",
+                    "must-not-commit",
+                    &expired,
+                    &expired_replacement,
+                )
+                .await,
+            Err(StoreError::FenceRejected { .. })
+        ));
+        assert_eq!(
+            store
+                .get_setting("contract.expired-publication")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read expired publication: {error}")),
+            None,
+            "{backend}: an expired predecessor committed a fenced publication"
+        );
     })
     .await;
 }

@@ -10,7 +10,9 @@ repository.workspace = true
 anyhow = { workspace = true }
 hiqlite = { workspace = true }
 hex = { workspace = true }
+libc = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { workspace = true }
@@ -18,6 +20,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -7,6 +7,7 @@
 
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use crate::error::StoreError;
 
 use super::{ReconcileOutcome, RootFingerprintStatus, Store};
 
-const PUBLICATION_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const PUBLICATION_CALL_SAFETY_WINDOW: Duration = Duration::from_secs(3);
 type FencedFuture<'a, T> =
     Pin<Box<dyn std::future::Future<Output = Result<T, StoreError>> + Send + 'a>>;
 
@@ -27,6 +28,7 @@ type FencedFuture<'a, T> =
 pub struct PublicationFence {
     state: Arc<RwLock<Option<Lease>>>,
     last: Arc<std::sync::RwLock<Lease>>,
+    revoked: Arc<AtomicBool>,
 }
 
 impl PublicationFence {
@@ -34,6 +36,7 @@ impl PublicationFence {
         Self {
             state: Arc::new(RwLock::new(Some(lease.clone()))),
             last: Arc::new(std::sync::RwLock::new(lease)),
+            revoked: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -51,11 +54,44 @@ impl PublicationFence {
         ttl: Duration,
     ) -> Result<bool, StoreError> {
         let mut state = self.state.write().await;
+        if self.revoked.load(Ordering::Acquire) {
+            // No backend request has been dispatched yet. Preserve the
+            // current token so graceful release can retire it; the deadline
+            // path invalidates it explicitly after draining this future.
+            return Ok(false);
+        }
         let Some(current) = state.clone() else {
             return Ok(false);
         };
-        match coordinator.renew(&current, ttl).await {
-            Ok(Some(replacement)) if unix_ms()? < current.expires_at_unix_ms => {
+        let renewed = coordinator.renew(&current, ttl).await;
+        if self.revoked.load(Ordering::Acquire) {
+            // A local deadline may win after the backend request was sent.
+            // Retain an acknowledged replacement solely so release can retire
+            // it; the atomic revocation still blocks every publication.
+            return match renewed {
+                Ok(Some(replacement)) => {
+                    *self
+                        .last
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement.clone();
+                    *state = Some(replacement);
+                    Ok(false)
+                }
+                Ok(None) => {
+                    *state = None;
+                    Ok(false)
+                }
+                Err(error) => {
+                    *state = None;
+                    Err(error)
+                }
+            };
+        }
+        let response_before_expiry = unix_ms()
+            .map(|now| now < current.expires_at_unix_ms)
+            .unwrap_or(false);
+        match renewed {
+            Ok(Some(replacement)) if response_before_expiry => {
                 *self
                     .last
                     .write()
@@ -63,7 +99,20 @@ impl PublicationFence {
                 *state = Some(replacement);
                 Ok(true)
             }
-            Ok(Some(_)) | Ok(None) => {
+            Ok(Some(replacement)) => {
+                // The backend may acknowledge a replacement just after the
+                // predecessor deadline. Preserve that exact token solely for
+                // graceful retirement, but revoke publishers before releasing
+                // the state lock so it can never authorize late work.
+                *self
+                    .last
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement.clone();
+                *state = Some(replacement);
+                self.revoked.store(true, Ordering::Release);
+                Ok(false)
+            }
+            Ok(None) => {
                 *state = None;
                 Ok(false)
             }
@@ -76,7 +125,12 @@ impl PublicationFence {
 
     /// Self-fence after a failed renewal. Work may finish computing, but its
     /// next durable publication is rejected before it reaches the backend.
+    pub fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
     pub async fn invalidate(&self, expected: &Lease) -> bool {
+        self.revoke();
         let mut state = self.state.write().await;
         if state.as_ref() != Some(expected) {
             return false;
@@ -112,7 +166,15 @@ impl<'a> PublicationStore<'a> {
         let fence = self.fence.as_ref().ok_or_else(|| {
             StoreError::Task("fenced publication requested without a lease".to_owned())
         })?;
-        Ok(Arc::clone(&fence.state).read_owned().await)
+        if fence.revoked.load(Ordering::Acquire) {
+            return Err(self.invalidated());
+        }
+        let token = Arc::clone(&fence.state).read_owned().await;
+        if fence.revoked.load(Ordering::Acquire) {
+            drop(token);
+            return Err(self.invalidated());
+        }
+        Ok(token)
     }
 
     fn invalidated(&self) -> StoreError {
@@ -141,7 +203,13 @@ impl<'a> PublicationStore<'a> {
         let fence = self.fence.as_ref().ok_or_else(|| {
             StoreError::Task("fenced publication requested without a lease".to_owned())
         })?;
+        if fence.revoked.load(Ordering::Acquire) {
+            return Err(self.invalidated());
+        }
         let mut state = fence.state.write().await;
+        if fence.revoked.load(Ordering::Acquire) {
+            return Err(self.invalidated());
+        }
         let predecessor = state.as_ref().cloned().ok_or_else(|| self.invalidated())?;
         let now = unix_ms()?;
         if predecessor.expires_at_unix_ms <= now {
@@ -149,29 +217,26 @@ impl<'a> PublicationStore<'a> {
             return Err(self.invalidated());
         }
         let replacement = predecessor.publication_successor()?;
-        let result = tokio::time::timeout(
-            PUBLICATION_CALL_TIMEOUT,
-            operation(predecessor, replacement.clone()),
-        )
-        .await;
+        // The backend owns its operation deadline. An equal outer deadline
+        // would drop the backend future with an unknown commit state (and a
+        // SQLite blocking transaction cannot be cancelled at all).
+        let result = operation(predecessor, replacement.clone()).await;
         match result {
-            Ok(Ok(value)) => {
+            Ok(value) => {
                 *fence
                     .last
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement.clone();
                 *state = Some(replacement);
-                Ok(value)
+                if fence.revoked.load(Ordering::Acquire) {
+                    Err(self.invalidated())
+                } else {
+                    Ok(value)
+                }
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 *state = None;
                 Err(error)
-            }
-            Err(_) => {
-                *state = None;
-                Err(StoreError::Task(
-                    "fenced publication timed out with an unknown commit state".to_owned(),
-                ))
             }
         }
     }
@@ -192,7 +257,7 @@ impl<'a> PublicationStore<'a> {
         let lease = token.as_ref().ok_or_else(|| self.invalidated())?;
         let now = unix_ms()?;
         if lease.expires_at_unix_ms
-            <= now.saturating_add(PUBLICATION_CALL_TIMEOUT.as_millis() as i64)
+            <= now.saturating_add(PUBLICATION_CALL_SAFETY_WINDOW.as_millis() as i64)
         {
             return Err(StoreError::FenceRejected {
                 resource: lease.resource.clone(),

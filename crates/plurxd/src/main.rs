@@ -4,6 +4,7 @@ mod copyseg;
 mod delivery;
 mod ffmpeg;
 mod http;
+mod job_lease;
 mod logbuf;
 mod manifest_cache;
 mod meter;
@@ -46,7 +47,8 @@ use plurx_core::store::{keys, Store};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
-use crate::state::{acquire_cluster_job, AppState, SystemInfo};
+use crate::job_lease::acquire_cluster_job;
+use crate::state::{AppState, SystemInfo};
 
 #[derive(Parser)]
 // `--version` carries the build stamp too: "0.1.0 (v0.1.0-14-gc0ffee)". The
@@ -253,7 +255,7 @@ async fn refresh_metadata_with_store(
         )),
     };
     drop(publisher);
-    lease.release().await;
+    let _ = lease.release().await;
     result
 }
 

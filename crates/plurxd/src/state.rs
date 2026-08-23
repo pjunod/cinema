@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+#[cfg(test)]
+use plurx_core::cluster::coordination::LeaseClaim;
+use plurx_core::cluster::coordination::StoreCoordinator;
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
@@ -22,13 +24,14 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationFence, PublicationStore, Store,
+    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use crate::job_lease::{acquire_cluster_job, ActiveJobLease};
 use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
@@ -954,8 +957,6 @@ const MAX_REQUESTS: usize = 256;
 /// request-history ring; overflow is terminal and visible to the caller.
 const MAX_PENDING_PER_LIBRARY: usize = 256;
 
-const JOB_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
-const JOB_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
 const PRETRANSCODE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const PRETRANSCODE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
 const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
@@ -963,127 +964,6 @@ const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
 // bounded universe avoids rotating one unreadable high-priority row back into
 // eligibility before a lower-priority row on this node's mount can be found.
 const MAX_PRETRANSCODE_REFUSALS: usize = 4_096 + PRODUCE_MAX_PER_PASS;
-
-pub(crate) struct ActiveJobLease {
-    coordinator: StoreCoordinator,
-    fence: PublicationFence,
-    cancel: tokio_util::sync::CancellationToken,
-    lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl ActiveJobLease {
-    fn start(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-    ) -> Self {
-        Self::start_with_policy(coordinator, lease, JOB_LEASE_TTL, JOB_LEASE_HEARTBEAT)
-    }
-
-    fn start_with_policy(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-        ttl: std::time::Duration,
-        heartbeat_every: std::time::Duration,
-    ) -> Self {
-        let fence = PublicationFence::new(lease);
-        let heartbeat_fence = fence.clone();
-        let heartbeat_coordinator = coordinator.clone();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let heartbeat_cancel = cancel.clone();
-        let lost = tokio_util::sync::CancellationToken::new();
-        let heartbeat_lost = lost.clone();
-        let heartbeat = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(heartbeat_every);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await;
-            loop {
-                tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
-                let Some(current) = heartbeat_fence.snapshot().await else {
-                    break;
-                };
-                let renewal = heartbeat_fence.renew(&heartbeat_coordinator, ttl);
-                tokio::pin!(renewal);
-                let expiry = tokio::time::sleep(lease_time_remaining(current.expires_at_unix_ms));
-                tokio::pin!(expiry);
-                let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = &mut expiry => {
-                        let _ = heartbeat_fence.invalidate(&current).await;
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            "cluster job renewal exceeded its lease deadline and self-fenced"
-                        );
-                        break;
-                    }
-                    result = &mut renewal => result,
-                };
-                match renewed {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            "cluster job lost its lease and self-fenced"
-                        );
-                        break;
-                    }
-                    Err(error) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            error = %error,
-                            "cluster job lease renewal failed and self-fenced"
-                        );
-                        break;
-                    }
-                }
-            }
-        });
-        Self {
-            coordinator,
-            fence,
-            cancel,
-            lost,
-            heartbeat: Some(heartbeat),
-        }
-    }
-
-    pub(crate) fn publisher<'a>(&self, store: &'a dyn Store) -> PublicationStore<'a> {
-        PublicationStore::fenced(store, self.fence.clone())
-    }
-
-    pub(crate) fn loss_token(&self) -> tokio_util::sync::CancellationToken {
-        self.lost.clone()
-    }
-
-    pub(crate) async fn release(mut self) {
-        self.cancel.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(error = %error, "cluster job heartbeat task failed during release");
-            }
-        }
-        let token = self.fence.snapshot().await;
-        if let Some(token) = token {
-            if let Err(error) = self.coordinator.release(&token).await {
-                tracing::warn!(
-                    resource = token.resource,
-                    fence = token.fence,
-                    error = %error,
-                    "cluster job lease release failed; TTL will recover it"
-                );
-            }
-        }
-    }
-}
 
 fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
     let now_unix_ms = clock_ms();
@@ -1097,22 +977,12 @@ fn clock_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-impl Drop for ActiveJobLease {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.lost.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-    }
-}
-
 /// Heartbeat and self-fence for one distributed queue row.
 struct ActivePretranscodeJob {
     fence: PretranscodeFence,
     cancel: tokio_util::sync::CancellationToken,
     lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
+    heartbeat: Option<tokio::task::JoinHandle<Result<(), StoreError>>>,
 }
 
 impl ActivePretranscodeJob {
@@ -1124,6 +994,7 @@ impl ActivePretranscodeJob {
         let lost = tokio_util::sync::CancellationToken::new();
         let heartbeat_lost = lost.clone();
         let heartbeat = tokio::spawn(async move {
+            let mut heartbeat_error = None;
             let mut ticker = tokio::time::interval(PRETRANSCODE_HEARTBEAT);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await;
@@ -1155,18 +1026,26 @@ impl ActivePretranscodeJob {
                 tokio::pin!(renewal);
                 let expiry = tokio::time::sleep(lease_time_remaining(current.lease_expires_ms));
                 tokio::pin!(expiry);
+                let mut stop_after_renewal = false;
                 let renewed = tokio::select! {
-                    biased;
-                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = heartbeat_cancel.cancelled() => {
+                        // A renewal may already have crossed the backend
+                        // boundary. Drain it before retirement so an
+                        // acknowledged replacement cannot be stranded.
+                        stop_after_renewal = true;
+                        renewal.await
+                    }
                     _ = &mut expiry => {
-                        let _ = heartbeat_fence.invalidate(&current).await;
+                        stop_after_renewal = true;
+                        heartbeat_fence.revoke();
                         heartbeat_lost.cancel();
+                        let result = renewal.await;
                         tracing::warn!(
                             job = current.id,
                             fence = current.fence,
                             "pre-transcode queue renewal exceeded its lease deadline and self-fenced"
                         );
-                        break;
+                        result
                     }
                     result = &mut renewal => result,
                 };
@@ -1189,9 +1068,24 @@ impl ActivePretranscodeJob {
                             %error,
                             "pre-transcode queue renewal failed and self-fenced"
                         );
+                        heartbeat_error = Some(error);
                         break;
                     }
                 }
+                if stop_after_renewal {
+                    break;
+                }
+            }
+            heartbeat_fence.revoke();
+            if let Err(error) = heartbeat_fence.retire(store.as_ref()).await {
+                tracing::warn!(%error, "pre-transcode queue retirement was ambiguous");
+                if heartbeat_error.is_none() {
+                    heartbeat_error = Some(error);
+                }
+            }
+            match heartbeat_error {
+                Some(error) => Err(error),
+                None => Ok(()),
             }
         });
         Self {
@@ -1211,10 +1105,18 @@ impl ActivePretranscodeJob {
     }
 
     async fn finish(mut self) {
+        self.fence.revoke();
+        self.lost.cancel();
         self.cancel.cancel();
         if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
+            match heartbeat.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "pre-transcode cleanup was ambiguous after settlement");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
+                }
             }
         }
     }
@@ -1222,34 +1124,13 @@ impl ActivePretranscodeJob {
 
 impl Drop for ActivePretranscodeJob {
     fn drop(&mut self) {
+        self.fence.revoke();
         self.cancel.cancel();
         self.lost.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-    }
-}
-
-pub(crate) async fn acquire_cluster_job(
-    coordinator: &StoreCoordinator,
-    resource: String,
-) -> Result<Option<ActiveJobLease>, StoreError> {
-    match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
-        LeaseClaim::Acquired(lease) => Ok(Some(ActiveJobLease::start(coordinator.clone(), lease))),
-        LeaseClaim::Held {
-            owner_node_id,
-            fence,
-            expires_at_unix_ms,
-        } => {
-            tracing::debug!(
-                resource,
-                owner = owner_node_id,
-                fence,
-                expires_at_unix_ms,
-                "cluster job lease is held; skipping local duplicate"
-            );
-            Ok(None)
-        }
+        // Dropping a JoinHandle detaches the task. Cancellation makes it
+        // drain any dispatched renewal and retire the final acknowledged
+        // token; aborting here would recreate the late-write race.
+        let _ = self.heartbeat.take();
     }
 }
 
@@ -1397,7 +1278,7 @@ impl JobManager {
             let entry = statuses.entry(library_id).or_default();
             if entry.running {
                 drop(statuses);
-                lease.release().await;
+                let _ = lease.release().await;
                 return false;
             }
             self.metrics.count_scan(why);
@@ -1431,7 +1312,7 @@ impl JobManager {
                     manager.finish(library_id, status).await;
                 }
             }
-            lease.release().await;
+            let _ = lease.release().await;
             // Whatever queued up while this ran is work someone was
             // promised. A full scan covers the same files a targeted one
             // would have, but the CALLER is still owed its answer — the
@@ -1500,7 +1381,7 @@ impl JobManager {
                 "cluster scan lease was lost".to_owned(),
             ))),
         };
-        lease.release().await;
+        let _ = lease.release().await;
         match &out {
             Ok(scan) => {
                 self.record_request(&req, "done", Some(scan), None).await;
@@ -1844,7 +1725,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         outcome
     }
 
@@ -1866,7 +1747,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -2238,7 +2119,7 @@ impl JobManager {
             }
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         false
     }
 
@@ -2507,7 +2388,7 @@ impl JobManager {
                             )),
                         };
                         drop(publisher);
-                        lease.release().await;
+                        let _ = lease.release().await;
                         result?;
                     }
                 }
@@ -2611,7 +2492,7 @@ impl JobManager {
                     }
                 }
                 drop(publisher);
-                lease.release().await;
+                let _ = lease.release().await;
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(error = %error, "artwork retry lease failed"),
@@ -2716,7 +2597,7 @@ impl JobManager {
             *self.last_genre_backfill.lock().await = Some(report);
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
     }
 
     /// Singleton half of speculative production: rank likely titles and put
@@ -2751,7 +2632,7 @@ impl JobManager {
             Err(e) => {
                 tracing::warn!(error = %e, "candidate generator cannot page users");
                 drop(publisher);
-                lease.release().await;
+                let _ = lease.release().await;
                 return;
             }
         };
@@ -2852,7 +2733,7 @@ impl JobManager {
             Err(error) => {
                 tracing::warn!(%error, "candidate generation could not read transcode policy");
                 drop(publisher);
-                lease.release().await;
+                let _ = lease.release().await;
                 return;
             }
         };
@@ -2997,7 +2878,7 @@ impl JobManager {
             },
         );
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
     }
 
     /// Non-singleton half: every idle compatible node drains distinct queue
@@ -3403,7 +3284,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -3820,7 +3701,8 @@ mod tests {
             lease,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_millis(50),
-        );
+        )
+        .expect("valid test lease policy");
         let owner = tokio::spawn(async move {
             let active = active;
             std::future::pending::<()>().await;
@@ -4187,7 +4069,7 @@ mod tests {
         let publisher = lease.publisher(store.as_ref());
         jobs.stamp("job.stamped", &publisher).await;
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         let stamped = jobs.job_stamp("job.stamped").await.expect("stamp");
         assert!((now() - stamped).abs() <= 1);
     }

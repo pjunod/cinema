@@ -1,8 +1,8 @@
 # Clustering transition — from one plurxd node to Phase 4
 
-**Status:** executing — M0 through M3a are complete; Hiqlite now activates,
-grows, and safely removes a follower, while the remaining M3 discovery,
-offline-work resolution, activity aggregation, and singleton fencing are next
+**Status:** executing — M0 through M3 are complete; M4's production fences are
+landed and its real-process singleton pause/takeover proof is staged, while the
+serving-node partition and later failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
 2026-08-15
@@ -874,6 +874,18 @@ prove its resumed write is rejected inside the transaction. Kill a scan owner
 and observe one successor restart. Partition a serving node and prove it fails
 readiness, kills children, and stops capability-URL serving.
 
+The retained singleton slice uses three real voter processes and the exact
+daemon lease-heartbeat source. A follower begins a blocked provider request,
+both peers are refused without making another physical call, and the follower
+is stopped past the expiry read from the authoritative lease row. One surviving
+peer takes over with the next fence, publishes a distinct response, and the
+resumed production task self-fences. Replaying the pre-takeover token is
+rejected by the atomic successor-generation transaction independently of its
+former wall-clock TTL. Both live peers contest takeover, exactly
+one observes acquisition while the other observes its new fence, and the proof
+allows exactly two provider calls and at most eight post-baseline Raft entries.
+The serving-node partition acceptance above remains separate.
+
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
 Implement the exact §3.5/[PERF-PLAN.md](PERF-PLAN.md) §7.3 contract. Proxy
@@ -949,10 +961,12 @@ offline-work resolution, and singleton fencing.
 ```bash
 make check                    # M0 and every milestone: repository baseline
 make validate-staged          # changed behavior contracts
-make cluster-check            # M1b-M3a state, membership, import, and loss gate
+make cluster-check            # M1b-M4 state, membership, singleton, and loss gate
 make cluster-growth           # 10,000-beat compacted growth + raw control
 cargo run --locked -p plurx-cluster-check -- membership
                               # focused real-process 1 -> 3 -> 2 lifecycle
+cargo run --locked -p plurx-cluster-check -- singleton
+                              # focused SIGSTOP/TTL/takeover/stale-token proof
 cargo test -p plurx-core store::sqlite::tests:: -- --nocapture
                               # explicit local M2 database-upgrade gate
 ```
