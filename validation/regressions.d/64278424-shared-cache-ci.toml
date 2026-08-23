@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["64278424"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The warnings-as-errors compiler gate and retained Store contract compile coverage retain the shared-cache integration corrections."
