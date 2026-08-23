@@ -3,6 +3,7 @@ mod cachekeep;
 mod copyseg;
 mod delivery;
 mod ffmpeg;
+mod fragindex;
 mod http;
 mod job_lease;
 mod logbuf;

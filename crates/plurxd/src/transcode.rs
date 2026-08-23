@@ -1053,7 +1053,7 @@ fn spawn_ffmpeg_pipe(
 /// Keep the environment local to ffmpeg rather than changing the daemon's
 /// process environment, and use the data directory whose ownership plurxd has
 /// already proved by creating its session and cache directories.
-fn configure_ffmpeg_runtime(
+pub(crate) fn configure_ffmpeg_runtime(
     command: &mut tokio::process::Command,
     runtime_cache: &std::path::Path,
 ) {
