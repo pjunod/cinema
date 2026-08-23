@@ -683,11 +683,15 @@ async fn wait_singleton_outcome(
                 return Ok(outcome);
             }
             Response::SingletonProbeStatus { outcome }
-                if outcome == "provider_pending" || outcome == "publishing" => {}
+                if outcome == "provider_pending" || outcome == "publishing" =>
+            {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "singleton probe on voter {node_id} timed out in outcome {outcome}; expected one of {accepted:?}"
+                    );
+                }
+            }
             response => bail!("singleton probe reached an unexpected outcome: {response:?}"),
-        }
-        if Instant::now() >= deadline {
-            bail!("singleton probe outcome timed out");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -4842,10 +4846,14 @@ async fn handle_request(
                                 }
                             }
                         };
-                        active.release().await;
                         *outcome
                             .write()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = terminal;
+                        // Publication/fencing is the proof's terminal result.
+                        // Lease retirement is best effort and may itself need
+                        // a quorum round trip, so never hide the result behind
+                        // cleanup that can outlive the observation deadline.
+                        active.release().await;
                     });
                     Ok(Response::SingletonProbeStart {
                         acquired: true,
