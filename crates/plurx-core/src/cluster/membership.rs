@@ -242,6 +242,11 @@ pub enum MembershipError {
     /// succeeds", so what stopped it has to be sayable.
     #[error("node owns offline work that could not be resolved: {0}")]
     OfflineWork(String),
+    /// Preserve Hiqlite's typed routing verdict so a caller can distinguish a
+    /// read-only operation that lost its leader from a semantic membership
+    /// refusal. The public error code and message remain backward-compatible.
+    #[error("cluster membership operation failed: LeaderChange: {0}")]
+    LeaderChanged(String),
     #[error("cluster membership operation failed: {0}")]
     Internal(String),
 }
@@ -268,14 +273,17 @@ impl MembershipError {
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
             Self::OfflineWork(_) => "node_owns_offline_work",
-            Self::Internal(_) => "membership_internal",
+            Self::LeaderChanged(_) | Self::Internal(_) => "membership_internal",
         }
     }
 }
 
 impl From<hiqlite::Error> for MembershipError {
     fn from(error: hiqlite::Error) -> Self {
-        Self::Internal(error.to_string())
+        match error {
+            hiqlite::Error::LeaderChange(message) => Self::LeaderChanged(message.into_owned()),
+            error => Self::Internal(error.to_string()),
+        }
     }
 }
 
@@ -1696,6 +1704,60 @@ impl MembershipManager {
     /// After an election, the successor observes the older term and waits one
     /// complete local monotonic lease before fencing it. A restarted successor
     /// waits again, which is conservative but cannot overlap an old repair.
+    pub async fn observe_artwork_source_repair(
+        &self,
+        item_id: i64,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        if !self.local_node_is_active_voter().await? {
+            return Err(MembershipError::LocalNodeNotActive);
+        }
+        let metrics = inner.client.metrics_db().await?;
+        if metrics.current_leader != Some(inner.identity.raft_id)
+            || metrics
+                .millis_since_quorum_ack
+                .is_none_or(|age| age > ARTWORK_LEADER_QUORUM_FRESH_MS)
+        {
+            return Ok(false);
+        }
+        let leader_term = i64::try_from(metrics.current_term)
+            .map_err(|_| MembershipError::Internal("Raft term overflow".to_owned()))?;
+        let existing = inner
+            .client
+            .query_consistent_map::<ArtworkRepairLeaseRow, _>(
+                "SELECT owner_node_id, leader_term, generation FROM cluster_artwork_repairs \
+                 WHERE item_id = $1",
+                params!(item_id),
+            )
+            .await?;
+        let Some(previous) = existing.first() else {
+            return Ok(false);
+        };
+        if previous.leader_term > leader_term
+            || (previous.leader_term == leader_term
+                && previous.owner_node_id != inner.identity.node_id)
+        {
+            return Ok(false);
+        }
+        let mut observations = inner.artwork_claim_observed_at.lock().map_err(|_| {
+            MembershipError::Internal("artwork claim observation lock was poisoned".to_owned())
+        })?;
+        match observations.get(&item_id) {
+            Some((term, generation, _))
+                if *term == previous.leader_term && *generation == previous.generation => {}
+            _ => {
+                observations.insert(
+                    item_id,
+                    (previous.leader_term, previous.generation, Instant::now()),
+                );
+            }
+        }
+        Ok(true)
+    }
+
+    /// Claim a repair generation after the receiver-local observation window.
+    /// Callers that only need to establish that window must use
+    /// [`Self::observe_artwork_source_repair`], which cannot reach the CAS.
     pub async fn claim_artwork_source_repair(
         &self,
         item_id: i64,
@@ -4716,6 +4778,33 @@ mod tests {
             MembershipError::QuorumLoss.code(),
             "removal_would_lose_quorum"
         );
+    }
+
+    #[test]
+    fn leader_change_remains_typed_without_changing_the_public_error_contract() {
+        let error = MembershipError::from(hiqlite::Error::LeaderChange(
+            "routing converged after election".into(),
+        ));
+        assert!(matches!(error, MembershipError::LeaderChanged(_)));
+        assert_eq!(error.code(), "membership_internal");
+        assert_eq!(
+            error.to_string(),
+            "cluster membership operation failed: LeaderChange: routing converged after election"
+        );
+    }
+
+    #[test]
+    fn repair_observation_cannot_cross_the_generation_cas_boundary() {
+        let source = include_str!("membership.rs");
+        let observation = source
+            .split_once("pub async fn observe_artwork_source_repair")
+            .expect("observation method")
+            .1
+            .split_once("pub async fn claim_artwork_source_repair")
+            .expect("claim method after observation")
+            .0;
+        assert!(observation.contains("query_consistent_map"));
+        assert!(!observation.contains(".execute("));
     }
 
     #[test]

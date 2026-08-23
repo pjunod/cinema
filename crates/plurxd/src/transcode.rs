@@ -1701,8 +1701,17 @@ impl Session {
         }
     }
 
-    async fn kill_child_for_replacement(&self) -> ChildReplacement<'_> {
+    async fn kill_child_for_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
+        // Retirement uses the same transition. If it won first, this
+        // previously scheduled fallback is stale and must not resurrect an
+        // encoder after the manager removed the session. Holding the gate
+        // through the check and successor publication also prevents
+        // retirement from starting between this verdict and the caller's
+        // install.
+        if self.retired.load(Acquire) {
+            return None;
+        }
         self.kill_child().await;
         #[cfg(test)]
         {
@@ -1716,7 +1725,7 @@ impl Session {
                 pause.wait().await;
             }
         }
-        replacement
+        Some(replacement)
     }
 
     /// Begin a replacement only while its session is still live after this
@@ -4277,6 +4286,14 @@ pub struct TranscodeManager {
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Process-local quorum serving authority. The router rejects ordinary
+    /// starts before they reach the manager; this second edge closes the
+    /// transition race between that check and publishing a spawned child.
+    serving_ready: AtomicBool,
+    /// Monotonic counterpart to `serving_ready`. Recovery may reopen the
+    /// process, but it cannot erase a loss observed by a session admitted
+    /// under an older generation.
+    serving_loss_generation: AtomicU64,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.
@@ -4431,6 +4448,8 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            serving_ready: AtomicBool::new(true),
+            serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
@@ -5907,10 +5926,11 @@ impl TranscodeManager {
             typeless_sliding: false,
             first_slide_logged: AtomicBool::new(false),
         });
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
+            .await
         {
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(session_id.clone(), Arc::clone(&session));
-            self.active_session_count.store(sessions.len(), Relaxed);
+            return None;
         }
         tracing::info!(
             %session_id, recipe = %hash, file = file.id,
@@ -8470,10 +8490,11 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
+            .await
         {
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(session_id.clone(), Arc::clone(&session));
-            self.active_session_count.store(sessions.len(), Relaxed);
+            return Err("this node lost quorum serving authority".to_owned());
         }
         self.emit_session_event(
             &session_id,
@@ -8686,7 +8707,9 @@ impl TranscodeManager {
                 "retrying on software"
             }
         );
-        let _replacement = session.kill_child_for_replacement().await;
+        let Some(_replacement) = session.kill_child_for_replacement().await else {
+            return opts.effective_rate_control;
+        };
         clear_session_dir(dir).await;
         if !downgrade_pipeline {
             // The slot belonged to the encoder that just died, not
@@ -9004,10 +9027,11 @@ impl TranscodeManager {
             typeless_sliding,
             first_slide_logged: AtomicBool::new(false),
         });
+        if !self
+            .register_session(&session_id, Arc::clone(&session))
+            .await
         {
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(session_id.clone(), Arc::clone(&session));
-            self.active_session_count.store(sessions.len(), Relaxed);
+            return Err("this node lost quorum serving authority".to_owned());
         }
         self.emit_session_event(
             &session_id,
@@ -9373,6 +9397,26 @@ impl TranscodeManager {
         true
     }
 
+    /// Publish a newly spawned session only while the process-local serving
+    /// fence is open. The post-insert load and the loss loop's pre-snapshot
+    /// store cover both orderings: either that snapshot sees this session or
+    /// this method observes the closed fence and retires it itself.
+    async fn register_session(&self, session_id: &str, session: Arc<Session>) -> bool {
+        let admitted_generation = self.serving_loss_generation.load(Acquire);
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.insert(session_id.to_owned(), Arc::clone(&session));
+            self.active_session_count.store(sessions.len(), Relaxed);
+        }
+        if self.serving_ready.load(Acquire)
+            && self.serving_loss_generation.load(Acquire) == admitted_generation
+        {
+            return true;
+        }
+        let _ = self.retire_session(session_id, &session).await;
+        false
+    }
+
     /// End one session now. True if it existed.
     ///
     /// `reason` distinguishes the two callers in the log, because they mean
@@ -9405,6 +9449,52 @@ impl TranscodeManager {
         .await;
         tracing::info!(%session_id, reason, "transcode session ended");
         true
+    }
+
+    async fn stop_all_sessions_for_serving_fence(&self) {
+        let sessions = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect::<Vec<_>>();
+        futures_util::future::join_all(sessions.into_iter().map(
+            |(session_id, session)| async move {
+                if self.retire_session(&session_id, &session).await {
+                    // Do not publish a Store-backed playback event here: quorum
+                    // loss is exactly the condition that triggered teardown.
+                    tracing::warn!(%session_id, "transcode session self-fenced after quorum loss");
+                }
+            },
+        ))
+        .await;
+    }
+
+    /// Kill every mutable HLS producer on the first loss transition. The
+    /// watch is process-local and changes synchronously with readiness, so
+    /// teardown never waits for another Store request to time out.
+    pub(crate) async fn serving_fence_loop(
+        self: Arc<Self>,
+        mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    ) {
+        loop {
+            let state = *serving.borrow_and_update();
+            let previous_generation = self.serving_loss_generation.load(Acquire);
+            if !state.ready || state.loss_generation != previous_generation {
+                // Keep the gate closed until the old generation is fully
+                // retired. Any insertion after the snapshot observes false
+                // in its post-insert check and retires itself.
+                self.serving_ready.store(false, Release);
+                self.serving_loss_generation
+                    .store(state.loss_generation, Release);
+                self.stop_all_sessions_for_serving_fence().await;
+            }
+            self.serving_ready.store(state.ready, Release);
+            if serving.changed().await.is_err() {
+                break;
+            }
+        }
     }
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
@@ -13930,7 +14020,10 @@ mod tests {
             .spawn()
             .expect("spawn false");
         let session = watchdog_session(dir.path(), Some(child), false);
-        let _replacement = session.kill_child_for_replacement().await;
+        let _replacement = session
+            .kill_child_for_replacement()
+            .await
+            .expect("a live session may replace its child");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = TranscodeManager::new(
             store,
@@ -15159,6 +15252,107 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn serving_fence_kills_existing_and_transition_racing_children() {
+        use plurx_core::store::SqliteStore;
+
+        let root = tempfile::tempdir().expect("serving-fence root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let existing = watchdog_session(
+            &root.path().join("existing"),
+            Some(long_running_child()),
+            false,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("existing".to_owned(), Arc::clone(&existing));
+
+        let (serving_tx, serving_rx) =
+            tokio::sync::watch::channel(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 0,
+            });
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(serving_rx));
+        // Publish loss and recovery without yielding. A boolean watch could
+        // coalesce this to `true` and preserve the old child; the generation
+        // makes the lost authority permanent for generation zero.
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: false,
+                loss_generation: 1,
+            })
+            .expect("publish quorum loss");
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 1,
+            })
+            .expect("publish quorum recovery");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stopped = existing
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+                if existing.retired.load(Acquire)
+                    && stopped
+                    && manager.sessions.lock().await.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("existing child must be retired promptly");
+
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: false,
+                loss_generation: 2,
+            })
+            .expect("publish second quorum loss");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager.serving_ready.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager gate must close");
+
+        // This insertion linearizes after the fence loop's false store and
+        // after its first snapshot. `register_session` is the other half of
+        // the race proof: the late child must retire itself.
+        let late = watchdog_session(&root.path().join("late"), Some(long_running_child()), false);
+        assert!(
+            !manager.register_session("late", Arc::clone(&late)).await,
+            "a transition-racing session must not publish"
+        );
+        assert!(late.retired.load(Acquire));
+        assert!(manager.sessions.lock().await.is_empty());
+        assert!(
+            late.child
+                .lock()
+                .await
+                .as_mut()
+                .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some())),
+            "the rejected late child must already be reaped"
+        );
+
+        drop(serving_tx);
+        fence_loop.await.expect("serving fence loop");
+    }
+
     /// A process that outlives the test unless the watchdog kills it.
     fn long_running_child() -> Child {
         let mut cmd = tokio::process::Command::new("sleep");
@@ -15304,7 +15498,10 @@ mod tests {
             .watchdog_verdict_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let replacement = session.kill_child_for_replacement().await;
+        let replacement = session
+            .kill_child_for_replacement()
+            .await
+            .expect("a live session may replace its child");
         session.progress.begin_attempt();
         *session.child.lock().await = Some(long_running_child());
         drop(replacement);
@@ -15590,6 +15787,91 @@ mod tests {
         assert!(
             session.begin_copy_child_replacement().await.is_none(),
             "a retired session must never publish another producer"
+        );
+    }
+
+    /// The inverse transition ordering matters too: a hardware fallback can
+    /// decide to downgrade immediately before the serving fence retires its
+    /// session, then arrive at `child_transition` only after teardown. The
+    /// real downgrade entry point must treat that work as stale instead of
+    /// installing a new ffmpeg process into an unregistered session.
+    #[tokio::test]
+    async fn retirement_wins_before_production_fallback_and_prevents_successor() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = tempfile::tempdir().expect("session dir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let predecessor_pid = session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(tokio::process::Child::id)
+            .expect("placeholder process id");
+        let predecessor_generation = session.progress.generation();
+        mgr.sessions
+            .lock()
+            .await
+            .insert("retirement-first".into(), Arc::clone(&session));
+
+        assert!(mgr.stop_session("retirement-first", "test").await);
+        // Scratch presence is not authority. Recreate it so this regression
+        // proves the monotonic retirement verdict is what rejects fallback.
+        tokio::fs::create_dir_all(&session.dir)
+            .await
+            .expect("recreate stale scratch");
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let sw_pool = mgr.admissions.software_pool();
+        let _ = TranscodeManager::downgrade_one_step(
+            &session,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &sw_pool,
+            dir.path(),
+            "retirement-first",
+            &mgr.runtime_cache,
+        )
+        .await;
+
+        assert!(session.retired.load(Acquire));
+        assert!(
+            mgr.sessions.lock().await.get("retirement-first").is_none(),
+            "the retired session must remain unregistered"
+        );
+        let mut child = session.child.lock().await;
+        assert!(
+            child.is_some(),
+            "retirement must retain the reaped predecessor handle"
+        );
+        assert_eq!(
+            session.progress.generation(),
+            predecessor_generation,
+            "fallback must not begin or publish a successor process after retirement (predecessor pid {predecessor_pid})"
+        );
+        assert!(
+            child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the retired predecessor must remain dead"
         );
     }
 

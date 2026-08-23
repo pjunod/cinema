@@ -22,6 +22,21 @@ use tokio::task::JoinHandle;
 use tokio::{select, task, time};
 use tracing::{debug, error, info};
 
+#[cfg(feature = "validation-test-helpers")]
+static VALIDATION_RAFT_PARTITIONED: AtomicBool = AtomicBool::new(false);
+
+/// Isolate this validation process from every Raft peer without changing its
+/// authenticated client API. The feature is absent from production builds.
+#[cfg(feature = "validation-test-helpers")]
+pub fn validation_set_raft_partitioned(partitioned: bool) {
+    VALIDATION_RAFT_PARTITIONED.store(partitioned, Ordering::Release);
+}
+
+#[cfg(feature = "validation-test-helpers")]
+pub(crate) fn validation_raft_partitioned() -> bool {
+    VALIDATION_RAFT_PARTITIONED.load(Ordering::Acquire)
+}
+
 #[cfg(feature = "cache")]
 use crate::store::state_machine::memory::TypeConfigKV;
 
@@ -492,6 +507,14 @@ impl NetworkConnectionStreaming {
     where
         Err: std::error::Error + 'static + Clone,
     {
+        #[cfg(feature = "validation-test-helpers")]
+        if validation_raft_partitioned() {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "validation Raft partition",
+            );
+            return Err(RPCError::Unreachable(Unreachable::new(&error)));
+        }
         tracing::debug!(
             req = debug(&req),
             "sending rpc request to {}",

@@ -373,7 +373,9 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
             raft: format!("127.0.0.1:{}", free_port().expect("raft port")),
             api: format!("127.0.0.1:{}", free_port().expect("api port")),
         }],
+        listen_addr: "127.0.0.1".to_owned(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
 
     let mut node = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
@@ -800,7 +802,9 @@ async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
             raft: format!("127.0.0.1:{raft}"),
             api: format!("127.0.0.1:{api}"),
         }],
+        listen_addr: "127.0.0.1".to_owned(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     let mut voter = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
     let error = voter
@@ -974,7 +978,9 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         node_id: 2,
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(3).expect("allocate voters").into_specs(),
+        listen_addr: "127.0.0.1".to_owned(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
 
     let config = node_config(&launch).expect("build the voter config");
@@ -1042,7 +1048,9 @@ async fn a_malformed_request_is_answered_and_the_voter_keeps_serving() {
         node_id: 1,
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(1).expect("allocate one voter").into_specs(),
+        listen_addr: "127.0.0.1".to_owned(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     // Driven as a raw child rather than through `NodeProcess`, which can only
     // send a well-formed `Request`.

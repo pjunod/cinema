@@ -57,8 +57,9 @@ mod web;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{Request, StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
@@ -250,7 +251,11 @@ pub fn router(state: AppState) -> Router {
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
         // Images
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     // Plex-compat Tier 1 façade at Plex's absolute paths (docs/CLIENTS.md §3).
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
@@ -271,7 +276,11 @@ pub fn router(state: AppState) -> Router {
         .route("/:/scrobble", get(plex::scrobble))
         .route("/:/unscrobble", get(plex::unscrobble))
         .route("/search", get(plex::search))
-        .route("/hubs/search", get(plex::search));
+        .route("/hubs/search", get(plex::search))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
@@ -363,6 +372,20 @@ async fn healthz() -> &'static str {
 
 /// Readiness: this node can do work (storage answers).
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(policy) = state.serving.http_policy("/readyz") {
+        if policy.status != 200 {
+            return (
+                StatusCode::from_u16(policy.status).expect("serving policy status"),
+                policy.body,
+            );
+        }
+    }
+    // A fresh quorum watermark is already a recent replicated-store proof.
+    // Do not turn readiness into another multi-second Store request exactly
+    // when an isolated node needs to self-fence promptly.
+    if state.serving.is_quorum_managed() {
+        return (StatusCode::OK, "ready\n");
+    }
     match state.store.ping().await {
         Ok(()) => (StatusCode::OK, "ready\n"),
         Err(error) => {
@@ -370,6 +393,29 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n")
         }
     }
+}
+
+async fn mutable_media_serving_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+        return next.run(request).await;
+    };
+
+    let mut response = (
+        StatusCode::from_u16(policy.status).expect("serving policy status"),
+        [(header::CONTENT_TYPE, policy.content_type)],
+        policy.body,
+    )
+        .into_response();
+    if policy.retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 #[cfg(test)]
@@ -418,6 +464,185 @@ mod tests {
             safe_trace_target(&publication),
             "/api/v1/publication/[REDACTED]/OEBPS/chapter.xhtml"
         );
+    }
+
+    fn compact_handler(source: &str, start: &str, end: &str) -> String {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing handler boundary {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing handler boundary {end}"))
+            .0
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn assert_catalogue_methods(handler: &str, methods: &[&str]) {
+        for method in methods {
+            assert!(
+                handler.contains(&format!("state.catalogue.{method}")),
+                "eligible handler no longer routes {method} through CatalogueReader"
+            );
+            assert!(
+                !handler.contains(&format!("state.store.{method}")),
+                "eligible handler routes {method} directly through Authority"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
+        let browse = include_str!("browse.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn list_items",
+                "pub async fn item_detail",
+            ),
+            &[
+                "get_library",
+                "list_top_items_in_genre",
+                "item_max_heights",
+                "item_media_facts",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn item_detail",
+                "pub async fn home_previews",
+            ),
+            &[
+                "get_item",
+                "get_item_children",
+                "item_media_facts",
+                "files_for_item",
+                "get_file_probe_json",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn home_previews", "pub async fn hubs"),
+            &[
+                "list_libraries",
+                "home_preview_pages",
+                "item_max_heights",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
+            &["recently_added", "child_counts", "item_max_heights"],
+        );
+        assert!(
+            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
+                .contains("state.store.search_items")
+        );
+
+        let libraries = include_str!("libraries.rs");
+        assert_catalogue_methods(
+            &compact_handler(libraries, "pub async fn list", "pub async fn create"),
+            &["list_libraries"],
+        );
+        for mutation in [
+            "state.store.create_library",
+            "state.store.update_library",
+            "state.store.set_library_schedule",
+            "state.store.delete_library",
+            "state.store.reset_library_root_fingerprint",
+        ] {
+            assert!(libraries
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(mutation));
+        }
+
+        let plex = include_str!("plex.rs");
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn sections", "async fn views"),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn visible_item", "async fn element_for"),
+            &["get_item", "get_library"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn element_for", "pub async fn section_all"),
+            &["files_for_item", "get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
+            &["get_library", "list_top_items_in_genre"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn children", "pub async fn part"),
+            &["get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn part", "pub async fn image"),
+            &["get_file"],
+        );
+        let image = compact_handler(plex, "pub async fn image", "pub async fn photo_transcode");
+        assert!(image.contains("visible_item(&state"));
+        assert!(!image.contains("state.store."));
+        assert_catalogue_methods(
+            &compact_handler(
+                plex,
+                "pub async fn photo_transcode",
+                "pub async fn timeline",
+            ),
+            &["get_item"],
+        );
+        let timeline = compact_handler(plex, "pub async fn timeline", "pub async fn scrobble");
+        assert!(timeline.contains("state.store.get_item"));
+        assert!(!timeline.contains("state.catalogue.get_item"));
+        assert!(timeline.contains("state.progress.put"));
+        let scrobble = compact_handler(plex, "pub async fn scrobble", "pub async fn unscrobble");
+        assert!(scrobble.contains("state.store.get_item"));
+        assert!(scrobble.contains("state.store.set_watched_tree"));
+        assert!(!scrobble.contains("state.catalogue.get_item"));
+        let unscrobble =
+            compact_handler(plex, "pub async fn unscrobble", "pub struct ScrobbleQuery");
+        assert!(unscrobble.contains("state.store.get_item"));
+        assert!(unscrobble.contains("state.store.set_watched_tree"));
+        assert!(!unscrobble.contains("state.catalogue.get_item"));
+        let plex_search = compact_handler(plex, "pub async fn search", "fn version");
+        assert!(plex_search.contains("state.store.search_items"));
+        assert!(!plex_search.contains("state.catalogue.search_items"));
+
+        let system = include_str!("system.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn system_info",
+                "pub async fn library_shape",
+            ),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn library_shape",
+                "pub async fn probe_storage",
+            ),
+            &["media_shape"],
+        );
+        let authority_only = [include_str!("auth.rs"), include_str!("watch.rs"), system]
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        for authority_call in [
+            "state.store.get_user_by_username",
+            "state.store.set_watched_tree",
+            "state.store.settings_snapshot",
+            "state.store.put_setting",
+        ] {
+            assert!(authority_only.contains(authority_call));
+        }
     }
 
     fn test_dirs(base: &std::path::Path) -> crate::state::Dirs {
@@ -479,6 +704,58 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(false);
+
+        let (status, body) = call_text(&app, get("/healthz", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ok\n");
+
+        let (status, body) = call_text(&app, get("/readyz", None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "quorum unavailable\n");
+
+        for path in [
+            "/api/v1/hls/probe/status",
+            "/api/v1/files/7/decision",
+            "/api/v1/files/7/offline-options",
+            "/api/v1/files/7/stream.mp4",
+            "/api/v1/files/7/direct",
+            "/api/v1/files/7/content",
+            "/api/v1/offline/media/capability/0.ts",
+            "/api/v1/publication/capability/chapter.xhtml",
+            "/api/v1/files/7/subs/0",
+            "/api/v1/images/poster.jpg",
+            "/api/v1/items/7/photo",
+            "/library/parts/7/0/movie.mkv",
+            "/library/metadata/7/thumb",
+            "/photo/:/transcode",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("fenced response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&HeaderValue::from_static("1")),
+                "{path}"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let body: Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], "serving_fenced", "{path}");
+            assert!(body.get("retry_nodes").is_none(), "{path}");
+        }
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {

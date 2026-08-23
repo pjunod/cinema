@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P2e landed; M4 singleton process proof staged; P0c/P2f and P3–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P3 implementation and deterministic acceptance delivered; M4 singleton and serving-partition proofs delivered; P0c/P2f physical evidence and P4–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -350,6 +350,9 @@ slices:
   than the acceptance budget, a pinned isolated load-generator placement,
   per-node resource captures, medians, the pre-registered paired confidence
   intervals above, and reviewed budgets;
+  the remote/container runner, resource capture, campaign schema, and
+  pre-registered stopping validator are implemented separately from the raw
+  hardware evidence so CI cannot be mistaken for the named result;
 - **P2a — observer-safe metrics snapshots:** remove Store calls from the scrape
   path before Store instrumentation can observe itself;
 - **P2b — Store primitives:** RAII timing for `local_read`, `authority_read`,
@@ -390,9 +393,10 @@ lifecycle into the three-process harness, pauses a follower owner past its
 authoritative TTL, admits one successor, bounds provider calls and Raft
 entries, and rejects the resumed token inside the publication transaction.
 That closes the duplication risk which could contaminate an ordinary-load
-baseline. M4's separate serving-node partition/readiness/capability proof
-remains before P0c; `SIGSTOP` is process unavailability and is not relabelled
-as a live network partition.
+baseline. The separate serving-node partition/readiness/capability proof also
+landed in #526; `SIGSTOP` remains process unavailability and is not relabelled
+as a live network partition. P0c now awaits only the named-runner physical
+baseline and its reviewed evidence.
 
 **Acceptance:** CI's replicated-storage contract passes and validates that the
 artifact contains both voter counts, exact workload identity, quorum, commit
@@ -490,6 +494,14 @@ local applied index exists. Only that state derives saturating commit-to-apply
 lag. Metrics retain an invalid prior value for diagnosis, expose fixed
 `source="watermark"` validity, age, and error series, and never render either
 node identity.
+
+A distinct serving process is a separate authority-only case: it owns no local
+Raft replica, so it renews the same bounded quorum proof without polling or
+inventing a local applied index. Its proof exposes no apply-lag value and may
+gate media readiness only. It is categorically ineligible for `BoundedReplica`;
+that class still requires the locally bound term, leader, epoch, and applied
+index above. A failed remote renewal retains the preceding proof only until its
+original pre-request monotonic deadline, after which serving self-fences.
 
 **P2e snapshot hooks:** the vendored SQLite state-machine builder and installer
 start an RAII timer at their real operation boundary and publish exactly one
@@ -685,11 +697,10 @@ documented discontinuity behavior.
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
 
 `CLUSTERING-PLAN.md` M4's core implementation landed in #505. Its real-process
-singleton pause/takeover proof is staged here; the serving-node partition
-acceptance remains before P0c and before any PR in this table claims
-ordinary-load performance. Code instrumentation may be
-prepared before the named-runner baseline, but P0c/P2f acceptance and tuning
-decisions remain blocked until that remaining singleton-work proof passes.
+singleton pause/takeover proof landed in #523, and the serving-node partition
+acceptance landed in #526. Code instrumentation may proceed before the
+named-runner baseline, but P0c/P2f acceptance and tuning decisions remain
+blocked until the physical evidence is recorded and reviewed.
 
 ### 7.2 Existing work and shared-file ownership
 

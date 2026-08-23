@@ -174,7 +174,7 @@ pub async fn system_info(
         instance_id: state.store.instance_id().await?,
         uptime_seconds: state.started_at.elapsed().as_secs(),
         users: state.store.count_users().await?,
-        libraries: state.store.list_libraries().await?.len(),
+        libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
         replication,
         hw_slots_in_use: hw_in_use,
@@ -215,7 +215,7 @@ pub async fn library_shape(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<MediaShapeDto>, ApiError> {
-    let s = state.store.media_shape().await?;
+    let s = state.catalogue.media_shape().await?;
     Ok(Json(MediaShapeDto {
         probed: s.probed,
         unprobed: s.unprobed,
@@ -2227,12 +2227,16 @@ fn render_passive_raft_metrics(
          plurx_raft_metric_sample_errors_total{{source=\"watermark\"}} {}\n\
          # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
          # TYPE plurx_raft_leader_changes_total counter\n\
-         plurx_raft_leader_changes_total {}\n",
+         plurx_raft_leader_changes_total {}\n\
+         # HELP plurx_raft_local_read_protocol_supported Whether the watermark source supports this binary's bounded local-read protocol.\n\
+         # TYPE plurx_raft_local_read_protocol_supported gauge\n\
+         plurx_raft_local_read_protocol_supported {}\n",
         u8::from(view.valid),
         u8::from(view.watermark_valid),
         view.errors,
         view.watermark_errors,
         view.leader_changes,
+        u8::from(view.watermark_local_reads_supported),
     );
     if view.age_seconds.is_some() || view.watermark_age_millis.is_some() {
         out.push_str(
@@ -2576,12 +2580,14 @@ mod tests {
             errors: 3,
             leader_changes: 4,
             watermark_source: true,
+            watermark_requires_local_binding: true,
             watermark: Some(QuorumWatermarkSample {
                 committed_index: 45,
                 apply_lag_entries: Some(3),
             }),
             watermark_age_millis: Some(250),
             watermark_valid: true,
+            watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
                 build_ok: DbSnapshotHistogram {
@@ -2610,6 +2616,7 @@ mod tests {
         assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
         assert!(rendered.contains("plurx_raft_commit_index 45"));
         assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
+        assert!(rendered.contains("plurx_raft_local_read_protocol_supported 1"));
         assert!(rendered.contains(
             "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"0.1\"} 1"
         ));
@@ -2642,9 +2649,11 @@ mod tests {
                 errors: 0,
                 leader_changes: 0,
                 watermark_source: true,
+                watermark_requires_local_binding: true,
                 watermark: None,
                 watermark_age_millis: None,
                 watermark_valid: false,
+                watermark_local_reads_supported: true,
                 watermark_errors: 1,
                 snapshot_metrics: None,
             }
@@ -2661,9 +2670,11 @@ mod tests {
             errors: 0,
             leader_changes: 0,
             watermark_source: false,
+            watermark_requires_local_binding: false,
             watermark: None,
             watermark_age_millis: None,
             watermark_valid: false,
+            watermark_local_reads_supported: false,
             watermark_errors: 0,
             snapshot_metrics: None,
         });

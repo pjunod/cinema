@@ -1,9 +1,11 @@
 use crate::app_state::AppState;
 use crate::{Error, NodeId};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
 use stream::ClientStreamReq;
 use tokio::sync::{RwLock, oneshot, watch};
+use tokio::task::JoinHandle;
 
 #[cfg(feature = "backup")]
 mod backup;
@@ -21,7 +23,10 @@ mod helpers;
 mod listen_notify;
 mod mgmt;
 #[cfg(feature = "sqlite")]
-pub use mgmt::{DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+pub use mgmt::{
+    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+    DB_LOCAL_READ_PROTOCOL_VERSION,
+};
 #[cfg(feature = "sqlite")]
 pub(crate) use mgmt::{
     DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER,
@@ -55,6 +60,10 @@ pub(crate) struct DbClient {
     #[cfg(feature = "sqlite")]
     pub(crate) leader_db: Arc<RwLock<(NodeId, String)>>,
     pub(crate) nodes: Vec<String>,
+    /// Keep remote proxy endpoints authoritative across reconnects. Without
+    /// this, discovery and ForwardToLeader handling replace them with the
+    /// cluster's directly advertised node addresses.
+    pub(crate) proxy_mode: bool,
     pub(crate) client: Option<reqwest::Client>,
     #[cfg(feature = "cache")]
     pub(crate) tx_client_cache: flume::Sender<ClientStreamReq>,
@@ -66,6 +75,8 @@ pub(crate) struct DbClient {
     pub(crate) api_secret: Option<String>,
     pub(crate) request_id: AtomicUsize,
     pub(crate) tx_shutdown: Option<watch::Sender<bool>>,
+    pub(crate) stream_shutdown: watch::Sender<bool>,
+    pub(crate) background_handles: Mutex<Vec<JoinHandle<()>>>,
     #[cfg(feature = "listen_notify_local")]
     pub(crate) app_start: i64,
     #[cfg(feature = "listen_notify_local")]

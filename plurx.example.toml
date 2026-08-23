@@ -1,7 +1,8 @@
 # plurx configuration — copy to plurx.toml (or /etc/plurx/plurx.toml).
 # Every key is optional; these are the defaults. Env vars override the file:
 #   PLURX_SERVER_NAME, PLURX_BIND, PLURX_DATA_DIR,
-#   PLURX_SCAN_PRUNE_PERCENT, PLURX_CONFIG, PLURX_LOG
+#   PLURX_SCAN_PRUNE_PERCENT, PLURX_CLUSTER_BOUNDED_REPLICA_READS,
+#   PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES, PLURX_CONFIG, PLURX_LOG
 
 [server]
 # Human-visible server name.
@@ -26,3 +27,9 @@ scan_prune_percent = 10
 # advertise_host = ""
 # join_token_file = ""
 # trusted_network = ""
+# Opt in cluster-wide only after every voter advertises the same bounded-read
+# protocol. False is the immediate Authority-read kill switch.
+# bounded_replica_reads = false
+# Fresh local reads also require commit-to-apply lag at or below this value.
+# Range: 0..10000 entries. Keep identical on every voter.
+# bounded_replica_max_lag_entries = 64

@@ -308,6 +308,10 @@ impl Client {
         query: Query,
         consistent: bool,
     ) -> Result<Vec<RowOwned>, Error> {
+        #[cfg(feature = "validation-test-helpers")]
+        if crate::network::raft_client::validation_raft_partitioned() {
+            return Err(Error::Connect("validation cluster partition".into()));
+        }
         let (ack, rx) = oneshot::channel();
 
         let payload = if consistent {
@@ -331,7 +335,7 @@ impl Client {
             .map_err(|err| Error::Error(err.to_string().into()))?;
         let res = rx
             .await
-            .expect("To always receive an answer from Client Stream Manager")?;
+            .map_err(|_| Error::Connect("client stream manager stopped".into()))??;
         match res {
             ApiStreamResponsePayload::Query(res) => {
                 assert!(!consistent);

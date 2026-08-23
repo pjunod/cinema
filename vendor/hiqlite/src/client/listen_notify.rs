@@ -29,10 +29,11 @@ pub(crate) mod remote {
             leader_cache: Arc<RwLock<(NodeId, String)>>,
             tls: bool,
             api_secret: String,
-        ) -> flume::Receiver<(i64, Vec<u8>)> {
+            shutdown: tokio::sync::watch::Receiver<bool>,
+        ) -> (flume::Receiver<(i64, Vec<u8>)>, task::JoinHandle<()>) {
             let (tx, rx) = flume::unbounded();
-            task::spawn(Self::handler(leader_cache, api_secret, tls, tx));
-            rx
+            let handle = task::spawn(Self::handler(leader_cache, api_secret, tls, tx, shutdown));
+            (rx, handle)
         }
 
         async fn handler(
@@ -40,6 +41,7 @@ pub(crate) mod remote {
             api_secret: String,
             tls: bool,
             tx: flume::Sender<(i64, Vec<u8>)>,
+            mut shutdown: tokio::sync::watch::Receiver<bool>,
         ) {
             'main: loop {
                 let client = {
@@ -59,7 +61,14 @@ pub(crate) mod remote {
                 };
 
                 let mut stream = client.stream();
-                while let Some(res) = stream.next().await {
+                loop {
+                    let res = tokio::select! {
+                        _ = shutdown.changed() => break 'main,
+                        res = stream.next() => res,
+                    };
+                    let Some(res) = res else {
+                        break;
+                    };
                     match res {
                         Ok(sse) => match sse {
                             SSE::Connected(c) => {
@@ -90,7 +99,10 @@ pub(crate) mod remote {
                     }
                 }
 
-                time::sleep(Duration::from_secs(1)).await;
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    () = time::sleep(Duration::from_secs(1)) => {}
+                }
             }
 
             debug!("RemoteListener exiting");
@@ -210,7 +222,7 @@ impl Client {
                 .map_err(|err| Error::Error(err.to_string().into()))?;
             let res = rx
                 .await
-                .expect("To always receive an answer from Client Stream Manager")?;
+                .map_err(|_| Error::Connect("client stream manager stopped".into()))??;
             match res {
                 ApiStreamResponsePayload::Notify(res) => res,
                 _ => unreachable!(),

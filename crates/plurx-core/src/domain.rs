@@ -1030,7 +1030,7 @@ impl ItemSort {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ItemPage {
     pub items: Vec<Item>,
     pub total: i64,
@@ -1042,7 +1042,7 @@ pub struct ItemPage {
 /// HTTP layer joins these pages to the authoritative library roster and emits
 /// an empty page for them. Keeping only the id here avoids leaking HTTP DTOs
 /// into the durable storage boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HomePreviewPage {
     pub library_id: i64,
     pub items: Vec<Item>,
@@ -1062,7 +1062,7 @@ pub struct HomePreviewPage {
 /// Counts, deliberately, not a list. Nobody needs to know which files; they
 /// need to know whether the 4K HDR they own is mostly the kind the fast path
 /// can reach.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MediaShape {
     /// Files with a successful probe. Everything below is a subset — an
     /// unprobed file has no codec, no height and no HDR flavour, and counting

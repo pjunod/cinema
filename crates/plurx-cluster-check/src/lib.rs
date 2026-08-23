@@ -14,12 +14,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::io::Write as _;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,7 +48,7 @@ use plurx_core::domain::{
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    ApiKeyStore, ArtworkRepairFence, ClusterCompatibility, CoordinationStore,
+    ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility, CoordinationStore,
     FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
     PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
@@ -74,7 +75,20 @@ use production_progress::ProgressCoalescer;
 mod production_job_lease;
 use production_job_lease::ActiveJobLease;
 
+// Compile the production daemon serving fence directly. The partition proof
+// below is a separate live process, but its readiness decision must remain the
+// exact projection used by plurxd rather than a harness imitation.
+#[allow(dead_code)]
+#[path = "../../plurxd/src/serving_fence.rs"]
+mod production_serving_fence;
+use production_serving_fence::ServingFence;
+
+mod named_runner;
 mod topology;
+pub use named_runner::{
+    claim_named_output, validate_named_campaign, NamedRunnerConfig, NamedTopologyCampaign,
+    NamedVoter, NAMED_CAMPAIGN_SCHEMA_VERSION,
+};
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
     NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
@@ -84,6 +98,7 @@ pub use topology::{
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
 const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
+const P3A_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER";
 const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
@@ -110,6 +125,9 @@ const SINGLETON_PROOF_KEY: &str = "cluster-check.singleton-provider";
 const SINGLETON_LEASE_TTL: Duration = Duration::from_secs(5);
 const SINGLETON_HEARTBEAT: Duration = Duration::from_secs(4);
 const SINGLETON_POST_BASELINE_COMMIT_BUDGET: u64 = 8;
+const SINGLETON_TRIAL_ATTEMPTS: u32 = 3;
+const SINGLETON_TRIAL_TIMEOUT: Duration = Duration::from_secs(120);
+const SINGLETON_UNSTABLE_MARKER: &str = "CLUSTER_SINGLETON_UNSTABLE";
 /// Incoming active-player heartbeats in the compacted-growth record.
 pub const GROWTH_INCOMING_BEATS: u64 = 10_000;
 /// Independent user/item streams represented by the growth load.
@@ -208,6 +226,7 @@ pub fn validate_compacted_growth(report: &CompactedGrowthReport) -> Result<()> {
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
 pub async fn run(args: Vec<String>) -> Result<()> {
+    install_crypto_provider();
     match args.get(1).map(String::as_str) {
         None | Some("check") => {
             run_growth_subprocess().await?;
@@ -215,6 +234,8 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("membership") => run_membership_lifecycle_case().await,
         Some("singleton") => run_singleton_takeover_case().await,
+        Some("singleton-attempt") => run_singleton_takeover_attempt().await,
+        Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
@@ -223,9 +244,82 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             let order = topology::parse_topology_order(args.get(3).map(String::as_str))?;
             run_topology_comparison(&output, order).await
         }
+        Some("build-identity") => {
+            if args.get(2).is_some() {
+                bail!("build-identity accepts no arguments");
+            }
+            named_runner::print_embedded_build_identity()
+        }
+        Some("topology-named") => {
+            let config = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-named requires a runner config JSON")?;
+            let output = args
+                .get(3)
+                .map(PathBuf::from)
+                .context("topology-named requires an output directory")?;
+            let source_root = args
+                .get(4)
+                .map(PathBuf::from)
+                .context("topology-named requires the controller source root")?;
+            let owner_nonce = args
+                .get(5)
+                .context("topology-named requires the output owner nonce")?;
+            if args.get(6).is_some() {
+                bail!(
+                    "topology-named accepts exactly config, output, source-root, and owner arguments"
+                );
+            }
+            named_runner::run_named_campaign(&config, &output, &source_root, owner_nonce).await
+        }
+        Some("topology-claim") => {
+            let output = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-claim requires an absent output directory")?;
+            let owner_nonce = args
+                .get(3)
+                .context("topology-claim requires an owner nonce")?;
+            if args.get(4).is_some() {
+                bail!("topology-claim accepts exactly output and owner arguments");
+            }
+            claim_named_output(&output, owner_nonce)
+        }
+        Some("topology-campaign-validate") => {
+            let path = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-campaign-validate requires campaign.json")?;
+            let campaign: NamedTopologyCampaign = serde_json::from_slice(
+                &std::fs::read(&path)
+                    .with_context(|| format!("read named campaign {}", path.display()))?,
+            )?;
+            let root = path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            validate_named_campaign(&campaign, Some(root))
+        }
+        Some("topology-cleanup") => {
+            let path = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("topology-cleanup requires an active cleanup manifest")?;
+            named_runner::cleanup_named_manifest(&path).await
+        }
         Some("node") => {
             let launch: NodeLaunch =
                 serde_json::from_str(args.get(2).context("node mode requires its launch JSON")?)?;
+            node(launch).await
+        }
+        Some("node-hex") => {
+            let encoded = args
+                .get(2)
+                .context("node-hex mode requires hex-encoded launch JSON")?;
+            let bytes = hex::decode(encoded).context("decode node-hex launch JSON")?;
+            let launch: NodeLaunch =
+                serde_json::from_slice(&bytes).context("parse node-hex launch JSON")?;
             node(launch).await
         }
         Some("preflight") => {
@@ -235,6 +329,14 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             )?;
             preflight_voter(preflight).await
         }
+        Some("serving-node") => {
+            let launch: ServingLaunch = serde_json::from_str(
+                args.get(2)
+                    .context("serving-node mode requires its launch JSON")?,
+            )?;
+            serving_node(launch).await
+        }
+        Some("media-child") => media_child().await,
         Some(other) => bail!("unknown cluster-check mode {other}"),
     }
 }
@@ -286,13 +388,19 @@ async fn controller() -> Result<()> {
     run_degraded_four_voter_leader_self_leave_case().await?;
     println!("cluster-check: rolling quorum-watermark stream compatibility");
     run_quorum_watermark_rolling_compatibility_case().await?;
+    println!("cluster-check: P3a three-column watermark compatibility");
+    run_p3a_watermark_rolling_compatibility_case().await?;
+    println!("cluster-check: bounded catalogue apply-pause and follower partition");
+    run_bounded_catalogue_failure_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
+    println!("cluster-check: isolated serving-node readiness and media fence");
+    run_serving_partition_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
-    println!("cluster-check: all M1b/M1c/M1d/M3/M4 singleton contracts passed");
+    println!("cluster-check: all M1b/M1c/M1d/M3/M4 serving contracts passed");
     Ok(())
 }
 
@@ -441,6 +549,90 @@ impl ProviderFixture {
 }
 
 async fn run_singleton_takeover_case() -> Result<()> {
+    let executable = harness_executable()?;
+    for attempt in 1..=SINGLETON_TRIAL_ATTEMPTS {
+        let output = run_singleton_trial_process(&executable).await?;
+        std::io::stdout().write_all(&output.stdout)?;
+        std::io::stderr().write_all(&output.stderr)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        if !singleton_trial_was_unstable(&output.stdout) {
+            bail!("singleton trial process exited with {}", output.status);
+        }
+        if attempt == SINGLETON_TRIAL_ATTEMPTS {
+            bail!("singleton topology changed across all {SINGLETON_TRIAL_ATTEMPTS} fresh trials");
+        }
+        eprintln!(
+            "cluster-check: singleton trial {attempt} had unrelated Raft topology churn; retrying a fresh cluster"
+        );
+    }
+    unreachable!("singleton trial loop returns success or its last error")
+}
+
+async fn run_singleton_trial_process(executable: &Path) -> Result<std::process::Output> {
+    let mut command = Command::new(executable);
+    command
+        .arg("singleton-attempt")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = command.spawn().context("spawn isolated singleton trial")?;
+    let pid = child.id().context("isolated singleton trial has no pid")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("capture singleton trial stdout")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("capture singleton trial stderr")?;
+    let stdout_reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let stderr_reader = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let status = match tokio::time::timeout(SINGLETON_TRIAL_TIMEOUT, child.wait()).await {
+        Ok(status) => status.context("wait for isolated singleton trial")?,
+        Err(_) => {
+            let kill_result = kill_process_group(pid, "singleton trial timeout");
+            let _ = child.wait().await;
+            let _ = stdout_reader.await;
+            let _ = stderr_reader.await;
+            kill_result?;
+            bail!(
+                "isolated singleton trial exceeded its {:?} hard timeout",
+                SINGLETON_TRIAL_TIMEOUT
+            );
+        }
+    };
+    let stdout = stdout_reader
+        .await
+        .context("join singleton stdout reader")??;
+    let stderr = stderr_reader
+        .await
+        .context("join singleton stderr reader")??;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn singleton_trial_was_unstable(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.starts_with(SINGLETON_UNSTABLE_MARKER))
+}
+
+async fn run_singleton_takeover_attempt() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("singleton takeover data root")?;
     let mut cluster = with_port_retry(|attempt| {
@@ -611,8 +803,32 @@ async fn run_singleton_takeover_case() -> Result<()> {
         Response::Flag { value: false } => {}
         response => bail!("authoritative stale singleton rejection not observed: {response:?}"),
     }
-    wait_singleton_cleanup(&mut cluster, *successor_node).await?;
-    wait_singleton_cleanup(&mut cluster, old_owner).await?;
+    let cleanup_result = async {
+        wait_singleton_cleanup(&mut cluster, *successor_node).await?;
+        wait_singleton_cleanup(&mut cluster, old_owner).await
+    }
+    .await;
+    if let Err(cleanup_error) = cleanup_result {
+        // Cleanup remains strict in a stable term. If unrelated Raft churn
+        // made the release outcome ambiguous, classify the whole fresh trial
+        // as unstable so the parent can discard it instead of weakening the
+        // lease-retirement assertion.
+        let observed_leader = cluster.leader().await?;
+        let (confirmed_leader, observed_term, _) =
+            raft_position(&mut cluster, observed_leader).await?;
+        if observed_term != stable_term
+            || observed_leader != leader
+            || confirmed_leader != Some(observed_leader)
+        {
+            provider.shutdown().await;
+            cluster.shutdown_all().await?;
+            println!(
+                "{SINGLETON_UNSTABLE_MARKER} stage=cleanup expected_leader={leader} observed_leader={observed_leader} expected_term={stable_term} observed_term={observed_term}"
+            );
+            bail!("singleton proof changed leader/term during cleanup: {cleanup_error}");
+        }
+        return Err(cleanup_error);
+    }
 
     for node_id in 1..=3 {
         require_singleton_value(&mut cluster, node_id, "successor", true).await?;
@@ -648,6 +864,1000 @@ async fn run_singleton_takeover_case() -> Result<()> {
     );
     provider.shutdown().await;
     cluster.shutdown_all().await
+}
+
+const SERVING_PROOF_KEY: &str = "cluster-check.serving-partition-majority";
+const SERVING_PARTITION_MAX_ATTEMPTS: usize = 3;
+
+enum ServingPartitionAttempt {
+    Complete,
+    UnstableInitialAdmission(String),
+}
+
+/// A raw TCP cut-point in front of one voter API. It carries Hiqlite's TLS
+/// bytes unchanged, and partitioning cancels every accepted connection as
+/// well as refusing new ones. The voter itself remains reachable directly by
+/// the controller, which separates a serving-node partition from voter loss.
+struct TcpPartitionProxy {
+    address: String,
+    enabled: Arc<AtomicBool>,
+    connections: Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
+    shutdown: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TcpPartitionProxy {
+    async fn start(backend: String) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind((LISTEN_ADDR, 0))
+            .await
+            .context("bind serving partition proxy")?;
+        let address = listener.local_addr()?.to_string();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let connections = Arc::new(std::sync::Mutex::new(
+            tokio_util::sync::CancellationToken::new(),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task_enabled = Arc::clone(&enabled);
+        let task_connections = Arc::clone(&connections);
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = task_shutdown.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut downstream, _)) = accepted else {
+                    break;
+                };
+                if !task_enabled.load(AtomicOrdering::Acquire) {
+                    let _ = downstream.shutdown().await;
+                    continue;
+                }
+                let connection_shutdown = task_connections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    let upstream = tokio::select! {
+                        () = connection_shutdown.cancelled() => return,
+                        upstream = tokio::net::TcpStream::connect(&backend) => upstream,
+                    };
+                    let Ok(mut upstream) = upstream else {
+                        return;
+                    };
+                    tokio::select! {
+                        () = connection_shutdown.cancelled() => {}
+                        _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream) => {}
+                    }
+                    let _ = downstream.shutdown().await;
+                    let _ = upstream.shutdown().await;
+                });
+            }
+        });
+        Ok(Self {
+            address,
+            enabled,
+            connections,
+            shutdown,
+            task,
+        })
+    }
+
+    fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    fn partition(&self) {
+        self.enabled.store(false, AtomicOrdering::Release);
+        self.connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
+    }
+
+    fn restore(&self) {
+        let mut connections = self
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *connections = tokio_util::sync::CancellationToken::new();
+        self.enabled.store(true, AtomicOrdering::Release);
+    }
+
+    async fn stop(self) {
+        self.enabled.store(false, AtomicOrdering::Release);
+        self.connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
+        self.shutdown.cancel();
+        let _ = self.task.await;
+    }
+}
+
+struct ServingProcess {
+    child: Child,
+    input: ChildStdin,
+    http_base: String,
+}
+
+impl ServingProcess {
+    async fn spawn(executable: &Path, proxy_addresses: Vec<String>) -> Result<Self> {
+        let launch = ServingLaunch { proxy_addresses };
+        let mut command = Command::new(executable);
+        command
+            .arg("serving-node")
+            .arg(serde_json::to_string(&launch)?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let mut child = command.spawn().context("spawn distinct serving node")?;
+        let input = child.stdin.take().context("serving-node stdin")?;
+        let mut output = BufReader::new(child.stdout.take().context("serving-node stdout")?);
+        let mut line = String::new();
+        let bytes = tokio::time::timeout(START_TIMEOUT, output.read_line(&mut line))
+            .await
+            .context("serving-node startup timed out")??;
+        if bytes == 0 {
+            bail!(
+                "serving-node closed its startup stream: {:?}",
+                child.try_wait()?
+            );
+        }
+        let ready: ServingReady =
+            serde_json::from_str(line.trim()).context("decode serving-node startup")?;
+        Ok(Self {
+            child,
+            input,
+            http_base: format!("http://{}", ready.http_address),
+        })
+    }
+
+    async fn stop(self) -> Result<()> {
+        let Self {
+            mut child,
+            input,
+            http_base: _,
+        } = self;
+        drop(input);
+        let status = tokio::time::timeout(START_TIMEOUT, child.wait())
+            .await
+            .context("serving-node did not stop after stdin closed")??;
+        if !status.success() {
+            bail!("serving-node exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+struct HttpObservation {
+    body: String,
+    retry_after: Option<String>,
+}
+
+async fn wait_serving_http(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    expected: reqwest::StatusCode,
+) -> Result<HttpObservation> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let last = match client.get(format!("{base}{path}")).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let body = response.text().await.unwrap_or_default();
+                if status == expected {
+                    return Ok(HttpObservation { body, retry_after });
+                }
+                format!("HTTP {status}: {body}")
+            }
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() >= deadline {
+            bail!("{path} did not reach HTTP {expected}: {last}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn run_serving_partition_case() -> Result<()> {
+    let mut unstable = Vec::new();
+    for attempt in 1..=SERVING_PARTITION_MAX_ATTEMPTS {
+        match run_serving_partition_attempt().await? {
+            ServingPartitionAttempt::Complete => return Ok(()),
+            ServingPartitionAttempt::UnstableInitialAdmission(error) => {
+                println!(
+                    "CLUSTER_SERVING_UNSTABLE stage=initial-admission attempt={attempt} error={error}"
+                );
+                unstable.push(format!("attempt {attempt}: {error}"));
+            }
+        }
+    }
+    bail!(
+        "serving partition proof exhausted {SERVING_PARTITION_MAX_ATTEMPTS} fresh attempts after pre-proof admission instability: {}",
+        unstable.join(" | ")
+    )
+}
+
+async fn run_serving_partition_attempt() -> Result<ServingPartitionAttempt> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("serving partition data root")?;
+    let (mut cluster, specs) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+
+    let mut proxies = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        proxies.push(TcpPartitionProxy::start(spec.api.clone()).await?);
+    }
+    let serving = ServingProcess::spawn(
+        &executable,
+        proxies.iter().map(TcpPartitionProxy::address).collect(),
+    )
+    .await?;
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
+        .build()?;
+
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if let Err(error) = admit_serving_media(&http, &serving.http_base).await {
+        let error = format!("{error:#}").replace('\n', " ");
+        cleanup_serving_partition(serving, proxies, &mut cluster)
+            .await
+            .context("clean up unstable initial serving admission")?;
+        return Ok(ServingPartitionAttempt::UnstableInitialAdmission(error));
+    }
+
+    // Establish a real WebSocket through the first configured proxy, then
+    // sever that accepted stream while later endpoints remain healthy. A
+    // subsequent watermark must recover through the next per-stream cursor
+    // position without a direct-voter path.
+    let mut stable_drop_client = None;
+    for _ in 0..3 {
+        if cluster.leader().await? != 1 {
+            cluster
+                .request(1, Request::TriggerElection)
+                .await?
+                .require_ok()?;
+            let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+            loop {
+                if cluster.leader().await? == 1 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    bail!("established-drop proof could not place leadership on voter 1");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        let before = raft_position(&mut cluster, 1).await?;
+        let client = Client::remote(
+            proxies.iter().map(TcpPartitionProxy::address).collect(),
+            true,
+            true,
+            API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await?;
+        if tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
+            .await
+            .is_err()
+        {
+            client.shutdown().await?;
+            continue;
+        }
+        let watermark =
+            match tokio::time::timeout(START_TIMEOUT, client.db_quorum_watermark()).await {
+                Ok(Ok(watermark)) => watermark,
+                Ok(Err(_)) | Err(_) => {
+                    client.shutdown().await?;
+                    continue;
+                }
+            };
+        let after = match raft_position(&mut cluster, 1).await {
+            Ok(after) => after,
+            Err(error) => {
+                client.shutdown().await?;
+                return Err(error);
+            }
+        };
+        if before.0 == Some(1)
+            && after.0 == Some(1)
+            && before.1 == after.1
+            && watermark.leader_id == 1
+            && watermark.term == before.1
+        {
+            stable_drop_client = Some(client);
+            break;
+        }
+        client
+            .shutdown()
+            .await
+            .context("close unstable established-drop client streams")?;
+    }
+    let drop_client = stable_drop_client
+        .context("established-drop proof did not retain voter 1 leadership for stream setup")?;
+    proxies[0].partition();
+    cluster
+        .request(2, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        if cluster.leader().await? != 1 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            proxies[0].restore();
+            bail!("established-drop proof did not move leadership off voter 1");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let established_drop = tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+        loop {
+            if drop_client.db_quorum_watermark().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    proxies[0].restore();
+    established_drop.context("configured proxy pool did not recover an established stream drop")?;
+    drop_client
+        .shutdown()
+        .await
+        .context("close established-drop remote client streams")?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    admit_serving_media(&http, &serving.http_base).await?;
+
+    // The cut-points are an authoritative proxy pool, not advertised voter
+    // addresses. Suspend the current leader while every proxy remains
+    // enabled, require the surviving majority to elect a successor, then
+    // restore the old process. This makes the handoff deterministic while
+    // proving recovery through another member of the configured pool.
+    let former_leader = cluster.leader().await?;
+    let eligible = (1..=3)
+        .filter(|node_id| *node_id != former_leader)
+        .collect::<Vec<_>>();
+    let paused_leader = cluster.pause(former_leader)?;
+    let successor = cluster.leader_among(&eligible).await;
+    paused_leader
+        .resume()
+        .context("resume former serving-proof leader after deterministic handoff")?;
+    let successor = successor.context("serving proxy pool did not observe majority failover")?;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    admit_serving_media(&http, &serving.http_base).await?;
+
+    for proxy in &proxies {
+        proxy.partition();
+    }
+    let fenced = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    if fenced.body != "quorum unavailable\n" {
+        bail!(
+            "serving-node readiness returned the wrong fence body: {}",
+            fenced.body
+        );
+    }
+    let liveness = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/healthz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if liveness.body != "ok\n" {
+        bail!(
+            "isolated serving-node lost process liveness: {}",
+            liveness.body
+        );
+    }
+    let capability = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    if capability.retry_after.as_deref() != Some("1")
+        || !capability.body.contains(r#""code":"serving_fenced""#)
+        || capability.body.contains("127.0.0.1")
+    {
+        bail!(
+            "mutable media fence response was not bounded and topology-free: {}",
+            capability.body
+        );
+    }
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/childz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":false"#) {
+        bail!(
+            "serving-node media child survived quorum loss: {}",
+            child.body
+        );
+    }
+
+    let leader = cluster.leader().await?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: SERVING_PROOF_KEY.to_owned(),
+                value: "majority-committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    for node_id in 1..=3 {
+        wait_for_local_setting(
+            &mut cluster,
+            node_id,
+            SERVING_PROOF_KEY,
+            "majority-committed",
+        )
+        .await?;
+    }
+
+    for proxy in &proxies {
+        proxy.restore();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+
+    admit_serving_media(&http, &serving.http_base).await?;
+    for proxy in &proxies {
+        proxy.partition();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await?;
+    let child = wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/childz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    if !child.body.contains(r#""alive":false"#) {
+        bail!(
+            "new-generation media child survived the second quorum loss: {}",
+            child.body
+        );
+    }
+    for proxy in &proxies {
+        proxy.restore();
+    }
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/readyz",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+    wait_serving_http(
+        &http,
+        &serving.http_base,
+        "/api/v1/hls/probe/status",
+        reqwest::StatusCode::OK,
+    )
+    .await?;
+
+    println!(
+        "CLUSTER_SERVING_PARTITION cycles=2 established_drop=recovered leader_failover={former_leader}->{successor} proxy_pool=recovered liveness=ok readiness=fenced capability=fenced child_killed=true majority_write=locally_converged recovery=ready"
+    );
+    cleanup_serving_partition(serving, proxies, &mut cluster).await?;
+    Ok(ServingPartitionAttempt::Complete)
+}
+
+async fn cleanup_serving_partition(
+    serving: ServingProcess,
+    proxies: Vec<TcpPartitionProxy>,
+    cluster: &mut ClusterProcesses,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = serving.stop().await {
+        errors.push(format!("serving process: {error:#}"));
+    }
+    for proxy in proxies {
+        proxy.stop().await;
+    }
+    if let Err(error) = cluster.shutdown_all().await {
+        errors.push(format!("voters: {error:#}"));
+        cluster.kill_all().await;
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("serving partition cleanup failed: {}", errors.join(" | "))
+    }
+}
+
+async fn admit_serving_media(client: &reqwest::Client, base: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        wait_serving_http(client, base, "/readyz", reqwest::StatusCode::OK).await?;
+        wait_serving_http(client, base, "/spawn-child", reqwest::StatusCode::OK).await?;
+        let child = wait_serving_http(client, base, "/childz", reqwest::StatusCode::OK).await?;
+        if child.body.contains(r#""alive":true"#) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "serving-node could not retain a current-generation media child: {}",
+                child.body
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_local_setting(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    key: &str,
+    expected: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        let response = cluster
+            .request(
+                node_id,
+                Request::ReadLocalSetting {
+                    key: key.to_owned(),
+                },
+            )
+            .await?;
+        let last = match response {
+            Response::Setting { value } if value.as_deref() == Some(expected) => return Ok(()),
+            response => format!("{response:?}"),
+        };
+        if Instant::now() >= deadline {
+            bail!(
+                "voter {node_id} did not apply setting {key:?}={expected:?} locally before the convergence deadline; last response: {last}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+struct MediaChild {
+    child: Child,
+    _input: ChildStdin,
+    admitted_generation: u64,
+    admission_id: u64,
+}
+
+async fn reap_media_child(mut media_child: MediaChild) {
+    if media_child.child.try_wait().ok().flatten().is_none() {
+        let _ = media_child.child.kill().await;
+    }
+    let _ = media_child.child.wait().await;
+}
+
+async fn kill_media_child(media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>) {
+    if let Some(media_child) = media.lock().await.take() {
+        reap_media_child(media_child).await;
+    }
+}
+
+async fn take_media_child_if_id(
+    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
+    admission_id: u64,
+) -> Option<MediaChild> {
+    let mut slot = media.lock().await;
+    if slot
+        .as_ref()
+        .is_some_and(|child| child.admission_id == admission_id)
+    {
+        slot.take()
+    } else {
+        None
+    }
+}
+
+async fn kill_media_child_if_id(
+    media: &Arc<tokio::sync::Mutex<Option<MediaChild>>>,
+    admission_id: u64,
+) {
+    if let Some(media_child) = take_media_child_if_id(media, admission_id).await {
+        reap_media_child(media_child).await;
+    }
+}
+
+/// The serving parent retains this process's stdin pipe. A normal shutdown or
+/// an assertion-driven parent kill closes that pipe, so the stand-in cannot
+/// leak beyond the process fixture even when the parent never reaches cleanup.
+async fn media_child() -> Result<()> {
+    let mut stdin = tokio::io::stdin();
+    let mut buffer = [0_u8; 128];
+    loop {
+        match stdin.read(&mut buffer).await {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn spawn_media_child_process(admitted_generation: u64, admission_id: u64) -> Result<MediaChild> {
+    let executable = harness_executable()?;
+    let mut command = Command::new(executable);
+    command
+        .arg("media-child")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("spawn serving media child")?;
+    let input = child
+        .stdin
+        .take()
+        .context("retain serving media child stdin")?;
+    Ok(MediaChild {
+        child,
+        _input: input,
+        admitted_generation,
+        admission_id,
+    })
+}
+
+async fn serving_node(launch: ServingLaunch) -> Result<()> {
+    install_crypto_provider();
+    let client = Client::remote(
+        launch.proxy_addresses,
+        true,
+        true,
+        API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await?;
+    tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
+        .await
+        .context("serving-node remote client health timed out")?;
+    let replication = ReplicationMonitor::replicated_remote(client);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let passive = tokio::spawn(
+        replication
+            .clone()
+            .passive_metrics_loop(shutdown.clone().cancelled_owned()),
+    );
+    let serving = ServingFence::new(replication.metrics_handle());
+    let monitor = tokio::spawn(serving.clone().monitor_loop(shutdown.clone()));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !serving.is_ready() {
+        if Instant::now() >= deadline {
+            bail!("serving-node never acquired its initial quorum watermark");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let media: Arc<tokio::sync::Mutex<Option<MediaChild>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let next_media_id = Arc::new(AtomicU64::new(1));
+    let mut serving_state = serving.subscribe();
+    let fenced_media = Arc::clone(&media);
+    let media_shutdown = shutdown.clone();
+    let media_fence = tokio::spawn(async move {
+        loop {
+            let state = *serving_state.borrow_and_update();
+            let media_child = {
+                let mut slot = fenced_media.lock().await;
+                if slot
+                    .as_ref()
+                    .is_some_and(|child| state.authority_lost_since(child.admitted_generation))
+                {
+                    slot.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(media_child) = media_child {
+                reap_media_child(media_child).await;
+            }
+            tokio::select! {
+                () = media_shutdown.cancelled() => break,
+                changed = serving_state.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind((LISTEN_ADDR, 0))
+        .await
+        .context("bind serving-node HTTP")?;
+    let ready = ServingReady {
+        http_address: listener.local_addr()?.to_string(),
+    };
+    let mut output = tokio::io::stdout();
+    let mut bytes = serde_json::to_vec(&ready)?;
+    bytes.push(b'\n');
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+
+    let stdin_shutdown = shutdown.clone();
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buffer = [0_u8; 128];
+        loop {
+            match stdin.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        stdin_shutdown.cancel();
+    });
+    loop {
+        let accepted = tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, _) = accepted.context("accept serving-node HTTP")?;
+        let connection_serving = serving.clone();
+        let connection_media = Arc::clone(&media);
+        let connection_next_media_id = Arc::clone(&next_media_id);
+        tokio::spawn(async move {
+            let _ = serve_serving_http(
+                stream,
+                connection_serving,
+                connection_media,
+                connection_next_media_id,
+            )
+            .await;
+        });
+    }
+
+    kill_media_child(&media).await;
+    let _ = stdin_task.await;
+    let _ = passive.await;
+    let _ = monitor.await;
+    let _ = media_fence.await;
+    Ok(())
+}
+
+async fn serve_serving_http(
+    mut stream: tokio::net::TcpStream,
+    serving: ServingFence,
+    media: Arc<tokio::sync::Mutex<Option<MediaChild>>>,
+    next_media_id: Arc<AtomicU64>,
+) -> Result<()> {
+    const MAX_REQUEST_BYTES: usize = 8 * 1024;
+    let mut request = Vec::with_capacity(1024);
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        if request.len() >= MAX_REQUEST_BYTES {
+            return Ok(());
+        }
+        let mut chunk = [0_u8; 1024];
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk)).await??;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let path = std::str::from_utf8(&request)
+        .ok()
+        .and_then(|request| request.lines().next())
+        .and_then(|line| {
+            let mut parts = line.split_whitespace();
+            (parts.next() == Some("GET"))
+                .then(|| parts.next())
+                .flatten()
+        })
+        .unwrap_or("/");
+    let (status, reason, content_type, body, retry_after) =
+        if let Some(policy) = serving.http_policy(path) {
+            (
+                policy.status,
+                if policy.status == 200 {
+                    "OK"
+                } else {
+                    "Service Unavailable"
+                },
+                policy.content_type,
+                policy.body.to_owned(),
+                policy.retry_after,
+            )
+        } else {
+            match path {
+                "/api/v1/hls/probe/status" => (
+                    200,
+                    "OK",
+                    "application/json",
+                    r#"{"code":"serving"}"#.to_owned(),
+                    false,
+                ),
+                "/childz" => {
+                    let mut media_child = media.lock().await;
+                    if let Some(child) = media_child.as_mut() {
+                        if !matches!(child.child.try_wait(), Ok(None)) {
+                            *media_child = None;
+                        }
+                    }
+                    let alive = media_child.is_some();
+                    (
+                        200,
+                        "OK",
+                        "application/json",
+                        format!(r#"{{"alive":{alive}}}"#),
+                        false,
+                    )
+                }
+                "/spawn-child" => {
+                    let admission = *serving.subscribe().borrow();
+                    if !admission.ready {
+                        return write_serving_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "application/json",
+                            production_serving_fence::SERVING_FENCED_JSON,
+                            true,
+                        )
+                        .await;
+                    }
+                    let mut media_child = media.lock().await;
+                    if media_child.is_none() {
+                        let admission_id = next_media_id.fetch_add(1, AtomicOrdering::Relaxed);
+                        *media_child = Some(spawn_media_child_process(
+                            admission.loss_generation,
+                            admission_id,
+                        )?);
+                    }
+                    let (admitted_generation, admission_id) = media_child
+                        .as_ref()
+                        .map(|child| (child.admitted_generation, child.admission_id))
+                        .context("spawned media child disappeared")?;
+                    drop(media_child);
+                    let current = *serving.subscribe().borrow();
+                    if current.authority_lost_since(admitted_generation) {
+                        kill_media_child_if_id(&media, admission_id).await;
+                        return write_serving_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "application/json",
+                            production_serving_fence::SERVING_FENCED_JSON,
+                            true,
+                        )
+                        .await;
+                    }
+                    (
+                        200,
+                        "OK",
+                        "application/json",
+                        r#"{"alive":true}"#.to_owned(),
+                        false,
+                    )
+                }
+                _ => (
+                    404,
+                    "Not Found",
+                    "text/plain",
+                    "not found\n".to_owned(),
+                    false,
+                ),
+            }
+        };
+    write_serving_http_response(
+        &mut stream,
+        status,
+        reason,
+        content_type,
+        &body,
+        retry_after,
+    )
+    .await
+}
+
+async fn write_serving_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &str,
+    retry_after: bool,
+) -> Result<()> {
+    let retry = if retry_after {
+        "Retry-After: 1\r\n"
+    } else {
+        ""
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{retry}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn start_singleton_probe(
@@ -881,6 +2091,280 @@ async fn run_quorum_watermark_rolling_compatibility_case() -> Result<()> {
     cluster.shutdown_all().await
 }
 
+/// Prove a P3b follower preserves P3a's three-column quorum proof for serving
+/// readiness while keeping bounded local reads disabled at protocol version 0.
+async fn run_p3a_watermark_rolling_compatibility_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("P3a watermark compatibility data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move {
+            ClusterProcesses::start_with_p3a_watermark_handler(
+                &executable,
+                &attempt_root,
+                reservation?,
+                1,
+            )
+            .await
+        }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    if cluster.leader().await? != 1 {
+        cluster
+            .request(1, Request::TriggerElection)
+            .await?
+            .require_ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cluster.leader().await? != 1 {
+            if Instant::now() >= deadline {
+                bail!("P3a-handler voter 1 did not become compatibility leader");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    cluster
+        .request(2, Request::ProveP3aWatermarkCompatibility)
+        .await?
+        .require_ok()?;
+    cluster.shutdown_all().await
+}
+
+#[derive(Debug)]
+struct BoundedReadObservation {
+    title: Option<String>,
+    error: Option<String>,
+    consistent_query_calls: u64,
+    non_consistent_query_calls: u64,
+    watermark_valid: bool,
+    watermark_age_millis: Option<u64>,
+    local_reads_supported: bool,
+    apply_lag_entries: Option<u64>,
+    serving_ready: bool,
+}
+
+async fn bounded_read(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<BoundedReadObservation> {
+    match cluster
+        .request(node_id, Request::BoundedCatalogueGetItem { item_id })
+        .await?
+    {
+        Response::BoundedCatalogueRead {
+            title,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            watermark_age_millis,
+            local_reads_supported,
+            apply_lag_entries,
+            serving_ready,
+        } => Ok(BoundedReadObservation {
+            title,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            watermark_age_millis,
+            local_reads_supported,
+            apply_lag_entries,
+            serving_ready,
+        }),
+        response => bail!("bounded catalogue request returned {response:?}"),
+    }
+}
+
+async fn wait_for_local_catalogue_read(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+    expected_title: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = bounded_read(cluster, node_id, item_id).await?;
+        if observation.error.is_none()
+            && observation.title.as_deref() == Some(expected_title)
+            && observation.consistent_query_calls == 0
+            && observation.non_consistent_query_calls == 1
+            && observation.watermark_valid
+            && observation
+                .watermark_age_millis
+                .is_some_and(|age| age <= 250)
+            && observation.local_reads_supported
+            && observation.apply_lag_entries == Some(0)
+            && observation.serving_ready
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("bounded catalogue local read did not recover: {observation:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Drive the P3 acceptance against three real voter processes. Apply pause is
+/// below Raft's log and transport paths; the partition cuts this follower's
+/// Raft and cluster-query transports while leaving the harness control pipe.
+async fn run_bounded_catalogue_failure_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("bounded catalogue failure data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move { ClusterProcesses::start(&executable, &attempt_root, reservation?).await }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+    let follower = [1_u64, 2, 3]
+        .into_iter()
+        .find(|node_id| *node_id != leader)
+        .context("three-voter cluster had no follower")?;
+    let item_id = match cluster
+        .request(
+            leader,
+            Request::SeedArtworkRepairFenceItem { ordinal: 7_003 },
+        )
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("bounded catalogue seed returned {response:?}"),
+    };
+    const EXPECTED_TITLE: &str = "Original artwork fence title";
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+
+    cluster
+        .request(follower, Request::PauseApply)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: "bounded.apply-pause".to_owned(),
+                value: "committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let pause_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match cluster
+            .request(follower, Request::ApplyPauseObserved)
+            .await?
+        {
+            Response::ApplyPauseObserved { observed: true } => break,
+            Response::ApplyPauseObserved { observed: false } => {}
+            response => bail!("apply-pause observation returned {response:?}"),
+        }
+        if Instant::now() >= pause_deadline {
+            bail!("follower did not block inside its SQLite apply path");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let fallback_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let observation = bounded_read(&mut cluster, follower, item_id).await?;
+        if observation.title.as_deref() == Some(EXPECTED_TITLE)
+            && observation.error.is_none()
+            && observation.non_consistent_query_calls == 0
+            && observation.consistent_query_calls == 1
+            && !observation.serving_ready
+            && observation.apply_lag_entries.is_some_and(|lag| lag > 0)
+        {
+            break;
+        }
+        if Instant::now() >= fallback_deadline {
+            bail!("apply-paused follower did not fall back and self-fence: {observation:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cluster
+        .request(follower, Request::ResumeApply)
+        .await?
+        .require_ok()?;
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+
+    cluster
+        .request(follower, Request::SetRaftPartitioned { partitioned: true })
+        .await?
+        .require_ok()?;
+    let partition_started = Instant::now();
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: "bounded.partition-majority".to_owned(),
+                value: "committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let before_expiry = bounded_read(&mut cluster, follower, item_id).await?;
+    if before_expiry.error.is_some()
+        || before_expiry.title.as_deref() != Some(EXPECTED_TITLE)
+        || before_expiry.consistent_query_calls != 0
+        || before_expiry.non_consistent_query_calls != 1
+        || !before_expiry.watermark_valid
+        || before_expiry.apply_lag_entries != Some(0)
+    {
+        bail!("partition precondition did not execute one zero-gap local read: {before_expiry:?}");
+    }
+
+    let isolated = loop {
+        let observation = bounded_read(&mut cluster, follower, item_id).await?;
+        if observation.non_consistent_query_calls == 0 {
+            break observation;
+        }
+        if partition_started.elapsed() >= Duration::from_millis(1_200) {
+            bail!("partitioned follower still executed local SQL after the watermark lease");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    if partition_started.elapsed() >= Duration::from_millis(1_200)
+        || isolated.consistent_query_calls != 1
+        || isolated.error.is_none()
+        || isolated.watermark_valid
+        || isolated.serving_ready
+    {
+        bail!(
+            "partitioned follower did not fail closed by the one-second lease: elapsed={:?}, observation={isolated:?}",
+            partition_started.elapsed()
+        );
+    }
+
+    cluster
+        .request(follower, Request::SetRaftPartitioned { partitioned: false })
+        .await?
+        .require_ok()?;
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+    cluster.shutdown_all().await
+}
+
 async fn run_membership_lifecycle_case() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("membership lifecycle data root")?;
@@ -1086,7 +2570,9 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     node_id,
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
+                    listen_addr: default_listen_addr(),
                     emulate_old_watermark_handler: false,
+                    emulate_p3a_watermark_handler: false,
                 },
             )
             .await?;
@@ -1382,12 +2868,10 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     }
 
-    let before_heartbeats = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("heartbeat budget missing initial applied index")?
-        }
-        response => bail!("unexpected pre-heartbeat metrics: {response:?}"),
-    };
+    let before_heartbeats = quorum_watermark_observation(&mut cluster, leader).await?;
+    if before_heartbeats.leader_id != leader {
+        bail!("heartbeat budget began on a non-leader watermark: {before_heartbeats:?}");
+    }
     cluster
         .request(leader, Request::Heartbeat)
         .await?
@@ -1396,17 +2880,17 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(leader, Request::Heartbeat)
         .await?
         .require_ok()?;
-    let after_heartbeats = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("heartbeat budget missing final applied index")?
-        }
-        response => bail!("unexpected post-heartbeat metrics: {response:?}"),
-    };
-    if after_heartbeats.saturating_sub(before_heartbeats) != 2 {
+    let after_heartbeats = quorum_watermark_observation(&mut cluster, leader).await?;
+    if after_heartbeats.leader_id != leader || after_heartbeats.term != before_heartbeats.term {
         bail!(
-            "two liveness heartbeats consumed {} Raft entries instead of two",
-            after_heartbeats.saturating_sub(before_heartbeats)
+            "heartbeat budget crossed a leader term: before={before_heartbeats:?} after={after_heartbeats:?}"
         );
+    }
+    let heartbeat_entries = after_heartbeats
+        .committed_index
+        .saturating_sub(before_heartbeats.committed_index);
+    if heartbeat_entries != 2 {
+        bail!("two liveness heartbeats consumed {heartbeat_entries} Raft entries instead of two");
     }
 
     // Four reconciliation loops must not turn one persistent miss into one
@@ -1424,8 +2908,15 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ItemId { item_id } => item_id,
         response => bail!("unexpected artwork fence fixture response: {response:?}"),
     };
-    let wrong_target_item = match cluster
+    let paused_claim_item = match cluster
         .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 2 })
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("unexpected paused-claim fixture response: {response:?}"),
+    };
+    let wrong_target_item = match cluster
+        .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 3 })
         .await?
     {
         Response::ItemId { item_id } => item_id,
@@ -1447,6 +2938,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     Request::ClaimArtworkRepairFence {
                         item_id: repair_item,
                         lease_ms: repair_lease_ms,
+                        inject_leader_change: false,
                     },
                 )
                 .await?
@@ -1522,6 +3014,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             Request::ClaimArtworkRepairFence {
                 item_id: repair_item,
                 lease_ms: repair_lease_ms,
+                inject_leader_change: false,
             },
         )
         .await?
@@ -1565,7 +3058,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             leader,
             Request::ClaimArtworkRepairAfterPause {
-                item_id: repair_item + 1,
+                item_id: paused_claim_item,
                 lease_ms: 100,
                 pause_ms: 150,
             },
@@ -1575,6 +3068,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::Flag { value: false } => {}
         response => bail!("expired post-CAS artwork claim could begin work: {response:?}"),
     }
+    let (paused_fence, _) =
+        read_artwork_repair_observation(&mut cluster, leader, paused_claim_item).await?;
+    let paused_fence =
+        paused_fence.context("expired post-CAS artwork claim never committed its fence")?;
+    if paused_fence.generation != 1 || paused_fence.owner_node_id != format!("node-{leader}") {
+        bail!("expired post-CAS artwork claim committed the wrong fence: {paused_fence:?}");
+    }
     let election_target = (1..=3)
         .find(|node_id| *node_id != leader)
         .context("choose artwork leadership successor")?;
@@ -1582,65 +3082,94 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(election_target, Request::TriggerElection)
         .await?
         .require_ok()?;
-    let handoff_deadline = Instant::now() + Duration::from_secs(10);
-    let handoff = loop {
-        let current = cluster.leader().await?;
-        if current != leader {
-            break current;
+    let handoff_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    let repair_lease = Duration::from_millis(repair_lease_ms);
+    let mut force_term_change_during_wait = true;
+    let (handoff, handoff_term) = loop {
+        let observed =
+            observe_artwork_repair_successor(&mut cluster, leader, repair_item, handoff_deadline)
+                .await?;
+        let observation_confirmed_at = Instant::now();
+        if observation_confirmed_at + repair_lease + Duration::from_millis(30) >= handoff_deadline {
+            bail!("artwork repair successor did not retain one stable lease window");
         }
-        if Instant::now() >= handoff_deadline {
-            bail!("artwork repair leadership did not move from voter {leader}");
+        let forced_this_window = force_term_change_during_wait;
+        if forced_this_window {
+            tokio::time::sleep(repair_lease / 2).await;
+            let target = (1..=3)
+                .find(|node_id| *node_id != observed.0 && *node_id != leader)
+                .context("artwork repair proof has no third election target")?;
+            cluster
+                .request(target, Request::TriggerElection)
+                .await?
+                .require_ok()?;
+            force_term_change_during_wait = false;
+            tokio::time::sleep(repair_lease / 2 + Duration::from_millis(30)).await;
+        } else {
+            tokio::time::sleep(repair_lease + Duration::from_millis(30)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    loop {
-        match cluster.request(handoff, Request::Metrics).await? {
+        match cluster.request(observed.0, Request::Metrics).await? {
             Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
                 quorum_acknowledged: true,
                 ..
-            } => break,
-            Response::Metrics { .. } => {}
-            response => bail!("unexpected successor metrics response: {response:?}"),
+            } if current_leader == observed.0 && current_term == observed.1 => {
+                if forced_this_window {
+                    bail!("forced artwork repair election did not change the observed term");
+                }
+                if observation_confirmed_at.elapsed() < repair_lease {
+                    bail!("artwork repair successor did not wait one complete monotonic lease");
+                }
+                break observed;
+            }
+            Response::Metrics { .. } => {
+                // A new term invalidates the receiver-local observation. The
+                // newly confirmed successor must observe the durable fence and
+                // wait its own complete monotonic lease before any CAS.
+            }
+            response => bail!("unexpected post-wait successor metrics response: {response:?}"),
         }
-        if Instant::now() >= handoff_deadline {
-            bail!("artwork repair successor never established a quorum lease");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
+    let (before_repeat_fence, before_repeat_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
     match cluster
         .request(
             handoff,
-            Request::ClaimArtworkRepair {
+            Request::ObserveArtworkRepair {
                 item_id: repair_item,
-                lease_ms: repair_lease_ms,
+                inject_leader_change: false,
             },
         )
         .await?
     {
-        Response::Flag { value: false } => {}
-        response => bail!("successor ignored the monotonic repair fence: {response:?}"),
+        Response::Flag { value: true } => {}
+        response => bail!("mature repair observation was not repeatable: {response:?}"),
     }
-    tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
+    let (after_repeat_fence, after_repeat_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
+    if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
+        bail!(
+            "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
+             {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
+             {after_repeat_index:?}"
+        );
+    }
     let mut handoff_winners = Vec::new();
     let mut new_fence = None;
     for node_id in 1..=3 {
         if node_id == handoff {
-            match cluster
-                .request(
-                    node_id,
-                    Request::ClaimArtworkRepairFence {
-                        item_id: repair_item,
-                        lease_ms: repair_lease_ms,
-                    },
-                )
-                .await?
+            if let Some(fence) = claim_artwork_repair_fence_once(
+                &mut cluster,
+                node_id,
+                repair_item,
+                repair_lease_ms,
+                false,
+            )
+            .await?
             {
-                Response::ArtworkRepairFence { fence: Some(fence) } => {
-                    handoff_winners.push(node_id);
-                    new_fence = Some(fence);
-                }
-                Response::ArtworkRepairFence { fence: None } => {}
-                response => bail!("unexpected handoff repair fence response: {response:?}"),
+                handoff_winners.push(node_id);
+                new_fence = Some(fence);
             }
         } else {
             match cluster
@@ -1659,8 +3188,57 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
         }
     }
+    match cluster.request(handoff, Request::Metrics).await? {
+        Response::Metrics {
+            leader: Some(current_leader),
+            current_term,
+            quorum_acknowledged: true,
+            ..
+        } if current_leader == handoff && current_term == handoff_term => {}
+        Response::Metrics { .. } => {
+            bail!("artwork repair topology changed during the generation CAS")
+        }
+        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
+    }
     if handoff_winners != [handoff] {
         bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
+    }
+    let (before_ambiguous_fence, before_ambiguous_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
+    if before_ambiguous_fence.is_some() {
+        bail!("ambiguous repair fixture already had a durable fence");
+    }
+    let ambiguous_claim = claim_artwork_repair_fence_once(
+        &mut cluster,
+        handoff,
+        wrong_target_item,
+        repair_lease_ms,
+        true,
+    )
+    .await
+    .expect_err("a typed leader change from a mutating repair claim must be fatal");
+    if !ambiguous_claim
+        .to_string()
+        .contains("mutating artwork repair claim was ambiguous and was not retried")
+    {
+        bail!("mutating repair ambiguity had the wrong verdict: {ambiguous_claim:#}");
+    }
+    let (after_ambiguous_fence, after_ambiguous_index) =
+        read_artwork_repair_observation(&mut cluster, handoff, wrong_target_item).await?;
+    let after_ambiguous_fence =
+        after_ambiguous_fence.context("ambiguous repair claim did not apply its one attempt")?;
+    if after_ambiguous_fence.generation != 1
+        || after_ambiguous_fence.owner_node_id != format!("node-{handoff}")
+        || after_ambiguous_fence.leader_term != i64::try_from(handoff_term)?
+        || after_ambiguous_index
+            .zip(before_ambiguous_index)
+            .is_none_or(|(after, before)| after.saturating_sub(before) != 1)
+    {
+        bail!(
+            "ambiguous repair claim was not exactly one applied attempt: \
+             fence={after_ambiguous_fence:?}, applied={before_ambiguous_index:?}->\
+             {after_ambiguous_index:?}"
+        );
     }
     let new_fence = new_fence.context("new leader did not return its artwork repair fence")?;
     match cluster
@@ -2426,6 +4004,129 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     Ok(())
 }
 
+/// Observe an old repair generation through one stable successor term before
+/// any call that can advance its durable fence. A Hiqlite leader-change error
+/// is retryable only here: `claim_artwork_source_repair` cannot reach its CAS
+/// until after this receiver-local observation has succeeded once.
+async fn observe_artwork_repair_successor(
+    cluster: &mut ClusterProcesses,
+    former_leader: u64,
+    item_id: i64,
+    deadline: Instant,
+) -> Result<(u64, u64)> {
+    let mut inject_leader_change = true;
+    loop {
+        if Instant::now() >= deadline {
+            bail!("artwork repair leadership did not stabilize away from voter {former_leader}");
+        }
+        let successor = cluster.leader().await?;
+        if successor == former_leader {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        let term = match cluster.request(successor, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == successor => current_term,
+            Response::Metrics { .. } => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            response => bail!("unexpected successor metrics response: {response:?}"),
+        };
+        let observed = match cluster
+            .request(
+                successor,
+                Request::ObserveArtworkRepair {
+                    item_id,
+                    inject_leader_change,
+                },
+            )
+            .await?
+        {
+            Response::Flag { value: true } => true,
+            Response::Flag { value: false } => false,
+            Response::MembershipLeaderChange { .. } => {
+                inject_leader_change = false;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            response => bail!("successor could not observe the durable repair fence: {response:?}"),
+        };
+        match cluster.request(successor, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if observed && current_leader == successor && current_term == term => {
+                return Ok((successor, term));
+            }
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == successor && current_term == term => {
+                bail!("successor could not observe the durable repair fence")
+            }
+            Response::Metrics { .. } => {}
+            response => bail!("unexpected successor post-observation metrics: {response:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn read_artwork_repair_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<(Option<ArtworkRepairFence>, Option<u64>)> {
+    let fence = match cluster
+        .request(node_id, Request::ReadArtworkRepairFence { item_id })
+        .await?
+    {
+        Response::ArtworkRepairFence { fence } => fence,
+        response => bail!("unexpected repair fence read response: {response:?}"),
+    };
+    let applied_index = match cluster.request(node_id, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => applied_index,
+        response => bail!("unexpected repair observation metrics: {response:?}"),
+    };
+    Ok((fence, applied_index))
+}
+
+/// A potentially mutating repair claim is sent exactly once. In particular,
+/// its typed routing ambiguity is terminal because the write may have applied.
+async fn claim_artwork_repair_fence_once(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+    lease_ms: u64,
+    inject_leader_change: bool,
+) -> Result<Option<ArtworkRepairFence>> {
+    match cluster
+        .request(
+            node_id,
+            Request::ClaimArtworkRepairFence {
+                item_id,
+                lease_ms,
+                inject_leader_change,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkRepairFence { fence } => Ok(fence),
+        Response::MembershipLeaderChange { .. } => {
+            bail!("mutating artwork repair claim was ambiguous and was not retried")
+        }
+        response => bail!("unexpected artwork repair fence response: {response:?}"),
+    }
+}
+
 /// Prove the self-leave path that a remote removal deliberately refuses: the
 /// current leader hands leadership to a survivor before it excludes itself.
 /// This is a separate cluster because the membership lifecycle above must keep
@@ -2640,7 +4341,9 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         node_id: 1,
         root,
         nodes: specs,
+        listen_addr: default_listen_addr(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     // The reservation is dropped here: hiqlite binds its own sockets from the
     // address strings, so we must release the port before it can bind it. A
@@ -2683,7 +4386,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let baseline_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        warm_snapshot,
+        Some(warm_snapshot),
         "baseline settle",
     )
     .await?;
@@ -2754,7 +4457,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let measured_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        baseline_snapshot,
+        Some(baseline_snapshot),
         "coalesced load",
     )
     .await?;
@@ -2764,7 +4467,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        measured_snapshot,
+        Some(measured_snapshot),
         "coalesced settle",
     )
     .await?;
@@ -2810,7 +4513,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_settled_snapshot = ensure_compaction_after(
         &metrics_client,
         store.as_ref(),
-        raw_measured_snapshot,
+        Some(raw_measured_snapshot),
         "raw settle",
     )
     .await?;
@@ -2939,35 +4642,62 @@ async fn applied_index(client: &Client) -> Result<u64> {
         .context("replicated store has no applied log index")
 }
 
-async fn snapshot_index(client: &Client) -> Result<u64> {
-    Ok(client
-        .metrics_db()
-        .await?
-        .snapshot
-        .map(|log| log.index)
-        .unwrap_or(0))
+async fn snapshot_index(client: &Client) -> Result<Option<u64>> {
+    Ok(client.metrics_db().await?.snapshot.map(|log| log.index))
 }
 
 async fn ensure_compaction_after(
     client: &Client,
     store: &HiqliteAuthStore,
-    previous_snapshot: u64,
+    previous_snapshot: Option<u64>,
     phase: &str,
 ) -> Result<u64> {
+    let metrics = client.metrics_db().await?;
+    if let Some(snapshot) = metrics
+        .snapshot
+        .filter(|log| previous_snapshot.is_none_or(|previous| log.index > previous))
+    {
+        return wait_for_purge(client, snapshot.index, phase).await;
+    }
+
+    // OpenRaft's LogsSinceLast policy triggers from the committed index, not
+    // from publication of the asynchronously built snapshot. Continuing to
+    // write until the snapshot metric appears creates a scheduler-dependent
+    // tail and contaminates the fixed-tail size comparison. Quorum-anchor the
+    // starting point, submit exactly enough writes to reach the trigger, then
+    // stop all writes while the snapshot builds and publishes.
+    let committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} obtain pre-compaction commit watermark"))?
+        .committed_index;
+    let writes = snapshot_trigger_plan(previous_snapshot, committed)?;
     let marker = format!("cluster.growth.compaction.{phase}");
-    for ordinal in 0..=GROWTH_COMPACTION_LOGS + 512 {
-        if ordinal % 64 == 0 {
-            let metrics = client.metrics_db().await?;
-            if let Some(snapshot) = metrics.snapshot.filter(|log| log.index > previous_snapshot) {
-                return wait_for_purge(client, snapshot.index, phase).await;
-            }
-        }
+    for ordinal in 0..writes {
         store.put_setting(&marker, &ordinal.to_string()).await?;
+    }
+    let final_committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} confirm exact compaction trigger"))?
+        .committed_index;
+    let expected_final = committed
+        .checked_add(writes)
+        .context("compaction trigger commit index overflowed")?;
+    if final_committed != expected_final {
+        bail!(
+            "{phase} compaction trigger was contaminated by concurrent writes: \
+             committed {committed} + {writes} planned writes reached {final_committed}, \
+             expected exact {expected_final}"
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let metrics = client.metrics_db().await?;
-        if let Some(snapshot) = metrics.snapshot.filter(|log| log.index > previous_snapshot) {
+        if let Some(snapshot) = metrics
+            .snapshot
+            .filter(|log| previous_snapshot.is_none_or(|previous| log.index > previous))
+        {
             return wait_for_purge(client, snapshot.index, phase).await;
         }
         if Instant::now() >= deadline {
@@ -2975,6 +4705,27 @@ async fn ensure_compaction_after(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn snapshot_trigger_plan(previous_snapshot: Option<u64>, committed: u64) -> Result<u64> {
+    if previous_snapshot.is_some_and(|snapshot| committed < snapshot) {
+        bail!("compaction commit {committed} precedes the observed snapshot {previous_snapshot:?}");
+    }
+    let snapshot_next = previous_snapshot
+        .map(|snapshot| {
+            snapshot
+                .checked_add(1)
+                .context("compaction snapshot next-index overflowed")
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let target_next = snapshot_next
+        .checked_add(GROWTH_COMPACTION_LOGS)
+        .context("compaction snapshot trigger next-index overflowed")?;
+    let committed_next = committed
+        .checked_add(1)
+        .context("compaction commit next-index overflowed")?;
+    Ok(target_next.saturating_sub(committed_next))
 }
 
 async fn wait_for_purge(client: &Client, snapshot: u64, phase: &str) -> Result<u64> {
@@ -3004,7 +4755,11 @@ async fn settle_post_snapshot_tail(
     phase: &str,
 ) -> Result<()> {
     let target = snapshot.saturating_add(GROWTH_SETTLED_LOG_TAIL);
-    let mut applied = applied_index(client).await?;
+    // A write acknowledgement and OpenRaft's metrics-watch publication are
+    // distinct completion paths. Anchor both ends with a quorum-confirmed
+    // commit watermark so a temporarily stale `last_applied` sample cannot
+    // make the harness submit one extra settling write.
+    let applied = wait_for_quorum_applied(client, phase).await?;
     if applied > target {
         bail!(
             "{phase} snapshot was observed with a {}-entry tail, beyond the fixed {}-entry settling boundary",
@@ -3013,16 +4768,35 @@ async fn settle_post_snapshot_tail(
         );
     }
     let marker = "cluster.growth.post_snapshot_tail";
-    while applied < target {
+    for ordinal in applied..target {
         store
-            .put_setting(marker, &applied.saturating_sub(snapshot).to_string())
+            .put_setting(marker, &ordinal.saturating_sub(snapshot).to_string())
             .await?;
-        applied = applied_index(client).await?;
     }
+    let applied = wait_for_quorum_applied(client, phase).await?;
     if applied != target {
         bail!("{phase} post-snapshot tail settled at {applied}, expected exact index {target}");
     }
     Ok(())
+}
+
+async fn wait_for_quorum_applied(client: &Client, phase: &str) -> Result<u64> {
+    let committed = client
+        .db_quorum_watermark()
+        .await
+        .with_context(|| format!("{phase} obtain settling commit watermark"))?
+        .committed_index;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let applied = applied_index(client).await?;
+        if applied >= committed {
+            return Ok(applied);
+        }
+        if Instant::now() >= deadline {
+            bail!("{phase} applied index did not reach quorum-confirmed commit {committed}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn stable_directory_bytes(root: &Path) -> Result<u64> {
@@ -3359,14 +5133,32 @@ pub struct NodeLaunch {
     pub node_id: u64,
     pub root: PathBuf,
     pub nodes: Vec<NodeSpec>,
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
+    #[serde(default)]
+    pub emulate_p3a_watermark_handler: bool,
+}
+
+fn default_listen_addr() -> String {
+    LISTEN_ADDR.to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preflight {
     pub addresses: Vec<String>,
     pub compatibility: ClusterCompatibility,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServingLaunch {
+    proxy_addresses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServingReady {
+    http_address: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3442,6 +5234,13 @@ pub enum Request {
         node_id: String,
     },
     Heartbeat,
+    ObserveArtworkRepair {
+        item_id: i64,
+        inject_leader_change: bool,
+    },
+    ReadArtworkRepairFence {
+        item_id: i64,
+    },
     ClaimArtworkRepair {
         item_id: i64,
         lease_ms: u64,
@@ -3457,6 +5256,7 @@ pub enum Request {
     ClaimArtworkRepairFence {
         item_id: i64,
         lease_ms: u64,
+        inject_leader_change: bool,
     },
     ApplyArtworkRepairFence {
         target_item_id: i64,
@@ -3495,6 +5295,13 @@ pub enum Request {
     },
     ReadSingletonValue {
         local: bool,
+    },
+    PutSetting {
+        key: String,
+        value: String,
+    },
+    ReadLocalSetting {
+        key: String,
     },
     ReleaseArtworkRepair {
         fence: ArtworkRepairFence,
@@ -3548,6 +5355,12 @@ pub enum Request {
         ordinal: u64,
         value: String,
     },
+    TopologyResources {
+        hardware: String,
+        storage_device: String,
+        network_path: String,
+        reset_max_rss: bool,
+    },
     PostLossWrite {
         target: String,
         position_ms: i64,
@@ -3559,7 +5372,17 @@ pub enum Request {
     Metrics,
     PassiveRaftMetrics,
     QuorumWatermark,
+    PauseApply,
+    ApplyPauseObserved,
+    ResumeApply,
+    SetRaftPartitioned {
+        partitioned: bool,
+    },
+    BoundedCatalogueGetItem {
+        item_id: i64,
+    },
     ProveOldWatermarkStreamCompatibility,
+    ProveP3aWatermarkCompatibility,
     ReplicationStatus,
     Ping,
     ReadWithoutQuorum,
@@ -3603,6 +5426,9 @@ pub enum Response {
     TelemetryCount {
         count: usize,
     },
+    TopologyResources {
+        sample: ResourceSample,
+    },
     Dump {
         digest: String,
         dump: String,
@@ -3636,6 +5462,20 @@ pub enum Response {
         term: u64,
         leader_id: u64,
         committed_index: u64,
+    },
+    ApplyPauseObserved {
+        observed: bool,
+    },
+    BoundedCatalogueRead {
+        title: Option<String>,
+        error: Option<String>,
+        consistent_query_calls: u64,
+        non_consistent_query_calls: u64,
+        watermark_valid: bool,
+        watermark_age_millis: Option<u64>,
+        local_reads_supported: bool,
+        apply_lag_entries: Option<u64>,
+        serving_ready: bool,
     },
     ReplicationStatus {
         status: ReplicationStatus,
@@ -3676,6 +5516,9 @@ pub enum Response {
     SingletonValue {
         value: Option<String>,
     },
+    Setting {
+        value: Option<String>,
+    },
     ArtworkFenceApply {
         setting: bool,
         metadata: bool,
@@ -3683,6 +5526,11 @@ pub enum Response {
     },
     MembershipError {
         code: String,
+        message: String,
+    },
+    /// Harness-only preservation of a typed Hiqlite routing verdict. This is
+    /// never accepted after a potentially mutating request.
+    MembershipLeaderChange {
         message: String,
     },
     Error {
@@ -4096,6 +5944,9 @@ impl NodeProcess {
         if launch.emulate_old_watermark_handler {
             command.env(OLD_WATERMARK_HANDLER_ENV, "1");
         }
+        if launch.emulate_p3a_watermark_handler {
+            command.env(P3A_WATERMARK_HANDLER_ENV, "1");
+        }
         let mut child = command.spawn().context("spawn cluster voter")?;
         let input = child.stdin.take().context("voter stdin")?;
         let output = BufReader::new(child.stdout.take().context("voter stdout")?);
@@ -4226,6 +6077,21 @@ fn send_process_signal(pid: u32, signal: libc::c_int, label: &str) -> Result<()>
     Ok(())
 }
 
+fn kill_process_group(pid: u32, label: &str) -> Result<()> {
+    let process_group = libc::pid_t::try_from(pid).context("process group id overflowed pid_t")?;
+    // SAFETY: the singleton-attempt controller created a new process group
+    // whose id is its child pid. A negative pid targets that exact group, so
+    // timeout cleanup includes the voter grandchildren it spawned.
+    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error).with_context(|| format!("send SIGKILL for {label}"));
+        }
+    }
+    Ok(())
+}
+
 pub struct ClusterProcesses {
     nodes: Vec<Option<NodeProcess>>,
     root: PathBuf,
@@ -4241,7 +6107,7 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, None).await
+        Self::start_inner(executable, root, reservation, None, None).await
     }
 
     async fn start_with_old_watermark_handler(
@@ -4250,7 +6116,16 @@ impl ClusterProcesses {
         reservation: PortReservation,
         old_handler_node: u64,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, Some(old_handler_node)).await
+        Self::start_inner(executable, root, reservation, Some(old_handler_node), None).await
+    }
+
+    async fn start_with_p3a_watermark_handler(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        p3a_handler_node: u64,
+    ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, None, Some(p3a_handler_node)).await
     }
 
     async fn start_inner(
@@ -4258,6 +6133,7 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
         old_handler_node: Option<u64>,
+        p3a_handler_node: Option<u64>,
     ) -> Result<Self> {
         let (_listeners, specs) = reservation.into_inner();
         // Listeners are dropped here: the child process must bind the same
@@ -4271,7 +6147,9 @@ impl ClusterProcesses {
                 node_id,
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
+                listen_addr: default_listen_addr(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
+                emulate_p3a_watermark_handler: p3a_handler_node == Some(node_id),
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
         }
@@ -4317,6 +6195,24 @@ impl ClusterProcesses {
 
     pub async fn request(&mut self, node_id: u64, request: Request) -> Result<Response> {
         self.node_mut(node_id)?.request(&request).await
+    }
+
+    async fn request_all_concurrently(
+        &mut self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<(u64, Response)>> {
+        if requests.len() != self.nodes.len() || self.nodes.iter().any(Option::is_none) {
+            bail!("concurrent all-voter request requires every configured voter");
+        }
+        let mut calls = Vec::with_capacity(requests.len());
+        for (index, (slot, request)) in self.nodes.iter_mut().zip(requests).enumerate() {
+            let node_id = u64::try_from(index)? + 1;
+            let node = slot
+                .as_mut()
+                .with_context(|| format!("voter {node_id} is not running"))?;
+            calls.push(async move { Ok((node_id, node.request(&request).await?)) });
+        }
+        futures_util::future::try_join_all(calls).await
     }
 
     async fn request_pair_concurrently(
@@ -4878,6 +6774,8 @@ struct SingletonProbe {
 #[derive(Default)]
 struct NodeMutableState {
     store: Option<Arc<HiqliteAuthStore>>,
+    catalogue_store: Option<Arc<HiqliteAuthStore>>,
+    catalogue: Option<CatalogueReader>,
     membership: Option<MembershipManager>,
     singleton_probe: Option<SingletonProbe>,
 }
@@ -4886,8 +6784,9 @@ struct NodeMutableState {
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
+    let node_started = Instant::now();
     let listeners = voter_listen_addrs(&launch)?;
-    let _ = ServerTlsConfig::server_config_self_signed(LISTEN_ADDR).await;
+    let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
     let client = match hiqlite::start_node(node_config(&launch)?).await {
         Ok(client) => client,
         Err(error) => {
@@ -4913,6 +6812,9 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
         let _ = passive_shutdown_signal.await;
     }));
+    let serving = ServingFence::new(replication.metrics_handle());
+    let serving_shutdown = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(serving.clone().monitor_loop(serving_shutdown.clone()));
 
     write_response(&Response::Ready {
         node_id: launch.node_id,
@@ -4923,22 +6825,20 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         .root
         .join(format!("node-{}", launch.node_id))
         .join("telemetry.db");
+    let request_context = NodeRequestContext {
+        client: &client,
+        replication: &replication,
+        serving: &serving,
+        launch: &launch,
+        telemetry_path: &telemetry_path,
+        node_started,
+    };
     let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
     while let Some(line) = input.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                handle_request(
-                    request,
-                    &client,
-                    &replication,
-                    &launch,
-                    &telemetry_path,
-                    &mut state,
-                )
-                .await
-            }
+            Ok(request) => handle_request(request, &request_context, &mut state).await,
             Err(error) => Err(error.into()),
         };
         match response {
@@ -4952,19 +6852,36 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         }
     }
     let _ = passive_shutdown.send(());
+    serving_shutdown.cancel();
     Ok(())
+}
+
+struct NodeRequestContext<'a> {
+    client: &'a Client,
+    replication: &'a ReplicationMonitor,
+    serving: &'a ServingFence,
+    launch: &'a NodeLaunch,
+    telemetry_path: &'a Path,
+    node_started: Instant,
 }
 
 async fn handle_request(
     request: Request,
-    client: &Client,
-    replication: &ReplicationMonitor,
-    launch: &NodeLaunch,
-    telemetry_path: &Path,
+    context: &NodeRequestContext<'_>,
     state: &mut NodeMutableState,
 ) -> Result<Response> {
+    let &NodeRequestContext {
+        client,
+        replication,
+        serving,
+        launch,
+        telemetry_path,
+        node_started,
+    } = context;
     let NodeMutableState {
         store,
+        catalogue_store,
+        catalogue,
         membership,
         singleton_probe,
     } = state;
@@ -5029,17 +6946,39 @@ async fn handle_request(
         }
         Request::Bootstrap => {
             let opened = Arc::new(
-                HiqliteAuthStore::bootstrap(client.clone(), INSTANCE_ID, telemetry_path).await?,
+                HiqliteAuthStore::bootstrap((*client).clone(), INSTANCE_ID, telemetry_path).await?,
+            );
+            // Keep exact catalogue routing counters isolated from membership's
+            // background probes while sharing this node's real replicated DB.
+            let opened_catalogue_store = Arc::new(
+                HiqliteAuthStore::open(
+                    (*client).clone(),
+                    &telemetry_path.with_extension("catalogue-validation.db"),
+                )
+                .await?,
+            );
+            let authority: Arc<dyn plurx_core::store::Store> = opened_catalogue_store.clone();
+            let opened_catalogue = CatalogueReader::validation_replicated(
+                authority,
+                Arc::clone(&opened_catalogue_store),
+                replication.metrics_handle(),
+                0,
             );
             let opened_membership = membership_manager(client, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
+            *catalogue = Some(opened_catalogue);
+            *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
             Ok(Response::Ok)
         }
         Request::RejectIdentityDrift => {
-            match HiqliteAuthStore::bootstrap(client.clone(), "wrong-instance-id", telemetry_path)
-                .await
+            match HiqliteAuthStore::bootstrap(
+                (*client).clone(),
+                "wrong-instance-id",
+                telemetry_path,
+            )
+            .await
             {
                 Err(error) if error.to_string().contains("refusing bootstrap") => Ok(Response::Ok),
                 Err(error) => bail!("identity drift failed for the wrong reason: {error}"),
@@ -5047,10 +6986,26 @@ async fn handle_request(
             }
         }
         Request::Open => {
-            let opened = Arc::new(HiqliteAuthStore::open(client.clone(), telemetry_path).await?);
+            let opened = Arc::new(HiqliteAuthStore::open((*client).clone(), telemetry_path).await?);
+            let opened_catalogue_store = Arc::new(
+                HiqliteAuthStore::open(
+                    (*client).clone(),
+                    &telemetry_path.with_extension("catalogue-validation.db"),
+                )
+                .await?,
+            );
+            let authority: Arc<dyn plurx_core::store::Store> = opened_catalogue_store.clone();
+            let opened_catalogue = CatalogueReader::validation_replicated(
+                authority,
+                Arc::clone(&opened_catalogue_store),
+                replication.metrics_handle(),
+                0,
+            );
             let opened_membership = membership_manager(client, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
+            *catalogue = Some(opened_catalogue);
+            *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
             Ok(Response::Ok)
         }
@@ -5252,6 +7207,42 @@ async fn handle_request(
             membership_ref(membership)?.heartbeat().await?;
             Ok(Response::Ok)
         }
+        Request::ObserveArtworkRepair {
+            item_id,
+            inject_leader_change,
+        } => {
+            if inject_leader_change {
+                Ok(membership_error_response(MembershipError::LeaderChanged(
+                    "injected before the read-only repair observation".to_owned(),
+                )))
+            } else {
+                membership_ref(membership)?
+                    .observe_artwork_source_repair(item_id)
+                    .await
+                    .map(|value| Response::Flag { value })
+                    .or_else(|error| Ok(membership_error_response(error)))
+            }
+        }
+        Request::ReadArtworkRepairFence { item_id } => {
+            let mut rows = client
+                .query_consistent_map::<HarnessArtworkRepairRow, _>(
+                    "SELECT owner_node_id, leader_term, generation \
+                     FROM cluster_artwork_repairs WHERE item_id = $1",
+                    params!(item_id),
+                )
+                .await?;
+            if rows.len() > 1 {
+                bail!("artwork repair primary key returned multiple rows");
+            }
+            Ok(Response::ArtworkRepairFence {
+                fence: rows.pop().map(|row| ArtworkRepairFence {
+                    item_id,
+                    owner_node_id: row.owner_node_id,
+                    leader_term: row.leader_term,
+                    generation: row.generation,
+                }),
+            })
+        }
         Request::ClaimArtworkRepair { item_id, lease_ms } => membership_ref(membership)?
             .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
             .await
@@ -5295,13 +7286,31 @@ async fn handle_request(
                 .await?;
             Ok(Response::ItemId { item_id })
         }
-        Request::ClaimArtworkRepairFence { item_id, lease_ms } => membership_ref(membership)?
-            .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
-            .await
-            .map(|claim| Response::ArtworkRepairFence {
-                fence: claim.map(|claim| claim.fence().clone()),
-            })
-            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ClaimArtworkRepairFence {
+            item_id,
+            lease_ms,
+            inject_leader_change,
+        } => {
+            if inject_leader_change {
+                // Execute the real potentially mutating path, then discard its
+                // acknowledgement. This deterministically models the exact
+                // client ambiguity that must be fatal to the controller.
+                membership_ref(membership)?
+                    .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+                    .await?;
+                Ok(membership_error_response(MembershipError::LeaderChanged(
+                    "injected after applying a potentially mutating repair claim".to_owned(),
+                )))
+            } else {
+                membership_ref(membership)?
+                    .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+                    .await
+                    .map(|claim| Response::ArtworkRepairFence {
+                        fence: claim.map(|claim| claim.fence().clone()),
+                    })
+                    .or_else(|error| Ok(membership_error_response(error)))
+            }
+        }
         Request::ApplyArtworkRepairFence {
             target_item_id,
             ref fence,
@@ -5691,6 +7700,13 @@ async fn handle_request(
             };
             Ok(Response::SingletonValue { value })
         }
+        Request::PutSetting { ref key, ref value } => {
+            store_ref(store)?.put_setting(key, value).await?;
+            Ok(Response::Ok)
+        }
+        Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
+            value: read_local_setting(client, key).await?,
+        }),
         Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
             .retire_artwork_source_repair(fence)
             .await
@@ -5823,6 +7839,21 @@ async fn handle_request(
                 .await?;
             Ok(Response::Ok)
         }
+        Request::TopologyResources {
+            hardware,
+            storage_device,
+            network_path,
+            reset_max_rss,
+        } => Ok(Response::TopologyResources {
+            sample: capture_topology_resources(
+                launch.node_id,
+                node_started.elapsed(),
+                hardware,
+                storage_device,
+                network_path,
+                reset_max_rss,
+            )?,
+        }),
         Request::PostLossWrite {
             target,
             position_ms,
@@ -5917,6 +7948,45 @@ async fn handle_request(
                 committed_index: watermark.committed_index,
             })
         }
+        Request::PauseApply => {
+            hiqlite::validation_pause_apply();
+            Ok(Response::Ok)
+        }
+        Request::ApplyPauseObserved => Ok(Response::ApplyPauseObserved {
+            observed: hiqlite::validation_apply_pause_observed(),
+        }),
+        Request::ResumeApply => {
+            hiqlite::validation_resume_apply();
+            Ok(Response::Ok)
+        }
+        Request::SetRaftPartitioned { partitioned } => {
+            hiqlite::validation_set_raft_partitioned(partitioned);
+            Ok(Response::Ok)
+        }
+        Request::BoundedCatalogueGetItem { item_id } => {
+            let store = catalogue_store_ref(catalogue_store)?;
+            store.validation_reset_operation_counts();
+            let result = catalogue_ref(catalogue)?.get_item(item_id).await;
+            let counts = store.validation_operation_counts();
+            let view = replication.metrics_handle().snapshot();
+            let (title, error) = match result {
+                Ok(item) => (item.map(|item| item.title), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            Ok(Response::BoundedCatalogueRead {
+                title,
+                error,
+                consistent_query_calls: counts.consistent_query_calls,
+                non_consistent_query_calls: counts.non_consistent_query_calls,
+                watermark_valid: view.watermark_valid,
+                watermark_age_millis: view.watermark_age_millis,
+                local_reads_supported: view.watermark_local_reads_supported,
+                apply_lag_entries: view
+                    .watermark
+                    .and_then(|watermark| watermark.apply_lag_entries),
+                serving_ready: serving.is_ready(),
+            })
+        }
         Request::ProveOldWatermarkStreamCompatibility => {
             let error = client
                 .db_quorum_watermark()
@@ -5938,6 +8008,41 @@ async fn handle_request(
             }
             Ok(Response::Ok)
         }
+        Request::ProveP3aWatermarkCompatibility => {
+            let watermark = client.db_quorum_watermark().await?;
+            if watermark.local_read_protocol_version != 0 {
+                bail!(
+                    "P3a three-column watermark advertised local-read protocol {}",
+                    watermark.local_read_protocol_version
+                );
+            }
+
+            let fence = ServingFence::new(replication.metrics_handle());
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let monitor = tokio::spawn(fence.clone().monitor_loop(shutdown.clone()));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let view = replication.metrics_handle().snapshot();
+                if view.watermark_valid && !view.watermark_local_reads_supported && fence.is_ready()
+                {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    shutdown.cancel();
+                    let _ = monitor.await;
+                    bail!(
+                        "P3a watermark did not preserve readiness while local reads stayed disabled: valid={}, local_reads_supported={}, ready={}",
+                        view.watermark_valid,
+                        view.watermark_local_reads_supported,
+                        fence.is_ready()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            shutdown.cancel();
+            monitor.await.context("join compatibility serving fence")?;
+            Ok(Response::Ok)
+        }
         Request::ReplicationStatus => Ok(Response::ReplicationStatus {
             status: replication.status().await,
         }),
@@ -5956,6 +8061,120 @@ async fn handle_request(
             Ok(Response::Ok)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_topology_resources(
+    node_id: u64,
+    wall: Duration,
+    hardware: String,
+    storage_device: String,
+    network_path: String,
+    reset_max_rss: bool,
+) -> Result<ResourceSample> {
+    let stat = std::fs::read_to_string("/proc/self/stat").context("read process CPU counters")?;
+    let after_name = stat
+        .rsplit_once(')')
+        .map(|(_, fields)| fields)
+        .context("parse process stat command name")?;
+    // Fields after the command name begin at proc(5) field 3. utime/stime are
+    // fields 14/15, hence offsets 11/12 in this suffix.
+    let fields = after_name.split_whitespace().collect::<Vec<_>>();
+    let user_ticks = fields
+        .get(11)
+        .context("process stat omitted user ticks")?
+        .parse::<u64>()?;
+    let system_ticks = fields
+        .get(12)
+        .context("process stat omitted system ticks")?
+        .parse::<u64>()?;
+    // SAFETY: sysconf is a read-only libc query with a fixed selector.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        bail!("Linux reported an invalid process clock tick rate");
+    }
+
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("read process resident-memory counters")?;
+    let max_rss_kib = proc_key_u64(&status, "VmHWM:")
+        .or_else(|| proc_key_u64(&status, "VmRSS:"))
+        .context("process status omitted VmHWM and VmRSS")?;
+    let io = std::fs::read_to_string("/proc/self/io").context("read process I/O counters")?;
+    let storage_read_bytes =
+        proc_key_u64(&io, "read_bytes:").context("process I/O omitted read_bytes")?;
+    let storage_write_bytes =
+        proc_key_u64(&io, "write_bytes:").context("process I/O omitted write_bytes")?;
+    let network =
+        std::fs::read_to_string("/proc/net/dev").context("read container network counters")?;
+    let (network_receive_bytes, network_transmit_bytes) = parse_network_bytes(&network)?;
+
+    if reset_max_rss {
+        // Linux supports clear_refs=5 as a process-local high-water reset. The
+        // post-workload VmHWM therefore belongs to the measured interval, not
+        // bootstrap, schema migration, or leader election.
+        std::fs::write("/proc/self/clear_refs", b"5\n")
+            .context("reset process peak resident memory for topology window")?;
+    }
+
+    Ok(ResourceSample {
+        node_id,
+        hardware,
+        storage_device,
+        network_path,
+        cpu_seconds: Some((user_ticks + system_ticks) as f64 / ticks_per_second as f64),
+        wall_seconds: Some(wall.as_secs_f64()),
+        max_rss_bytes: Some(max_rss_kib.saturating_mul(1024)),
+        storage_read_bytes: Some(storage_read_bytes),
+        storage_write_bytes: Some(storage_write_bytes),
+        network_receive_bytes: Some(network_receive_bytes),
+        network_transmit_bytes: Some(network_transmit_bytes),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn capture_topology_resources(
+    _node_id: u64,
+    _wall: Duration,
+    _hardware: String,
+    _storage_device: String,
+    _network_path: String,
+    _reset_max_rss: bool,
+) -> Result<ResourceSample> {
+    bail!("named topology resource capture requires Linux voters")
+}
+
+#[cfg(target_os = "linux")]
+fn proc_key_u64(contents: &str, key: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?.trim();
+        value.split_whitespace().next()?.parse().ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_network_bytes(contents: &str) -> Result<(u64, u64)> {
+    let mut receive = 0_u64;
+    let mut transmit = 0_u64;
+    let mut interfaces = 0_u64;
+    for line in contents.lines().skip(2) {
+        let Some((name, counters)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == "lo" {
+            continue;
+        }
+        let counters = counters.split_whitespace().collect::<Vec<_>>();
+        if counters.len() < 16 {
+            bail!("network interface counters were truncated");
+        }
+        receive = receive.saturating_add(counters[0].parse::<u64>()?);
+        transmit = transmit.saturating_add(counters[8].parse::<u64>()?);
+        interfaces += 1;
+    }
+    if interfaces == 0 {
+        bail!("container has no non-loopback network interface");
+    }
+    Ok((receive, transmit))
 }
 
 #[derive(Debug)]
@@ -6004,6 +8223,22 @@ impl From<&mut Row<'_>> for SingletonSettingRow {
     }
 }
 
+struct HarnessArtworkRepairRow {
+    owner_node_id: String,
+    leader_term: i64,
+    generation: i64,
+}
+
+impl From<&mut Row<'_>> for HarnessArtworkRepairRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            owner_node_id: row.get("owner_node_id"),
+            leader_term: row.get("leader_term"),
+            generation: row.get("generation"),
+        }
+    }
+}
+
 async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>> {
     let mut rows = client
         .query_consistent_map::<SingletonLeaseRow, _>(
@@ -6047,6 +8282,18 @@ fn store_ref(store: &Option<Arc<HiqliteAuthStore>>) -> Result<&HiqliteAuthStore>
     store.as_deref().context("auth store has not been opened")
 }
 
+fn catalogue_ref(catalogue: &Option<CatalogueReader>) -> Result<&CatalogueReader> {
+    catalogue
+        .as_ref()
+        .context("catalogue reader has not been opened")
+}
+
+fn catalogue_store_ref(store: &Option<Arc<HiqliteAuthStore>>) -> Result<&Arc<HiqliteAuthStore>> {
+    store
+        .as_ref()
+        .context("catalogue validation store has not been opened")
+}
+
 fn membership_ref(membership: &Option<MembershipManager>) -> Result<&MembershipManager> {
     membership
         .as_ref()
@@ -6054,9 +8301,12 @@ fn membership_ref(membership: &Option<MembershipManager>) -> Result<&MembershipM
 }
 
 fn membership_error_response(error: plurx_core::cluster::membership::MembershipError) -> Response {
-    Response::MembershipError {
-        code: error.code().to_owned(),
-        message: error.to_string(),
+    match error {
+        MembershipError::LeaderChanged(message) => Response::MembershipLeaderChange { message },
+        error => Response::MembershipError {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        },
     }
 }
 
@@ -7358,7 +9608,7 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
         true,
         true,
         API_SECRET.to_owned(),
-        true,
+        false,
         None,
     )
     .await?;
@@ -7418,8 +9668,8 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
                 addr_api: node.api.clone(),
             })
             .collect(),
-        listen_addr_api: Cow::Borrowed(LISTEN_ADDR),
-        listen_addr_raft: Cow::Borrowed(LISTEN_ADDR),
+        listen_addr_api: Cow::Owned(launch.listen_addr.clone()),
+        listen_addr_raft: Cow::Owned(launch.listen_addr.clone()),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
         filename_db: Cow::Borrowed("auth.db"),
         secret_raft: RAFT_SECRET.to_owned(),
@@ -7564,7 +9814,7 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
             let (_, port) = address
                 .rsplit_once(':')
                 .with_context(|| format!("voter address {address} has no port"))?;
-            Ok(format!("{LISTEN_ADDR}:{port}"))
+            Ok(format!("{}:{port}", launch.listen_addr))
         })
         .collect()
 }
@@ -7578,9 +9828,13 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
 /// itself to the controller.
 async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
     for address in addresses {
+        let connection_address = address
+            .strip_prefix("0.0.0.0:")
+            .map(|port| format!("127.0.0.1:{port}"));
+        let connection_address = connection_address.as_deref().unwrap_or(address);
         let deadline = TokioInstant::now() + LISTENER_PROOF_TIMEOUT;
         loop {
-            match tokio::net::TcpStream::connect(address).await {
+            match tokio::net::TcpStream::connect(connection_address).await {
                 Ok(_) => break,
                 Err(error) if TokioInstant::now() >= deadline => {
                     return Err(anyhow!(error)).with_context(|| {
@@ -7608,6 +9862,118 @@ pub fn install_crypto_provider() {
 mod tests {
     use super::*;
 
+    fn test_media_child(admission_id: u64) -> MediaChild {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().expect("spawn test media child");
+        let input = child.stdin.take().expect("retain test child stdin");
+        MediaChild {
+            child,
+            _input: input,
+            admitted_generation: 7,
+            admission_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_media_teardown_cannot_take_or_hide_its_replacement() {
+        let media = Arc::new(tokio::sync::Mutex::new(Some(test_media_child(1))));
+
+        let delayed_old = take_media_child_if_id(&media, 1)
+            .await
+            .expect("old admission owns its child");
+        *media.lock().await = Some(test_media_child(2));
+
+        assert!(take_media_child_if_id(&media, 1).await.is_none());
+        reap_media_child(delayed_old).await;
+
+        let mut slot = media.lock().await;
+        let replacement = slot.as_mut().expect("replacement remains registered");
+        assert_eq!(replacement.admission_id, 2);
+        assert!(matches!(replacement.child.try_wait(), Ok(None)));
+        drop(slot);
+
+        kill_media_child_if_id(&media, 2).await;
+        assert!(media.lock().await.is_none());
+    }
+
+    #[test]
+    fn singleton_retry_requires_the_explicit_trial_marker() {
+        assert!(singleton_trial_was_unstable(
+            b"startup\nCLUSTER_SINGLETON_UNSTABLE stage=after-resume\n"
+        ));
+        assert!(!singleton_trial_was_unstable(
+            b"Error: singleton proof changed leader/term during its measured interval\n"
+        ));
+        assert!(!singleton_trial_was_unstable(
+            b"diagnostic mentioned CLUSTER_SINGLETON_UNSTABLE but was not a verdict\n"
+        ));
+    }
+
+    #[test]
+    fn membership_harness_retries_only_typed_leader_changes() {
+        assert!(matches!(
+            membership_error_response(MembershipError::LeaderChanged("routing".to_owned())),
+            Response::MembershipLeaderChange { message } if message == "routing"
+        ));
+        assert!(matches!(
+            membership_error_response(MembershipError::Internal(
+                "LeaderChange text from an unrelated semantic error".to_owned()
+            )),
+            Response::MembershipError { code, .. } if code == "membership_internal"
+        ));
+    }
+
+    #[test]
+    fn mutating_artwork_claim_helper_has_exactly_one_dispatch() {
+        let source = include_str!("lib.rs");
+        let helper = source
+            .split_once("async fn claim_artwork_repair_fence_once")
+            .expect("single-dispatch claim helper")
+            .1
+            .split_once("async fn run_leader_self_leave_case")
+            .expect("helper boundary")
+            .0;
+        assert_eq!(helper.matches(".request(").count(), 1);
+        assert!(helper.contains("Response::MembershipLeaderChange"));
+        assert!(helper.contains("was ambiguous and was not retried"));
+    }
+
+    #[test]
+    fn compaction_plan_stops_writing_at_the_exact_openraft_trigger() {
+        assert_eq!(
+            snapshot_trigger_plan(None, 9_998).expect("plan before initial trigger"),
+            1
+        );
+        assert_eq!(
+            snapshot_trigger_plan(None, 9_999).expect("plan initial trigger"),
+            0
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(0), 9_999).expect("plan before index-zero trigger"),
+            1
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(0), 10_000).expect("plan index-zero trigger"),
+            0
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(1_000), 1_512).expect("plan partial tail"),
+            9_488
+        );
+        assert_eq!(
+            snapshot_trigger_plan(Some(1_000), 11_609).expect("plan in-flight snapshot"),
+            0
+        );
+        assert!(snapshot_trigger_plan(Some(1_000), 999).is_err());
+        assert!(snapshot_trigger_plan(Some(u64::MAX), u64::MAX).is_err());
+    }
+
     #[test]
     fn voter_config_uses_the_production_wal_size() {
         let root = tempfile::tempdir().expect("config test root");
@@ -7619,7 +9985,9 @@ mod tests {
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
+            listen_addr: default_listen_addr(),
             emulate_old_watermark_handler: false,
+            emulate_p3a_watermark_handler: false,
         };
 
         let config = node_config(&launch).expect("build the voter config");
