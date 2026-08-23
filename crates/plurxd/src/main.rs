@@ -26,6 +26,7 @@ mod state;
 mod storeprobe;
 mod subtitles;
 mod telemetry;
+mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
