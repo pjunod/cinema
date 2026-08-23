@@ -2463,8 +2463,8 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = contract_cluster();
-    let store = open_contract_hiqlite_store().await;
+    let cluster = ContractCluster::start();
+    let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
         .await
@@ -2634,7 +2634,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = contract_cluster();
+    let cluster = ContractCluster::start();
     let mut opened = Vec::<Arc<dyn Store>>::new();
     for ordinal in 0..3 {
         let mut addresses = cluster.addresses.clone();
@@ -3265,7 +3265,7 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = contract_cluster();
+    let cluster = ContractCluster::start();
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -3908,7 +3908,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = contract_cluster();
+    let cluster = ContractCluster::start();
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -6258,7 +6258,8 @@ async fn settings_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn clustered_page_read_primitives_have_bounded_client_calls() {
     let _case = HIQLITE_CASE.lock().await;
-    let store = open_contract_hiqlite_store().await;
+    let cluster = ContractCluster::start();
+    let store = open_contract_hiqlite_store(&cluster).await;
     store
         .validation_reset_contract_state()
         .await
