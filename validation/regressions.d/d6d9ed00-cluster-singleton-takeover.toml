@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["d6d9ed00", "209407bd", "141d87cd", "520e56ef", "76c1e79b", "4763d89b", "8910ec32", "df33c232", "8278ded6", "9d1b6190", "0cb21b43", "3f56fac4"]
+commits = ["d6d9ed00", "209407bd", "141d87cd", "520e56ef", "76c1e79b", "4763d89b", "8910ec32", "df33c232", "8278ded6", "9d1b6190", "0cb21b43", "3f56fac4", "ef528399"]
 points = ["cluster.auth", "validation.framework"]
 checks = ["cluster-auth", "history-regressions", "rust-gate"]
-reason = "The retained three-process contract compiles the daemon's production lease lifecycle, blocks one follower inside a validated physical provider request, pauses it past the authoritative lease deadline, makes both surviving voters contest takeover without changing leader or term, admits one exact next-generation winner while the loser observes that fence, rejects the resumed token inside its former TTL, and includes that rejection in the bounded post-baseline Raft entries even if SIGCONT legitimately wakes an overdue election timer."
+reason = "The retained three-process contract compiles the daemon's production lease lifecycle, blocks one follower inside a validated physical provider request, pauses it past the authoritative lease deadline, makes both surviving voters contest takeover with leader and term taken from one boundary sample, admits one exact next-generation winner while the loser observes that fence, rejects the resumed token inside its former TTL, and includes that rejection in the bounded post-baseline Raft entries by taking the non-regressing maximum applied index across all live voters even if SIGCONT wakes an overdue election timer."
