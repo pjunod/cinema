@@ -146,6 +146,7 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::LeaveNodeMismatch
         | MembershipError::LocalNodeNotActive
         | MembershipError::QuorumLoss
+        | MembershipError::ActiveMediaSessions
         | MembershipError::OfflineWork(_) => StatusCode::CONFLICT,
         MembershipError::NodeNotFound => StatusCode::NOT_FOUND,
         MembershipError::Internal(_) => StatusCode::SERVICE_UNAVAILABLE,

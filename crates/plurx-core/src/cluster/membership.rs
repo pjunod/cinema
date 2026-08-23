@@ -232,6 +232,8 @@ pub enum MembershipError {
     LocalNodeNotActive,
     #[error("removal would leave fewer than two voters and lose the reconfiguration quorum")]
     QuorumLoss,
+    #[error("node owns active media sessions that must drain before removal")]
+    ActiveMediaSessions,
     /// The removal was refused because this node's offline work could not be
     /// resolved by the §6.7 rule. The payload is the operator-visible reason;
     /// lifting the blanket refusal must not turn removal into "always
@@ -263,6 +265,7 @@ impl MembershipError {
             Self::LeaveNodeMismatch => "leave_node_mismatch",
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
+            Self::ActiveMediaSessions => "media_sessions_active",
             Self::OfflineWork(_) => "node_owns_offline_work",
             Self::Internal(_) => "membership_internal",
         }
@@ -610,7 +613,9 @@ const CAPABILITY_READY_PREDICATE: &str = "NOT EXISTS (SELECT 1 FROM cluster_node
 fn begin_removal_attempt_sql() -> String {
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
-         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE}"
+         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE} \
+           AND NOT EXISTS (SELECT 1 FROM media_sessions \
+             WHERE owner_node_id = $1 AND state = 'active')"
     )
 }
 
@@ -2728,6 +2733,17 @@ impl MembershipManager {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         if results.get(1).copied() != Some(1) {
+            let active_sessions = inner
+                .client
+                .query_consistent_map::<CountRow, _>(
+                    "SELECT COUNT(*) AS count FROM media_sessions \
+                     WHERE owner_node_id = $1 AND state = 'active'",
+                    params!(node_id),
+                )
+                .await?;
+            if active_sessions.first().is_some_and(|row| row.count > 0) {
+                return Err(MembershipError::ActiveMediaSessions);
+            }
             return Err(MembershipError::MembershipUpgradeRequired);
         }
         if !self.node_is_tombstoned(node_id).await? {
@@ -4135,6 +4151,54 @@ mod tests {
     }
 
     #[test]
+    fn removal_attempt_and_active_media_session_are_mutually_exclusive() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
+                 INSERT INTO cluster_node_capabilities VALUES (\
+                   'node-a', 'membership_removal_attempt_refs_v1', 10); \
+                 INSERT INTO media_sessions VALUES ('node-a', 'active');",
+            )
+            .expect("seed active media owner");
+
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(),
+                    rusqlite::params!["node-a", "blocked-attempt"],
+                )
+                .expect("refuse removal while media is active"),
+            0
+        );
+        connection
+            .execute(
+                "UPDATE media_sessions SET state = 'ended' WHERE owner_node_id = 'node-a'",
+                [],
+            )
+            .expect("drain media owner");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(),
+                    rusqlite::params!["node-a", "admitted-attempt"],
+                )
+                .expect("admit removal after media drains"),
+            1
+        );
+    }
+
+    #[test]
     fn one_attempt_cannot_roll_back_a_concurrent_removal_fence() {
         fn rollback(connection: &mut rusqlite::Connection, node_id: &str, attempt_id: &str) {
             let transaction = connection.transaction().expect("rollback transaction");
@@ -4178,6 +4242,7 @@ mod tests {
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
                    revision INTEGER, updated_at_ms INTEGER); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 1, 10, NULL); \
                  INSERT INTO cluster_nodes VALUES ('node-old', 2, 20, NULL); \
                  INSERT INTO cluster_nodes VALUES ('staged-join', 99, 30, NULL); \

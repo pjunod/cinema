@@ -309,8 +309,15 @@ impl MediaSessionStore for SqliteStore {
             let current: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_sessions
                   WHERE user_id = ?1 AND state IN ('starting', 'active')
-                    AND incarnation_id != ?2",
-                params![activation.user_id, activation.incarnation_id],
+                    AND incarnation_id != ?2
+                    AND incarnation_id != COALESCE((
+                      SELECT current_incarnation_id FROM media_playback_pointers
+                       WHERE user_id = ?1 AND playback_id = ?3), '')",
+                params![
+                    activation.user_id,
+                    activation.incarnation_id,
+                    activation.playback_id,
+                ],
                 |row| row.get(0),
             )?;
             if current >= MAX_CURRENT_PER_USER {

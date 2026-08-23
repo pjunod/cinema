@@ -118,6 +118,14 @@ impl From<&mut Row<'_>> for RouteRow {
     }
 }
 
+struct PointerRow(String);
+
+impl From<&mut Row<'_>> for PointerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("current_incarnation_id"))
+    }
+}
+
 struct RequestRow {
     request_fingerprint: String,
     state: String,
@@ -443,27 +451,26 @@ impl MediaSessionStore for HiqliteAuthStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        let predecessor = self
+        let current_pointer = self
             .client()
-            .query_consistent_map::<RouteRow, _>(
-                &format!(
-                    "SELECT {ROUTE_COLS} FROM media_sessions
-                      WHERE incarnation_id = (
-                        SELECT current_incarnation_id FROM media_playback_pointers
-                         WHERE user_id = $1 AND playback_id = $2)
-                        AND incarnation_id != $3"
-                ),
-                params!(
-                    activation.user_id,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str()
-                ),
+            .query_consistent_map::<PointerRow, _>(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE user_id = $1 AND playback_id = $2",
+                params!(activation.user_id, activation.playback_id.as_str()),
             )
             .await?
             .into_iter()
             .next()
             .map(|row| row.0);
+        let predecessor = match current_pointer
+            .as_deref()
+            .filter(|incarnation| *incarnation != activation.incarnation_id)
+        {
+            Some(incarnation) => route_by(self, "incarnation_id", incarnation).await?,
+            None => None,
+        };
         let request_id = activation.request_id.as_deref().unwrap_or("");
+        let predecessor_incarnation = current_pointer.as_deref().unwrap_or("");
         let lease_resource = format!("session:{}", activation.incarnation_id);
         let removed_owner_key = removed_job_owner_key(&activation.owner_node_id);
         let statements = vec![
@@ -498,7 +505,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                         0, 0, 0, 0, 0, $10
                   WHERE (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $3 AND state IN ('starting', 'active')
-                            AND incarnation_id != $1) < $11
+                            AND incarnation_id != $1
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE user_id = $3 AND playback_id = $4), '')) < $11
                     AND ($12 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $12 AND incarnation_id = $1
@@ -536,8 +546,9 @@ impl MediaSessionStore for HiqliteAuthStore {
             (
                 "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = $1,
                         updated_at_ms = $1
-                  WHERE incarnation_id = (SELECT current_incarnation_id
-                    FROM media_playback_pointers WHERE user_id = $2 AND playback_id = $3)
+                  WHERE $7 != '' AND incarnation_id = $7
+                    AND incarnation_id = (SELECT current_incarnation_id
+                      FROM media_playback_pointers WHERE user_id = $2 AND playback_id = $3)
                     AND incarnation_id != $4 AND state != 'ended'
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $4 AND session_id = $5
@@ -548,7 +559,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
-                    activation.owner_node_id.as_str()
+                    activation.owner_node_id.as_str(),
+                    predecessor_incarnation
                 ),
             ),
             (
@@ -561,6 +573,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE 'session:' || session.incarnation_id = job_leases.resource
                         AND session.user_id = $2 AND session.playback_id = $3
                         AND session.incarnation_id != $4 AND session.state = 'ended'
+                        AND session.incarnation_id = $5
                         AND session.updated_at_ms = $1
                         AND session.owner_node_id = job_leases.owner_node_id
                         AND session.owner_epoch = job_leases.fence)",
@@ -568,7 +581,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.now_ms,
                     activation.user_id,
                     activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str()
+                    activation.incarnation_id.as_str(),
+                    predecessor_incarnation
                 ),
             ),
             (
@@ -577,16 +591,68 @@ impl MediaSessionStore for HiqliteAuthStore {
                  SELECT $1, $2, $3, $4 WHERE EXISTS (
                    SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
                      AND owner_node_id = $6 AND state = 'active')
+                   AND (($7 = '' AND NOT EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $1 AND playback_id = $2)) OR EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $1 AND playback_id = $2
+                        AND current_incarnation_id IN ($7, $3)))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms
+                  WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)",
                 params!(
                     activation.user_id,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     activation.now_ms,
                     activation.session_id.as_str(),
-                    activation.owner_node_id.as_str()
+                    activation.owner_node_id.as_str(),
+                    predecessor_incarnation
+                ),
+            ),
+            (
+                "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = $1,
+                        updated_at_ms = $1
+                  WHERE incarnation_id = $2 AND session_id = $3 AND state = 'active'
+                    AND NOT EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $4 AND playback_id = $5
+                        AND current_incarnation_id = $2)",
+                params!(
+                    activation.now_ms,
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str(),
+                    activation.user_id,
+                    activation.playback_id.as_str()
+                ),
+            ),
+            (
+                "UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                        revision = revision + 1, updated_at_ms = $1
+                  WHERE resource = $2 AND owner_node_id = $3 AND fence = 1
+                    AND revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $4 AND session_id = $5 AND state = 'ended'
+                        AND updated_at_ms = $1)",
+                params!(
+                    activation.now_ms,
+                    lease_resource.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str()
+                ),
+            ),
+            (
+                "DELETE FROM job_leases WHERE resource = $1 AND owner_node_id = $2
+                    AND fence = 1 AND revision = 1
+                    AND NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $3)",
+                params!(
+                    lease_resource.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.incarnation_id.as_str()
                 ),
             ),
             (
