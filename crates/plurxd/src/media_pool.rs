@@ -257,6 +257,7 @@ struct RootProbe {
 #[derive(Default)]
 struct RootProbeRegistry {
     running: BTreeMap<PathBuf, RootProbe>,
+    completed: Vec<(PathBuf, RootReadability)>,
 }
 
 #[derive(Clone)]
@@ -266,6 +267,7 @@ pub(crate) struct MediaPool {
     snapshots: Arc<RwLock<BTreeMap<String, CachedSnapshot>>>,
     root_readability: Arc<RwLock<BTreeMap<PathBuf, RootReadability>>>,
     root_probes: Arc<Mutex<RootProbeRegistry>>,
+    root_probe_launcher: Arc<tokio::sync::Semaphore>,
 }
 
 impl MediaPool {
@@ -276,6 +278,7 @@ impl MediaPool {
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             root_readability: Arc::new(RwLock::new(BTreeMap::new())),
             root_probes: Arc::new(Mutex::new(RootProbeRegistry::default())),
+            root_probe_launcher: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
@@ -352,7 +355,8 @@ impl MediaPool {
         // same deadline merely by making spawn calls expensive.
         let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
         let mut outcomes = self.reap_root_probes();
-        outcomes.extend(self.start_root_probes(&roots));
+        self.start_root_probes(&roots, deadline).await;
+        outcomes.extend(self.reap_root_probes_until(&roots, deadline));
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -381,41 +385,77 @@ impl MediaPool {
         }
     }
 
-    fn start_root_probes(&self, roots: &BTreeSet<PathBuf>) -> Vec<(PathBuf, RootReadability)> {
-        let mut immediate = Vec::new();
-        let mut registry = self
-            .root_probes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for root in roots {
-            if registry.running.contains_key(root)
-                || root_probe_capacity_remaining(registry.running.len()) == 0
-            {
-                continue;
-            }
-            match spawn_library_root_probe(root) {
-                Ok(child) => {
-                    registry.running.insert(
-                        root.clone(),
-                        RootProbe {
-                            child,
-                            kill_sent: false,
-                        },
-                    );
-                }
-                Err(error) => {
-                    tracing::debug!(%error, path = %root.display(), "could not start media root probe");
-                    immediate.push((
-                        root.clone(),
-                        RootReadability {
-                            readable: false,
-                            observed_at: tokio::time::Instant::now(),
-                        },
-                    ));
-                }
-            }
+    async fn start_root_probes(&self, roots: &BTreeSet<PathBuf>, deadline: tokio::time::Instant) {
+        if tokio::time::Instant::now() >= deadline {
+            return;
         }
-        immediate
+        let Ok(permit) = Arc::clone(&self.root_probe_launcher).try_acquire_owned() else {
+            // A previous process-table call is still outstanding. Do not
+            // queue another blocking launcher behind it.
+            return;
+        };
+        let roots = roots.clone();
+        let registry = Arc::clone(&self.root_probes);
+        let runtime = tokio::runtime::Handle::current();
+        let launcher = tokio::task::spawn_blocking(move || {
+            let _runtime = runtime.enter();
+            for root in roots {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                let can_start = {
+                    let registry = registry
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !registry.running.contains_key(&root)
+                        && root_probe_capacity_remaining(registry.running.len()) > 0
+                };
+                if !can_start {
+                    continue;
+                }
+                match spawn_library_root_probe(&root) {
+                    Ok(mut child) => {
+                        let mut registry = registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Check while holding the publication lock. Otherwise
+                        // this thread can be preempted after an earlier clock
+                        // sample and insert a positive-capable child after the
+                        // refresher has already performed its final fence.
+                        let late = tokio::time::Instant::now() >= deadline;
+                        if late {
+                            let _ = child.start_kill();
+                        }
+                        registry.running.insert(
+                            root,
+                            RootProbe {
+                                child,
+                                kill_sent: late,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, path = %root.display(), "could not start media root probe");
+                        registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .completed
+                            .push((
+                                root,
+                                RootReadability {
+                                    readable: false,
+                                    observed_at: tokio::time::Instant::now(),
+                                },
+                            ));
+                    }
+                }
+            }
+            drop(permit);
+        });
+        // Dropping the join wait at the common deadline does not cancel a
+        // possibly blocked OS spawn. Its owned permit remains held until it
+        // returns, which preserves the hard single-flight guarantee.
+        let _ = tokio::time::timeout_at(deadline, launcher).await;
     }
 
     fn reap_root_probes(&self) -> Vec<(PathBuf, RootReadability)> {
@@ -438,6 +478,7 @@ impl MediaPool {
             .root_probes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut outcomes = std::mem::take(&mut registry.completed);
         let completed = registry
             .running
             .iter_mut()
@@ -482,18 +523,16 @@ impl MediaPool {
             registry.running.remove(root);
         }
         let observed_at = tokio::time::Instant::now();
-        completed
-            .into_iter()
-            .map(|(root, readable)| {
-                (
-                    root,
-                    RootReadability {
-                        readable,
-                        observed_at,
-                    },
-                )
-            })
-            .collect()
+        outcomes.extend(completed.into_iter().map(|(root, readable)| {
+            (
+                root,
+                RootReadability {
+                    readable,
+                    observed_at,
+                },
+            )
+        }));
+        outcomes
     }
 
     fn has_running_root_probe(&self, roots: &BTreeSet<PathBuf>) -> bool {
@@ -1289,6 +1328,7 @@ fn unix_ms() -> i64 {
 mod tests {
     use super::*;
     use plurx_core::domain::{AudioStream, SubtitleStream};
+    use tokio::sync::mpsc;
 
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {
@@ -1617,7 +1657,7 @@ mod tests {
     #[tokio::test]
     async fn blackholed_first_eight_peers_do_not_starve_the_ninth() {
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-        let fanout = stream::iter((0..9).map(|index| {
+        let fanout = stream::iter((0..9).map(move |index| {
             let started_tx = started_tx.clone();
             async move {
                 if index < 8 {

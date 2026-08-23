@@ -188,6 +188,10 @@ const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
+// Exact-request proofs are accepted on the public listener. Bound the work
+// performed before a signature is known to be genuine so forged envelopes
+// cannot fill every executor with body hashing and Ed25519 verification.
+const MAX_INTERNAL_PREVERIFY_PER_SECOND: u8 = 64;
 const MAX_INTERNAL_READ_PREVERIFY_PER_SECOND: u16 = 1_024;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
 // Five seconds at the admitted 1,024 reads/second, plus one second of margin.
@@ -741,6 +745,7 @@ struct ReplicatedMembership {
     internal_read_replays: Mutex<BTreeMap<String, InternalReadReplayWindow>>,
     internal_read_preverify: Mutex<InternalReadAdmission>,
     internal_read_authority: tokio::sync::Mutex<BTreeMap<String, InternalReadAuthority>>,
+    internal_preverify_admission: Mutex<ActivityAuthAdmission>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -837,6 +842,15 @@ impl InternalReadAdmission {
         self.checks += 1;
         true
     }
+}
+
+fn admit_internal_preverification(
+    admission: &Mutex<ActivityAuthAdmission>,
+) -> Result<bool, MembershipError> {
+    let mut admission = admission.lock().map_err(|_| {
+        MembershipError::Internal("internal preverification lock was poisoned".to_owned())
+    })?;
+    Ok(admission.admit(Instant::now(), MAX_INTERNAL_PREVERIFY_PER_SECOND))
 }
 
 fn insert_bounded_activity_public_key(
@@ -944,6 +958,10 @@ impl MembershipManager {
                     checks: 0,
                 }),
                 internal_read_authority: tokio::sync::Mutex::new(BTreeMap::new()),
+                internal_preverify_admission: Mutex::new(ActivityAuthAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
                 activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -2196,6 +2214,12 @@ impl MembershipManager {
             || !canonical_internal_auth_nonce(&auth.nonce)
             || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
         {
+            return Ok(false);
+        }
+        // Admission is a real global rate bucket rather than a concurrency
+        // semaphore: cached-key verification completes in one executor poll
+        // and would otherwise release a permit before peers can contend.
+        if !admit_internal_preverification(&inner.internal_preverify_admission)? {
             return Ok(false);
         }
         let Some(message) = internal_peer_auth_message(
@@ -4293,6 +4317,18 @@ mod tests {
         }
         assert!(!admission.admit(started));
         assert!(admission.admit(started + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn exact_request_preverification_has_a_hard_global_rate() {
+        let admission = Mutex::new(ActivityAuthAdmission {
+            window_started: Instant::now(),
+            checks: 0,
+        });
+        for _ in 0..MAX_INTERNAL_PREVERIFY_PER_SECOND {
+            assert!(admit_internal_preverification(&admission).expect("admission"));
+        }
+        assert!(!admit_internal_preverification(&admission).expect("saturation"));
     }
 
     #[test]

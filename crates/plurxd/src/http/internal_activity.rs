@@ -539,7 +539,7 @@ mod tests {
         };
         let snapshot = bounded_snapshot("node-b".to_owned(), vec![delivery; MAX_DELIVERIES]);
         let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
-        assert!(encoded.len() <= MAX_RESPONSE_BYTES as usize);
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
     }

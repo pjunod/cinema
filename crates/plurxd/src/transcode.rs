@@ -42,6 +42,8 @@ const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unava
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
+const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
+const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 
 /// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
 /// authorize playback and therefore never belong in logs, traces, metrics, or
@@ -1382,13 +1384,25 @@ struct LastRequest {
 /// Integrity failures remove the row with all five fields as a compare-and-
 /// delete. A request that started against generation A must never erase a
 /// replacement generation B that another producer published meanwhile.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct CachedLocationIdentity {
     recipe_hash: String,
     node_id: String,
     storage_class: String,
     relative_dir: String,
     manifest_digest: Option<String>,
+}
+
+enum CacheOfferVerdict {
+    Pending {
+        identity: CachedLocationIdentity,
+        started_at: Instant,
+    },
+    Ready {
+        identity: CachedLocationIdentity,
+        verified: bool,
+        observed_at: Instant,
+    },
 }
 
 impl LastRequest {
@@ -4286,6 +4300,12 @@ pub struct TranscodeManager {
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
+    /// Fresh, byte-verified cache facts used by speculative placement. A hard
+    /// cache mount may strand one verifier, but the semaphore and pending
+    /// entry ensure offers never submit a second filesystem operation behind
+    /// it. Offers fail closed until the background verdict arrives.
+    cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
+    cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting
@@ -4382,7 +4402,6 @@ pub(crate) struct MediaOfferProbe {
     pub(crate) decoder_supported: bool,
     pub(crate) target_supported: bool,
     pub(crate) cache_hit: bool,
-    pub(crate) background_active: bool,
     pub(crate) free_hardware_slots: usize,
     pub(crate) free_software_threads: usize,
     pub(crate) encoder: String,
@@ -4439,6 +4458,8 @@ impl TranscodeManager {
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
+            cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
             active_session_count: Arc::new(AtomicUsize::new(0)),
             requests: std::sync::Mutex::new(HashMap::new()),
@@ -4651,10 +4672,11 @@ impl TranscodeManager {
         let session_pressure_limit = hardware_slots_max
             .saturating_add((software_threads_max / 2).max(1))
             .max(1);
-        let mut tone_map_pipelines = capabilities
-            .tone_map
-            .then(|| vec![self.pipeline.name().to_owned()])
-            .unwrap_or_default();
+        let mut tone_map_pipelines = if capabilities.tone_map {
+            vec![self.pipeline.name().to_owned()]
+        } else {
+            Vec::new()
+        };
         if self.dovi_passthrough {
             tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
         }
@@ -4754,7 +4776,6 @@ impl TranscodeManager {
             decoder_supported,
             target_supported,
             cache_hit,
-            background_active: self.admissions.background_is_active(),
             free_hardware_slots: hardware_max.saturating_sub(hardware_used),
             free_software_threads: software_max.saturating_sub(software_used),
             encoder: encoder.family_name().to_owned(),
@@ -5456,8 +5477,15 @@ impl TranscodeManager {
         location: &CachedLocationIdentity,
         reason: &'static str,
     ) -> bool {
-        match self
-            .store
+        Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
+    }
+
+    async fn invalidate_cache_location_with_store(
+        store: &dyn Store,
+        location: &CachedLocationIdentity,
+        reason: &'static str,
+    ) -> bool {
+        match store
             .invalidate_cache_entry(
                 &location.recipe_hash,
                 &location.node_id,
@@ -5527,9 +5555,6 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-        let Some(_lookup) = self.cache_readers.begin_lookup(&hash) else {
-            return false;
-        };
         let Some(hit) = self
             .store
             .cache_hit(&hash, &cache.node_id)
@@ -5551,19 +5576,120 @@ impl TranscodeManager {
             relative_dir: hit.relative_dir.clone(),
             manifest_digest: hit.manifest_digest.clone(),
         };
-        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
+        let now = Instant::now();
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            verdicts.retain(|_, verdict| match verdict {
+                CacheOfferVerdict::Pending { started_at, .. } => {
+                    now.saturating_duration_since(*started_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+                CacheOfferVerdict::Ready { observed_at, .. } => {
+                    now.saturating_duration_since(*observed_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+            });
+            match verdicts.get(&hash) {
+                Some(CacheOfferVerdict::Ready {
+                    identity: cached,
+                    verified,
+                    ..
+                }) if cached == &identity => return *verified,
+                Some(CacheOfferVerdict::Pending {
+                    identity: cached, ..
+                }) if cached == &identity => return false,
+                _ => {
+                    verdicts.remove(&hash);
+                }
+            }
+            if verdicts.len() >= MAX_CACHE_OFFER_VERDICTS {
+                return false;
+            }
+        }
+        let Ok(permit) = Arc::clone(&self.cache_offer_verifier).try_acquire_owned() else {
+            return false;
+        };
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another request may have published while this one acquired the
+            // sole verifier. Never replace a fresh verdict with pending.
+            if verdicts.contains_key(&hash) {
+                return false;
+            }
+            verdicts.insert(
+                hash.clone(),
+                CacheOfferVerdict::Pending {
+                    identity: identity.clone(),
+                    started_at: now,
+                },
+            );
+        }
+        let verdicts = Arc::clone(&self.cache_offer_verdicts);
+        let store = Arc::clone(&self.store);
+        let readers = self.cache_readers.clone();
+        let cache_root = cache.dir.clone();
+        tokio::spawn(async move {
+            let verified = Self::verify_cache_offer_location(
+                Arc::clone(&store),
+                readers,
+                cache_root,
+                identity.clone(),
+                expected_manifest,
+            )
+            .await;
+            let mut verdicts = verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(
+                verdicts.get(&hash),
+                Some(CacheOfferVerdict::Pending { identity: pending, .. }) if pending == &identity
+            ) {
+                verdicts.insert(
+                    hash,
+                    CacheOfferVerdict::Ready {
+                        identity,
+                        verified,
+                        observed_at: Instant::now(),
+                    },
+                );
+            }
+            drop(permit);
+        });
+        false
+    }
+
+    async fn verify_cache_offer_location(
+        store: Arc<dyn Store>,
+        readers: crate::cachekeep::ActiveCacheReaders,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+    ) -> bool {
+        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
+            return false;
+        };
+        let Some(dir) =
+            crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
         else {
-            self.invalidate_cache_location(&identity, "unsafe_relative_path")
-                .await;
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "unsafe_relative_path",
+            )
+            .await;
             return false;
         };
         let manifest = match crate::manifest_cache::load(
             crate::manifest_cache::GenerationKey {
-                cache_root: cache.dir.clone(),
-                node_id: cache.node_id.clone(),
-                recipe_hash: hash,
-                storage_class: hit.storage_class,
-                relative_dir: hit.relative_dir,
+                cache_root,
+                node_id: identity.node_id.clone(),
+                recipe_hash: identity.recipe_hash.clone(),
+                storage_class: identity.storage_class.clone(),
+                relative_dir: identity.relative_dir.clone(),
                 manifest_digest: expected_manifest,
             },
             &dir,
@@ -5572,8 +5698,12 @@ impl TranscodeManager {
         {
             Ok(manifest) => manifest,
             Err(_) => {
-                self.invalidate_cache_location(&identity, "manifest_invalid")
-                    .await;
+                let _ = Self::invalidate_cache_location_with_store(
+                    store.as_ref(),
+                    &identity,
+                    "manifest_invalid",
+                )
+                .await;
                 return false;
             }
         };
@@ -5587,8 +5717,12 @@ impl TranscodeManager {
             .and_then(validated_vod_part)
             .is_some();
         if !playlist_valid {
-            self.invalidate_cache_location(&identity, "playlist_invalid_vod")
-                .await;
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "playlist_invalid_vod",
+            )
+            .await;
         }
         playlist_valid
     }
@@ -15912,16 +16046,43 @@ mod tests {
             OutputGrade::Sdr,
         );
 
-        assert!(mgr.verified_cache_hit(&file, &opts, encoder).await);
+        assert!(
+            !mgr.verified_cache_hit(&file, &opts, encoder).await,
+            "an offer fails closed while its single verifier is running"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mgr.verified_cache_hit(&file, &opts, encoder).await {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background cache-offer verdict");
         tokio::fs::write(dir.join("index.m3u8"), b"corrupt")
             .await
             .expect("corrupt playlist");
+        mgr.cache_offer_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&hash);
         assert!(!mgr.verified_cache_hit(&file, &opts, encoder).await);
-        assert!(store
-            .cache_hit(&hash, NODE)
-            .await
-            .expect("cache lookup")
-            .is_none());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if store
+                    .cache_hit(&hash, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background invalidation verdict");
     }
 
     #[tokio::test]
