@@ -4116,11 +4116,22 @@ impl ContractCluster {
     fn start() -> Self {
         install_contract_crypto_provider();
         let root = tempfile::tempdir().expect("three-voter contract root");
+        // Keep every ephemeral listener open until the whole six-port set has
+        // been selected. Asking the kernel for one port at a time and dropping
+        // its listener immediately lets it hand the same port back to a later
+        // voter in this cluster before any child has bound it.
+        let mut ports = contract_free_ports(6).into_iter();
         let specs = (1..=3)
             .map(|id| ContractNodeSpec {
                 id,
-                raft: format!("127.0.0.1:{}", contract_free_port()),
-                api: format!("127.0.0.1:{}", contract_free_port()),
+                raft: format!(
+                    "127.0.0.1:{}",
+                    ports.next().expect("reserved contract Raft port")
+                ),
+                api: format!(
+                    "127.0.0.1:{}",
+                    ports.next().expect("reserved contract API port")
+                ),
             })
             .collect::<Vec<_>>();
         let executable = std::env::current_exe().expect("contract test executable");
@@ -4246,12 +4257,14 @@ async fn hiqlite_contract_node_process() {
 }
 
 #[cfg(feature = "hiqlite-store")]
-fn contract_free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind contract port")
-        .local_addr()
-        .expect("contract port address")
-        .port()
+fn contract_free_ports(count: usize) -> Vec<u16> {
+    let listeners = (0..count)
+        .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind contract port"))
+        .collect::<Vec<_>>();
+    listeners
+        .iter()
+        .map(|listener| listener.local_addr().expect("contract port address").port())
+        .collect()
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -5373,13 +5386,20 @@ async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
 #[cfg(feature = "hiqlite-store")]
 fn one_voter_config(data_dir: &std::path::Path) -> Config {
     let mut config = Config::default();
+    let mut ports = contract_free_ports(2).into_iter();
     config.storage.data_dir = data_dir.to_owned();
-    config.cluster.raft_bind = format!("0.0.0.0:{}", contract_free_port())
-        .parse()
-        .expect("raft bind");
-    config.cluster.api_bind = format!("0.0.0.0:{}", contract_free_port())
-        .parse()
-        .expect("api bind");
+    config.cluster.raft_bind = format!(
+        "0.0.0.0:{}",
+        ports.next().expect("reserved one-voter Raft port")
+    )
+    .parse()
+    .expect("raft bind");
+    config.cluster.api_bind = format!(
+        "0.0.0.0:{}",
+        ports.next().expect("reserved one-voter API port")
+    )
+    .parse()
+    .expect("api bind");
     config.cluster.advertise_host = "127.0.0.1".to_owned();
     config
 }
