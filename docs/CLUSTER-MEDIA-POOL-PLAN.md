@@ -664,7 +664,9 @@ through a bounded process-local gate. The gate covers predecessor reap, worker
 start, durable activation, local lease seeding, and any commit-unknown
 reconciliation; it is released only after the exact worker is accepted or
 aborted. This still reaps the old local worker before admission, which lets a
-one-slot encoder replace itself without deadlocking. The activation and its
+one-slot encoder replace itself without deadlocking. A racing replacement may
+wait at most three seconds for that gate and must still be inside the caller's
+common placement deadline before it can reap anything. The activation and its
 cleanup guard run in an owned task, so client disconnects, placement deadlines,
 renames, and racing starts cannot strand an encoder or publish a route to a
 worker another attempt already killed.
@@ -734,7 +736,10 @@ local session map, then a fixed 4,096-entry in-memory
 `session_id → active owner/epoch or miss` routing cache populated at creation
 or the first owner lookup. Its 32 deterministic query shards single-flight the
 same capability and bound concurrent Store reads during random-capability
-spray; each lookup has a three-second deadline. Both active and negative
+spray; one three-second deadline covers cache admission, shard admission,
+the Store read, and cache publication. A fixed generation table prevents a
+read begun before activation or fencing from publishing afterward, even when
+the one-second cache entry has expired or been evicted. Both active and negative
 answers expire after one second, and activation immediately overwrites a
 cached miss. Ordinary playlist and segment requests use that cache without
 reading Raft. TTL expiry,
@@ -1083,7 +1088,9 @@ waits have explicit deadlines, and the remote worker's activation watcher
 strictly outlives the complete ingress timeline. Fenced workers stop renewing
 even while child teardown waits on a transition lock. SQLite route/inventory
 lookups use the read pool, while active/negative route caching bounds Hiqlite
-read pressure.
+read pressure. Stale-session settlement attempts also time out and release
+their fixed tracking slots, allowing an idempotent later retry after an
+unknown commit result.
 
 Remote placement remains an explicit cluster-wide opt-in. An admin enables it
 with `PUT /api/v1/settings` and
