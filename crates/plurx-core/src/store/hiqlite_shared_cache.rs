@@ -149,15 +149,14 @@ impl SharedCacheStore for HiqliteAuthStore {
     ) -> Result<Option<CacheStorageMember>, StoreError> {
         validate_id("storage id", storage_id)?;
         validate_id("node id", node_id)?;
-        Ok(self
-            .client()
-            .query_consistent_map::<MemberRow, _>(
-                "SELECT storage_id, node_id, storage_class, verified_at_ms,
+        let sql = "SELECT storage_id, node_id, storage_class, verified_at_ms,
                         verification_state
                    FROM cache_storage_members
-                  WHERE storage_id = $1 AND node_id = $2",
-                params!(storage_id, node_id),
-            )
+                  WHERE storage_id = $1 AND node_id = $2";
+        validate_sql(sql)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<MemberRow, _>(sql, params!(storage_id, node_id))
             .await?
             .into_iter()
             .next()
@@ -172,14 +171,13 @@ impl SharedCacheStore for HiqliteAuthStore {
     ) -> Result<bool, StoreError> {
         validate_id("storage id", storage_id)?;
         validate_id("node id", node_id)?;
+        let sql = "UPDATE cache_storage_members
+                    SET verification_state = 'suspect', verified_at_ms = $1
+                  WHERE storage_id = $2 AND node_id = $3";
+        validate_sql(sql)?;
         Ok(self
             .client()
-            .execute(
-                "UPDATE cache_storage_members
-                    SET verification_state = 'suspect', verified_at_ms = $3
-                  WHERE storage_id = $1 AND node_id = $2",
-                params!(storage_id, node_id, observed_at_ms),
-            )
+            .execute(sql, params!(observed_at_ms, storage_id, node_id))
             .await?
             == 1)
     }
@@ -218,16 +216,15 @@ impl SharedCacheStore for HiqliteAuthStore {
         validate_id("recipe hash", recipe_hash)?;
         validate_id("storage id", storage_id)?;
         validate_id("generation id", generation_id)?;
+        let sql = "UPDATE transcode_cache_locations
+                    SET last_used_at = MAX(last_used_at, $1),
+                        last_seen_at = MAX(last_seen_at, $1)
+                  WHERE recipe_hash = $2 AND storage_id = $3 AND generation_id = $4
+                    AND storage_class = 'shared' AND complete = 1";
+        validate_sql(sql)?;
         Ok(self
             .client()
-            .execute(
-                "UPDATE transcode_cache_locations
-                    SET last_used_at = MAX(last_used_at, $4),
-                        last_seen_at = MAX(last_seen_at, $4)
-                  WHERE recipe_hash = $1 AND storage_id = $2 AND generation_id = $3
-                    AND storage_class = 'shared' AND complete = 1",
-                params!(recipe_hash, storage_id, generation_id, now_ms),
-            )
+            .execute(sql, params!(now_ms, recipe_hash, storage_id, generation_id))
             .await?
             == 1)
     }
@@ -257,7 +254,7 @@ impl SharedCacheStore for HiqliteAuthStore {
                     (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
                      manifest_digest, scrub_object_index, last_used_at, last_seen_at,
                      storage_id, generation_id)
-                 SELECT $1, $2, 'shared', $4, 0, 0, NULL, 0, $5, $5, $2, $3
+                 SELECT $1, $2, 'shared', $3, 0, 0, NULL, 0, $4, $4, $2, $5
                   WHERE EXISTS (
                     SELECT 1 FROM cache_storage_members
                      WHERE storage_id = $2 AND storage_class = 'shared'
@@ -274,7 +271,7 @@ impl SharedCacheStore for HiqliteAuthStore {
                     generation_id = excluded.generation_id
                  WHERE transcode_cache_locations.complete = 0"
                     .to_owned(),
-                params!(recipe_hash, storage_id, generation_id, relative_dir, now_ms),
+                params!(recipe_hash, storage_id, relative_dir, now_ms, generation_id),
             ),
             (
                 "DELETE FROM transcode_cache_recipes
@@ -320,17 +317,17 @@ impl SharedCacheStore for HiqliteAuthStore {
         let statements = vec![
             (
                 "UPDATE transcode_cache_locations
-                    SET complete = 1, bytes = $4, manifest_digest = $5, last_seen_at = $6
-                  WHERE recipe_hash = $1 AND storage_id = $2 AND generation_id = $3
+                    SET complete = 1, bytes = $1, manifest_digest = $2, last_seen_at = $3
+                  WHERE recipe_hash = $4 AND storage_id = $5 AND generation_id = $6
                     AND storage_class = 'shared' AND complete = 0"
                     .to_owned(),
                 params!(
-                    recipe_hash,
-                    storage_id,
-                    generation_id,
                     bytes,
                     manifest_digest,
-                    now_ms
+                    now_ms,
+                    recipe_hash,
+                    storage_id,
+                    generation_id
                 ),
             ),
             (
@@ -455,25 +452,25 @@ impl SharedCacheStore for HiqliteAuthStore {
             validate_pin(pin, now_ms)?;
             statements.push((
                 "UPDATE cache_consumer_pins
-                    SET expires_at_ms = MAX(expires_at_ms, $7)
-                  WHERE storage_id = $1 AND recipe_hash = $2
-                    AND generation_id = $3 AND consumer_kind = $4
-                    AND consumer_id = $5 AND consumer_epoch = $6
+                    SET expires_at_ms = MAX(expires_at_ms, $1)
+                  WHERE storage_id = $2 AND recipe_hash = $3
+                    AND generation_id = $4 AND consumer_kind = $5
+                    AND consumer_id = $6 AND consumer_epoch = $7
                     AND expires_at_ms > $8
                     AND EXISTS (
                         SELECT 1 FROM transcode_cache_locations
-                         WHERE recipe_hash = $2 AND storage_id = $1
-                           AND generation_id = $3 AND storage_class = 'shared'
+                         WHERE recipe_hash = $3 AND storage_id = $2
+                           AND generation_id = $4 AND storage_class = 'shared'
                            AND complete = 1)"
                     .to_owned(),
                 params!(
+                    pin.expires_at_ms,
                     &pin.storage_id,
                     &pin.recipe_hash,
                     &pin.generation_id,
                     pin.consumer_kind.as_str(),
                     &pin.consumer_id,
                     pin.consumer_epoch,
-                    pin.expires_at_ms,
                     now_ms
                 ),
             ));
@@ -512,12 +509,14 @@ impl SharedCacheStore for HiqliteAuthStore {
                 "cache pin consumer epoch must be positive".to_owned(),
             ));
         }
+        let sql = "DELETE FROM cache_consumer_pins
+                  WHERE storage_id = $1 AND recipe_hash = $2 AND generation_id = $3
+                    AND consumer_kind = $4 AND consumer_id = $5 AND consumer_epoch = $6";
+        validate_sql(sql)?;
         Ok(self
             .client()
             .execute(
-                "DELETE FROM cache_consumer_pins
-                  WHERE storage_id = $1 AND recipe_hash = $2 AND generation_id = $3
-                    AND consumer_kind = $4 AND consumer_id = $5 AND consumer_epoch = $6",
+                sql,
                 params!(
                     storage_id,
                     recipe_hash,
