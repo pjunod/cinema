@@ -7261,7 +7261,7 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user)
+        self.create_session_inner(req, user_name, &supersession_user, None)
             .await
     }
 
@@ -7286,7 +7286,7 @@ impl TranscodeManager {
             ));
         }
         let info = self
-            .create_session_inner(req, user_name, &supersession_user)
+            .create_session_inner(req, user_name, &supersession_user, Some(deadline))
             .await?;
         Ok(ClusterSessionStart { info, replacement })
     }
@@ -7337,6 +7337,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
     ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
@@ -7378,6 +7379,7 @@ impl TranscodeManager {
                     req.audio_offset_ms,
                     user_name,
                     supersession_user,
+                    replacement_deadline,
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
@@ -7399,6 +7401,7 @@ impl TranscodeManager {
                     },
                     user_name,
                     supersession_user,
+                    replacement_deadline,
                     &req.playback_id,
                     req.automatic,
                 )
@@ -8245,6 +8248,25 @@ impl TranscodeManager {
         }
     }
 
+    /// Preserve the cluster ingress deadline across request recovery and
+    /// normalization. Those awaits are necessary before supersession, but a
+    /// start that consumed its budget there must not kill a still-playable
+    /// predecessor and then fail before replacing it.
+    async fn reap_superseded_before(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(capacity_error(
+                "the replacement start expired before it could reap its predecessor",
+            ));
+        }
+        self.reap_superseded(supersession_user, playback_id).await;
+        Ok(())
+    }
+
     /// Start a transcode session for a file, superseding this viewer's previous
     /// session on the same file (see [`Self::reap_superseded`]).
     #[cfg(test)]
@@ -8269,6 +8291,7 @@ impl TranscodeManager {
             0,
             user_name,
             &supersession_user,
+            None,
             playback_id,
             false,
             false,
@@ -8397,6 +8420,7 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         user_name: &str,
         supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
@@ -8405,7 +8429,8 @@ impl TranscodeManager {
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded(supersession_user, playback_id).await;
+        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+            .await?;
 
         let mut file = self
             .store
@@ -8974,6 +8999,7 @@ impl TranscodeManager {
             options,
             user_name,
             &supersession_user,
+            None,
             playback_id,
             false,
         )
@@ -8990,12 +9016,14 @@ impl TranscodeManager {
         options: CopySessionOptions,
         user_name: &str,
         supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded(supersession_user, playback_id).await;
+        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+            .await?;
 
         let mut file = self
             .store
@@ -18130,6 +18158,43 @@ mod tests {
             .await
             .expect("a live retry acquires the released gate");
         drop(reacquired);
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_rechecks_deadline_before_predecessor_reap() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let predecessor_dir = tempfile::tempdir().expect("predecessor");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let immutable_scope = serde_json::json!(["user_id", 42]).to_string();
+        let mut predecessor = test_session(predecessor_dir.path().to_path_buf());
+        predecessor.supersession_user = immutable_scope.clone();
+        predecessor.playback_id = "deadline-player".into();
+        mgr.sessions
+            .lock()
+            .await
+            .insert("still-playable".into(), Arc::new(predecessor));
+
+        let error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now()),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("an expired start must stop immediately before predecessor reap");
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        assert!(
+            mgr.sessions.lock().await.contains_key("still-playable"),
+            "the expired replacement must leave its predecessor live"
+        );
     }
 
     /// Track intent is orthogonal to height normalization. A stall claim keeps

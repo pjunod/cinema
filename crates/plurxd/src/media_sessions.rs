@@ -59,6 +59,20 @@ const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
 const LEASE_RENEWAL_MIN_REMAINING_MS: i64 = 4_000;
 const MAX_STALE_SETTLEMENTS_PER_TICK: usize = 64;
 const STALE_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(4);
+const STALE_SETTLEMENT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const STALE_SETTLEMENT_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Copy, Debug)]
+struct StaleSettlementBackoff {
+    failures: u32,
+    next_attempt: tokio::time::Instant,
+}
+
+#[derive(Debug)]
+struct StaleSettlementResult {
+    session_id: String,
+    retry: Option<StaleSettlementBackoff>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -684,12 +698,18 @@ pub(crate) async fn lease_loop(state: AppState) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut known = HashMap::<String, (String, i64)>::new();
     let mut settling = HashSet::<String>::new();
+    let mut settlement_backoff = HashMap::<String, StaleSettlementBackoff>::new();
     let (settled_tx, mut settled_rx) =
-        tokio::sync::mpsc::channel::<String>(MAX_STALE_SETTLEMENTS_PER_TICK);
+        tokio::sync::mpsc::channel::<StaleSettlementResult>(MAX_STALE_SETTLEMENTS_PER_TICK);
     loop {
         interval.tick().await;
-        while let Ok(session_id) = settled_rx.try_recv() {
-            settling.remove(&session_id);
+        while let Ok(result) = settled_rx.try_recv() {
+            settling.remove(&result.session_id);
+            if let Some(retry) = result.retry {
+                settlement_backoff.insert(result.session_id, retry);
+            } else {
+                settlement_backoff.remove(&result.session_id);
+            }
         }
         let now_ms = unix_ms();
         let live = state
@@ -743,6 +763,11 @@ pub(crate) async fn lease_loop(state: AppState) {
             fence_and_reap_sessions(&state, cleanup).await;
             continue;
         };
+        let routed_session_ids = routes
+            .iter()
+            .map(|route| route.session_id.as_str())
+            .collect::<HashSet<_>>();
+        settlement_backoff.retain(|session_id, _| routed_session_ids.contains(session_id.as_str()));
         let current = routes
             .iter()
             .map(|route| route.incarnation_id.as_str())
@@ -875,11 +900,18 @@ pub(crate) async fn lease_loop(state: AppState) {
         cleanup.sort_unstable_by(|left, right| left.1.cmp(&right.1));
         cleanup.dedup_by(|left, right| left.1 == right.1);
         fence_and_reap_sessions(&state, cleanup).await;
-        let settlement_capacity = MAX_STALE_SETTLEMENTS_PER_TICK.saturating_sub(settling.len());
+        let settlement_now = tokio::time::Instant::now();
+        let settlement_capacity =
+            stale_settlement_capacity(settling.len(), &settlement_backoff, settlement_now);
         let unsettled = routes
             .iter()
             .filter(|route| !live.contains(&route.session_id))
             .filter(|route| !settling.contains(&route.session_id))
+            .filter(|route| {
+                settlement_backoff
+                    .get(&route.session_id)
+                    .is_none_or(|retry| retry.next_attempt <= settlement_now)
+            })
             .take(settlement_capacity)
             .cloned()
             .collect::<Vec<_>>();
@@ -887,9 +919,12 @@ pub(crate) async fn lease_loop(state: AppState) {
             let cleanup_state = state.clone();
             let session_id = route.session_id.clone();
             let settled_tx = settled_tx.clone();
+            let previous_failures = settlement_backoff
+                .remove(&session_id)
+                .map_or(0, |retry| retry.failures);
             settling.insert(session_id.clone());
             tokio::spawn(async move {
-                match tokio::time::timeout(
+                let failed = match tokio::time::timeout(
                     STALE_SETTLEMENT_DEADLINE,
                     cleanup_state
                         .store
@@ -897,14 +932,28 @@ pub(crate) async fn lease_loop(state: AppState) {
                 )
                 .await
                 {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(_)) => false,
                     Ok(Err(error)) => {
-                        tracing::debug!(%error, "stale media-session settlement unavailable")
+                        tracing::debug!(%error, "stale media-session settlement unavailable");
+                        true
                     }
-                    Err(_) => tracing::debug!("stale media-session settlement timed out"),
-                }
+                    Err(_) => {
+                        tracing::debug!("stale media-session settlement timed out");
+                        true
+                    }
+                };
                 cleanup_state.media_sessions.cache_miss(&session_id).await;
-                let _ = settled_tx.send(session_id).await;
+                let retry = failed.then(|| {
+                    let failures = previous_failures.saturating_add(1);
+                    StaleSettlementBackoff {
+                        failures,
+                        next_attempt: tokio::time::Instant::now()
+                            + stale_settlement_retry_delay(failures),
+                    }
+                });
+                let _ = settled_tx
+                    .send(StaleSettlementResult { session_id, retry })
+                    .await;
             });
             known.remove(&route.incarnation_id);
         }
@@ -928,6 +977,25 @@ pub(crate) async fn maintenance_loop(state: AppState) {
 
 fn renewal_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {
     items.chunks(LEASE_RENEWAL_BATCH)
+}
+
+fn stale_settlement_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(4);
+    STALE_SETTLEMENT_RETRY_BACKOFF
+        .saturating_mul(1_u32 << exponent)
+        .min(STALE_SETTLEMENT_MAX_BACKOFF)
+}
+
+fn stale_settlement_capacity(
+    settling: usize,
+    backoff: &HashMap<String, StaleSettlementBackoff>,
+    now: tokio::time::Instant,
+) -> usize {
+    let deferred = backoff
+        .values()
+        .filter(|retry| retry.next_attempt > now)
+        .count();
+    MAX_STALE_SETTLEMENTS_PER_TICK.saturating_sub(settling.saturating_add(deferred))
 }
 
 #[cfg(test)]
@@ -1122,6 +1190,48 @@ mod tests {
                     + ACTIVATION_FAST_RECONCILIATION
                     + ACTIVATION_CONFIRMATION_WINDOW,
             "the worker fallback must begin earlier and end after every ingress phase"
+        );
+    }
+
+    #[test]
+    fn stale_settlement_retries_retain_a_bounded_backoff_slot() {
+        assert_eq!(
+            (1..=6)
+                .map(stale_settlement_retry_delay)
+                .collect::<Vec<_>>(),
+            vec![
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+                Duration::from_secs(300),
+                Duration::from_secs(300),
+            ]
+        );
+
+        let now = tokio::time::Instant::now();
+        let mut backoff = (0..MAX_STALE_SETTLEMENTS_PER_TICK - 1)
+            .map(|index| {
+                (
+                    format!("deferred-{index}"),
+                    StaleSettlementBackoff {
+                        failures: 1,
+                        next_attempt: now + Duration::from_secs(30),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            stale_settlement_capacity(1, &backoff, now),
+            0,
+            "in-flight and deferred retries share one fixed 64-slot boundary"
+        );
+
+        backoff.get_mut("deferred-0").expect("fixture").next_attempt = now;
+        assert_eq!(
+            stale_settlement_capacity(1, &backoff, now),
+            1,
+            "only a retry whose backoff elapsed may reclaim its retained slot"
         );
     }
 
