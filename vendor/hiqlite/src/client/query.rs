@@ -308,6 +308,10 @@ impl Client {
         query: Query,
         consistent: bool,
     ) -> Result<Vec<RowOwned>, Error> {
+        #[cfg(feature = "validation-test-helpers")]
+        if crate::network::raft_client::validation_raft_partitioned() {
+            return Err(Error::Connect("validation cluster partition".into()));
+        }
         let (ack, rx) = oneshot::channel();
 
         let payload = if consistent {
