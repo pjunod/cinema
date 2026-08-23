@@ -1036,6 +1036,19 @@ pub struct ItemPage {
     pub total: i64,
 }
 
+/// One library's Home preview from the catalog-wide bounded preview query.
+///
+/// Libraries with no top-level items are absent from the Store result; the
+/// HTTP layer joins these pages to the authoritative library roster and emits
+/// an empty page for them. Keeping only the id here avoids leaking HTTP DTOs
+/// into the durable storage boundary.
+#[derive(Debug, Clone)]
+pub struct HomePreviewPage {
+    pub library_id: i64,
+    pub items: Vec<Item>,
+    pub total: i64,
+}
+
 /// What a library is actually made of, in the terms the transcoder cares about.
 ///
 /// Exists to answer a question PERF-PLAN §5 could not. The GPU tone-map passed
