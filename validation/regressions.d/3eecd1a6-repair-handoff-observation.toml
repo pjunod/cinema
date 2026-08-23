@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3eecd1a6"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process membership lifecycle retries only a typed leader-change from the explicit read-only repair observation. It forces another election halfway through the old observation window, requires the confirmed successor to wait a fresh complete monotonic lease, proves a mature repeated observation changes neither the durable generation nor the applied index, and proves an applied mutating claim whose acknowledgement becomes ambiguous is dispatched exactly once and treated as fatal."
