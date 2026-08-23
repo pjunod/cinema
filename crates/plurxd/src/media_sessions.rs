@@ -428,10 +428,6 @@ impl MediaSessionCoordinator {
         route
     }
 
-    pub(crate) async fn invalidate_route(&self, session_id: &str) {
-        self.routes.lock().await.remove(session_id);
-    }
-
     /// Hand a freshly activated local worker to the renewal loop before its
     /// next store inventory. If the store disappears in that exact window,
     /// the worker still knows the committed expiry and self-fences on time.
@@ -627,10 +623,7 @@ async fn fence_and_reap_sessions(state: &AppState, sessions: Vec<(String, String
     for (_, session_id, reason) in sessions {
         let cleanup_state = state.clone();
         tokio::spawn(async move {
-            cleanup_state
-                .media_sessions
-                .invalidate_route(&session_id)
-                .await;
+            cleanup_state.media_sessions.cache_miss(&session_id).await;
             cleanup_state
                 .transcode
                 .stop_session(&session_id, reason)
@@ -856,10 +849,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                     .store
                     .end_media_session(&session_id, unix_ms())
                     .await;
-                cleanup_state
-                    .media_sessions
-                    .invalidate_route(&session_id)
-                    .await;
+                cleanup_state.media_sessions.cache_miss(&session_id).await;
                 let _ = settled_tx.send(session_id).await;
             });
             known.remove(&route.incarnation_id);

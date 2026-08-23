@@ -999,10 +999,7 @@ async fn abort_started_session(
 }
 
 async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
-    state
-        .media_sessions
-        .invalidate_route(&route.session_id)
-        .await;
+    state.media_sessions.cache_miss(&route.session_id).await;
     if route.owner_node_id == state.node_id {
         state
             .transcode
@@ -1131,10 +1128,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             segment_local(state, &request.session_id, &segment, &request.headers).await
         }
         RelayResource::Delete => {
-            state
-                .media_sessions
-                .invalidate_route(&request.session_id)
-                .await;
+            state.media_sessions.cache_miss(&request.session_id).await;
             state
                 .transcode
                 .stop_session(&request.session_id, "released through cluster relay")
