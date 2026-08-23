@@ -19,7 +19,9 @@ enum NativeReaderHandoff {
         guard !token.isEmpty, itemId > 0, fileId > 0,
               let data = try? JSONEncoder().encode(token),
               let encodedToken = String(data: data, encoding: .utf8) else { return nil }
-        return "window.startNativeReader(\(encodedToken),\(itemId),\(fileId));"
+        // IDs are quoted deliberately. JavaScript Numbers round values above
+        // 2^53 before the trusted handoff function can validate them.
+        return "window.startNativeReader(\(encodedToken),\"\(itemId)\",\"\(fileId)\");"
     }
 
     static func permitsNavigation(_ candidate: URL, from origin: URL) -> Bool {

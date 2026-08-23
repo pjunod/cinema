@@ -9,11 +9,13 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-08-22): source is v0.2.7, Apple build 79. Native text
+> Status (2026-08-22): source is v0.2.7, Apple build 80. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
-> landed. Build 79 compacts all three playback-info modes, bounds Debug to the
-> available tvOS canvas, and uses severity colors for fields that need attention.
+> landed. Build 80 preserves full signed 64-bit reader item/file routes across
+> the native-to-JavaScript handoff. Build 79 compacts all three playback-info
+> modes, bounds Debug to the available tvOS canvas, and uses severity colors for
+> fields that need attention.
 > Build 78 keeps the ten-foot tvOS dashboard as Standard and adds the shared Mini
 > and full Debug modes on iOS and tvOS. Build 77
 > carries the explicit delivered-SDR acknowledgement required

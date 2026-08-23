@@ -199,6 +199,18 @@ struct CountRow {
     count: i64,
 }
 
+struct ArtworkFilenameRow {
+    filename: String,
+}
+
+impl From<&mut Row<'_>> for ArtworkFilenameRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            filename: row.get("filename"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for CountRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -875,17 +887,81 @@ impl MediaStore for HiqliteAuthStore {
             .map_err(database_error)
     }
 
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        if after_item_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid artwork inventory page".to_owned(),
+            ));
+        }
+        items(
+            self.client()
+                .query_consistent_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {i} FROM items i
+                         WHERE i.id > $1
+                           AND (i.poster_path IS NOT NULL OR i.backdrop_path IS NOT NULL)
+                         ORDER BY i.id LIMIT $2",
+                        i = item_cols("i")
+                    ),
+                    params!(after_item_id, limit),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
     async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
-        let rows = self
+        Ok(self
             .client()
             .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM items \
-                 WHERE poster_path = $1 OR backdrop_path = $1",
+                "SELECT 1 AS count FROM items
+                  WHERE poster_path = $1 OR backdrop_path = $1
+                  LIMIT 1",
                 params!(filename),
             )
             .await
-            .map_err(database_error)?;
-        Ok(rows.first().is_some_and(|row| row.count > 0))
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .is_some())
+    }
+
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if filenames.len() > 256
+            || filenames
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 512)
+        {
+            return Err(StoreError::Task(
+                "invalid artwork reference batch".to_owned(),
+            ));
+        }
+        if filenames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(filenames).map_err(database_error)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<ArtworkFilenameRow, _>(
+                "SELECT poster_path AS filename FROM items
+                  WHERE poster_path IN (SELECT value FROM json_each($1))
+                 UNION
+                 SELECT backdrop_path AS filename FROM items
+                  WHERE backdrop_path IN (SELECT value FROM json_each($1))",
+                params!(encoded),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| row.filename)
+            .collect())
     }
 
     async fn list_top_items_in_genre(
@@ -1218,7 +1294,15 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15";
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17))";
+        let (origin_key, origin_value) = patch
+            .required_origin
+            .as_ref()
+            .map_or((None, None), |(key, value)| {
+                (Some(key.as_str()), Some(value.as_str()))
+            });
         let changed = if let Some(fence) = repair_fence {
             self.execute(
                 "UPDATE items SET \
@@ -1236,10 +1320,13 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15 AND $16 = $9 \
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17)) \
+                   AND $18 = $9 \
                    AND EXISTS (SELECT 1 FROM cluster_artwork_repairs \
-                     WHERE item_id = $16 AND owner_node_id = $17 AND leader_term = $18 \
-                       AND generation = $19)",
+                     WHERE item_id = $18 AND owner_node_id = $19 AND leader_term = $20 \
+                       AND generation = $21)",
                 params!(
                     patch.title.as_deref(),
                     sort_title,
@@ -1256,6 +1343,8 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
                     expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value,
                     fence.item_id,
                     fence.owner_node_id.as_str(),
                     fence.leader_term,
@@ -1281,7 +1370,9 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_work_id.as_deref(),
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
-                    expected.poster_path.as_deref()
+                    expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value
                 ),
             )
             .await?
@@ -1882,6 +1973,9 @@ impl MediaStore for HiqliteAuthStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = super::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let expected = self
             .client()
             .query_consistent_map::<RootFingerprintRow, _>(

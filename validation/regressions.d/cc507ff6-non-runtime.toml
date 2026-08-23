@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["cc507ff6"]
+points = []
+checks = []
+reason = "This commit only registers current regression evidence for the P3 replicated-contract corrections and does not change runtime behavior."
+ignore = true

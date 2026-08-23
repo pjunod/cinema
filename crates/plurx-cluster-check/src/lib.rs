@@ -3955,7 +3955,7 @@ async fn handle_request(
             )
             .context("cluster-check unix millisecond clock overflowed")?;
             let resource = format!("cluster-check:artwork-fence:{target_item_id}:{title}");
-            let lease = match store
+            let mut lease = match store
                 .acquire_lease(&resource, "cluster-check-artwork", now_ms, now_ms + 10_000)
                 .await?
             {
@@ -3968,6 +3968,7 @@ async fn handle_request(
                     .await?
                     .context("cluster-check artwork publication lease was not renewable")?;
             }
+            let replacement = lease.publication_successor()?;
             let setting = match store
                 .put_setting_if_absent_if_artwork_repair_current_fenced(
                     &format!("cluster-check.artwork-fence.{target_item_id}.{title}"),
@@ -3975,14 +3976,18 @@ async fn handle_request(
                     target_item_id,
                     fence,
                     &lease,
-                    now_ms + 2,
+                    &replacement,
                 )
                 .await
             {
-                Ok(setting) => setting,
+                Ok(setting) => {
+                    lease = replacement;
+                    setting
+                }
                 Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
                 Err(error) => return Err(error.into()),
             };
+            let replacement = lease.publication_successor()?;
             let metadata = match store
                 .apply_metadata_if_artwork_repair_current_fenced(
                     target_item_id,
@@ -3992,11 +3997,14 @@ async fn handle_request(
                     },
                     fence,
                     &lease,
-                    now_ms + 2,
+                    &replacement,
                 )
                 .await
             {
-                Ok(metadata) => metadata,
+                Ok(metadata) => {
+                    lease = replacement;
+                    metadata
+                }
                 Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
                 Err(error) => return Err(error.into()),
             };
@@ -4005,6 +4013,7 @@ async fn handle_request(
                 .await?
                 .context("cluster-check artwork fence target disappeared")?;
             if stale_book_snapshot {
+                let replacement = lease.publication_successor()?;
                 store
                     .apply_metadata_fenced(
                         target_item_id,
@@ -4013,10 +4022,12 @@ async fn handle_request(
                             ..Default::default()
                         },
                         &lease,
-                        now_ms + 3,
+                        &replacement,
                     )
                     .await?;
+                lease = replacement;
             }
+            let replacement = lease.publication_successor()?;
             let book = match store
                 .apply_book_metadata_if_current_fenced(
                     &expected,
@@ -4027,10 +4038,11 @@ async fn handle_request(
                         edition_id: Some(format!("{title} edition")),
                         poster_path: None,
                         source: BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     Some(fence),
                     &lease,
-                    now_ms + 4,
+                    &replacement,
                 )
                 .await
             {
@@ -4160,13 +4172,19 @@ async fn handle_request(
                     .as_millis(),
             )
             .context("cluster-check unix millisecond clock overflowed")?;
+            let observed_at_ms = observed_at_ms.unwrap_or(now_ms);
+            if observed_at_ms >= lease.expires_at_unix_ms {
+                return Ok(Response::Flag { value: false });
+            }
+            let replacement = match lease.publication_successor() {
+                Ok(replacement) => replacement,
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => {
+                    return Ok(Response::Flag { value: false });
+                }
+                Err(error) => return Err(error.into()),
+            };
             match store_ref(store)?
-                .put_setting_fenced(
-                    key,
-                    "removed-owner-write",
-                    lease,
-                    observed_at_ms.unwrap_or(now_ms),
-                )
+                .put_setting_fenced(key, "removed-owner-write", lease, &replacement)
                 .await
             {
                 Ok(()) => Ok(Response::Flag { value: true }),

@@ -21,6 +21,35 @@ bump may break compatibility and a **patch** bump never does.
   logical corpus. Hosted CI leaves resource fields null so it cannot
   masquerade as named-runner evidence.
 
+- **Idle cluster voters now prepare different likely-next titles in parallel.**
+  One fenced scheduler ranks and enqueues immutable source generations, while
+  every compatible node claims distinct whole-title jobs with renewable,
+  takeover-safe row fences. Yielded work resumes from node-local numbered
+  parts; a successor on another node restarts cleanly, and an expired worker
+  cannot publish. Cache location and ready state commit atomically, source
+  deletion cancels work, eviction makes it eligible again, and housekeeping
+  preserves only the current staging owner. New distributed cache generations
+  carry an authenticated object manifest whose fenced digest is bound to the
+  cache-location row. Starts load that bounded manifest without walking the
+  film, while requests authenticate the exact playlist or segment bytes they
+  return. Scheduled cleanup rotates a durable object cursor under a 132 MiB
+  plus two-byte EOF-probe ceiling, yields to same-title playback, and
+  invalidates the exact corrupt generation. Offline downloads fail their ready
+  lease coherently when that authoritative generation is removed. The existing
+  foreground admission lane still preempts speculative ffmpeg work within its
+  five-second bound, and completed hits start as childless cached sessions.
+  Worker claims use the boot-probed decoder/encoder/tone-map inventory and
+  current reserved disk capacity, paginate beyond incompatible work, and
+  self-fence renewals at their local deadline. Ready/terminal history is
+  pruned under hard active and total queue ceilings. Workers open/stat the
+  source before ffmpeg and keep unreadable-mount refusals node-local, so one
+  unmounted voter cannot spend the cluster's failure budget. Individual empty
+  queue polls avoid cache filesystem walks; producer nodes rate-limit a bounded
+  local sweep to every 15 minutes, while scheduled cleanup remains the
+  backstop for abandoned queue staging/final directories after a restart with
+  no cache rows. Rename-to-publication blocks both recipe eviction and orphan
+  cleanup.
+
 - **Cluster schedulers now spend shared work once, even when every voter ticks
   together.** Scans and refreshes share a per-library lease across startup,
   scheduled, manual, and targeted integration triggers; probe repair, artwork
