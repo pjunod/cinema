@@ -5411,6 +5411,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -7969,6 +7970,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -8508,6 +8510,7 @@ impl TranscodeManager {
             watchdog_verdict_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_transition_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
