@@ -2404,12 +2404,10 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     }
 
-    let before_heartbeats = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("heartbeat budget missing initial applied index")?
-        }
-        response => bail!("unexpected pre-heartbeat metrics: {response:?}"),
-    };
+    let before_heartbeats = quorum_watermark_observation(&mut cluster, leader).await?;
+    if before_heartbeats.leader_id != leader {
+        bail!("heartbeat budget began on a non-leader watermark: {before_heartbeats:?}");
+    }
     cluster
         .request(leader, Request::Heartbeat)
         .await?
@@ -2418,17 +2416,17 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(leader, Request::Heartbeat)
         .await?
         .require_ok()?;
-    let after_heartbeats = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
-            applied_index.context("heartbeat budget missing final applied index")?
-        }
-        response => bail!("unexpected post-heartbeat metrics: {response:?}"),
-    };
-    if after_heartbeats.saturating_sub(before_heartbeats) != 2 {
+    let after_heartbeats = quorum_watermark_observation(&mut cluster, leader).await?;
+    if after_heartbeats.leader_id != leader || after_heartbeats.term != before_heartbeats.term {
         bail!(
-            "two liveness heartbeats consumed {} Raft entries instead of two",
-            after_heartbeats.saturating_sub(before_heartbeats)
+            "heartbeat budget crossed a leader term: before={before_heartbeats:?} after={after_heartbeats:?}"
         );
+    }
+    let heartbeat_entries = after_heartbeats
+        .committed_index
+        .saturating_sub(before_heartbeats.committed_index);
+    if heartbeat_entries != 2 {
+        bail!("two liveness heartbeats consumed {heartbeat_entries} Raft entries instead of two");
     }
 
     // Four reconciliation loops must not turn one persistent miss into one
