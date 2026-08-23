@@ -201,9 +201,16 @@ impl Streams {
     ///
     /// Ordered newest first so a page that re-polls does not reshuffle.
     pub fn list(&self) -> Vec<StreamListing> {
+        self.list_bounded(usize::MAX)
+    }
+
+    /// A diagnostics-safe prefix that does not clone or inspect an unbounded
+    /// registry before the caller applies its response cap.
+    pub fn list_bounded(&self, limit: usize) -> Vec<StreamListing> {
         let live = self.live.lock().expect("streams mutex");
         let mut out: Vec<StreamListing> = live
             .iter()
+            .take(limit)
             .map(|(id, s)| StreamListing {
                 id: id.clone(),
                 user_name: s.user_name.clone(),

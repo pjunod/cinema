@@ -8659,11 +8659,20 @@ impl TranscodeManager {
     /// would relabel a stream mid-play. The method is fixed when the session
     /// is created and never moves.
     pub async fn list_deliveries(&self) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        self.list_deliveries_bounded(usize::MAX).await
+    }
+
+    /// A diagnostics-safe prefix that bounds the expensive per-session
+    /// telemetry reads before they begin.
+    pub async fn list_deliveries_bounded(
+        &self,
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let sessions = self.sessions.lock().await;
-        let mut out = Vec::with_capacity(sessions.len());
-        for (id, s) in sessions.iter() {
+        let mut out = Vec::with_capacity(sessions.len().min(limit));
+        for (id, s) in sessions.iter().take(limit) {
             out.push((
                 session_info(id, s, limits, global_live_bytes, global_ahead_bytes).await,
                 s.method,

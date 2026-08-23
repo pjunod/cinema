@@ -32,7 +32,7 @@ use plurx_core::cluster::coordination::{Lease, LeaseClaim};
 use plurx_core::cluster::membership::{
     join_token_digest, ActivityPeerAuth, ArtworkPeerAuth, ClusterAvailability, ClusterPeer,
     FinalizeJoinRequest, IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager,
-    MembershipStatus, RedeemJoinRequest,
+    MembershipStatus, PeerSigningKey, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -1191,8 +1191,25 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .await?
     {
         Response::ActivityAuth { auth } => auth,
-        response => bail!("removed voter could not mint its retained-secret proof: {response:?}"),
+        response => bail!("removed voter could not mint its retained-key proof: {response:?}"),
     };
+    let impersonated_node = (1..=3)
+        .find(|node_id| *node_id != target && *node_id != observer)
+        .context("choose the other surviving voter")?;
+    let mut impersonated_activity_proof = removed_activity_proof.clone();
+    impersonated_activity_proof.node_id = format!("node-{impersonated_node}");
+    match cluster
+        .request(
+            observer,
+            Request::AuthorizeActivityRequest {
+                auth: impersonated_activity_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter impersonated a surviving activity peer: {response:?}"),
+    }
     match cluster
         .request(
             observer,
@@ -1204,6 +1221,21 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         Response::Flag { value: false } => {}
         response => bail!("a removed voter retained activity access: {response:?}"),
+    }
+    let mut impersonated_artwork_proof = departing_artwork_proof.clone();
+    impersonated_artwork_proof.node_id = format!("node-{impersonated_node}");
+    match cluster
+        .request(
+            observer,
+            Request::VerifyArtworkPeer {
+                filename: "poster.jpg".to_owned(),
+                auth: impersonated_artwork_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter impersonated a surviving artwork peer: {response:?}"),
     }
     match cluster
         .request(
@@ -3961,6 +3993,7 @@ async fn handle_request(
                     for statement in [
                         "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
                         "DELETE FROM cluster_node_http WHERE node_id = $1",
+                        "DELETE FROM cluster_node_peer_keys WHERE node_id = $1",
                         "DELETE FROM cluster_nodes WHERE node_id = $1",
                     ] {
                         client
@@ -4699,7 +4732,7 @@ async fn membership_manager_with_identity_artwork_url(
         store,
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
-            node_id,
+            node_id: node_id.clone(),
             raft_id,
         },
         ClusterPeer {
@@ -4714,6 +4747,9 @@ async fn membership_manager_with_identity_artwork_url(
             api: API_SECRET.to_owned(),
             credential_key: "00".repeat(32),
         },
+        PeerSigningKey::from_seed_hex(&hex::encode(Sha256::digest(format!(
+            "plurx-cluster-check-peer-key:{node_id}:{raft_id}"
+        ))))?,
         ActivationMarker {
             marker_version: 1,
             cluster_id: INSTANCE_ID.to_owned(),

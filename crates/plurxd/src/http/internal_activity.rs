@@ -5,13 +5,14 @@
 //! public response. The aggregation/UI remains in `system.rs`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeerAuth, MembershipError};
+use plurx_core::cluster::membership::{ActivityPeer, ActivityPeerAuth, MembershipError};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -72,40 +73,26 @@ impl PeerActivityClient {
     pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
         Self {
             membership,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|error| error.to_string()),
+            client: peer_http_client(),
         }
     }
 
     pub async fn snapshots(&self) -> Result<Vec<(String, PeerActivityOutcome)>, MembershipError> {
         let peers = self.membership.activity_peers().await?;
-        let deadline = tokio::time::Instant::now() + TIMEOUT;
-        let mut outcomes = stream::iter(peers.into_iter().map(|peer| {
-            let client = self.clone();
+        let client = self.clone();
+        Ok(collect_peer_outcomes(peers, TIMEOUT, move |peer| {
+            let client = client.clone();
             async move {
-                let node_id = peer.node_id;
-                let request = async {
-                    if !peer.reachable {
-                        PeerActivityOutcome::Unhealthy
-                    } else if let Some(http_base) = peer.http_base {
-                        client.snapshot(&node_id, &http_base).await
-                    } else {
-                        PeerActivityOutcome::Unreachable
-                    }
-                };
-                let outcome = tokio::time::timeout_at(deadline, request)
-                    .await
-                    .unwrap_or(PeerActivityOutcome::TimedOut);
-                (node_id, outcome)
+                if !peer.reachable {
+                    PeerActivityOutcome::Unhealthy
+                } else if let Some(http_base) = peer.http_base {
+                    client.snapshot(&peer.node_id, &http_base).await
+                } else {
+                    PeerActivityOutcome::Unreachable
+                }
             }
-        }))
-        .buffer_unordered(PEER_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-        outcomes.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(outcomes)
+        })
+        .await)
     }
 
     async fn snapshot(&self, expected_node_id: &str, base: &str) -> PeerActivityOutcome {
@@ -138,6 +125,40 @@ impl PeerActivityClient {
             Ok(_) | Err(_) => PeerActivityOutcome::Unreachable,
         }
     }
+}
+
+fn peer_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+async fn collect_peer_outcomes<F, Fut>(
+    peers: Vec<ActivityPeer>,
+    timeout: Duration,
+    fetch: F,
+) -> Vec<(String, PeerActivityOutcome)>
+where
+    F: Fn(ActivityPeer) -> Fut + Clone,
+    Fut: Future<Output = PeerActivityOutcome>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut outcomes = stream::iter(peers.into_iter().map(|peer| {
+        let fetch = fetch.clone();
+        async move {
+            let node_id = peer.node_id.clone();
+            let outcome = tokio::time::timeout_at(deadline, fetch(peer))
+                .await
+                .unwrap_or(PeerActivityOutcome::TimedOut);
+            (node_id, outcome)
+        }
+    }))
+    .buffer_unordered(PEER_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    outcomes.sort_by(|left, right| left.0.cmp(&right.0));
+    outcomes
 }
 
 pub async fn snapshot(
@@ -234,9 +255,13 @@ fn bounded_text(value: String, max_bytes: usize) -> String {
 }
 
 async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
-    let sessions = state.transcode.list_deliveries().await;
+    let sessions = state
+        .transcode
+        .list_deliveries_bounded(MAX_DELIVERIES)
+        .await;
     let mut deliveries = sessions
         .into_iter()
+        .take(MAX_DELIVERIES)
         .map(|(session, method)| ActivityDelivery {
             method: method.as_str().to_owned(),
             user: bounded_text(session.user_name, MAX_USER_BYTES),
@@ -250,7 +275,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         })
         .collect::<Vec<_>>();
     let mut titles = HashMap::new();
-    for stream in state.streams.list() {
+    for stream in state.streams.list_bounded(MAX_DELIVERIES) {
         let item_id = state
             .store
             .get_file(stream.file_id)
@@ -271,7 +296,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             delivered_bps: stream.delivered_bps,
         });
     }
-    for play in state.direct_plays.list() {
+    for play in state.direct_plays.list_bounded(MAX_DELIVERIES) {
         let title = title(state, play.item_id, &mut titles).await;
         deliveries.push(ActivityDelivery {
             method: "direct".to_owned(),
@@ -293,11 +318,34 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             .then(left.file_id.cmp(&right.file_id))
             .then(left.user.cmp(&right.user))
     });
-    deliveries.truncate(MAX_DELIVERIES);
-    ActivitySnapshot {
-        node_id: state.node_id.clone(),
-        deliveries,
+    bounded_snapshot(state.node_id.clone(), deliveries)
+}
+
+/// Keep the producer and consumer on the same exact wire budget. Serializing
+/// each candidate accounts for JSON escaping without repeatedly encoding the
+/// whole response, and preserves the newest-first ordering above.
+fn bounded_snapshot(node_id: String, deliveries: Vec<ActivityDelivery>) -> ActivitySnapshot {
+    let node_id = bounded_text(node_id, MAX_NODE_ID_BYTES);
+    let mut snapshot = ActivitySnapshot {
+        node_id,
+        deliveries: Vec::new(),
+    };
+    let mut encoded_bytes = serde_json::to_vec(&snapshot)
+        .map(|encoded| encoded.len())
+        .unwrap_or(MAX_RESPONSE_BYTES as usize);
+    for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
+        let Ok(encoded) = serde_json::to_vec(&delivery) else {
+            continue;
+        };
+        let separator = usize::from(!snapshot.deliveries.is_empty());
+        let added = encoded.len().saturating_add(separator);
+        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES as usize {
+            continue;
+        }
+        encoded_bytes += added;
+        snapshot.deliveries.push(delivery);
     }
+    snapshot
 }
 
 async fn title(state: &AppState, item_id: i64, titles: &mut HashMap<i64, String>) -> String {
@@ -327,6 +375,15 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::response::Redirect;
+    use axum::routing::get;
+    use axum::Router;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn ordinary_bearer_and_missing_cluster_authority_are_rejected() {
@@ -410,5 +467,110 @@ mod tests {
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
+    }
+
+    #[test]
+    fn producer_obeys_the_exact_json_byte_budget_after_escaping() {
+        let delivery = ActivityDelivery {
+            method: "x".repeat(32),
+            user: "\0".repeat(MAX_USER_BYTES),
+            file_id: i64::MAX,
+            item_id: i64::MAX,
+            title: "\0".repeat(MAX_TITLE_BYTES),
+            started_unix: i64::MAX,
+            idle_seconds: u64::MAX,
+            delivered_bytes: Some(i64::MAX),
+            delivered_bps: Some(i64::MAX),
+        };
+        let snapshot = bounded_snapshot("node-b".to_owned(), vec![delivery; MAX_DELIVERIES]);
+        let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES as usize);
+        assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+    }
+
+    #[tokio::test]
+    async fn peer_client_refuses_redirects_and_chunked_oversized_bodies() {
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&target_hits);
+        let app = Router::new()
+            .route(
+                "/redirect",
+                get(|| async { Redirect::temporary("/target") }),
+            )
+            .route(
+                "/target",
+                get(move || {
+                    let hits = Arc::clone(&hits);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/oversized",
+                get(|| async {
+                    let chunks = stream::iter([
+                        Ok::<Bytes, Infallible>(Bytes::from(vec![
+                            b'x';
+                            MAX_RESPONSE_BYTES as usize
+                        ])),
+                        Ok::<Bytes, Infallible>(Bytes::from_static(b"x")),
+                    ]);
+                    Body::from_stream(chunks)
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind peer transport fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve peer transport fixture");
+        });
+        let client = peer_http_client().expect("peer client");
+        let redirect = client
+            .get(format!("http://{address}/redirect"))
+            .send()
+            .await
+            .expect("request redirect fixture");
+        assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+
+        let oversized = client
+            .get(format!("http://{address}/oversized"))
+            .send()
+            .await
+            .expect("request oversized fixture");
+        assert!(oversized.content_length().is_none());
+        assert_eq!(
+            read_snapshot(oversized, "node-b").await,
+            PeerActivityOutcome::InvalidResponse
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ninth_peer_cannot_extend_the_common_deadline() {
+        let peers = (0..9)
+            .map(|index| ActivityPeer {
+                node_id: format!("node-{index}"),
+                http_base: Some(format!("http://node-{index}:32400")),
+                reachable: true,
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        let outcomes = collect_peer_outcomes(peers, Duration::from_millis(40), |_| async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            PeerActivityOutcome::Unreachable
+        })
+        .await;
+        assert_eq!(outcomes.len(), 9);
+        assert!(outcomes
+            .iter()
+            .all(|(_, outcome)| *outcome == PeerActivityOutcome::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

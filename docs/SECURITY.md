@@ -412,15 +412,18 @@ not a certificate authority, authenticate membership requests.
 The read-only activity snapshot is the narrow application-level peer call. An
 explicit per-node `artwork_url` origin is retained behind membership (never
 projected in public status), and requests to
-`/_internal/v1/activity-snapshot` carry a 30-second HMAC proof under cluster
-API authority. The proof names the current sender and intended target; the
-receiver also requires the sender to remain a live, non-removed voter. Calls
-refuse redirects and validate the returned node identity. They never forward a
-login, admin, Plex, scoped API-key bearer, or HLS session capability, and the
-shared cluster secret is not sent on the wire. Missing, stale, cross-target,
-removed-sender, or invalid proofs receive 401. The 256 KiB response contains
-only node identity and bounded active-delivery fields: no media paths, peer
-addresses, credentials, library rows, or settings.
+`/_internal/v1/activity-snapshot` carry a 30-second Ed25519 proof from the
+calling node's owner-only private key. Only the public key is replicated. The
+proof names the current sender and intended target; the receiver verifies that
+key and also requires both ends to remain committed, non-removed voters. A
+removed machine therefore cannot use retained cluster-wide secrets to
+impersonate a survivor. Calls refuse redirects and validate the returned node
+identity. They never forward a login, admin, Plex, scoped API-key bearer, or
+HLS session capability. Missing, stale, cross-target, removed-sender, or
+invalid proofs receive 401. The producer enforces the same exact 256 KiB JSON
+budget as the consumer and returns only node identity and bounded
+active-delivery fields: no media paths, peer addresses, credentials, library
+rows, or settings.
 
 The consequence is explicit: **anything past a network you fully trust belongs
 behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain

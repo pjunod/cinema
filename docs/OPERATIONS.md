@@ -437,12 +437,14 @@ that public URL; the Raft/API secrets and credential-wrapping key do not cross
 the redemption or finalization request.
 
 Cluster activity fan-out calls `/_internal/v1/activity-snapshot` at those
-explicit origins. The request carries a 30-second HMAC proof naming the live
-sender and intended target, not a household user/admin/API-key bearer; the
-shared secret itself never crosses that HTTP request. Redirects are refused,
-responses are capped at 256 KiB, wrong-node answers are invalid, and all peer
-calls share one concurrent two-second deadline. SQLite and never-joined
-one-node installs have no peers, make no calls, and add no listener.
+explicit origins. The request carries a 30-second signature from the sender's
+durable per-node key and names the intended target, not a household
+user/admin/API-key bearer. Redirects are refused, responses are capped at an
+exact 256 KiB serialized budget, wrong-node answers are invalid, and at most
+64 peer calls share one concurrent two-second deadline. SQLite and
+never-joined one-node installs have no peers, make no calls, and add no
+listener. `join_url` may retain a reverse-proxy path prefix such as
+`https://cluster.example/plurx`; `artwork_url` is deliberately an origin only.
 
 **Mint one token into a protected file.** The default lifetime is 10 minutes;
 the API clamps requests to 60–3,600 seconds. It returns the token once, so do

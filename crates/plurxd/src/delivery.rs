@@ -259,6 +259,35 @@ impl DirectPlays {
         self.list_at(Instant::now())
     }
 
+    /// A diagnostics-safe prefix. It deliberately does not sweep the whole
+    /// map: the ordinary `list` path owns cleanup, while a peer request must
+    /// not turn an unbounded household registry into unbounded work.
+    pub fn list_bounded(&self, limit: usize) -> Vec<Live> {
+        let now = Instant::now();
+        let Ok(live) = self.live.lock() else {
+            return Vec::new();
+        };
+        let mut out = live
+            .values()
+            .take(limit)
+            .filter(|entry| is_live(now.saturating_duration_since(entry.last_seen), IDLE_TIMEOUT))
+            .map(|entry| Live {
+                user_name: entry.user_name.clone(),
+                file_id: entry.file_id,
+                item_id: entry.item_id,
+                started_unix: entry.started_unix,
+                idle_seconds: now.saturating_duration_since(entry.last_seen).as_secs(),
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(|left, right| {
+            right
+                .started_unix
+                .cmp(&left.started_unix)
+                .then(left.file_id.cmp(&right.file_id))
+        });
+        out
+    }
+
     fn list_at(&self, now: Instant) -> Vec<Live> {
         let Ok(mut live) = self.live.lock() else {
             return Vec::new();

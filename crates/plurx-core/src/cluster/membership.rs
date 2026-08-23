@@ -16,7 +16,7 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hiqlite::macros::params;
 use hiqlite::{Client, Node, Row};
-use hmac::{Hmac, Mac};
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -95,6 +95,12 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_node_hostnames (\
          node_id TEXT PRIMARY KEY, \
          hostname TEXT NOT NULL) STRICT",
+    // Peer HTTP authority is node-specific. Unlike the shared Hiqlite API
+    // secret, a removed node's retained private key cannot impersonate a
+    // surviving voter. Keys are immutable once published for a node id.
+    "CREATE TABLE IF NOT EXISTS cluster_node_peer_keys (\
+         node_id TEXT PRIMARY KEY, \
+         public_key TEXT NOT NULL) STRICT",
     // Provider/source repair is a replicated side effect. The current Raft
     // leader arbitrates one durable claim per item and term; a successor waits
     // a full local monotonic lease before fencing an abandoned older term.
@@ -121,6 +127,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
 
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
+const ARTWORK_AUTH_CONTEXT: &[u8] = b"plurx-internal-artwork-v1";
+const MAX_ACTIVITY_PEERS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
@@ -348,6 +356,38 @@ pub struct ActivityPeerAuth {
     pub signature: String,
 }
 
+/// Process-local Ed25519 authority for cluster-only HTTP calls.
+///
+/// The seed is persisted as an owner-only file by the migration coordinator;
+/// only the public half is replicated. Intentionally not `Clone` or `Debug`.
+pub struct PeerSigningKey {
+    key_pair: Ed25519KeyPair,
+}
+
+impl PeerSigningKey {
+    pub fn from_seed_hex(seed: &str) -> Result<Self, MembershipError> {
+        let seed = hex::decode(seed).map_err(|_| {
+            MembershipError::Internal("peer signing seed is not hexadecimal".to_owned())
+        })?;
+        if seed.len() != 32 {
+            return Err(MembershipError::Internal(
+                "peer signing seed must be exactly 32 bytes".to_owned(),
+            ));
+        }
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&seed)
+            .map_err(|_| MembershipError::Internal("peer signing seed is invalid".to_owned()))?;
+        Ok(Self { key_pair })
+    }
+
+    fn public_key_hex(&self) -> String {
+        hex::encode(self.key_pair.public_key().as_ref())
+    }
+
+    fn sign_hex(&self, message: &[u8]) -> String {
+        hex::encode(self.key_pair.sign(message).as_ref())
+    }
+}
+
 /// Normalize one cluster-internal HTTP origin. Stored endpoints are treated
 /// as origins, never as arbitrary URLs: path, query, fragment, and userinfo
 /// would make route joining ambiguous or expose authority to another origin.
@@ -435,6 +475,7 @@ struct ReplicatedMembership {
     bootstrap_http: String,
     artwork_http: String,
     secrets: JoinSecrets,
+    peer_signing_key: PeerSigningKey,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
     /// First local observation of an older-term claim. `Instant` deliberately
@@ -502,6 +543,7 @@ impl MembershipManager {
         bootstrap_http: String,
         artwork_http: String,
         secrets: JoinSecrets,
+        peer_signing_key: PeerSigningKey,
         activation_marker: ActivationMarker,
     ) -> Result<Self, MembershipError> {
         let replication = ReplicationMonitor::replicated(client.clone());
@@ -519,6 +561,7 @@ impl MembershipManager {
                 bootstrap_http,
                 artwork_http,
                 secrets,
+                peer_signing_key,
                 activation_marker,
                 replication,
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -560,6 +603,7 @@ impl MembershipManager {
         }
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
+        self.publish_peer_signing_key().await?;
         self.publish_http_url().await
     }
 
@@ -827,6 +871,37 @@ impl MembershipManager {
                 ),
             )
             .await?;
+        Ok(())
+    }
+
+    /// Publish the public half of this node's durable peer-HTTP authority.
+    ///
+    /// A key is immutable for a node id. Losing the private file is therefore
+    /// a fail-closed recovery event, not permission to replace replicated
+    /// authority; operators must recover the data directory or rejoin with a
+    /// new node identity.
+    async fn publish_peer_signing_key(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let public_key = inner.peer_signing_key.public_key_hex();
+        let changed = inner
+            .client
+            .execute(
+                "INSERT INTO cluster_node_peer_keys (node_id, public_key) \
+                 SELECT $1, $2 WHERE EXISTS (\
+                   SELECT 1 FROM cluster_nodes node \
+                   WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                       WHERE removal.node_id = node.node_id)) \
+                 ON CONFLICT(node_id) DO UPDATE SET public_key = excluded.public_key \
+                 WHERE cluster_node_peer_keys.public_key = excluded.public_key",
+                params!(inner.identity.node_id.as_str(), public_key.as_str()),
+            )
+            .await?;
+        if changed != 1 {
+            return Err(MembershipError::Internal(
+                "local peer signing key does not match immutable cluster authority".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -1108,25 +1183,19 @@ impl MembershipManager {
         Ok(rows.into_iter().map(|row| row.public_http_url).collect())
     }
 
-    /// Sign a one-file materialization request without exposing the shared
-    /// cluster API secret to the HTTP transport.
+    /// Sign a one-file materialization request with this node's private key.
     pub fn artwork_peer_auth(&self, filename: &str) -> Result<ArtworkPeerAuth, MembershipError> {
         let inner = self.replicated_inner()?;
         let timestamp_ms = unix_ms()?;
         let message = artwork_auth_message(&inner.identity.node_id, timestamp_ms, filename);
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
-            .map_err(|error| MembershipError::Internal(error.to_string()))?;
-        mac.update(message.as_bytes());
         Ok(ArtworkPeerAuth {
             node_id: inner.identity.node_id.clone(),
             timestamp_ms,
-            signature: hex::encode(mac.finalize().into_bytes()),
+            signature: inner.peer_signing_key.sign_hex(&message),
         })
     }
 
-    /// Verify the proof and the sender's live membership. A removed node still
-    /// knows the old cluster secret, so signature validity alone is not enough
-    /// authority to read bytes from the surviving voters.
+    /// Verify the per-node proof and the sender's live voter membership.
     pub async fn verify_artwork_peer_auth(
         &self,
         filename: &str,
@@ -1142,25 +1211,8 @@ impl MembershipManager {
             Err(_) => return Ok(false),
         };
         let message = artwork_auth_message(&auth.node_id, auth.timestamp_ms, filename);
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
-            .map_err(|error| MembershipError::Internal(error.to_string()))?;
-        mac.update(message.as_bytes());
-        if mac.verify_slice(&signature).is_err() {
-            return Ok(false);
-        }
-
-        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
-        let rows = inner
-            .client
-            .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_nodes \
-                 WHERE node_id = $1 AND removed_at IS NULL AND last_seen_at >= $2 \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
-                     WHERE node_id = $1)",
-                params!(auth.node_id.as_str(), reachable_after),
-            )
-            .await?;
-        Ok(rows.first().is_some_and(|row| row.count == 1))
+        self.verify_live_peer_signature(&auth.node_id, now, &message, &signature)
+            .await
     }
 
     /// Resolve peer daemon endpoints without widening the public node status.
@@ -1168,32 +1220,43 @@ impl MembershipManager {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
-        let status = self.status().await?;
+        let now = unix_ms()?;
+        let voters = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .voter_ids()
+            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
+            .collect::<BTreeSet<_>>();
         let rows = inner
             .client
-            .query_map::<ActivityEndpointRow, _>(
-                "SELECT node_id, public_http_url FROM cluster_node_http ORDER BY node_id",
-                params!(),
+            .query_map::<ActivityPeerRow, _>(
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                        http.public_http_url \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
             )
             .await?;
-        let endpoints = rows
+        Ok(rows
             .into_iter()
-            .map(|row| (row.node_id, row.http_base))
-            .collect::<std::collections::HashMap<_, _>>();
-        Ok(status
-            .nodes
-            .into_iter()
-            .filter(|node| node.node_id != inner.identity.node_id)
-            .map(|node| ActivityPeer {
-                http_base: endpoints.get(&node.node_id).cloned(),
-                node_id: node.node_id,
-                reachable: node.reachable,
+            .filter(|row| voters.contains(&row.raft_id))
+            .take(MAX_ACTIVITY_PEERS)
+            .map(|row| ActivityPeer {
+                http_base: row.http_base,
+                node_id: row.node_id,
+                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
             })
             .collect())
     }
 
-    /// Sign one short-lived, sender-and-target-bound activity request without
-    /// putting the shared cluster API secret on the HTTP wire.
+    /// Sign one short-lived, sender-and-target-bound activity request with
+    /// this node's private key.
     pub fn sign_activity_request(
         &self,
         target_node_id: &str,
@@ -1201,20 +1264,16 @@ impl MembershipManager {
     ) -> Result<ActivityPeerAuth, MembershipError> {
         let inner = self.replicated_inner()?;
         let message = activity_auth_message(&inner.identity.node_id, target_node_id, timestamp_ms);
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
-            .map_err(|error| MembershipError::Internal(error.to_string()))?;
-        mac.update(&message);
         Ok(ActivityPeerAuth {
             node_id: inner.identity.node_id.clone(),
             target_node_id: target_node_id.to_owned(),
             timestamp_ms,
-            signature: hex::encode(mac.finalize().into_bytes()),
+            signature: inner.peer_signing_key.sign_hex(&message),
         })
     }
 
-    /// Authenticate the proof and confirm that its sender is still a live,
-    /// non-removed committed voter. Removed daemons retain the old shared
-    /// secret, so HMAC validity alone is never sufficient authority.
+    /// Authenticate the per-node proof and confirm that its sender is still a
+    /// live, non-removed committed voter.
     pub async fn authorize_activity_request(
         &self,
         auth: &ActivityPeerAuth,
@@ -1232,15 +1291,22 @@ impl MembershipManager {
             Err(_) => return Ok(false),
         };
         let message = activity_auth_message(&auth.node_id, &auth.target_node_id, auth.timestamp_ms);
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(inner.secrets.api.as_bytes())
-            .map_err(|error| MembershipError::Internal(error.to_string()))?;
-        mac.update(&message);
-        if mac.verify_slice(&signature).is_err() {
-            return Ok(false);
-        }
+        self.verify_live_peer_signature(&auth.node_id, now, &message, &signature)
+            .await
+    }
 
-        let metrics = inner.client.metrics_db().await?;
-        let voters = metrics
+    async fn verify_live_peer_signature(
+        &self,
+        node_id: &str,
+        now: i64,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let voters = inner
+            .client
+            .metrics_db()
+            .await?
             .membership_config
             .voter_ids()
             .collect::<BTreeSet<_>>();
@@ -1250,15 +1316,29 @@ impl MembershipManager {
         let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         let rows = inner
             .client
-            .query_consistent_map::<ActivityAuthNodeRow, _>(
-                "SELECT raft_id FROM cluster_nodes WHERE node_id = $1 \
-                 AND removed_at IS NULL AND last_seen_at >= $2 \
-                 AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
-                   WHERE node_id = $1)",
-                params!(auth.node_id.as_str(), reachable_after),
+            .query_consistent_map::<PeerAuthNodeRow, _>(
+                "SELECT node.raft_id, peer.public_key \
+                 FROM cluster_nodes node \
+                 JOIN cluster_node_peer_keys peer ON peer.node_id = node.node_id \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                   AND node.last_seen_at >= $2 \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                params!(node_id, reachable_after),
             )
             .await?;
-        Ok(rows.len() == 1 && voters.contains(&rows[0].raft_id))
+        let Some(sender) = rows
+            .first()
+            .filter(|sender| voters.contains(&sender.raft_id))
+        else {
+            return Ok(false);
+        };
+        let Ok(public_key) = hex::decode(&sender.public_key) else {
+            return Ok(false);
+        };
+        Ok(UnparsedPublicKey::new(&ED25519, public_key)
+            .verify(message, signature)
+            .is_ok())
     }
 
     pub async fn heartbeat_loop(self) {
@@ -2406,29 +2486,36 @@ struct NodeRow {
     last_seen_at: i64,
 }
 
-struct ActivityEndpointRow {
+struct ActivityPeerRow {
     node_id: String,
-    http_base: String,
+    raft_id: u64,
+    last_seen_at: i64,
+    http_base: Option<String>,
 }
 
-impl From<&mut Row<'_>> for ActivityEndpointRow {
+impl From<&mut Row<'_>> for ActivityPeerRow {
     fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
         Self {
             node_id: row.get("node_id"),
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            last_seen_at: row.get("last_seen_at"),
             http_base: row.get("public_http_url"),
         }
     }
 }
 
-struct ActivityAuthNodeRow {
+struct PeerAuthNodeRow {
     raft_id: u64,
+    public_key: String,
 }
 
-impl From<&mut Row<'_>> for ActivityAuthNodeRow {
+impl From<&mut Row<'_>> for PeerAuthNodeRow {
     fn from(row: &mut Row<'_>) -> Self {
         let raft_id: i64 = row.get("raft_id");
         Self {
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            public_key: row.get("public_key"),
         }
     }
 }
@@ -2522,8 +2609,14 @@ impl From<&mut Row<'_>> for NodeRow {
     }
 }
 
-fn artwork_auth_message(node_id: &str, timestamp_ms: i64, filename: &str) -> String {
-    format!("plurx-artwork-v1\n{node_id}\n{timestamp_ms}\n{filename}")
+fn artwork_auth_message(node_id: &str, timestamp_ms: i64, filename: &str) -> Vec<u8> {
+    let mut message = ARTWORK_AUTH_CONTEXT.to_vec();
+    for value in [node_id, filename] {
+        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
+    message
 }
 
 /// Strip the listener port while preserving DNS names, IPv4, and bracketed
