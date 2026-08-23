@@ -2294,8 +2294,15 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ItemId { item_id } => item_id,
         response => bail!("unexpected artwork fence fixture response: {response:?}"),
     };
-    let wrong_target_item = match cluster
+    let paused_claim_item = match cluster
         .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 2 })
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("unexpected paused-claim fixture response: {response:?}"),
+    };
+    let wrong_target_item = match cluster
+        .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 3 })
         .await?
     {
         Response::ItemId { item_id } => item_id,
@@ -2437,7 +2444,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             leader,
             Request::ClaimArtworkRepairAfterPause {
-                item_id: repair_item + 1,
+                item_id: paused_claim_item,
                 lease_ms: 100,
                 pause_ms: 150,
             },
@@ -2446,6 +2453,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         Response::Flag { value: false } => {}
         response => bail!("expired post-CAS artwork claim could begin work: {response:?}"),
+    }
+    let (paused_fence, _) =
+        read_artwork_repair_observation(&mut cluster, leader, paused_claim_item).await?;
+    let paused_fence =
+        paused_fence.context("expired post-CAS artwork claim never committed its fence")?;
+    if paused_fence.generation != 1 || paused_fence.owner_node_id != format!("node-{leader}") {
+        bail!("expired post-CAS artwork claim committed the wrong fence: {paused_fence:?}");
     }
     let election_target = (1..=3)
         .find(|node_id| *node_id != leader)
