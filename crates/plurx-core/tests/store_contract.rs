@@ -641,6 +641,69 @@ async fn media_session_contract_runs_through_dyn_store() {
         let incarnation_a_retry = "00000000-0000-4000-8000-0000000000a2";
         let session_a = "00000000-0000-4000-8000-0000000000b1";
 
+        let failed_incarnation = "00000000-0000-4000-8000-0000000000e1";
+        let retried_incarnation = "00000000-0000-4000-8000-0000000000e2";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &fingerprint,
+                    failed_incarnation,
+                    10,
+                    20,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim retry fixture: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == failed_incarnation
+        ));
+        assert!(store
+            .fail_media_session_request(first_user.id, "retryable-attempt", failed_incarnation, 11,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail retry fixture: {error}")));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &fingerprint,
+                    retried_incarnation,
+                    12,
+                    22,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reacquire failed request: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == retried_incarnation
+        ));
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &conflicting,
+                    failed_incarnation,
+                    13,
+                    23,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: conflict retried request: {error}")),
+            MediaSessionRequestClaim::Conflict,
+            "{backend}"
+        );
+        assert!(
+            store
+                .fail_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    retried_incarnation,
+                    14,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle retry fixture: {error}"))
+        );
+
         assert_eq!(
             store
                 .claim_media_session_request(

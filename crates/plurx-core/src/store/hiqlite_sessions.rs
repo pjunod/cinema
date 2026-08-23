@@ -246,6 +246,66 @@ async fn claim_from_row(
     Ok(MediaSessionRequestClaim::Conflict)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn claim_existing_or_reacquire(
+    store: &HiqliteAuthStore,
+    row: RequestRow,
+    user_id: i64,
+    request_id: &str,
+    fingerprint: &str,
+    incarnation_id: &str,
+    now_ms: i64,
+    claim_expires_at_ms: i64,
+) -> Result<MediaSessionRequestClaim, StoreError> {
+    if row.request_fingerprint != fingerprint {
+        return Ok(MediaSessionRequestClaim::Conflict);
+    }
+    if row.state == "failed" {
+        let reacquired = store
+            .client()
+            .execute(
+                "UPDATE media_session_requests
+                    SET state = 'starting', claim_expires_at_ms = $1,
+                        incarnation_id = $2, owner_node_id = NULL,
+                        response_json = NULL, updated_at_ms = $3
+                  WHERE user_id = $4 AND request_id = $5 AND state = 'failed'
+                    AND request_fingerprint = $6
+                    AND (SELECT COUNT(*) FROM media_session_requests
+                          WHERE user_id = $4 AND state = 'starting'
+                            AND claim_expires_at_ms > $3) < $7
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $4 AND state IN ('starting', 'active')) < $8",
+                params!(
+                    claim_expires_at_ms,
+                    incarnation_id,
+                    now_ms,
+                    user_id,
+                    request_id,
+                    fingerprint,
+                    MAX_IN_FLIGHT_PER_USER,
+                    MAX_CURRENT_PER_USER
+                ),
+            )
+            .await?
+            == 1;
+        if reacquired {
+            return Ok(MediaSessionRequestClaim::Acquired {
+                incarnation_id: incarnation_id.to_owned(),
+            });
+        }
+        return match request_row(store, user_id, request_id).await? {
+            Some(current)
+                if current.state == "failed" && current.request_fingerprint == fingerprint =>
+            {
+                Ok(MediaSessionRequestClaim::Overloaded)
+            }
+            Some(current) => claim_from_row(store, current, fingerprint).await,
+            None => Ok(MediaSessionRequestClaim::Overloaded),
+        };
+    }
+    claim_from_row(store, row, fingerprint).await
+}
+
 #[async_trait]
 impl MediaSessionStore for HiqliteAuthStore {
     async fn claim_media_session_request(
@@ -289,7 +349,17 @@ impl MediaSessionStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         if let Some(row) = request_row(self, user_id, request_id).await? {
-            return claim_from_row(self, row, &fingerprint).await;
+            return claim_existing_or_reacquire(
+                self,
+                row,
+                user_id,
+                request_id,
+                &fingerprint,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+            )
+            .await;
         }
         let inserted = self
             .client()
@@ -322,7 +392,17 @@ impl MediaSessionStore for HiqliteAuthStore {
             });
         }
         if let Some(row) = request_row(self, user_id, request_id).await? {
-            return claim_from_row(self, row, &fingerprint).await;
+            return claim_existing_or_reacquire(
+                self,
+                row,
+                user_id,
+                request_id,
+                &fingerprint,
+                incarnation_id,
+                now_ms,
+                claim_expires_at_ms,
+            )
+            .await;
         }
         Ok(MediaSessionRequestClaim::Overloaded)
     }
