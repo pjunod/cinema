@@ -320,6 +320,9 @@ pub struct AppState {
     /// Finished content-addressed transcodes. Offline routes never join a
     /// request-controlled path directly to this root.
     pub cache_dir: PathBuf,
+    /// Optional shared-cache mount, admitted only while its all-voter canary
+    /// proof remains current.
+    pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
@@ -401,6 +404,9 @@ impl AppState {
                 credential_key: Arc::new(CredentialKey::generate()),
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_id: String::new(),
+                shared_cache_dir: PathBuf::new(),
+                shared_cache_id: String::new(),
             },
             store,
             dirs,
@@ -428,6 +434,9 @@ impl AppState {
             credential_key,
             replication,
             membership,
+            cluster_id,
+            shared_cache_dir,
+            shared_cache_id,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -445,6 +454,14 @@ impl AppState {
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
         let progress = crate::progress::ProgressCoalescer::new(Arc::clone(&store));
+        let shared_cache = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_cache_dir,
+            shared_cache_id,
+            &cluster_id,
+            node_id.clone(),
+            membership.clone(),
+            Arc::clone(&store),
+        );
         let transcode = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -461,7 +478,8 @@ impl AppState {
                 cache_dir.clone(),
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-            ),
+            )
+            .with_shared_cache(Arc::clone(&shared_cache)),
         );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.
         let trakt_base = std::env::var("PLURX_TRAKT_BASE")
@@ -495,6 +513,7 @@ impl AppState {
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
+            shared_cache,
             subs_dir,
             pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
                 matches!(
@@ -586,6 +605,9 @@ pub struct AppConfig {
     /// Actual backend selected before HTTP starts; tests default to SQLite.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    pub cluster_id: String,
+    pub shared_cache_dir: PathBuf,
+    pub shared_cache_id: String,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

@@ -668,7 +668,9 @@ async fn authorized_package(state: &AppState, token: &str) -> Result<OfflinePack
 
 struct PackageLocation {
     dir: PathBuf,
-    _cache_reader: crate::cachekeep::CacheReadGuard,
+    cache_root: PathBuf,
+    location_node_id: String,
+    _cache_reader: Option<crate::cachekeep::CacheReadGuard>,
     cached: CachedTranscode,
     manifest: Option<std::sync::Arc<plurx_core::transcode::manifest::GenerationManifest>>,
 }
@@ -758,11 +760,16 @@ fn offline_generation_cache() -> &'static StdMutex<OfflineGenerationCache> {
     CACHE.get_or_init(|| StdMutex::new(OfflineGenerationCache::default()))
 }
 
-fn offline_generation_key(state: &AppState, package: &OfflinePackage, recipe: &str) -> String {
+fn offline_generation_key(
+    cache_root: &Path,
+    location_node_id: &str,
+    package: &OfflinePackage,
+    recipe: &str,
+) -> String {
     format!(
         "{}\0{}\0{}\0{}",
-        state.cache_dir.display(),
-        state.node_id,
+        cache_root.display(),
+        location_node_id,
         package.id,
         recipe
     )
@@ -804,16 +811,18 @@ fn forget_offline_generation(cache_root: &Path, node_id: &str, cached: &CachedTr
 async fn invalidate_package_location(
     state: &AppState,
     package: &OfflinePackage,
+    cache_root: &Path,
+    location_node_id: &str,
     cached: &CachedTranscode,
     reason: &'static str,
 ) {
-    forget_offline_generation(&state.cache_dir, &state.node_id, cached);
+    forget_offline_generation(cache_root, location_node_id, cached);
     let recipe = package.recipe_hash.as_deref().unwrap_or_default();
     let invalidated = state
         .store
         .invalidate_cache_entry(
             recipe,
-            &state.node_id,
+            location_node_id,
             &cached.storage_class,
             &cached.relative_dir,
             cached.manifest_digest.as_deref(),
@@ -829,6 +838,9 @@ async fn invalidate_package_location(
             );
             false
         });
+    if cached.storage_class == "shared" {
+        state.shared_cache.report_io_failure(reason).await;
+    }
     // Exact location invalidation atomically settles every ready offline
     // package bound to that generation. A failed CAS means a newer location
     // won the race and no replacement-backed package was touched.
@@ -843,6 +855,142 @@ async fn invalidate_package_location(
     );
 }
 
+struct OfflineLocationCandidate {
+    cache_root: PathBuf,
+    location_node_id: String,
+    cached: CachedTranscode,
+}
+
+async fn validate_package_candidate(
+    state: &AppState,
+    package: &OfflinePackage,
+    recipe: &str,
+    candidate: OfflineLocationCandidate,
+    cache_reader: Option<crate::cachekeep::CacheReadGuard>,
+) -> Result<PackageLocation, ApiError> {
+    let generation_key = offline_generation_key(
+        &candidate.cache_root,
+        &candidate.location_node_id,
+        package,
+        recipe,
+    );
+    if let Some(snapshot) = cached_offline_generation(&generation_key) {
+        if let Some(dir) = crate::cachekeep::validated_entry_dir(
+            &candidate.cache_root,
+            &snapshot.cached.relative_dir,
+        )
+        .await
+        {
+            return Ok(PackageLocation {
+                dir,
+                cache_root: candidate.cache_root,
+                location_node_id: candidate.location_node_id,
+                _cache_reader: cache_reader,
+                cached: snapshot.cached,
+                manifest: snapshot.manifest,
+            });
+        }
+        forget_offline_generation(
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &snapshot.cached,
+        );
+    }
+    let Some(dir) = crate::cachekeep::validated_entry_dir(
+        &candidate.cache_root,
+        &candidate.cached.relative_dir,
+    )
+    .await
+    else {
+        invalidate_package_location(
+            state,
+            package,
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &candidate.cached,
+            "unsafe_relative_path",
+        )
+        .await;
+        return Err(corrupt_package());
+    };
+    let manifest = if let Some(expected) = candidate.cached.manifest_digest.as_deref() {
+        let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+        if tokio::fs::metadata(&manifest_path).await.is_err() {
+            invalidate_package_location(
+                state,
+                package,
+                &candidate.cache_root,
+                &candidate.location_node_id,
+                &candidate.cached,
+                "manifest_missing",
+            )
+            .await;
+            return Err(corrupt_package());
+        }
+        let loaded = crate::manifest_cache::load(
+            crate::manifest_cache::GenerationKey {
+                cache_root: candidate.cache_root.clone(),
+                node_id: candidate.location_node_id.clone(),
+                recipe_hash: recipe.to_owned(),
+                storage_class: candidate.cached.storage_class.clone(),
+                relative_dir: candidate.cached.relative_dir.clone(),
+                manifest_digest: expected.to_owned(),
+            },
+            &dir,
+        )
+        .await;
+        match loaded {
+            Ok(manifest) => Some(manifest),
+            Err(_) => {
+                invalidate_package_location(
+                    state,
+                    package,
+                    &candidate.cache_root,
+                    &candidate.location_node_id,
+                    &candidate.cached,
+                    "manifest_invalid",
+                )
+                .await;
+                return Err(corrupt_package());
+            }
+        }
+    } else if candidate.cached.storage_class == "shared" {
+        invalidate_package_location(
+            state,
+            package,
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &candidate.cached,
+            "manifest_unfenced",
+        )
+        .await;
+        return Err(corrupt_package());
+    } else {
+        // A legacy local row has no fenced digest. Ignore even a file named
+        // like a manifest: a timed-out adoption may have left it behind.
+        None
+    };
+    remember_offline_generation(
+        generation_key,
+        OfflineGenerationSnapshot {
+            cached: candidate.cached.clone(),
+            manifest: manifest.clone(),
+            manifest_decoded_bytes: manifest
+                .as_deref()
+                .map_or(0, crate::manifest_cache::decoded_weight),
+            validated_at: Instant::now(),
+        },
+    );
+    Ok(PackageLocation {
+        dir,
+        cache_root: candidate.cache_root,
+        location_node_id: candidate.location_node_id,
+        _cache_reader: cache_reader,
+        cached: candidate.cached,
+        manifest,
+    })
+}
+
 fn corrupt_package() -> ApiError {
     typed(
         StatusCode::GONE,
@@ -855,13 +1003,6 @@ async fn package_dir(
     state: &AppState,
     package: &OfflinePackage,
 ) -> Result<PackageLocation, ApiError> {
-    if package.node_id != state.node_id {
-        return Err(typed(
-            StatusCode::NOT_FOUND,
-            "package_unavailable",
-            "This package belongs to another server node.",
-        ));
-    }
     let recipe = package.recipe_hash.as_deref().ok_or_else(|| {
         typed(
             StatusCode::CONFLICT,
@@ -869,118 +1010,113 @@ async fn package_dir(
             "The offline package has not been published.",
         )
     })?;
-    // Claim the recipe before either the row lookup or the filesystem read,
-    // exactly as cached playback does. Offline leases pin ordinary LRU
-    // eviction, but they cannot prevent a source-file cascade from removing
-    // the row and exposing the directory to the orphan pass.
-    let cache_reader = state
-        .transcode
-        .cache_readers()
-        .begin_read(recipe)
-        .ok_or_else(|| {
-            typed(
-                StatusCode::GONE,
-                "package_evicted",
-                "The prepared package is being removed from the server.",
-            )
-        })?;
-    let generation_key = offline_generation_key(state, package, recipe);
-    if let Some(snapshot) = cached_offline_generation(&generation_key) {
-        if let Some(dir) =
-            crate::cachekeep::validated_entry_dir(&state.cache_dir, &snapshot.cached.relative_dir)
-                .await
-        {
-            return Ok(PackageLocation {
-                dir,
-                _cache_reader: cache_reader,
-                cached: snapshot.cached,
-                manifest: snapshot.manifest,
-            });
-        }
-        forget_offline_generation(&state.cache_dir, &state.node_id, &snapshot.cached);
-    }
-    let cached = match state.store.cache_hit(recipe, &state.node_id).await? {
-        Some(cached) => cached,
-        None => {
-            if let Err(error) = state
-                .store
-                .invalidate_ready_offline_package(
-                    &package.id,
-                    &state.node_id,
-                    recipe,
-                    "cache_integrity",
-                    "Prepared media is no longer available on this server.",
-                )
-                .await
-            {
-                tracing::error!(
-                    package = %package.id,
-                    recipe,
-                    %error,
-                    "missing offline cache location could not settle its ready package"
-                );
+    let mut shared_failed = false;
+    let shared_root = state.shared_cache.root().await;
+    let shared_storage = state.shared_cache.storage_id().map(str::to_owned);
+    if let (Some(cache_root), Some(storage_id)) = (shared_root, shared_storage) {
+        if let Some(shared) = state.store.shared_cache_hit(recipe, &storage_id).await? {
+            let generation_id = shared.generation_id.clone();
+            let candidate = OfflineLocationCandidate {
+                cache_root,
+                location_node_id: storage_id.clone(),
+                cached: CachedTranscode {
+                    recipe_hash: shared.recipe_hash,
+                    file_id: shared.file_id,
+                    storage_class: "shared".to_owned(),
+                    relative_dir: shared.relative_dir,
+                    bytes: shared.bytes,
+                    complete: true,
+                    manifest_digest: shared.manifest_digest,
+                    scrub_object_index: 0,
+                    last_used_at: shared.last_used_at,
+                },
+            };
+            match validate_package_candidate(state, package, recipe, candidate, None).await {
+                Ok(location) => {
+                    let _ = state
+                        .store
+                        .touch_shared_cache_entry(
+                            recipe,
+                            &storage_id,
+                            &generation_id,
+                            now_unix().saturating_mul(1_000),
+                        )
+                        .await;
+                    return Ok(location);
+                }
+                Err(_) => shared_failed = true,
             }
-            return Err(typed(
-                StatusCode::GONE,
-                "package_evicted",
-                "The prepared package is no longer available on the server.",
-            ));
         }
-    };
-    let Some(dir) =
-        crate::cachekeep::validated_entry_dir(&state.cache_dir, &cached.relative_dir).await
-    else {
-        invalidate_package_location(state, package, &cached, "unsafe_relative_path").await;
-        return Err(corrupt_package());
-    };
-    let manifest = if let Some(expected) = cached.manifest_digest.as_deref() {
-        let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
-        if tokio::fs::metadata(&manifest_path).await.is_err() {
-            invalidate_package_location(state, package, &cached, "manifest_missing").await;
-            return Err(corrupt_package());
-        }
-        let loaded = crate::manifest_cache::load(
-            crate::manifest_cache::GenerationKey {
+    }
+
+    if package.node_id == state.node_id {
+        // Local cache retirement still uses the in-process read guard. Shared
+        // generations use the distributed download pin renewed above instead.
+        let cache_reader = state
+            .transcode
+            .cache_readers()
+            .begin_read(recipe)
+            .ok_or_else(|| {
+                typed(
+                    StatusCode::GONE,
+                    "package_evicted",
+                    "The prepared package is being removed from the server.",
+                )
+            })?;
+        let cached = match state.store.cache_hit(recipe, &state.node_id).await? {
+            Some(cached) => cached,
+            None => {
+                if let Err(error) = state
+                    .store
+                    .invalidate_ready_offline_package(
+                        &package.id,
+                        &state.node_id,
+                        recipe,
+                        "cache_integrity",
+                        "Prepared media is no longer available on this server.",
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        package = %package.id,
+                        recipe,
+                        %error,
+                        "missing offline cache location could not settle its ready package"
+                    );
+                }
+                return Err(typed(
+                    StatusCode::GONE,
+                    "package_evicted",
+                    "The prepared package is no longer available on the server.",
+                ));
+            }
+        };
+        return validate_package_candidate(
+            state,
+            package,
+            recipe,
+            OfflineLocationCandidate {
                 cache_root: state.cache_dir.clone(),
-                node_id: state.node_id.clone(),
-                recipe_hash: recipe.to_owned(),
-                storage_class: cached.storage_class.clone(),
-                relative_dir: cached.relative_dir.clone(),
-                manifest_digest: expected.to_owned(),
+                location_node_id: state.node_id.clone(),
+                cached,
             },
-            &dir,
+            Some(cache_reader),
         )
         .await;
-        match loaded {
-            Ok(manifest) => Some(manifest),
-            Err(_) => {
-                invalidate_package_location(state, package, &cached, "manifest_invalid").await;
-                return Err(corrupt_package());
-            }
-        }
-    } else {
-        // A legacy row has no fenced digest. Ignore even a file named like a
-        // manifest: a timed-out adoption may have left it behind, and its
-        // self-declared hashes are not publication authority.
-        None
-    };
-    remember_offline_generation(
-        generation_key,
-        OfflineGenerationSnapshot {
-            cached: cached.clone(),
-            manifest: manifest.clone(),
-            manifest_decoded_bytes: manifest
-                .as_deref()
-                .map_or(0, crate::manifest_cache::decoded_weight),
-            validated_at: Instant::now(),
-        },
-    );
-    Ok(PackageLocation {
-        dir,
-        _cache_reader: cache_reader,
-        cached,
-        manifest,
-    })
+    }
+
+    if shared_failed {
+        return Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared_cache_unavailable",
+            "The shared offline package became unavailable; retry another server node.",
+        ));
+    }
+    Err(typed(
+        StatusCode::NOT_FOUND,
+        "package_unavailable",
+        "This package belongs to another server node.",
+    ))
 }
 
 fn hls_response(
@@ -1121,8 +1257,15 @@ pub async fn playlist(
     let bytes = match bytes {
         Some(bytes) => bytes,
         None => {
-            invalidate_package_location(&state, &package, &location.cached, "playlist_missing")
-                .await;
+            invalidate_package_location(
+                &state,
+                &package,
+                &location.cache_root,
+                &location.location_node_id,
+                &location.cached,
+                "playlist_missing",
+            )
+            .await;
             return Err(corrupt_package());
         }
     };
@@ -1131,7 +1274,15 @@ pub async fn playlist(
         .and_then(crate::transcode::validated_vod_part)
         .is_some();
     if !valid_vod {
-        invalidate_package_location(&state, &package, &location.cached, "playlist_not_vod").await;
+        invalidate_package_location(
+            &state,
+            &package,
+            &location.cache_root,
+            &location.location_node_id,
+            &location.cached,
+            "playlist_not_vod",
+        )
+        .await;
         return Err(corrupt_package());
     }
     Ok(hls_response(
@@ -1188,8 +1339,15 @@ pub async fn segment(
     let (file, bytes, snapshot_lease) = match opened {
         Some(opened) => opened,
         None if location.manifest.is_some() => {
-            invalidate_package_location(&state, &package, &location.cached, "segment_missing")
-                .await;
+            invalidate_package_location(
+                &state,
+                &package,
+                &location.cache_root,
+                &location.location_node_id,
+                &location.cached,
+                "segment_missing",
+            )
+            .await;
             return Err(corrupt_package());
         }
         None => return Err(ApiError::NotFound("offline segment")),
@@ -2503,6 +2661,89 @@ mod tests {
         .await;
         assert_eq!(code, StatusCode::GONE);
         assert_eq!(body["code"], "package_corrupt");
+    }
+
+    #[tokio::test]
+    async fn nonowner_serves_verified_shared_media_and_mount_loss_falls_back_to_owner_local() {
+        let mut fixture = fixture().await;
+        let recipe = "a".repeat(64);
+        let package = ready_package(&fixture, &recipe, "none", None).await;
+        let manifest = fence_ready_package_manifest(&fixture, &package).await;
+        let local_generation = fixture.state.cache_dir.join(format!("ready/{recipe}"));
+        let shared_root = fixture._root.path().join("shared");
+        tokio::fs::create_dir_all(&shared_root)
+            .await
+            .expect("shared root");
+        let shared = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_root.clone(),
+            "media-a".to_owned(),
+            "test-cluster",
+            "reader-node".to_owned(),
+            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            Arc::clone(&fixture.state.store),
+        );
+        shared
+            .admit_local_for_test()
+            .await
+            .expect("verified shared mount");
+        assert!(shared
+            .publish_generation(&recipe, package.file_id, 7, &local_generation, &manifest,)
+            .await
+            .expect("shared publication"));
+        fixture.state.shared_cache = Arc::clone(&shared);
+
+        let token = "b".repeat(64);
+        assert_eq!(
+            lease(&fixture, &package.id, &token).await.0,
+            StatusCode::CREATED
+        );
+
+        // A non-owner has no usable local location. The successful response
+        // therefore came directly from the verified shared generation.
+        let parked_local = fixture._root.path().join("parked-local-generation");
+        tokio::fs::rename(&local_generation, &parked_local)
+            .await
+            .expect("hide owner-local generation");
+        fixture.state.node_id = "reader-node".to_owned();
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath((token.clone(), "seg00000.ts".to_owned())),
+        )
+        .await
+        .expect("non-owner shared segment");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("shared response body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"portable-video");
+
+        // Simulate loss of the admitted mount. The exact shared location is
+        // retired and classification is revoked, but the owning node can
+        // still serve its independently validated local generation.
+        tokio::fs::rename(&parked_local, &local_generation)
+            .await
+            .expect("restore owner-local generation");
+        fixture.state.node_id = "test-node".to_owned();
+        tokio::fs::rename(&shared_root, fixture._root.path().join("detached-shared"))
+            .await
+            .expect("detach shared mount");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath((token, "seg00000.ts".to_owned())),
+        )
+        .await
+        .expect("owner-local fallback");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("local fallback body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"portable-video");
+        assert!(!shared.is_verified());
+        assert!(shared.root().await.is_none());
     }
 
     #[tokio::test]

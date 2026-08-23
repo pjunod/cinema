@@ -15,7 +15,10 @@ use std::sync::atomic::{
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use plurx_core::domain::{PlaybackEvent, PretranscodeJob, PretranscodeWorkerCapabilities};
+use plurx_core::domain::{
+    CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
+    PretranscodeWorkerCapabilities,
+};
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
     self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,
@@ -46,6 +49,7 @@ const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
+const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
 
 /// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
 /// authorize playback and therefore never belong in logs, traces, metrics, or
@@ -1419,6 +1423,7 @@ struct CachedLocationIdentity {
     recipe_hash: String,
     node_id: String,
     storage_class: String,
+    generation_id: Option<String>,
     relative_dir: String,
     manifest_digest: Option<String>,
 }
@@ -3900,7 +3905,7 @@ async fn remove_staged_child(
     }
 }
 
-async fn quarantine_remove_cache_tree(
+pub(crate) async fn quarantine_remove_cache_tree(
     path: &std::path::Path,
     max_depth: usize,
 ) -> Result<(), String> {
@@ -4367,6 +4372,7 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    shared_cache: Option<Arc<crate::shared_cache::SharedCacheCoordinator>>,
     /// Last completed cache-filesystem capacity sample. Request and scheduler
     /// paths read only this atomic projection: `statvfs` can block forever on
     /// a hard network mount and therefore belongs to one non-accumulating
@@ -4545,6 +4551,7 @@ impl TranscodeManager {
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            shared_cache: None,
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
@@ -4630,8 +4637,53 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_shared_cache(
+        mut self,
+        shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
+    ) -> Self {
+        self.shared_cache = Some(shared_cache);
+        self
+    }
+
     pub fn cache_readers(&self) -> &crate::cachekeep::ActiveCacheReaders {
         &self.cache_readers
+    }
+
+    /// Pin a shared-cache-backed worker before its durable route is exposed.
+    /// Non-cache and node-local sessions need no distributed pin and succeed
+    /// immediately.
+    pub(crate) async fn pin_shared_session(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+        owner_epoch: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let session = self.sessions.lock().await.get(session_id).cloned();
+        let Some(location) = session
+            .as_ref()
+            .and_then(|session| session.cache_location.as_ref())
+            .filter(|location| location.storage_class == "shared")
+        else {
+            return Ok(true);
+        };
+        let Some(generation_id) = location.generation_id.as_ref() else {
+            return Ok(false);
+        };
+        self.store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: location.node_id.clone(),
+                    recipe_hash: location.recipe_hash.clone(),
+                    generation_id: generation_id.clone(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_id.to_owned(),
+                    consumer_epoch: owner_epoch,
+                    expires_at_ms,
+                },
+                crate::media_sessions::unix_ms(),
+            )
+            .await
     }
 
     #[cfg(test)]
@@ -5566,11 +5618,66 @@ impl TranscodeManager {
             .map(Some)
     }
 
+    /// Prefer a currently verified shared generation, then preserve the
+    /// established node-local lookup as the fallback. Replicated rows are not
+    /// mount proof: the shared coordinator must still expose a live root.
+    async fn cache_read_location(
+        &self,
+        recipe_hash: &str,
+        cache: &CacheConfig,
+    ) -> Result<Option<(CachedLocationIdentity, PathBuf)>, StoreError> {
+        if let Some(shared) = self.shared_cache.as_ref() {
+            if let (Some(storage_id), Some(root)) = (shared.storage_id(), shared.root().await) {
+                if let Some(hit) = self.store.shared_cache_hit(recipe_hash, storage_id).await? {
+                    // Placement and cross-node serving require the immutable
+                    // object inventory. Legacy local entries remain readable,
+                    // but never become shared solely because their directory
+                    // happens to sit under the configured mount.
+                    if hit.manifest_digest.is_some() {
+                        return Ok(Some((
+                            CachedLocationIdentity {
+                                recipe_hash: recipe_hash.to_owned(),
+                                node_id: hit.storage_id,
+                                storage_class: "shared".to_owned(),
+                                generation_id: Some(hit.generation_id),
+                                relative_dir: hit.relative_dir,
+                                manifest_digest: hit.manifest_digest,
+                            },
+                            root,
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(self
+            .store
+            .cache_hit(recipe_hash, &cache.node_id)
+            .await?
+            .map(|hit| {
+                (
+                    CachedLocationIdentity {
+                        recipe_hash: recipe_hash.to_owned(),
+                        node_id: cache.node_id.clone(),
+                        storage_class: hit.storage_class,
+                        generation_id: None,
+                        relative_dir: hit.relative_dir,
+                        manifest_digest: hit.manifest_digest,
+                    },
+                    cache.dir.clone(),
+                )
+            }))
+    }
+
     async fn invalidate_cache_location(
         &self,
         location: &CachedLocationIdentity,
         reason: &'static str,
     ) -> bool {
+        if location.storage_class == "shared" {
+            if let Some(shared) = self.shared_cache.as_ref() {
+                shared.report_io_failure(reason).await;
+            }
+        }
         Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
     }
 
@@ -5649,26 +5756,15 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-        let Some(hit) = self
-            .store
-            .cache_hit(&hash, &cache.node_id)
-            .await
-            .ok()
-            .flatten()
+        let Some((identity, cache_root)) =
+            self.cache_read_location(&hash, cache).await.ok().flatten()
         else {
             return false;
         };
         // Legacy completions do not carry a byte inventory and therefore
         // cannot make the stronger cluster placement claim.
-        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+        let Some(expected_manifest) = identity.manifest_digest.clone() else {
             return false;
-        };
-        let identity = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
         };
         let now = Instant::now();
         {
@@ -5725,7 +5821,7 @@ impl TranscodeManager {
         let verdicts = Arc::clone(&self.cache_offer_verdicts);
         let store = Arc::clone(&self.store);
         let readers = self.cache_readers.clone();
-        let cache_root = cache.dir.clone();
+        let shared_cache = self.shared_cache.clone();
         tokio::spawn(async move {
             let verified = Self::verify_cache_offer_location(
                 Arc::clone(&store),
@@ -5735,6 +5831,13 @@ impl TranscodeManager {
                 expected_manifest,
             )
             .await;
+            if !verified && identity.storage_class == "shared" {
+                if let Some(shared_cache) = shared_cache.as_ref() {
+                    shared_cache
+                        .report_io_failure("offer_integrity_failed")
+                        .await;
+                }
+            }
             let mut verdicts = verdicts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5842,16 +5945,8 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-
-        // Claim deletion safety before looking at either the row or the
-        // filesystem. A miss is not active playback; upgrade this generic
-        // guard only after the complete generation has been validated.
-        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
-            tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
-            return None;
-        };
-
-        let hit = match self.store.cache_hit(&hash, &cache.node_id).await {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (cache_location, cache_root) = match self.cache_read_location(&hash, cache).await {
             Ok(Some(hit)) => hit,
             other => {
                 // The name is logged on a miss because "why is this not
@@ -5867,14 +5962,48 @@ impl TranscodeManager {
                 return None;
             }
         };
-        let cache_location = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
+        // Local deletion safety is process-local. Shared generations instead
+        // need a durable exact-generation pin before the first filesystem
+        // read, otherwise GC can retire the row between lookup and owner
+        // publication. The short lookup pin bridges to the durable media
+        // session pin installed before the route is exposed.
+        let cache_lookup = if cache_location.storage_class == "shared" {
+            let Some(generation_id) = cache_location.generation_id.as_ref() else {
+                return None;
+            };
+            let now_ms = unix_ms();
+            match self
+                .store
+                .acquire_cache_consumer_pin(
+                    &CacheConsumerPin {
+                        storage_id: cache_location.node_id.clone(),
+                        recipe_hash: hash.clone(),
+                        generation_id: generation_id.clone(),
+                        consumer_kind: CacheConsumerKind::MediaSession,
+                        consumer_id: session_id.clone(),
+                        consumer_epoch: 1,
+                        expires_at_ms: now_ms.saturating_add(SHARED_LOOKUP_PIN_MS),
+                    },
+                    now_ms,
+                )
+                .await
+            {
+                Ok(true) => None,
+                Ok(false) => return None,
+                Err(error) => {
+                    tracing::warn!(recipe = %hash, %error, "shared cache lookup pin failed");
+                    return None;
+                }
+            }
+        } else {
+            let Some(guard) = self.cache_readers.begin_lookup(&hash) else {
+                tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
+                return None;
+            };
+            Some(guard)
         };
-        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
+        let Some(dir) =
+            crate::cachekeep::validated_entry_dir(&cache_root, &cache_location.relative_dir).await
         else {
             self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
                 .await;
@@ -5893,7 +6022,7 @@ impl TranscodeManager {
                 .await;
             return None;
         }
-        let cache_manifest = if let Some(expected) = hit.manifest_digest.as_deref() {
+        let cache_manifest = if let Some(expected) = cache_location.manifest_digest.as_deref() {
             let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
             if tokio::fs::metadata(&manifest_path).await.is_err() {
                 tracing::warn!(
@@ -5907,11 +6036,11 @@ impl TranscodeManager {
             }
             match crate::manifest_cache::load(
                 crate::manifest_cache::GenerationKey {
-                    cache_root: cache.dir.clone(),
-                    node_id: cache.node_id.clone(),
+                    cache_root: cache_root.clone(),
+                    node_id: cache_location.node_id.clone(),
                     recipe_hash: hash.clone(),
-                    storage_class: hit.storage_class.clone(),
-                    relative_dir: hit.relative_dir.clone(),
+                    storage_class: cache_location.storage_class.clone(),
+                    relative_dir: cache_location.relative_dir.clone(),
                     manifest_digest: expected.to_owned(),
                 },
                 &dir,
@@ -5958,11 +6087,23 @@ impl TranscodeManager {
                 .await;
             return None;
         }
-        let cache_reader = self.cache_readers.begin_playback(&hash)?;
+        let cache_reader = if cache_location.storage_class == "shared" {
+            None
+        } else {
+            Some(self.cache_readers.begin_playback(&hash)?)
+        };
         drop(cache_lookup);
-        let _ = self.store.touch_cache_entry(&hash, &cache.node_id).await;
-
-        let session_id = uuid::Uuid::new_v4().to_string();
+        if let Some(generation_id) = cache_location.generation_id.as_deref() {
+            let _ = self
+                .store
+                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
+                .await;
+        } else {
+            let _ = self
+                .store
+                .touch_cache_entry(&hash, &cache_location.node_id)
+                .await;
+        }
         let session = Arc::new(Session {
             dir,
             child: Mutex::new(None),
@@ -5981,7 +6122,7 @@ impl TranscodeManager {
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
-            _cache_reader: Some(cache_reader),
+            _cache_reader: cache_reader,
             subtitle_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
@@ -6437,6 +6578,7 @@ impl TranscodeManager {
                 recipe_hash: hash.clone(),
                 node_id: cache.node_id.clone(),
                 storage_class: cached.storage_class.clone(),
+                generation_id: None,
                 relative_dir: cached.relative_dir.clone(),
                 manifest_digest: cached.manifest_digest.clone(),
             };
@@ -6916,6 +7058,27 @@ impl TranscodeManager {
                 .complete_cache_entry(&hash, &cache.node_id, published.bytes)
                 .await
                 .map_err(|error| error.to_string())?;
+        }
+        if let (Some(shared_cache), Some(manifest)) =
+            (self.shared_cache.as_ref(), manifest.as_ref())
+        {
+            match shared_cache
+                .publish_generation(&hash, file.id, CACHE_RECIPE_VERSION, &final_dir, manifest)
+                .await
+            {
+                Ok(true) => tracing::info!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    "portable transcode published to the shared cache"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    %error,
+                    "shared cache publication failed; the node-local generation remains ready"
+                ),
+            }
         }
         drop(publication_guard);
         let _ = quarantine_remove_cache_tree(&temp, 3).await;
