@@ -1043,6 +1043,9 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::ArtworkPeerAuth { auth } => auth,
         response => bail!("unexpected artwork proof response: {response:?}"),
     };
+    if !legacy_artwork_proof_is_valid("poster.jpg", &departing_artwork_proof)? {
+        bail!("the production artwork signer changed the established v4 HMAC wire");
+    }
     match cluster
         .request(
             observer,
@@ -4723,6 +4726,23 @@ fn shared_secret_artwork_proof(
         timestamp_ms,
         signature: hex::encode(mac.finalize().into_bytes()),
     })
+}
+
+/// Verify a production proof without the production verifier. Together with
+/// `shared_secret_artwork_proof`, this checks both rolling-upgrade directions.
+fn legacy_artwork_proof_is_valid(filename: &str, auth: &ArtworkPeerAuth) -> Result<bool> {
+    let signature = match hex::decode(&auth.signature) {
+        Ok(signature) => signature,
+        Err(_) => return Ok(false),
+    };
+    let message = format!(
+        "plurx-artwork-v1\n{}\n{}\n{filename}",
+        auth.node_id, auth.timestamp_ms
+    );
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct legacy artwork verifier: {error}"))?;
+    mac.update(message.as_bytes());
+    Ok(mac.verify_slice(&signature).is_ok())
 }
 
 async fn membership_manager(

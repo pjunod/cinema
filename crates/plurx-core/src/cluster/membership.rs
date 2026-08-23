@@ -509,6 +509,23 @@ impl ActivityAuthAdmission {
     }
 }
 
+fn insert_bounded_activity_public_key(
+    keys: &mut BTreeMap<String, Vec<u8>>,
+    node_id: String,
+    public_key: Vec<u8>,
+) -> Option<String> {
+    let evicted = if keys.contains_key(&node_id) || keys.len() < MAX_ACTIVITY_PEERS {
+        None
+    } else {
+        keys.keys().next().cloned()
+    };
+    if let Some(evicted) = evicted.as_deref() {
+        keys.remove(evicted);
+    }
+    keys.insert(node_id, public_key);
+    evicted
+}
+
 #[derive(Clone)]
 pub struct JoinSecrets {
     pub raft: String,
@@ -949,11 +966,11 @@ impl MembershipManager {
                 "SELECT key.node_id, key.public_key \
                  FROM cluster_node_activity_keys key \
                  JOIN cluster_nodes node ON node.node_id = key.node_id \
-                 WHERE node.removed_at IS NULL AND node.node_id != $2 \
+                 WHERE node.removed_at IS NULL AND node.node_id != $1 \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
                      WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $1",
-                params!(MAX_ACTIVITY_PEERS as i64, inner.identity.node_id.as_str()),
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
             )
             .await?;
         let keys = rows
@@ -1446,14 +1463,7 @@ impl MembershipManager {
             let mut keys = inner.activity_public_keys.lock().map_err(|_| {
                 MembershipError::Internal("activity public-key lock was poisoned".to_owned())
             })?;
-            let evicted = (keys.len() >= MAX_ACTIVITY_PEERS)
-                .then(|| keys.keys().next().cloned())
-                .flatten();
-            if let Some(evicted) = evicted.as_deref() {
-                keys.remove(evicted);
-            }
-            keys.insert(node_id, public_key);
-            evicted
+            insert_bounded_activity_public_key(&mut keys, node_id, public_key)
         };
         if let Some(evicted) = evicted {
             inner
@@ -3041,6 +3051,39 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_key_cache_replaces_one_peer_without_exceeding_its_bound() {
+        let mut keys = (0..MAX_ACTIVITY_PEERS)
+            .map(|index| (format!("node-{index:03}"), vec![index as u8; 32]))
+            .collect::<BTreeMap<_, _>>();
+
+        let evicted =
+            insert_bounded_activity_public_key(&mut keys, "node-064".to_owned(), vec![0x64; 32]);
+
+        assert_eq!(keys.len(), MAX_ACTIVITY_PEERS);
+        assert_eq!(evicted.as_deref(), Some("node-000"));
+        assert!(!keys.contains_key("node-000"));
+        assert_eq!(keys.get("node-064"), Some(&vec![0x64; 32]));
+    }
+
+    #[test]
+    fn activity_key_lookup_admission_reopens_after_one_window() {
+        let started = Instant::now();
+        let mut admission = ActivityAuthAdmission {
+            window_started: started,
+            checks: 0,
+        };
+
+        for _ in 0..MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND {
+            assert!(admission.admit(started, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND));
+        }
+        assert!(!admission.admit(started, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND));
+        assert!(admission.admit(
+            started + Duration::from_secs(1),
+            MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND
+        ));
+    }
 
     #[test]
     fn every_post_send_membership_error_keeps_the_removal_fence() {
