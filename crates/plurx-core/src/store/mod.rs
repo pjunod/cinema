@@ -40,6 +40,8 @@ mod hiqlite_publication;
 mod hiqlite_reading;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_sessions;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_shared_cache;
 
 pub mod replicated;
 
@@ -62,15 +64,16 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheManifestCheck, CachedTranscode, HomePreviewPage, InProgressItem, Item,
-    ItemEdit, ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation,
-    MediaSessionActivationOutcome, MediaSessionRenewal, MediaSessionRequestClaim,
-    MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior, NetworkPriorObservation, NewItem,
-    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineActivityPackage,
-    OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats,
-    OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease, PlaybackEvent,
-    PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup, WatchState,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
+    CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
+    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
+    User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -1251,6 +1254,110 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     async fn cache_bytes(&self, node_id: &str) -> Result<i64, StoreError>;
 }
 
+/// Storage-keyed cache generations and their distributed reader pins.
+///
+/// The legacy TranscodeCacheStore remains the rolling-upgrade interface for
+/// node-local roots. Shared roots use this boundary exclusively: callers must
+/// name the immutable generation they validated, and GC must present the exact
+/// live lease that authorized retirement.
+#[async_trait]
+pub trait SharedCacheStore: Send + Sync + 'static {
+    async fn put_cache_storage_member(&self, member: &CacheStorageMember)
+        -> Result<(), StoreError>;
+
+    async fn cache_storage_member(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+    ) -> Result<Option<CacheStorageMember>, StoreError>;
+
+    async fn mark_cache_storage_suspect(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+        observed_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn shared_cache_hit(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+    ) -> Result<Option<SharedCacheGeneration>, StoreError>;
+
+    async fn touch_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        file_id: i64,
+        recipe_version: i64,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        bytes: i64,
+        manifest_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Insert or renew a pin only while the exact complete generation remains
+    /// current. Validation and mutation are one database statement/transaction.
+    async fn acquire_cache_consumer_pin(
+        &self,
+        pin: &CacheConsumerPin,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Renew matching epochs in one bounded owner-liveness transaction.
+    async fn renew_cache_consumer_pins(
+        &self,
+        pins: &[CacheConsumerPin],
+        now_ms: i64,
+    ) -> Result<usize, StoreError>;
+
+    async fn release_cache_consumer_pin(
+        &self,
+        storage_id: &str,
+        recipe_hash: &str,
+        generation_id: &str,
+        consumer_kind: CacheConsumerKind,
+        consumer_id: &str,
+        consumer_epoch: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn shared_cache_gc_candidates(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
+    /// Retire the exact generation only when the supplied GC lease is still
+    /// current and no live typed consumer pin exists. Filesystem deletion may
+    /// happen only after this returns true.
+    async fn retire_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<bool, StoreError>;
+}
+
 /// Durable distributed work for speculative whole-title transcodes.
 ///
 /// Candidate generation is a singleton, but execution is deliberately not:
@@ -1888,6 +1995,7 @@ pub trait Store:
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
+    + SharedCacheStore
     + PretranscodeJobStore
     + OfflinePackageStore
     + PlaybackTelemetryStore
@@ -1913,6 +2021,7 @@ impl<T> Store for T where
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore
+        + SharedCacheStore
         + PretranscodeJobStore
         + OfflinePackageStore
         + PlaybackTelemetryStore

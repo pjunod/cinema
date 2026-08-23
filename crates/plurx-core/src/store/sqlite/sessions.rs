@@ -476,6 +476,21 @@ impl MediaSessionStore for SqliteStore {
                 ],
             )?;
             tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session'
+                    AND consumer_id IN (
+                      SELECT incarnation_id FROM media_sessions
+                       WHERE user_id = ?1 AND playback_id = ?2
+                         AND incarnation_id != ?3 AND state = 'ended'
+                         AND updated_at_ms = ?4)",
+                params![
+                    activation.user_id,
+                    activation.playback_id,
+                    activation.incarnation_id,
+                    activation.now_ms,
+                ],
+            )?;
+            tx.execute(
                 "UPDATE job_leases
                     SET expires_at_ms = CASE
                           WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
@@ -715,6 +730,34 @@ impl MediaSessionStore for SqliteStore {
                         ],
                     )? == 1
                 {
+                    tx.execute(
+                        "UPDATE cache_consumer_pins
+                            SET expires_at_ms = CASE
+                                  WHEN expires_at_ms < ?1 THEN ?1 ELSE expires_at_ms END
+                          WHERE consumer_kind = 'media_session' AND consumer_id = ?2
+                            AND consumer_epoch = ?3 AND expires_at_ms > ?4
+                            AND EXISTS (
+                                SELECT 1 FROM transcode_cache_locations location
+                                 WHERE location.storage_id = cache_consumer_pins.storage_id
+                                   AND location.recipe_hash = cache_consumer_pins.recipe_hash
+                                   AND location.generation_id = cache_consumer_pins.generation_id
+                                   AND location.storage_class = 'shared'
+                                   AND location.complete = 1)
+                            AND EXISTS (
+                                SELECT 1 FROM media_sessions session
+                                 WHERE session.incarnation_id = ?2
+                                   AND session.owner_node_id = ?5
+                                   AND session.owner_epoch = ?3
+                                   AND session.state = 'active'
+                                   AND session.lease_expires_at_ms = ?1)",
+                        params![
+                            lease_expires_at_ms,
+                            renewal.incarnation_id,
+                            renewal.owner_epoch,
+                            now_ms,
+                            owner_node_id,
+                        ],
+                    )?;
                     renewed.push(renewal.incarnation_id);
                 }
             }
@@ -771,6 +814,14 @@ impl MediaSessionStore for SqliteStore {
                       WHERE user_id = ?1 AND playback_id = ?2 AND current_incarnation_id = ?3",
                     params![route.user_id, route.playback_id, route.incarnation_id],
                 )?;
+                tx.execute(
+                    "DELETE FROM cache_consumer_pins
+                      WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+                        AND consumer_epoch = ?2
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?1 AND state = 'ended')",
+                    params![route.incarnation_id, route.owner_epoch],
+                )?;
             }
             tx.commit()?;
             Ok(route)
@@ -790,6 +841,15 @@ impl MediaSessionStore for SqliteStore {
                     SELECT incarnation_id FROM media_sessions
                      WHERE state = 'active' AND lease_expires_at_ms <= ?1
                      ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2)",
+                params![now_ms, MAINTENANCE_BATCH],
+            )?;
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session'
+                    AND consumer_id IN (
+                      SELECT incarnation_id FROM media_sessions
+                       WHERE state = 'ended' AND lease_expires_at_ms <= ?1
+                       ORDER BY updated_at_ms, incarnation_id LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(

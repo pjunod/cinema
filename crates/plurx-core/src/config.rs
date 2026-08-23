@@ -105,6 +105,13 @@ pub struct ClusterConfig {
     /// what makes a replicated row safe to write, so it has to exist before
     /// replication is switched on, not with it.
     pub credential_key_file: PathBuf,
+    /// Optional node-local mount point for a cache filesystem shared by
+    /// multiple voters. A path is only a candidate; the daemon admits it
+    /// after an authenticated two-way canary succeeds.
+    pub shared_cache_dir: PathBuf,
+    /// Operator-stable identity for the shared filesystem. Combined with the
+    /// replicated cluster id so unrelated clusters cannot alias one mount.
+    pub shared_cache_id: String,
 }
 
 impl Default for ClusterConfig {
@@ -118,6 +125,8 @@ impl Default for ClusterConfig {
             join_token_file: PathBuf::new(),
             trusted_network: String::new(),
             credential_key_file: PathBuf::new(),
+            shared_cache_dir: PathBuf::new(),
+            shared_cache_id: String::new(),
         }
     }
 }
@@ -158,6 +167,29 @@ impl Config {
                 message: "must be between 0 and 100".to_owned(),
             });
         }
+        let shared_dir_set = !config.cluster.shared_cache_dir.as_os_str().is_empty();
+        let shared_id_set = !config.cluster.shared_cache_id.is_empty();
+        if shared_dir_set != shared_id_set {
+            return Err(ConfigError::Value {
+                key: "cluster.shared_cache_dir".to_owned(),
+                message: "shared_cache_dir and shared_cache_id must be configured together"
+                    .to_owned(),
+            });
+        }
+        if shared_id_set
+            && (config.cluster.shared_cache_id.len() > 64
+                || !config
+                    .cluster
+                    .shared_cache_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.shared_cache_id".to_owned(),
+                message: "must be 1-64 ASCII letters, digits, dots, dashes, or underscores"
+                    .to_owned(),
+            });
+        }
         Ok(config)
     }
 
@@ -187,6 +219,12 @@ impl Config {
         }
         if let Some(path) = env_var("PLURX_CREDENTIAL_KEY_FILE") {
             self.cluster.credential_key_file = PathBuf::from(path);
+        }
+        if let Some(path) = env_var("PLURX_SHARED_CACHE_DIR") {
+            self.cluster.shared_cache_dir = PathBuf::from(path);
+        }
+        if let Some(id) = env_var("PLURX_SHARED_CACHE_ID") {
+            self.cluster.shared_cache_id = id;
         }
         if let Some(value) = env_var("PLURX_SCAN_PRUNE_PERCENT") {
             self.storage.scan_prune_percent = value.parse().map_err(|_| ConfigError::Env {
@@ -285,6 +323,43 @@ mod tests {
         assert!(matches!(
             Config::load(Some(&path)),
             Err(ConfigError::Value { key, .. }) if key == "storage.scan_prune_percent"
+        ));
+    }
+
+    #[test]
+    fn shared_cache_mount_and_identity_are_paired_and_rollback_safe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+        std::fs::write(
+            &path,
+            "[cluster]\nshared_cache_dir = \"/srv/plurx-shared\"\nshared_cache_id = \"media-a\"\nfuture_shared_cache_knob = true\n",
+        )
+        .expect("write shared config");
+        let config = Config::load(Some(&path)).expect("paired shared cache config");
+        assert_eq!(
+            config.cluster.shared_cache_dir,
+            PathBuf::from("/srv/plurx-shared")
+        );
+        assert_eq!(config.cluster.shared_cache_id, "media-a");
+
+        std::fs::write(
+            &path,
+            "[cluster]\nshared_cache_dir = \"/srv/plurx-shared\"\n",
+        )
+        .expect("write unpaired path");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. }) if key == "cluster.shared_cache_dir"
+        ));
+
+        std::fs::write(
+            &path,
+            "[cluster]\nshared_cache_dir = \"/srv/plurx-shared\"\nshared_cache_id = \"unsafe/id\"\n",
+        )
+        .expect("write invalid identity");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. }) if key == "cluster.shared_cache_id"
         ));
     }
 }

@@ -705,9 +705,43 @@ const TABLES: &[TablePlan] = &[
             "scrub_object_index",
             "last_used_at",
             "last_seen_at",
+            "storage_id",
+            "generation_id",
         ],
         order_by: "recipe_hash, node_id, storage_class",
         minimum_schema: 11,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cache_storage_members",
+        columns: &[
+            "storage_id",
+            "node_id",
+            "storage_class",
+            "verified_at_ms",
+            "verification_state",
+        ],
+        order_by: "storage_id, node_id",
+        minimum_schema: 26,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cache_consumer_pins",
+        columns: &[
+            "storage_id",
+            "recipe_hash",
+            "generation_id",
+            "consumer_kind",
+            "consumer_id",
+            "consumer_epoch",
+            "expires_at_ms",
+        ],
+        order_by: "storage_id, recipe_hash, generation_id, consumer_kind, consumer_id",
+        minimum_schema: 26,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1743,6 +1777,24 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 24
             {
                 "0".to_owned()
+            } else if table.name == "transcode_cache_locations"
+                && *column == "storage_id"
+                && schema_version < 26
+            {
+                if qualify {
+                    "'node:' || source.node_id || ':cache'".to_owned()
+                } else {
+                    "'node:' || node_id || ':cache'".to_owned()
+                }
+            } else if table.name == "transcode_cache_locations"
+                && *column == "generation_id"
+                && schema_version < 26
+            {
+                if qualify {
+                    "source.relative_dir".to_owned()
+                } else {
+                    "relative_dir".to_owned()
+                }
             } else if qualify {
                 format!("source.{column}")
             } else {
@@ -1933,7 +1985,22 @@ mod tests {
         assert!(names.contains(&"media_session_requests"));
         assert!(names.contains(&"media_playback_pointers"));
         assert!(names.contains(&"media_sessions"));
-        assert_eq!(names.len(), 23, "review every imported durable table");
+        assert!(names.contains(&"cache_storage_members"));
+        assert!(names.contains(&"cache_consumer_pins"));
+        assert_eq!(names.len(), 25, "review every imported durable table");
+    }
+
+    #[test]
+    fn pre_v26_cache_locations_project_stable_local_storage_identity() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "transcode_cache_locations")
+            .copied()
+            .expect("cache location table plan");
+        let v25 = value_projection(table, 25, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(v25.ends_with("'node:' || node_id || ':cache', relative_dir"));
+        assert!(current.ends_with("storage_id, generation_id"));
     }
 
     #[test]

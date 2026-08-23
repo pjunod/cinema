@@ -33,12 +33,13 @@ use crate::error::StoreError;
 
 // v6 adds revision-bound ebook reading state; v7 adds first-class book facts;
 // v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
-// speculative-transcode queue; v10 adds live media-session routing. Every additive step is applied through
-// Raft before the daemon opens the
-// store. v5 remains a supported direct-upgrade source so an offline node is
+// speculative-transcode queue; v10 adds live media-session routing; v11 adds
+// storage-keyed shared-cache generations and reader pins. Every additive step
+// is applied through Raft before the daemon opens the store. v5 remains a
+// supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 10;
+pub const AUTH_SCHEMA_VERSION: i64 = 11;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -46,9 +47,10 @@ const BOOK_SCHEMA_MIGRATION_SOURCE: i64 = READING_SCHEMA_VERSION;
 const LEASE_SCHEMA_MIGRATION_SOURCE: i64 = 7;
 const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
-// Session routing is additive durable state and uses the existing Hiqlite
-// transport contract. Keep protocol v4 so a healthy v9 cluster can authorize
-// the daemon that performs the v9→v10 schema migration.
+const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
+// Session routing and shared-cache identity are additive durable state and use
+// the existing Hiqlite transport contract. Keep protocol v4 so a healthy
+// v9/v10 cluster can authorize the daemon that advances its schema.
 pub const AUTH_PROTOCOL_VERSION: i64 = 4;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -808,6 +810,7 @@ impl HiqliteAuthStore {
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
+        super::hiqlite_shared_cache::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -1043,7 +1046,7 @@ impl HiqliteAuthStore {
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",
                                 params!(
-                                    AUTH_SCHEMA_VERSION,
+                                    SHARED_CACHE_SCHEMA_MIGRATION_SOURCE,
                                     now,
                                     MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
                                 ),
@@ -1051,6 +1054,23 @@ impl HiqliteAuthStore {
                         ])
                         .await;
                     self.settle_migration_attempt(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_shared_cache::migration_statements();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            AUTH_SCHEMA_VERSION,
+                            now,
+                            SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -1177,6 +1197,8 @@ impl HiqliteAuthStore {
             ("DELETE FROM offline_lease_guards".to_owned(), params!()),
             ("DELETE FROM offline_package_leases".to_owned(), params!()),
             ("DELETE FROM offline_packages".to_owned(), params!()),
+            ("DELETE FROM cache_consumer_pins".to_owned(), params!()),
+            ("DELETE FROM cache_storage_members".to_owned(), params!()),
             (
                 "DELETE FROM transcode_cache_locations".to_owned(),
                 params!(),
@@ -2121,7 +2143,8 @@ fn schema_migration_action(
         | BOOK_SCHEMA_MIGRATION_SOURCE
         | LEASE_SCHEMA_MIGRATION_SOURCE
         | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
-        | MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE => {
+        | MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
+        | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -2896,9 +2919,9 @@ mod tests {
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 5,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 6,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v10 step"
+            "this implementation contains every additive v5→v11 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
