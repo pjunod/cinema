@@ -1027,16 +1027,15 @@ impl MediaSessionStore for HiqliteAuthStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let sql = format!(
+            "SELECT {ROUTE_COLS} FROM media_sessions
+              WHERE state = 'active' AND lease_expires_at_ms <= $1
+              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $2"
+        );
+        validate_sql(&sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<RouteRow, _>(
-                &format!(
-                    "SELECT {ROUTE_COLS} FROM media_sessions
-                      WHERE state = 'active' AND lease_expires_at_ms <= $1
-                      ORDER BY lease_expires_at_ms, incarnation_id LIMIT $2"
-                ),
-                params!(now_ms, limit),
-            )
+            .query_consistent_map::<RouteRow, _>(sql, params!(now_ms, limit))
             .await?
             .into_iter()
             .map(|row| row.0)

@@ -508,8 +508,12 @@ pub async fn create(
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
-        source_size: file.size,
-        source_mtime: file.mtime,
+        // The source snapshot a later takeover must match exactly (§7.3). A
+        // row we could not read records an impossible snapshot rather than a
+        // plausible one, so takeover refuses instead of reproducing a session
+        // against a file it never verified.
+        source_size: source.as_ref().map_or(0, |f| f.size),
+        source_mtime: source.as_ref().map_or(0, |f| f.mtime),
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
