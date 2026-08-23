@@ -133,7 +133,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          public_http_url TEXT NOT NULL) STRICT",
     // A durable exact-origin claim distinguishes pre-M3d shared-address rows
     // from origins admitted by the node-scoped redemption protocol. Legacy
-    // rows may migrate once; a claimed origin is immutable on every retry.
+    // rows may migrate once; an in-flight redemption cannot substitute a new
+    // origin, while an established node may later readdress its own endpoint.
     "CREATE TABLE IF NOT EXISTS cluster_node_http_claims (\
          node_id TEXT PRIMARY KEY, \
          public_http_url TEXT NOT NULL) STRICT",
@@ -1545,15 +1546,24 @@ impl MembershipManager {
         // this table without that constraint, and may temporarily contain the
         // former shared join URL in every row while voters roll forward. A
         // node may replace its own legacy value, but may never claim a URL
-        // currently published by another node.
+        // currently published by another node. A still-redeeming token freezes
+        // the durable origin chosen during redemption; after finalization the
+        // active node identity may atomically publish an operator readdress.
         let transaction = inner
             .client
             .txn(vec![
                 (
                     "INSERT INTO cluster_node_http (node_id, public_http_url) \
-                     SELECT $1, $2 WHERE NOT EXISTS (\
+                     SELECT $1, $2 WHERE EXISTS (\
+                       SELECT 1 FROM cluster_nodes self_node \
+                       WHERE self_node.node_id = $1 AND self_node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals self_removal \
+                           WHERE self_removal.node_id = self_node.node_id)) \
+                     AND (NOT EXISTS (\
                        SELECT 1 FROM cluster_node_http_claims claim \
                        WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                       OR NOT EXISTS (SELECT 1 FROM cluster_join_tokens token \
+                         WHERE token.node_id = $1 AND token.state = 'redeeming')) \
                      AND NOT EXISTS (\
                        SELECT 1 FROM cluster_node_http AS owner_http \
                        WHERE owner_http.public_http_url = $2 \
@@ -1574,8 +1584,7 @@ impl MembershipManager {
                 (
                     "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
-                       public_http_url = excluded.public_http_url \
-                     WHERE cluster_node_http_claims.public_http_url = excluded.public_http_url"
+                       public_http_url = excluded.public_http_url"
                         .to_owned(),
                     vec![
                         Param::StmtOutputNamed(0, "node_id".into()),
