@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P4 delivered; P5 is next ·
+**Status:** P0–P5 delivered; P6 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -628,6 +628,10 @@ incarnation as an internal request id before worker allocation, so ordinary
 creates cannot bypass per-user admission; only caller-visible replay semantics
 remain absent. Requiring public request ids waits for a versioned API and
 migrated clients.
+The durable fingerprint is scoped by immutable `user_id` plus the byte- and
+timeline-affecting request intent. The mutable display username is deliberately
+excluded, so renaming an account cannot turn a retry into a conflict; the
+legacy process-local retry map keeps its established username scope.
 A request is normalized and length-checked before any consensus write. Limit
 each user to 32 in-flight claims and 64 current/starting incarnations, with an
 explicit stable overload error. Prune abandoned `starting` rows after their
@@ -635,14 +639,25 @@ claim deadline plus recovery window, failed rows after one hour, resolved rows
 after the 24-hour retry window, and obsolete playback pointers with their ended
 incarnations. Rate/spam tests assert bounded rows and WAL under endlessly
 unique authenticated ids.
+Claim recovery CASes the exact expired `starting` row before returning
+`InFlight`; it does not depend on that row landing inside a globally bounded
+maintenance page. Failed and expired attempts apply the same in-flight,
+current-session, and retained-session admission bounds on both backends.
 A new request for the same user/playback atomically changes the pointer and
 ends the predecessor. Two users may use the same playback id without sharing
 state. A stall reopen additionally compares the pointer with the exact durable
 predecessor it named; a rolling-upgrade reopen of a process-local legacy
 session compares against an absent pointer, so either form loses rather than
-superseding a newer start. The selected worker receives no user bearer; the signed internal
-request carries only the already-authorized user id and resolves the current
-display name from replicated user state.
+superseding a newer start. The selected worker receives no user bearer; the
+signed internal request carries only the already-authorized user id and
+resolves the current display name from replicated user state.
+
+Cluster starts defer process-local playback supersession. Worker publication is
+owned by a cancellation guard until the replicated activation CAS returns the
+exact predecessor; only that predecessor is stopped. The activation and its
+commit-unknown reconciliation run in an owned task, so client disconnects,
+placement deadlines, and racing starts cannot strand an encoder or publish a
+route to a worker another attempt already killed.
 
 ## 7. Owner proxy and takeover — the capability URL stays stable
 
@@ -1015,7 +1030,7 @@ in the exact replicated file snapshot before a node can answer eligible.
 ### 8.6 P5 — place and proxy new HLS sessions
 
 Add cluster-wide session idempotency, remote start, owner lookup, and streamed
-playlist/segment/status/delete proxying. Implement the bounded two-second
+playlist/segment/status/delete proxying. Implement the bounded three-second
 per-owner batch that renews session liveness; it need not publish takeover
 frontiers yet. Keep failover disabled: an owner that actually expires still
 produces the existing terminal error until §8.8. At drain start, a node stops
@@ -1033,6 +1048,14 @@ bounded; forbidden proxy headers and raw capability ids never cross or enter
 logs; authoritative delete wins against a concurrent
 start and reaches the worker; healthy sessions remain live beyond the lease;
 a draining node receives no starts and cannot be removed while it owns one.
+
+**Delivered:** new HLS sessions rank eligible offers, start locally or through
+exact-auth peer control, activate one durable owner, and stream typed relay
+responses through any ingress. Twelve-second owner leases renew in bounded
+parallel batches; work without the complete renewal window and every
+commit-unknown result self-fence the exact worker. Stale durable settlement is
+deduplicated and capped, and removed or exhausted Hiqlite lease owners cannot
+activate through a retained row.
 
 ### 8.7 P6 — add verified shared-cache roots as an optional fast path
 
