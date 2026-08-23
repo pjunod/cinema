@@ -4,7 +4,21 @@
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) · **Evidence:** plan §12,
 `target/vod-probe/*.json` · **Branch:** `agent/vod-m0`
 
-Four groups. **A** needs a decision and blocks M1. **B** are production defects
+**All of group A was ruled on 2026-08-23 and the amendments are applied to the
+plan; M1 is authorized.** A1 — byte-landing identification, strengthened to a
+3-fragment byte-count sequence, with typed failure on no match or a double
+match. A2 — documentation, not policy: `TARGETDURATION` bounds time, not
+bytes. A3 — write the invariant, not the number, plus a 30 s producer
+materialization budget. B1 and B2 became stopgaps S5 and S6; B3 folded into
+M1's spec. D6 stays open until the device halves return. Plan §12.9 carries
+the full rulings; the sections below are the record of what was found.
+
+One premise in the ruling was re-verified and does not hold: the vendored
+`hls.min.js` fragment first-byte default is `1e4`, not `8e3` — the `8e3`
+values are `certLoadPolicy` and `keyLoadPolicy`. The invariant applies as
+ruled and resolves to 8 s for web, with margin rather than by race.
+
+Four groups. **A** needed a decision and blocked M1. **B** are production defects
 found in passing, none of them fixed. **C** were defects in my own measurement
 harnesses — all fixed and re-run, listed so nobody re-finds them. **D** is what
 M0 did not measure.
