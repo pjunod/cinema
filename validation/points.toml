@@ -531,6 +531,9 @@ paths = [
   "docs/STUTTER-4K.md",
   "scripts/dv-evidence",
   "scripts/playback-lab",
+  "scripts/vod-plan-probe",
+  "scripts/vod-probe-fixtures.sh",
+  "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
 checks = ["rust-gate", "web-static", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
