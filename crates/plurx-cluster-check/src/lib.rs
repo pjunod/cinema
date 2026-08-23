@@ -220,6 +220,7 @@ pub fn validate_compacted_growth(report: &CompactedGrowthReport) -> Result<()> {
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
 pub async fn run(args: Vec<String>) -> Result<()> {
+    install_crypto_provider();
     match args.get(1).map(String::as_str) {
         None | Some("check") => {
             run_growth_subprocess().await?;
