@@ -16,21 +16,21 @@ use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{ActivityPeer, ActivityPeerAuth, MembershipError};
 use serde::{Deserialize, Serialize};
 
+use super::peer_transport::{
+    deadline_after, PeerAuthMode, PeerTransport, PeerTransportError, NODE_HEADER, SIGNATURE_HEADER,
+    TARGET_HEADER, TIMESTAMP_HEADER,
+};
 use crate::state::AppState;
 
 pub const PATH: &str = "/_internal/v1/activity-snapshot";
 #[allow(dead_code)] // aggregation child #326 calls the pre-wired client
 pub const TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_DELIVERIES: usize = 512;
 const MAX_NODE_ID_BYTES: usize = 256;
 const MAX_USER_BYTES: usize = 256;
 const MAX_TITLE_BYTES: usize = 2 * 1024;
 const PEER_CONCURRENCY: usize = 8;
-const NODE_HEADER: &str = "x-plurx-cluster-node";
-const TARGET_HEADER: &str = "x-plurx-cluster-target";
-const TIMESTAMP_HEADER: &str = "x-plurx-cluster-time-ms";
-const SIGNATURE_HEADER: &str = "x-plurx-cluster-signature";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActivitySnapshot {
@@ -65,7 +65,7 @@ pub enum PeerActivityOutcome {
 #[derive(Clone)]
 pub struct PeerActivityClient {
     membership: plurx_core::cluster::membership::MembershipManager,
-    client: Result<reqwest::Client, String>,
+    transport: PeerTransport,
 }
 
 #[allow(dead_code)]
@@ -73,21 +73,22 @@ impl PeerActivityClient {
     #[must_use]
     pub fn new(membership: plurx_core::cluster::membership::MembershipManager) -> Self {
         Self {
+            transport: PeerTransport::new(membership.clone()),
             membership,
-            client: peer_http_client(),
         }
     }
 
     pub async fn snapshots(&self) -> Result<Vec<(String, PeerActivityOutcome)>, MembershipError> {
         let peers = self.membership.activity_peers().await?;
         let client = self.clone();
-        Ok(collect_peer_outcomes(peers, TIMEOUT, move |peer| {
+        let deadline = deadline_after(TIMEOUT);
+        Ok(collect_peer_outcomes(peers, deadline, move |peer| {
             let client = client.clone();
             async move {
                 if !peer.reachable {
                     PeerActivityOutcome::Unhealthy
                 } else if let Some(http_base) = peer.http_base {
-                    client.snapshot(&peer.node_id, &http_base).await
+                    client.snapshot(&peer.node_id, &http_base, deadline).await
                 } else {
                     PeerActivityOutcome::Unreachable
                 }
@@ -96,55 +97,45 @@ impl PeerActivityClient {
         .await)
     }
 
-    async fn snapshot(&self, expected_node_id: &str, base: &str) -> PeerActivityOutcome {
-        let Some(url) = activity_url(base) else {
-            return PeerActivityOutcome::Unreachable;
-        };
-        let Some(client) = self.client.as_ref().ok() else {
-            return PeerActivityOutcome::Unreachable;
-        };
-        let Ok(auth) = self
-            .membership
-            .sign_activity_request(expected_node_id, unix_ms())
-        else {
-            return PeerActivityOutcome::Unreachable;
-        };
-        let request = client
-            .get(url)
-            .timeout(TIMEOUT)
-            .header(NODE_HEADER, &auth.node_id)
-            .header(TARGET_HEADER, &auth.target_node_id)
-            .header(TIMESTAMP_HEADER, auth.timestamp_ms)
-            .header(SIGNATURE_HEADER, &auth.signature)
-            .send()
-            .await;
-        match request {
-            Ok(response) if response.status().is_success() => {
-                read_snapshot(response, expected_node_id).await
+    async fn snapshot(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        deadline: tokio::time::Instant,
+    ) -> PeerActivityOutcome {
+        match self
+            .transport
+            .request(
+                expected_node_id,
+                base,
+                reqwest::Method::GET,
+                PATH,
+                Vec::new(),
+                deadline,
+                MAX_RESPONSE_BYTES,
+                PeerAuthMode::LegacyActivity,
+            )
+            .await
+        {
+            Ok(response) if response.status.is_success() => {
+                decode_snapshot(&response.body, expected_node_id)
             }
-            Err(error) if error.is_timeout() => PeerActivityOutcome::TimedOut,
-            Ok(_) | Err(_) => PeerActivityOutcome::Unreachable,
+            Err(PeerTransportError::TimedOut) => PeerActivityOutcome::TimedOut,
+            Err(PeerTransportError::InvalidResponse) => PeerActivityOutcome::InvalidResponse,
+            Ok(_) | Err(PeerTransportError::Unreachable) => PeerActivityOutcome::Unreachable,
         }
     }
 }
 
-fn peer_http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| error.to_string())
-}
-
 async fn collect_peer_outcomes<F, Fut>(
     peers: Vec<ActivityPeer>,
-    timeout: Duration,
+    deadline: tokio::time::Instant,
     fetch: F,
 ) -> Vec<(String, PeerActivityOutcome)>
 where
     F: Fn(ActivityPeer) -> Fut + Clone,
     Fut: Future<Output = PeerActivityOutcome>,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
     let mut outcomes = stream::iter(peers.into_iter().map(|peer| {
         let fetch = fetch.clone();
         async move {
@@ -196,41 +187,13 @@ fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ActivityPeerAuth> {
     })
 }
 
+#[cfg(test)]
 fn activity_url(base: &str) -> Option<reqwest::Url> {
-    let normalized = plurx_core::cluster::membership::normalize_internal_http_base(base)?;
-    let mut url = reqwest::Url::parse(&normalized).ok()?;
-    url.set_path(PATH);
-    Some(url)
+    super::peer_transport::peer_url(base, PATH)
 }
 
-async fn read_snapshot(
-    mut response: reqwest::Response,
-    expected_node_id: &str,
-) -> PeerActivityOutcome {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES)
-    {
-        return PeerActivityOutcome::InvalidResponse;
-    }
-    let mut body = Vec::new();
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                let Ok(next_len) = u64::try_from(body.len().saturating_add(chunk.len())) else {
-                    return PeerActivityOutcome::InvalidResponse;
-                };
-                if next_len > MAX_RESPONSE_BYTES {
-                    return PeerActivityOutcome::InvalidResponse;
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Ok(None) => break,
-            Err(error) if error.is_timeout() => return PeerActivityOutcome::TimedOut,
-            Err(_) => return PeerActivityOutcome::Unreachable,
-        }
-    }
-    let Ok(snapshot) = serde_json::from_slice::<ActivitySnapshot>(&body) else {
+fn decode_snapshot(body: &[u8], expected_node_id: &str) -> PeerActivityOutcome {
+    let Ok(snapshot) = serde_json::from_slice::<ActivitySnapshot>(body) else {
         return PeerActivityOutcome::InvalidResponse;
     };
     if !snapshot_is_bounded(&snapshot, expected_node_id) {
@@ -435,14 +398,14 @@ fn bounded_snapshot(node_id: String, deliveries: Vec<ActivityDelivery>) -> Activ
     };
     let mut encoded_bytes = serde_json::to_vec(&snapshot)
         .map(|encoded| encoded.len())
-        .unwrap_or(MAX_RESPONSE_BYTES as usize);
+        .unwrap_or(MAX_RESPONSE_BYTES);
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
         let Ok(encoded) = serde_json::to_vec(&delivery) else {
             continue;
         };
         let separator = usize::from(!snapshot.deliveries.is_empty());
         let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES as usize {
+        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES {
             continue;
         }
         encoded_bytes += added;
@@ -463,15 +426,8 @@ fn unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::Infallible;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
-
-    use axum::body::Body;
-    use axum::response::Redirect;
-    use axum::routing::get;
-    use axum::Router;
-    use bytes::Bytes;
 
     #[test]
     fn authenticated_snapshot_is_never_share_cacheable() {
@@ -583,7 +539,7 @@ mod tests {
         };
         let snapshot = bounded_snapshot("node-b".to_owned(), vec![delivery; MAX_DELIVERIES]);
         let encoded = serde_json::to_vec(&snapshot).expect("bounded snapshot serializes");
-        assert!(encoded.len() <= MAX_RESPONSE_BYTES as usize);
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
     }
@@ -656,70 +612,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(titles.len(), MAX_DELIVERIES);
     }
-
-    #[tokio::test]
-    async fn peer_client_refuses_redirects_and_chunked_oversized_bodies() {
-        let target_hits = Arc::new(AtomicUsize::new(0));
-        let hits = Arc::clone(&target_hits);
-        let app = Router::new()
-            .route(
-                "/redirect",
-                get(|| async { Redirect::temporary("/target") }),
-            )
-            .route(
-                "/target",
-                get(move || {
-                    let hits = Arc::clone(&hits);
-                    async move {
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        StatusCode::OK
-                    }
-                }),
-            )
-            .route(
-                "/oversized",
-                get(|| async {
-                    let chunks = stream::iter([
-                        Ok::<Bytes, Infallible>(Bytes::from(vec![
-                            b'x';
-                            MAX_RESPONSE_BYTES as usize
-                        ])),
-                        Ok::<Bytes, Infallible>(Bytes::from_static(b"x")),
-                    ]);
-                    Body::from_stream(chunks)
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind peer transport fixture");
-        let address = listener.local_addr().expect("fixture address");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve peer transport fixture");
-        });
-        let client = peer_http_client().expect("peer client");
-        let redirect = client
-            .get(format!("http://{address}/redirect"))
-            .send()
-            .await
-            .expect("request redirect fixture");
-        assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
-        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
-
-        let oversized = client
-            .get(format!("http://{address}/oversized"))
-            .send()
-            .await
-            .expect("request oversized fixture");
-        assert!(oversized.content_length().is_none());
-        assert_eq!(
-            read_snapshot(oversized, "node-b").await,
-            PeerActivityOutcome::InvalidResponse
-        );
-        server.abort();
-    }
-
     #[tokio::test(start_paused = true)]
     async fn ninth_peer_cannot_extend_the_common_deadline() {
         let peers = (0..9)
@@ -731,9 +623,10 @@ mod tests {
             .collect();
         let started = tokio::time::Instant::now();
         let timeout = Duration::from_millis(100);
+        let deadline = started + timeout;
         let ninth_started_ms = Arc::new(AtomicU64::new(u64::MAX));
         let ninth = Arc::clone(&ninth_started_ms);
-        let outcomes = collect_peer_outcomes(peers, timeout, move |peer| {
+        let outcomes = collect_peer_outcomes(peers, deadline, move |peer| {
             if peer.node_id == "node-8" {
                 ninth.store(started.elapsed().as_millis() as u64, Ordering::SeqCst);
             }

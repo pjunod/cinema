@@ -5,7 +5,7 @@
 //! only the small amount of state needed to admit nodes, describe them without
 //! exposing listener ports or secrets, and remove a voter safely.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::net::IpAddr;
@@ -184,8 +184,18 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
 
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
+const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
+const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
+// Exact-request proofs are accepted on the public listener. Bound the work
+// performed before a signature is known to be genuine so forged envelopes
+// cannot fill every executor with body hashing and Ed25519 verification.
+const MAX_INTERNAL_PREVERIFY_PER_SECOND: u8 = 64;
+const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
+const MAX_PEER_NODE_ID_BYTES: usize = 256;
+const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
+const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -437,6 +447,20 @@ pub struct ActivityPeerAuth {
     pub node_id: String,
     pub target_node_id: String,
     pub timestamp_ms: i64,
+    pub signature: String,
+}
+
+/// Short-lived proof over an exact internal HTTP request.
+///
+/// The signed message binds method, normalized route, and the SHA-256 of the
+/// raw body as well as both node identities. Household credentials never
+/// authorize this envelope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalPeerAuth {
+    pub node_id: String,
+    pub target_node_id: String,
+    pub timestamp_ms: i64,
+    pub nonce: String,
     pub signature: String,
 }
 
@@ -711,6 +735,9 @@ struct ReplicatedMembership {
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
+    internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
+    internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
+    internal_preverify_admission: Mutex<ActivityAuthAdmission>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -725,6 +752,29 @@ struct ActivityAuthAdmission {
     checks: u8,
 }
 
+#[derive(Default)]
+struct InternalAuthReplayWindow {
+    accepted: VecDeque<(String, Instant)>,
+}
+
+impl InternalAuthReplayWindow {
+    fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        while self.accepted.front().is_some_and(|(_, accepted_at)| {
+            now.saturating_duration_since(*accepted_at)
+                > Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64)
+        }) {
+            self.accepted.pop_front();
+        }
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
+            || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
+        {
+            return false;
+        }
+        self.accepted.push_back((nonce.to_owned(), now));
+        true
+    }
+}
+
 impl ActivityAuthAdmission {
     fn admit(&mut self, now: Instant, maximum: u8) -> bool {
         if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
@@ -737,6 +787,15 @@ impl ActivityAuthAdmission {
         self.checks += 1;
         true
     }
+}
+
+fn admit_internal_preverification(
+    admission: &Mutex<ActivityAuthAdmission>,
+) -> Result<bool, MembershipError> {
+    let mut admission = admission.lock().map_err(|_| {
+        MembershipError::Internal("internal preverification lock was poisoned".to_owned())
+    })?;
+    Ok(admission.admit(Instant::now(), MAX_INTERNAL_PREVERIFY_PER_SECOND))
 }
 
 fn insert_bounded_activity_public_key(
@@ -836,6 +895,12 @@ impl MembershipManager {
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
+                internal_auth_admission: Mutex::new(BTreeMap::new()),
+                internal_auth_replays: Mutex::new(BTreeMap::new()),
+                internal_preverify_admission: Mutex::new(ActivityAuthAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
                 activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -1538,6 +1603,20 @@ impl MembershipManager {
                 MembershipError::Internal("activity admission lock was poisoned".to_owned())
             })?
             .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_auth_admission
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("internal peer admission lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_auth_replays
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
         *inner.activity_public_keys.lock().map_err(|_| {
             MembershipError::Internal("activity public-key lock was poisoned".to_owned())
         })? = keys;
@@ -2029,6 +2108,9 @@ impl MembershipManager {
         if auth.target_node_id != inner.identity.node_id
             || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
             || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
         {
             return Ok(false);
         }
@@ -2041,6 +2123,97 @@ impl MembershipManager {
             .activity_signature_is_valid(&auth.node_id, &message, &signature)
             .await?
             || !self.admit_activity_authority_check(&auth.node_id)?
+        {
+            return Ok(false);
+        }
+        self.verify_live_activity_authority(&auth.node_id, now)
+            .await
+    }
+
+    /// Sign an exact internal peer HTTP request with this node's durable key.
+    pub fn sign_internal_peer_request(
+        &self,
+        target_node_id: &str,
+        timestamp_ms: i64,
+        nonce: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<InternalPeerAuth, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let message = internal_peer_auth_message(
+            &inner.identity.node_id,
+            target_node_id,
+            timestamp_ms,
+            nonce,
+            method,
+            path,
+            body,
+        )
+        .ok_or_else(|| MembershipError::Internal("invalid internal peer route".to_owned()))?;
+        Ok(InternalPeerAuth {
+            node_id: inner.identity.node_id.clone(),
+            target_node_id: target_node_id.to_owned(),
+            timestamp_ms,
+            nonce: nonce.to_owned(),
+            signature: inner.activity_signing_key.sign_hex(&message),
+        })
+    }
+
+    /// Authenticate one exact internal request and its live voter authority.
+    pub async fn authorize_internal_peer_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if auth.target_node_id != inner.identity.node_id
+            || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
+            || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || !canonical_internal_auth_nonce(&auth.nonce)
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
+        {
+            return Ok(false);
+        }
+        // Admission is a real global rate bucket rather than a concurrency
+        // semaphore: cached-key verification completes in one executor poll
+        // and would otherwise release a permit before peers can contend.
+        if !admit_internal_preverification(&inner.internal_preverify_admission)? {
+            return Ok(false);
+        }
+        let Some(message) = internal_peer_auth_message(
+            &auth.node_id,
+            &auth.target_node_id,
+            auth.timestamp_ms,
+            &auth.nonce,
+            method,
+            path,
+            body,
+        ) else {
+            return Ok(false);
+        };
+        let signature = match hex::decode(&auth.signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
+        };
+        if !self
+            .activity_signature_is_valid(&auth.node_id, &message, &signature)
+            .await?
+        {
+            return Ok(false);
+        }
+        // The signed random nonce lets legitimate identical concurrent
+        // requests remain distinct. Keep every admitted nonce for the full
+        // window so a captured proof can authorize at most one request, and
+        // reject rather than evict while the bounded cache is full. Forged
+        // proofs never reach this cache.
+        if !self.admit_internal_replay(&auth.node_id, &auth.nonce)?
+            || !self.admit_internal_authority_check(&auth.node_id)?
         {
             return Ok(false);
         }
@@ -2110,6 +2283,22 @@ impl MembershipManager {
                     MembershipError::Internal("activity admission lock was poisoned".to_owned())
                 })?
                 .remove(&evicted);
+            inner
+                .internal_auth_admission
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal(
+                        "internal peer admission lock was poisoned".to_owned(),
+                    )
+                })?
+                .remove(&evicted);
+            inner
+                .internal_auth_replays
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
         }
         Ok(true)
     }
@@ -2141,6 +2330,33 @@ impl MembershipManager {
                 checks: 0,
             });
         Ok(state.admit(now, MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND))
+    }
+
+    fn admit_internal_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut admission = inner.internal_auth_admission.lock().map_err(|_| {
+            MembershipError::Internal("internal peer admission lock was poisoned".to_owned())
+        })?;
+        let state = admission
+            .entry(node_id.to_owned())
+            .or_insert(ActivityAuthAdmission {
+                window_started: now,
+                checks: 0,
+            });
+        Ok(state.admit(now, MAX_INTERNAL_AUTH_CHECKS_PER_SECOND))
+    }
+
+    fn admit_internal_replay(&self, node_id: &str, nonce: &str) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
+            MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+        })?;
+        Ok(replays
+            .entry(node_id.to_owned())
+            .or_default()
+            .admit(nonce, now))
     }
 
     async fn verify_live_activity_authority(
@@ -2763,6 +2979,12 @@ impl MembershipManager {
         }
         if let Ok(mut admission) = inner.activity_auth_admission.lock() {
             admission.remove(node_id);
+        }
+        if let Ok(mut admission) = inner.internal_auth_admission.lock() {
+            admission.remove(node_id);
+        }
+        if let Ok(mut replays) = inner.internal_auth_replays.lock() {
+            replays.remove(node_id);
         }
         if let Err(error) = inner
             .client
@@ -3569,6 +3791,43 @@ fn activity_auth_message(node_id: &str, target_node_id: &str, timestamp_ms: i64)
     message
 }
 
+fn internal_peer_auth_message(
+    node_id: &str,
+    target_node_id: &str,
+    timestamp_ms: i64,
+    nonce: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Option<Vec<u8>> {
+    if !canonical_internal_auth_nonce(nonce)
+        || method.is_empty()
+        || method.len() > 16
+        || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+        || !path.starts_with('/')
+        || path.len() > 512
+        || path.contains('?')
+        || path.contains('#')
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let body_digest = Sha256::digest(body);
+    let mut message = INTERNAL_PEER_AUTH_CONTEXT.to_vec();
+    for value in [node_id, target_node_id, nonce, method, path] {
+        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&timestamp_ms.to_be_bytes());
+    message.extend_from_slice(&body_digest);
+    Some(message)
+}
+
+fn canonical_internal_auth_nonce(nonce: &str) -> bool {
+    nonce.len() == INTERNAL_AUTH_NONCE_BYTES
+        && uuid::Uuid::parse_str(nonce).is_ok_and(|parsed| parsed.hyphenated().to_string() == nonce)
+}
+
 impl From<&mut Row<'_>> for HttpUrlRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -3855,6 +4114,51 @@ mod tests {
             started + Duration::from_secs(1),
             MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND
         ));
+    }
+
+    #[test]
+    fn exact_request_preverification_has_a_hard_global_rate() {
+        let admission = Mutex::new(ActivityAuthAdmission {
+            window_started: Instant::now(),
+            checks: 0,
+        });
+        for _ in 0..MAX_INTERNAL_PREVERIFY_PER_SECOND {
+            assert!(admit_internal_preverification(&admission).expect("admission"));
+        }
+        assert!(!admit_internal_preverification(&admission).expect("saturation"));
+    }
+
+    #[test]
+    fn exact_internal_replay_is_rejected_for_the_entire_auth_window() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+
+        assert!(replays.admit("nonce-a", started));
+        assert!(!replays.admit("nonce-a", started + Duration::from_secs(29)));
+        assert!(replays.admit(
+            "nonce-a",
+            started + Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64 + 1)
+        ));
+    }
+
+    #[test]
+    fn exact_internal_replay_allows_distinct_nonces_at_the_same_timestamp() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+
+        assert!(replays.admit("nonce-a", started));
+        assert!(replays.admit("nonce-b", started));
+    }
+
+    #[test]
+    fn exact_internal_replay_cache_rejects_instead_of_evicting_live_proofs() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+        for index in 0..MAX_INTERNAL_REPLAYS_PER_PEER {
+            assert!(replays.admit(&format!("nonce-{index}"), started));
+        }
+        assert!(!replays.admit("overflow", started));
+        assert!(!replays.admit("nonce-0", started));
     }
 
     #[test]
@@ -4593,5 +4897,99 @@ mod tests {
             assert!(!rendered.contains(&"a".repeat(64)), "{rendered}");
             assert!(!rendered.contains(&"c".repeat(64)), "{rendered}");
         }
+    }
+
+    #[test]
+    fn exact_internal_authority_binds_method_path_and_raw_body() {
+        let nonce = "123e4567-e89b-42d3-a456-426614174000";
+        let message = internal_peer_auth_message(
+            "node-a",
+            "node-b",
+            42,
+            nonce,
+            "POST",
+            "/internal/v1/media/offers",
+            b"{}",
+        )
+        .expect("valid exact route");
+        for changed in [
+            internal_peer_auth_message(
+                "node-c",
+                "node-b",
+                42,
+                nonce,
+                "POST",
+                "/internal/v1/media/offers",
+                b"{}",
+            ),
+            internal_peer_auth_message(
+                "node-a",
+                "node-b",
+                42,
+                nonce,
+                "GET",
+                "/internal/v1/media/offers",
+                b"{}",
+            ),
+            internal_peer_auth_message(
+                "node-a",
+                "node-b",
+                42,
+                nonce,
+                "POST",
+                "/internal/v1/media/snapshot",
+                b"{}",
+            ),
+            internal_peer_auth_message(
+                "node-a",
+                "node-b",
+                42,
+                nonce,
+                "POST",
+                "/internal/v1/media/offers",
+                b"{ }",
+            ),
+            internal_peer_auth_message(
+                "node-a",
+                "node-b",
+                42,
+                "123e4567-e89b-42d3-a456-426614174001",
+                "POST",
+                "/internal/v1/media/offers",
+                b"{}",
+            ),
+        ] {
+            assert_ne!(message, changed.expect("valid mutation"));
+        }
+        assert!(internal_peer_auth_message(
+            "node-a",
+            "node-b",
+            42,
+            nonce,
+            "post",
+            "/internal/v1/media/offers",
+            b"{}"
+        )
+        .is_none());
+        assert!(internal_peer_auth_message(
+            "node-a",
+            "node-b",
+            42,
+            nonce,
+            "POST",
+            "/internal/v1/media/offers?credential=secret",
+            b"{}"
+        )
+        .is_none());
+        assert!(internal_peer_auth_message(
+            "node-a",
+            "node-b",
+            42,
+            "NOT-A-CANONICAL-UUID",
+            "POST",
+            "/internal/v1/media/offers",
+            b"{}"
+        )
+        .is_none());
     }
 }

@@ -40,6 +40,10 @@ const SESSION_IDLE_SECS: u64 = 60;
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
+const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
+const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
+const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
@@ -1372,13 +1376,25 @@ struct LastRequest {
 /// Integrity failures remove the row with all five fields as a compare-and-
 /// delete. A request that started against generation A must never erase a
 /// replacement generation B that another producer published meanwhile.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct CachedLocationIdentity {
     recipe_hash: String,
     node_id: String,
     storage_class: String,
     relative_dir: String,
     manifest_digest: Option<String>,
+}
+
+enum CacheOfferVerdict {
+    Pending {
+        identity: CachedLocationIdentity,
+        started_at: Instant,
+    },
+    Ready {
+        identity: CachedLocationIdentity,
+        verified: bool,
+        observed_at: Instant,
+    },
 }
 
 impl LastRequest {
@@ -4248,9 +4264,27 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    /// Last completed cache-filesystem capacity sample. Request and scheduler
+    /// paths read only this atomic projection: `statvfs` can block forever on
+    /// a hard network mount and therefore belongs to one non-accumulating
+    /// background worker, never the async media-serving runtime.
+    scratch_bytes_free: AtomicI64,
+    /// Wall-clock completion time of the free-space sample. A previously
+    /// positive sample fails closed once it is too old, including while a
+    /// later `statvfs` call remains stuck on a hard mount.
+    scratch_sampled_at_unix_ms: AtomicI64,
+    /// Even outside publication, odd while the two sample atomics change.
+    /// Readers accept bytes only when both generation reads match.
+    scratch_sample_generation: AtomicU64,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
+    /// Fresh, byte-verified cache facts used by speculative placement. A hard
+    /// cache mount may strand one verifier, but the semaphore and pending
+    /// entry ensure offers never submit a second filesystem operation behind
+    /// it. Offers fail closed until the background verdict arrives.
+    cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
+    cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
@@ -4327,6 +4361,41 @@ pub(crate) struct TranscodeMetrics {
     active_cache: crate::cachekeep::ActiveCacheMetrics,
 }
 
+/// Bounded local facts published in the cluster media snapshot. None of these
+/// fields require reading a library source path.
+pub(crate) struct MediaNodeRuntime {
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) scratch_target_bytes: u64,
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) encoder_families: Vec<String>,
+    pub(crate) max_target_height: i64,
+    pub(crate) decoders: Vec<String>,
+    pub(crate) tone_map_pipelines: Vec<String>,
+    pub(crate) hardware_slots_used: usize,
+    pub(crate) hardware_slots_max: usize,
+    pub(crate) software_threads_used: usize,
+    pub(crate) software_threads_max: usize,
+    pub(crate) live_waiting: bool,
+    pub(crate) background_active: bool,
+}
+
+/// Node-local answer to a diagnostics-only offer request. Calculating it does
+/// not reserve capacity or open the media source.
+pub(crate) struct MediaOfferProbe {
+    pub(crate) active_sessions: usize,
+    pub(crate) session_pressure_limit: usize,
+    pub(crate) scratch_bytes_free: u64,
+    pub(crate) decoder_supported: bool,
+    pub(crate) target_supported: bool,
+    pub(crate) cache_hit: bool,
+    pub(crate) free_hardware_slots: usize,
+    pub(crate) free_software_threads: usize,
+    pub(crate) encoder: String,
+    pub(crate) pipeline: String,
+    pub(crate) recent_speed: Option<f64>,
+}
+
 impl TranscodeMetrics {
     pub(crate) fn snapshot(&self) -> (usize, usize) {
         (
@@ -4372,7 +4441,12 @@ impl TranscodeManager {
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            scratch_bytes_free: AtomicI64::new(0),
+            scratch_sampled_at_unix_ms: AtomicI64::new(0),
+            scratch_sample_generation: AtomicU64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
+            cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
@@ -4492,6 +4566,49 @@ impl TranscodeManager {
             .map(|c| (c.dir.as_path(), c.node_id.as_str()))
     }
 
+    /// Refresh free cache space outside Tokio's blocking pool.
+    ///
+    /// Only one OS call exists at a time. If a dead mount never returns, this
+    /// loop consumes interval ticks without submitting another call, while
+    /// request paths keep using the last completed (or fail-closed zero)
+    /// sample only until its maximum age.
+    pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
+        let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
+            return;
+        };
+        let mut interval = tokio::time::interval(SCRATCH_SAMPLE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            let sample_path = cache_dir.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("plurx-scratch-sample".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(available_cache_scratch_bytes(&sample_path));
+                })
+            {
+                tracing::debug!(%error, "could not start cache scratch sampler");
+            }
+            loop {
+                tokio::select! {
+                    sample = &mut receiver => {
+                        let sample = sample.ok().flatten().unwrap_or(0).max(0);
+                        self.scratch_sample_generation.fetch_add(1, AcqRel);
+                        self.scratch_bytes_free.store(sample, Relaxed);
+                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+                        self.scratch_sample_generation.fetch_add(1, Release);
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // The outstanding OS call is deliberately left alone.
+                        // Do not submit another one until it actually returns.
+                    }
+                }
+            }
+        }
+    }
+
     /// Bounded claim filter for the distributed speculative queue.
     pub fn pretranscode_capabilities(&self) -> PretranscodeWorkerCapabilities {
         let mut encoder_families = vec!["software".to_owned()];
@@ -4523,12 +4640,139 @@ impl TranscodeManager {
             // explicit fallback), but an operator can still disable mapping.
             tone_map: self.pipeline.handles(Some("hdr10")) && tone_map_pref() != ToneMap::None,
             output_grades: vec!["sdr".to_owned()],
-            scratch_bytes: self
-                .cache
-                .as_ref()
-                .and_then(|cache| available_cache_scratch_bytes(&cache.dir))
-                .unwrap_or(0),
+            scratch_bytes: {
+                let (bytes, sampled_at) = read_scratch_sample(
+                    &self.scratch_sample_generation,
+                    &self.scratch_bytes_free,
+                    &self.scratch_sampled_at_unix_ms,
+                );
+                fresh_scratch_bytes(bytes, sampled_at, unix_ms())
+            },
         }
+    }
+
+    /// Snapshot media capacity without probing a source mount.
+    pub(crate) async fn media_node_runtime(&self) -> MediaNodeRuntime {
+        const SCRATCH_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+        let capabilities = self.pretranscode_capabilities();
+        let (hardware_slots_used, hardware_slots_max) = self.hardware_slots().await;
+        let software_threads_max = self.software_budget().await;
+        let software_threads_used = self.admissions.software_in_use();
+        let session_pressure_limit = hardware_slots_max
+            .saturating_add((software_threads_max / 2).max(1))
+            .max(1);
+        let mut tone_map_pipelines = if capabilities.tone_map {
+            vec![self.pipeline.name().to_owned()]
+        } else {
+            Vec::new()
+        };
+        if self.dovi_passthrough {
+            tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
+        }
+        MediaNodeRuntime {
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            scratch_target_bytes: SCRATCH_TARGET_BYTES,
+            active_sessions: self.active_session_count.load(Relaxed),
+            session_pressure_limit,
+            encoder_families: capabilities.encoder_families,
+            max_target_height: capabilities.max_target_height,
+            decoders: capabilities.decoders,
+            tone_map_pipelines,
+            hardware_slots_used,
+            hardware_slots_max,
+            software_threads_used,
+            software_threads_max,
+            live_waiting: self.admissions.live_is_waiting(),
+            background_active: self.admissions.background_is_active(),
+        }
+    }
+
+    /// Inspect whether this node could service one request. Offers are
+    /// intentionally non-reserving and never stat/open `file.path`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn media_offer_probe(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        start_seconds: f64,
+        audio_override: Option<i64>,
+        subtitle_override: Option<i64>,
+        hdr10: bool,
+    ) -> Result<MediaOfferProbe, &'static str> {
+        let needs_source_proof =
+            Self::needs_dovi_reshape(file).map_err(|_| "unsupported_source")?;
+        if needs_source_proof {
+            if !self.dovi_reshape {
+                return Err("incapable");
+            }
+            let proof = self
+                .dovi_proofs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&Self::dovi_proof_key(file))
+                .copied();
+            if proof != Some(true) {
+                // The authoritative live path may create this proof for the
+                // selected node. Diagnostics fan-out must never be what opens
+                // every candidate's source mount.
+                return Err("source_proof_unavailable");
+            }
+        }
+        let capabilities = self.pretranscode_capabilities();
+        let decoder_supported = crate::media_pool::decoder_contract(file).is_some_and(|decoder| {
+            capabilities
+                .decoders
+                .iter()
+                .any(|candidate| candidate == decoder || candidate == "*")
+        });
+        let geometry_supported =
+            (MIN_HEIGHT..=capabilities.max_target_height).contains(&target_height);
+        let Tracks {
+            audio_index,
+            subtitle_burn,
+        } = self
+            .select_tracks(file, audio_override, subtitle_override)
+            .await;
+        let (encoder, grade) = self
+            .encoder_and_grade_for(file, hdr10, target_height)
+            .await
+            .map_err(|_| "incapable")?;
+        let target_supported = geometry_supported && (!hdr10 || grade == OutputGrade::Hdr10);
+        let opts = self.live_lookup_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            start_seconds,
+            audio_index,
+            subtitle_burn,
+            None,
+            grade,
+        );
+        let cache_hit = self.verified_cache_hit(file, &opts, encoder).await;
+        let (hardware_used, hardware_max) = self.hardware_slots().await;
+        let software_max = self.software_budget().await;
+        let software_used = self.admissions.software_in_use();
+        let active_sessions = self.active_session_count.load(Relaxed);
+        let session_pressure_limit = hardware_max
+            .saturating_add((software_max / 2).max(1))
+            .max(1);
+        let workload = Workload::of(file, target_height);
+        Ok(MediaOfferProbe {
+            active_sessions,
+            session_pressure_limit,
+            scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
+            decoder_supported,
+            target_supported,
+            cache_hit,
+            free_hardware_slots: hardware_max.saturating_sub(hardware_used),
+            free_software_threads: software_max.saturating_sub(software_used),
+            encoder: encoder.family_name().to_owned(),
+            pipeline: opts.pipeline.name().to_owned(),
+            recent_speed: self
+                .admissions
+                .recent_speed(&workload.class(encoder.family_name())),
+        })
     }
 
     /// Identity for every mutable input that can change a speculative recipe
@@ -5222,8 +5466,15 @@ impl TranscodeManager {
         location: &CachedLocationIdentity,
         reason: &'static str,
     ) -> bool {
-        match self
-            .store
+        Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
+    }
+
+    async fn invalidate_cache_location_with_store(
+        store: &dyn Store,
+        location: &CachedLocationIdentity,
+        reason: &'static str,
+    ) -> bool {
+        match store
             .invalidate_cache_entry(
                 &location.recipe_hash,
                 &location.node_id,
@@ -5273,6 +5524,196 @@ impl TranscodeManager {
             "cached media failed an integrity check".to_owned(),
         ));
         let _ = self.retire_session(session_id, session).await;
+    }
+
+    /// Prove that the complete local generation for this exact recipe is
+    /// byte-verified. This is the non-reserving subset of `serve_cached`: it
+    /// neither creates a session nor updates last-used metadata.
+    async fn verified_cache_hit(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> bool {
+        let Some(cache) = self.cache.as_ref() else {
+            return false;
+        };
+        let Some(mut digest) = self.digest() else {
+            return false;
+        };
+        let hash = self
+            .effective_recipe(&mut digest, file, opts, encoder, false)
+            .hash();
+        let Some(hit) = self
+            .store
+            .cache_hit(&hash, &cache.node_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return false;
+        };
+        // Legacy completions do not carry a byte inventory and therefore
+        // cannot make the stronger cluster placement claim.
+        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+            return false;
+        };
+        let identity = CachedLocationIdentity {
+            recipe_hash: hash.clone(),
+            node_id: cache.node_id.clone(),
+            storage_class: hit.storage_class.clone(),
+            relative_dir: hit.relative_dir.clone(),
+            manifest_digest: hit.manifest_digest.clone(),
+        };
+        let now = Instant::now();
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            verdicts.retain(|_, verdict| match verdict {
+                CacheOfferVerdict::Pending { started_at, .. } => {
+                    now.saturating_duration_since(*started_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+                CacheOfferVerdict::Ready { observed_at, .. } => {
+                    now.saturating_duration_since(*observed_at) <= CACHE_OFFER_VERDICT_TTL
+                }
+            });
+            match verdicts.get(&hash) {
+                Some(CacheOfferVerdict::Ready {
+                    identity: cached,
+                    verified,
+                    ..
+                }) if cached == &identity => return *verified,
+                Some(CacheOfferVerdict::Pending {
+                    identity: cached, ..
+                }) if cached == &identity => return false,
+                _ => {
+                    verdicts.remove(&hash);
+                }
+            }
+            if verdicts.len() >= MAX_CACHE_OFFER_VERDICTS {
+                return false;
+            }
+        }
+        let Ok(permit) = Arc::clone(&self.cache_offer_verifier).try_acquire_owned() else {
+            return false;
+        };
+        {
+            let mut verdicts = self
+                .cache_offer_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another request may have published while this one acquired the
+            // sole verifier. Never replace a fresh verdict with pending.
+            if verdicts.contains_key(&hash) {
+                return false;
+            }
+            verdicts.insert(
+                hash.clone(),
+                CacheOfferVerdict::Pending {
+                    identity: identity.clone(),
+                    started_at: now,
+                },
+            );
+        }
+        let verdicts = Arc::clone(&self.cache_offer_verdicts);
+        let store = Arc::clone(&self.store);
+        let readers = self.cache_readers.clone();
+        let cache_root = cache.dir.clone();
+        tokio::spawn(async move {
+            let verified = Self::verify_cache_offer_location(
+                Arc::clone(&store),
+                readers,
+                cache_root,
+                identity.clone(),
+                expected_manifest,
+            )
+            .await;
+            let mut verdicts = verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(
+                verdicts.get(&hash),
+                Some(CacheOfferVerdict::Pending { identity: pending, .. }) if pending == &identity
+            ) {
+                verdicts.insert(
+                    hash,
+                    CacheOfferVerdict::Ready {
+                        identity,
+                        verified,
+                        observed_at: Instant::now(),
+                    },
+                );
+            }
+            drop(permit);
+        });
+        false
+    }
+
+    async fn verify_cache_offer_location(
+        store: Arc<dyn Store>,
+        readers: crate::cachekeep::ActiveCacheReaders,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+    ) -> bool {
+        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
+            return false;
+        };
+        let Some(dir) =
+            crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
+        else {
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "unsafe_relative_path",
+            )
+            .await;
+            return false;
+        };
+        let manifest = match crate::manifest_cache::load(
+            crate::manifest_cache::GenerationKey {
+                cache_root,
+                node_id: identity.node_id.clone(),
+                recipe_hash: identity.recipe_hash.clone(),
+                storage_class: identity.storage_class.clone(),
+                relative_dir: identity.relative_dir.clone(),
+                manifest_digest: expected_manifest,
+            },
+            &dir,
+        )
+        .await
+        {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                let _ = Self::invalidate_cache_location_with_store(
+                    store.as_ref(),
+                    &identity,
+                    "manifest_invalid",
+                )
+                .await;
+                return false;
+            }
+        };
+        let playlist_valid = manifest
+            .read_verified_playlist(&dir, "index.m3u8")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(validated_vod_part)
+            .is_some();
+        if !playlist_valid {
+            let _ = Self::invalidate_cache_location_with_store(
+                store.as_ref(),
+                &identity,
+                "playlist_invalid_vod",
+            )
+            .await;
+        }
+        playlist_valid
     }
 
     /// Serve a finished transcode, if this exact one has already been made.
@@ -10036,6 +10477,43 @@ fn unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn read_scratch_sample(
+    generation: &AtomicU64,
+    bytes: &AtomicI64,
+    sampled_at_unix_ms: &AtomicI64,
+) -> (i64, i64) {
+    for _ in 0..3 {
+        let before = generation.load(Acquire);
+        if before & 1 != 0 {
+            std::hint::spin_loop();
+            continue;
+        }
+        let bytes = bytes.load(Relaxed);
+        let sampled_at = sampled_at_unix_ms.load(Relaxed);
+        // Conventional seqlock reader ordering: data loads must complete
+        // before the relaxed validation read, while the fence pairs with the
+        // writer's release publication.
+        std::sync::atomic::fence(Acquire);
+        let after = generation.load(Relaxed);
+        if before == after {
+            return (bytes, sampled_at);
+        }
+    }
+    (0, 0)
+}
+
+fn fresh_scratch_bytes(bytes: i64, sampled_at_unix_ms: i64, now_unix_ms: i64) -> i64 {
+    let max_age_ms = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).unwrap_or(i64::MAX);
+    if sampled_at_unix_ms > 0
+        && now_unix_ms >= sampled_at_unix_ms
+        && now_unix_ms.saturating_sub(sampled_at_unix_ms) <= max_age_ms
+    {
+        bytes.max(0)
+    } else {
+        0
+    }
+}
+
 fn bitrate_for_height(height: i64) -> u32 {
     match height {
         h if h >= 2160 => 20_000,
@@ -10540,6 +11018,41 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_capacity_fails_closed_when_the_background_sample_expires() {
+        let sampled_at = 10_000;
+        let max_age = i64::try_from(SCRATCH_SAMPLE_MAX_AGE.as_millis()).expect("age fits i64");
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at), 4096);
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age),
+            4096
+        );
+        assert_eq!(
+            fresh_scratch_bytes(4096, sampled_at, sampled_at + max_age + 1),
+            0
+        );
+        assert_eq!(fresh_scratch_bytes(4096, 0, sampled_at), 0);
+        assert_eq!(fresh_scratch_bytes(4096, sampled_at, sampled_at - 1), 0);
+    }
+
+    #[test]
+    fn scratch_capacity_rejects_an_in_progress_seqlock_publication() {
+        let generation = AtomicU64::new(2);
+        let bytes = AtomicI64::new(4096);
+        let sampled_at = AtomicI64::new(10_000);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (4096, 10_000)
+        );
+
+        generation.store(3, Release);
+        bytes.store(0, Relaxed);
+        assert_eq!(
+            read_scratch_sample(&generation, &bytes, &sampled_at),
+            (0, 0)
+        );
+    }
 
     #[tokio::test]
     async fn metrics_session_snapshot_does_not_wait_for_the_session_map() {
@@ -15692,6 +16205,110 @@ mod tests {
                 .expect("cache lookup")
                 .is_none(),
             "a listed corrupt object did not invalidate the exact generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_offer_claims_only_a_byte_verified_complete_generation() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let relative = "fb/media-offer";
+        let dir = seed_cache_dir(cache.path(), relative).await;
+        let manifest = plurx_core::transcode::manifest::publish(
+            &dir,
+            "00000000-0000-4000-8000-000000000601:1",
+            &[
+                "index.m3u8".to_owned(),
+                "seg00000.ts".to_owned(),
+                "seg00001.ts".to_owned(),
+                "seg00002.ts".to_owned(),
+            ],
+        )
+        .await
+        .expect("publish generation manifest");
+        complete_manifest_cache(&store, file_id, &hash, relative, &manifest.manifest_digest).await;
+        let encoder = mgr.encoder().await;
+        let opts = mgr.options_for_tone_map(
+            encoder,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+
+        assert!(
+            !mgr.verified_cache_hit(&file, &opts, encoder).await,
+            "an offer fails closed while its single verifier is running"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mgr.verified_cache_hit(&file, &opts, encoder).await {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background cache-offer verdict");
+        tokio::fs::write(dir.join("index.m3u8"), b"corrupt")
+            .await
+            .expect("corrupt playlist");
+        mgr.cache_offer_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&hash);
+        assert!(!mgr.verified_cache_hit(&file, &opts, encoder).await);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if store
+                    .cache_hit(&hash, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background invalidation verdict");
+    }
+
+    #[tokio::test]
+    async fn media_offer_never_opens_an_unproved_profile_five_source() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_dovi_reshape(true);
+        let mut file = profile5_file();
+        file.path = work.path().join("sleeping-nas/movie.mkv");
+
+        assert!(matches!(
+            manager
+                .media_offer_probe(&file, 1080, 0.0, None, None, false)
+                .await,
+            Err("source_proof_unavailable")
+        ));
+        assert!(
+            !file.path.exists(),
+            "offer fanout created or materialized the absent source path"
         );
     }
 
