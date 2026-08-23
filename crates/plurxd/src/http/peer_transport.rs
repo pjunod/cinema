@@ -265,7 +265,7 @@ mod tests {
     use futures_util::{stream, StreamExt};
 
     #[tokio::test]
-    async fn client_refuses_redirects_and_chunked_oversized_bodies() {
+    async fn client_refuses_redirects_and_both_declared_and_chunked_oversized_bodies() {
         let target_hits = Arc::new(AtomicUsize::new(0));
         let hits = Arc::clone(&target_hits);
         let app = Router::new()
@@ -283,6 +283,7 @@ mod tests {
                     }
                 }),
             )
+            .route("/declared-oversized", get(|| async { vec![b'x'; 1025] }))
             .route(
                 "/oversized",
                 get(|| async {
@@ -320,6 +321,23 @@ mod tests {
             .expect("request redirect fixture");
         assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+
+        let declared_oversized = client
+            .get(format!("http://{address}/declared-oversized"))
+            .send()
+            .await
+            .expect("request declared oversized fixture");
+        assert_eq!(declared_oversized.content_length(), Some(1025));
+        assert_eq!(
+            read_bounded(
+                declared_oversized,
+                deadline_after(Duration::from_secs(1)),
+                1024,
+            )
+            .await
+            .expect_err("declared body above the exact budget is rejected before streaming"),
+            PeerTransportError::InvalidResponse
+        );
 
         let oversized = client
             .get(format!("http://{address}/oversized"))

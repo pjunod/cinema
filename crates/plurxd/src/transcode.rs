@@ -40,6 +40,7 @@ const SESSION_IDLE_SECS: u64 = 60;
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
+const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
@@ -4239,6 +4240,11 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    /// Last completed cache-filesystem capacity sample. Request and scheduler
+    /// paths read only this atomic projection: `statvfs` can block forever on
+    /// a hard network mount and therefore belongs to one non-accumulating
+    /// background worker, never the async media-serving runtime.
+    scratch_bytes_free: AtomicI64,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -4391,6 +4397,7 @@ impl TranscodeManager {
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            scratch_bytes_free: AtomicI64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             sessions: Mutex::new(HashMap::new()),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -4509,6 +4516,46 @@ impl TranscodeManager {
             .map(|c| (c.dir.as_path(), c.node_id.as_str()))
     }
 
+    /// Refresh free cache space outside Tokio's blocking pool.
+    ///
+    /// Only one OS call exists at a time. If a dead mount never returns, this
+    /// loop consumes interval ticks without submitting another call, while
+    /// request paths keep using the last completed (or fail-closed zero)
+    /// sample.
+    pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
+        let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
+            return;
+        };
+        let mut interval = tokio::time::interval(SCRATCH_SAMPLE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            let sample_path = cache_dir.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("plurx-scratch-sample".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(available_cache_scratch_bytes(&sample_path));
+                })
+            {
+                tracing::debug!(%error, "could not start cache scratch sampler");
+            }
+            loop {
+                tokio::select! {
+                    sample = &mut receiver => {
+                        let sample = sample.ok().flatten().unwrap_or(0).max(0);
+                        self.scratch_bytes_free.store(sample, Release);
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // The outstanding OS call is deliberately left alone.
+                        // Do not submit another one until it actually returns.
+                    }
+                }
+            }
+        }
+    }
+
     /// Bounded claim filter for the distributed speculative queue.
     pub fn pretranscode_capabilities(&self) -> PretranscodeWorkerCapabilities {
         let mut encoder_families = vec!["software".to_owned()];
@@ -4540,11 +4587,7 @@ impl TranscodeManager {
             // explicit fallback), but an operator can still disable mapping.
             tone_map: self.pipeline.handles(Some("hdr10")) && tone_map_pref() != ToneMap::None,
             output_grades: vec!["sdr".to_owned()],
-            scratch_bytes: self
-                .cache
-                .as_ref()
-                .and_then(|cache| available_cache_scratch_bytes(&cache.dir))
-                .unwrap_or(0),
+            scratch_bytes: self.scratch_bytes_free.load(Acquire).max(0),
         }
     }
 

@@ -862,6 +862,7 @@ fn spawn_background_loops(
     // become the public leader before a failover actually happens.
     tokio::spawn(crate::http::images::materialize_loop(state.clone()));
     tokio::spawn(std::sync::Arc::clone(&state.transcode).rate_control_refresh_loop());
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.offline).run());

@@ -5,7 +5,7 @@
 //! only the small amount of state needed to admit nodes, describe them without
 //! exposing listener ports or secrets, and remove a voter safely.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::net::IpAddr;
@@ -188,6 +188,9 @@ const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
+const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
+const MAX_PEER_NODE_ID_BYTES: usize = 256;
+const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -719,6 +722,7 @@ struct ReplicatedMembership {
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
+    internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
@@ -731,6 +735,32 @@ struct ReplicatedMembership {
 struct ActivityAuthAdmission {
     window_started: Instant,
     checks: u8,
+}
+
+#[derive(Default)]
+struct InternalAuthReplayWindow {
+    accepted: VecDeque<(Vec<u8>, Instant)>,
+}
+
+impl InternalAuthReplayWindow {
+    fn admit(&mut self, signature: &[u8], now: Instant) -> bool {
+        while self.accepted.front().is_some_and(|(_, accepted_at)| {
+            now.saturating_duration_since(*accepted_at)
+                > Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64)
+        }) {
+            self.accepted.pop_front();
+        }
+        if self
+            .accepted
+            .iter()
+            .any(|(accepted, _)| accepted == signature)
+            || self.accepted.len() >= MAX_INTERNAL_REPLAYS_PER_PEER
+        {
+            return false;
+        }
+        self.accepted.push_back((signature.to_vec(), now));
+        true
+    }
 }
 
 impl ActivityAuthAdmission {
@@ -845,6 +875,7 @@ impl MembershipManager {
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_admission: Mutex::new(BTreeMap::new()),
+                internal_auth_replays: Mutex::new(BTreeMap::new()),
                 activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -1554,6 +1585,13 @@ impl MembershipManager {
                 MembershipError::Internal("internal peer admission lock was poisoned".to_owned())
             })?
             .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_auth_replays
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
         *inner.activity_public_keys.lock().map_err(|_| {
             MembershipError::Internal("activity public-key lock was poisoned".to_owned())
         })? = keys;
@@ -1991,6 +2029,9 @@ impl MembershipManager {
         if auth.target_node_id != inner.identity.node_id
             || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
             || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
         {
             return Ok(false);
         }
@@ -2050,6 +2091,9 @@ impl MembershipManager {
         if auth.target_node_id != inner.identity.node_id
             || now.abs_diff(auth.timestamp_ms) > ACTIVITY_AUTH_WINDOW_MS as u64
             || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
         {
             return Ok(false);
         }
@@ -2070,6 +2114,14 @@ impl MembershipManager {
         if !self
             .activity_signature_is_valid(&auth.node_id, &message, &signature)
             .await?
+        {
+            return Ok(false);
+        }
+        // Ed25519 signatures are deterministic for this exact envelope. Keep
+        // the full admitted window so a captured proof can authorize at most
+        // one request, and reject rather than evict while the bounded cache is
+        // full. Forged proofs never reach this cache.
+        if !self.admit_internal_replay(&auth.node_id, &signature)?
             || !self.admit_internal_authority_check(&auth.node_id)?
         {
             return Ok(false);
@@ -2149,6 +2201,13 @@ impl MembershipManager {
                     )
                 })?
                 .remove(&evicted);
+            inner
+                .internal_auth_replays
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
         }
         Ok(true)
     }
@@ -2195,6 +2254,22 @@ impl MembershipManager {
                 checks: 0,
             });
         Ok(state.admit(now, MAX_INTERNAL_AUTH_CHECKS_PER_SECOND))
+    }
+
+    fn admit_internal_replay(
+        &self,
+        node_id: &str,
+        signature: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut replays = inner.internal_auth_replays.lock().map_err(|_| {
+            MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
+        })?;
+        Ok(replays
+            .entry(node_id.to_owned())
+            .or_default()
+            .admit(signature, now))
     }
 
     async fn verify_live_activity_authority(
@@ -2820,6 +2895,9 @@ impl MembershipManager {
         }
         if let Ok(mut admission) = inner.internal_auth_admission.lock() {
             admission.remove(node_id);
+        }
+        if let Ok(mut replays) = inner.internal_auth_replays.lock() {
+            replays.remove(node_id);
         }
         if let Err(error) = inner
             .client
@@ -3945,6 +4023,30 @@ mod tests {
     }
 
     #[test]
+    fn exact_internal_replay_is_rejected_for_the_entire_auth_window() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+
+        assert!(replays.admit(b"a", started));
+        assert!(!replays.admit(b"a", started + Duration::from_secs(29)));
+        assert!(replays.admit(
+            b"a",
+            started + Duration::from_millis(ACTIVITY_AUTH_WINDOW_MS as u64 + 1)
+        ));
+    }
+
+    #[test]
+    fn exact_internal_replay_cache_rejects_instead_of_evicting_live_proofs() {
+        let started = Instant::now();
+        let mut replays = InternalAuthReplayWindow::default();
+        for index in 0..MAX_INTERNAL_REPLAYS_PER_PEER {
+            assert!(replays.admit(format!("proof-{index}").as_bytes(), started));
+        }
+        assert!(!replays.admit(b"overflow", started));
+        assert!(!replays.admit(b"proof-0", started));
+    }
+
+    #[test]
     fn every_post_send_membership_error_keeps_the_removal_fence() {
         for status in [
             reqwest::StatusCode::REQUEST_TIMEOUT,
@@ -4667,6 +4769,14 @@ mod tests {
         )
         .expect("valid exact route");
         for changed in [
+            internal_peer_auth_message(
+                "node-c",
+                "node-b",
+                42,
+                "POST",
+                "/internal/v1/media/offers",
+                b"{}",
+            ),
             internal_peer_auth_message(
                 "node-a",
                 "node-b",

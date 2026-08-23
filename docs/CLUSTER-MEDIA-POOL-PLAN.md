@@ -968,19 +968,25 @@ incapable idle node and prefer a byte-verified cache holder · scratch-full,
 stale-source, and saturated-egress nodes do not win.
 
 **Delivered:** voter requests now bind sender, target, timestamp, method,
-normalized route, and raw-body digest to the durable node key. The daemon polls
+normalized route, and raw-body digest to the durable node key; a bounded
+per-sender window rejects replay of an already accepted exact proof. The daemon polls
 privacy-safe capability snapshots every ten seconds, gives each response only
 the remainder of its signed fifteen-second lifetime, and collects only reachable
-peers under bounded transport deadlines. Successful snapshots are marked
+peers immediately under one common bounded transport deadline, so failed early
+peers cannot starve a healthy later voter. Successful snapshots are marked
 `Cache-Control: private, no-store`. The daemon shortlists heterogeneous peers
 from memory and collects non-reserving offers under one common 200 ms deadline.
 Admin diagnostics expose the directory and ranked reasons, while the live start
 path remains unchanged. A cache advantage requires the exact complete
-generation's fenced manifest and verified VOD playlist. A bounded background
-probe refreshes the most-specific configured library-root readability; offer
+generation's fenced manifest and verified VOD playlist. Cache scratch capacity
+is sampled by one non-accumulating background OS worker, keeping a hard cache
+mount out of the async offer deadline. When a reachable remote candidate exists,
+bounded background workers refresh the most-specific configured library-root
+readability without resubmitting an OS call that is still outstanding; offer
 fan-out consults only that age-limited signal, replicated media facts, recent
 file availability, local capacity, and local cache bytes, so an offer never
-opens a candidate source path.
+opens a candidate source path. Requested audio and subtitle indices must exist
+in the exact replicated file snapshot before a node can answer eligible.
 
 ### 8.6 P5 — place and proxy new HLS sessions
 
