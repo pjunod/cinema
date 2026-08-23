@@ -303,6 +303,8 @@ const REFUSAL_CODES = [
   "cluster_node_not_found",
   "self_removal_requires_leave",
   "leave_node_mismatch",
+  "membership_upgrade_required",
+  "membership_removal_pending",
 ];
 
 test("each removal refusal renders as an actionable sentence, not a code", () => {
@@ -395,6 +397,20 @@ test("a roster row shows hostname and advertised host without listener ports", (
   for (const leak of [":32401", ":32402", "http://", "raft_address", "api_address"]) {
     assert.equal(row.includes(leak), false, `roster row exposes ${leak}`);
   }
+});
+
+test("a pending removal is visible and offers an idempotent retry", () => {
+  const ui = sandbox();
+  const row = ui.clusterNodeRow(
+    node("node-b", 2, "voter", { removal_pending: true }),
+    "node-a",
+  );
+  assert.match(row, /Removal pending/);
+  assert.match(row, />Retry removal</);
+  const refusal = ui.membershipRefusalText("membership_removal_pending", "");
+  assert.match(refusal, /finish upgrading every cluster node/i);
+  assert.match(refusal, /retry this same removal/i);
+  assert.match(refusal, /do not return.*to service/i);
 });
 
 test("hostname leads the identity while node id stays secondary", () => {

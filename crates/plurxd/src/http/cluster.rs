@@ -120,6 +120,8 @@ fn api_error(error: MembershipError) -> ApiError {
         MembershipError::ExpiredToken => StatusCode::GONE,
         MembershipError::ReusedToken
         | MembershipError::ReservedToken
+        | MembershipError::MembershipUpgradeRequired
+        | MembershipError::RemovalPending(_)
         | MembershipError::LeaderRemoval
         | MembershipError::SelfRemovalRequiresLeave
         | MembershipError::LeaveNodeMismatch
