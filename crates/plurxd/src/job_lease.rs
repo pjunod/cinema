@@ -63,8 +63,14 @@ impl ActiveJobLease {
                 let renewed = tokio::select! {
                     _ = heartbeat_cancel.cancelled() => break,
                     _ = &mut expiry => {
-                        let _ = heartbeat_fence.invalidate(&current).await;
+                        // Revocation and loss notification are synchronous,
+                        // but the already-dispatched renewal must still be
+                        // drained. TimedClient bounds that request; awaiting
+                        // it prevents a late Raft write after release returns.
+                        heartbeat_fence.revoke();
                         heartbeat_lost.cancel();
+                        let _ = renewal.await;
+                        let _ = heartbeat_fence.invalidate(&current).await;
                         tracing::warn!(
                             resource = current.resource,
                             fence = current.fence,

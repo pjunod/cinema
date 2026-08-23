@@ -6,6 +6,7 @@
 //! a renewal cannot replace it halfway through a publication call.
 
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use super::{ReconcileOutcome, RootFingerprintStatus, Store};
 pub struct PublicationFence {
     state: Arc<RwLock<Option<Lease>>>,
     last: Arc<std::sync::RwLock<Lease>>,
+    revoked: Arc<AtomicBool>,
 }
 
 impl PublicationFence {
@@ -28,6 +30,7 @@ impl PublicationFence {
         Self {
             state: Arc::new(RwLock::new(Some(lease.clone()))),
             last: Arc::new(std::sync::RwLock::new(lease)),
+            revoked: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -45,10 +48,22 @@ impl PublicationFence {
         ttl: Duration,
     ) -> Result<bool, StoreError> {
         let mut state = self.state.write().await;
+        if self.revoked.load(Ordering::Acquire) {
+            *state = None;
+            return Ok(false);
+        }
         let Some(current) = state.clone() else {
             return Ok(false);
         };
-        match coordinator.renew(&current, ttl).await {
+        let renewed = coordinator.renew(&current, ttl).await;
+        if self.revoked.load(Ordering::Acquire) {
+            // A local deadline may win after the backend request was sent.
+            // Drain that bounded request, but never restore a lease after the
+            // worker has synchronously self-fenced.
+            *state = None;
+            return Ok(false);
+        }
+        match renewed {
             Ok(Some(replacement)) => {
                 *self
                     .last
@@ -70,7 +85,12 @@ impl PublicationFence {
 
     /// Self-fence after a failed renewal. Work may finish computing, but its
     /// next durable publication is rejected before it reaches the backend.
+    pub fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
     pub async fn invalidate(&self, expected: &Lease) -> bool {
+        self.revoke();
         let mut state = self.state.write().await;
         if state.as_ref() != Some(expected) {
             return false;
@@ -106,7 +126,15 @@ impl<'a> PublicationStore<'a> {
         let fence = self.fence.as_ref().ok_or_else(|| {
             StoreError::Task("fenced publication requested without a lease".to_owned())
         })?;
-        Ok(Arc::clone(&fence.state).read_owned().await)
+        if fence.revoked.load(Ordering::Acquire) {
+            return Err(self.invalidated());
+        }
+        let token = Arc::clone(&fence.state).read_owned().await;
+        if fence.revoked.load(Ordering::Acquire) {
+            drop(token);
+            return Err(self.invalidated());
+        }
+        Ok(token)
     }
 
     fn invalidated(&self) -> StoreError {
