@@ -3,7 +3,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -69,6 +69,41 @@ const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
 const TAKEOVER_OVERLAP_MS: i64 = 2_000;
+const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000_000;
+
+static TAKEOVER_SETTLING: LazyLock<StdMutex<HashSet<String>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+
+struct TakeoverSettlementGuard {
+    session_id: String,
+}
+
+impl TakeoverSettlementGuard {
+    fn begin(session_id: &str) -> Result<Self, String> {
+        TAKEOVER_SETTLING
+            .lock()
+            .map_err(|_| "takeover settlement registry was poisoned".to_owned())?
+            .insert(session_id.to_owned());
+        Ok(Self {
+            session_id: session_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for TakeoverSettlementGuard {
+    fn drop(&mut self) {
+        if let Ok(mut settling) = TAKEOVER_SETTLING.lock() {
+            settling.remove(&self.session_id);
+        }
+    }
+}
+
+fn settling_takeover_ids() -> HashSet<String> {
+    TAKEOVER_SETTLING
+        .lock()
+        .map(|settling| settling.clone())
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug)]
 struct StaleSettlementBackoff {
@@ -88,6 +123,8 @@ pub(crate) struct RemoteStartRequest {
     pub protocol_version: i64,
     pub incarnation_id: String,
     pub user_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
     pub request: SessionRequest,
 }
 
@@ -96,6 +133,8 @@ impl RemoteStartRequest {
         self.protocol_version == crate::media_pool::PROTOCOL_VERSION
             && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
             && self.user_id > 0
+            && self.source_size >= 0
+            && self.source_mtime >= 0
             && self.request.request_id.as_deref() == Some(self.incarnation_id.as_str())
             && worker_session_request_is_valid(&self.request)
     }
@@ -720,12 +759,13 @@ pub(crate) async fn lease_loop(state: AppState) {
             }
         }
         let now_ms = unix_ms();
-        let live = state
+        let mut live = state
             .transcode
             .renewable_session_ids()
             .await
             .into_iter()
             .collect::<HashSet<_>>();
+        live.extend(settling_takeover_ids());
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
         let routes = match tokio::time::timeout(
@@ -1011,7 +1051,10 @@ pub(crate) async fn takeover_loop(state: AppState) {
             .flatten()
             .as_deref()
             == Some("1");
-        if !media_pool_enabled || !takeover_enabled {
+        if !media_pool_enabled
+            || !takeover_enabled
+            || !state.media_pool.remote_rollout_ready().await
+        {
             continue;
         }
         let now_ms = unix_ms();
@@ -1043,6 +1086,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
 }
 
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
     if route.owner_node_id == state.node_id || route.owner_epoch >= i64::MAX {
         return Ok(());
     }
@@ -1054,12 +1098,14 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     {
         return Err("persisted takeover recipe no longer matches its route".to_owned());
     }
-    let file = state
-        .store
-        .get_file(envelope.request.file_id)
+    let file = tokio::time::timeout_at(deadline, state.store.get_file(envelope.request.file_id))
         .await
+        .map_err(|_| "media-session takeover timed out".to_owned())?
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover source is missing".to_owned())?;
+    if file.size != envelope.source_size || file.mtime != envelope.source_mtime {
+        return Err("takeover source revision changed".to_owned());
+    }
     let frontier_offset_ms = route
         .fetched_through_ms
         .saturating_sub(TAKEOVER_OVERLAP_MS)
@@ -1083,24 +1129,28 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         envelope.request.hdr10,
     )
     .map_err(str::to_owned)?;
-    let offers = state.media_pool.offers(state, offer_request).await;
+    let offers = tokio::time::timeout_at(deadline, state.media_pool.offers(state, offer_request))
+        .await
+        .map_err(|_| "media-session takeover timed out".to_owned())?;
     if offers.selected_node_id.as_deref() != Some(state.node_id.as_str()) {
         return Ok(());
     }
-    let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
-    let next_epoch = route.owner_epoch.saturating_add(1);
-    // The replicated coordinate is the next unused sequence number. Reusing
-    // the previous owner's last URI for replacement bytes breaks HLS caches.
-    let start_number = route.media_sequence.max(0);
-    let user = state
-        .store
-        .get_user(route.user_id)
+    let next_epoch = route.owner_epoch + 1;
+    // Each ownership epoch receives a disjoint HLS sequence range. The
+    // successor can therefore publish no URI the expired owner ever used,
+    // even if that owner produced after its last successful heartbeat.
+    let epoch_floor = next_epoch
+        .checked_mul(TAKEOVER_SEQUENCE_STRIDE)
+        .ok_or_else(|| "media-session takeover sequence space exhausted".to_owned())?;
+    let start_number = route.media_sequence.max(epoch_floor);
+    let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
         .await
+        .map_err(|_| "media-session takeover timed out".to_owned())?
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover user is missing".to_owned())?;
-    let started = state
-        .transcode
-        .create_cluster_takeover_session(
+    let started = tokio::time::timeout_at(
+        deadline,
+        state.transcode.create_cluster_takeover_session(
             &envelope.request,
             route.user_id,
             &user.username,
@@ -1111,29 +1161,42 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                 discontinuity_sequence: route.discontinuity_sequence.saturating_add(1),
                 owner_epoch: next_epoch,
             },
-        )
-        .await?;
+        ),
+    )
+    .await
+    .map_err(|_| "media-session takeover timed out".to_owned())??;
     let provisional_id = started.info.session_id.clone();
+    let _settlement = TakeoverSettlementGuard::begin(&route.session_id)?;
     let claim_now_ms = unix_ms();
-    let claimed = match state
-        .store
-        .claim_media_session_takeover(&MediaSessionTakeover {
-            incarnation_id: route.incarnation_id.clone(),
-            expected_owner_node_id: route.owner_node_id,
-            expected_owner_epoch: route.owner_epoch,
-            next_owner_node_id: state.node_id.clone(),
-            now_ms: claim_now_ms,
-            lease_expires_at_ms: claim_now_ms.saturating_add(LEASE_TTL_MS),
-        })
-        .await
-    {
-        Ok(claimed) => claimed,
-        Err(error) => {
+    let claim = tokio::time::timeout_at(
+        deadline,
+        state
+            .store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: route.incarnation_id.clone(),
+                expected_owner_node_id: route.owner_node_id,
+                expected_owner_epoch: route.owner_epoch,
+                next_owner_node_id: state.node_id.clone(),
+                now_ms: claim_now_ms,
+                lease_expires_at_ms: claim_now_ms.saturating_add(LEASE_TTL_MS),
+            }),
+    )
+    .await;
+    let claimed = match claim {
+        Ok(Ok(claimed)) => claimed,
+        Ok(Err(error)) => {
             state
                 .transcode
                 .stop_session(&provisional_id, "media-session takeover claim failed")
                 .await;
             return Err(error.to_string());
+        }
+        Err(_) => {
+            state
+                .transcode
+                .stop_session(&provisional_id, "media-session takeover timed out")
+                .await;
+            return Err("media-session takeover timed out".to_owned());
         }
     };
     let Some(claimed) = claimed else {
@@ -1143,26 +1206,32 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             .await;
         return Ok(());
     };
-    let adopted = state
-        .transcode
-        .adopt_session_id(&provisional_id, &claimed.session_id)
-        .await;
-    let pinned = if adopted {
-        match state
+    let adopted = tokio::time::timeout_at(
+        deadline,
+        state
             .transcode
-            .pin_shared_session(
+            .adopt_session_id(&provisional_id, &claimed.session_id),
+    )
+    .await
+    .unwrap_or(false);
+    let pinned = if adopted {
+        match tokio::time::timeout_at(
+            deadline,
+            state.transcode.pin_shared_session(
                 &claimed.session_id,
                 &claimed.incarnation_id,
                 claimed.owner_epoch,
                 claimed.lease_expires_at_ms,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(pinned) => pinned,
-            Err(error) => {
+            Ok(Ok(pinned)) => pinned,
+            Ok(Err(error)) => {
                 tracing::debug!(%error, "takeover shared-cache pin unavailable");
                 false
             }
+            Err(_) => false,
         }
     } else {
         false
@@ -1177,11 +1246,27 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             .transcode
             .stop_session(local_id, "media-session takeover settlement failed")
             .await;
-        let _ = state
-            .store
-            .end_media_session(&claimed.session_id, unix_ms())
-            .await;
         return Err("takeover winner could not publish its local worker".to_owned());
+    }
+    let current = tokio::time::timeout_at(
+        deadline,
+        state.store.media_session_route(&claimed.session_id),
+    )
+    .await
+    .map_err(|_| "media-session takeover settlement timed out".to_owned())?
+    .map_err(|error| error.to_string())?;
+    if !matches!(current, Some(ref exact)
+        if exact.incarnation_id == claimed.incarnation_id
+            && exact.owner_node_id == state.node_id
+            && exact.owner_epoch == claimed.owner_epoch
+            && exact.lease_expires_at_ms == claimed.lease_expires_at_ms
+            && exact.lease_expires_at_ms > unix_ms())
+    {
+        state
+            .transcode
+            .stop_session(&claimed.session_id, "media-session takeover lease changed")
+            .await;
+        return Err("takeover lease changed before publication".to_owned());
     }
     state.media_sessions.cache_route(claimed.clone()).await;
     state.media_sessions.seed_owned_lease(&claimed).await;
@@ -1270,6 +1355,8 @@ mod tests {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: 7,
+            source_size: 123_456,
+            source_mtime: 1_700_000_000,
             request: SessionRequest {
                 file_id: 11,
                 playback_id: "player-a".to_owned(),

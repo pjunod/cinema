@@ -508,6 +508,8 @@ pub async fn create(
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
