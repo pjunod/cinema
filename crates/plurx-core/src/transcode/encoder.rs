@@ -33,7 +33,7 @@ pub enum Encoder {
 /// there is no place to spell the two halves separately: a caller picks a
 /// grade and gets both. [`crate::transcode::assert_no_pq_at_8_bit`] is the
 /// belt to this braces, for chains assembled as text elsewhere.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
     /// BT.709 8-bit, the only grade that existed before M5.

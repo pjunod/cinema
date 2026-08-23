@@ -1,0 +1,608 @@
+//! Cluster placement transport and liveness for capability-authenticated HLS.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::body::Body;
+use axum::http::{header, HeaderName, Response, StatusCode};
+use futures_util::TryStreamExt;
+use plurx_core::cluster::membership::MembershipManager;
+use plurx_core::domain::{MediaSessionRenewal, MediaSessionRoute};
+use plurx_core::error::StoreError;
+use plurx_core::store::Store;
+use plurx_core::transcode::OutputGrade;
+use serde::{Deserialize, Serialize};
+
+use crate::http::peer_transport::{
+    deadline_after, PeerAuthMode, PeerTransport, PeerTransportError,
+};
+use crate::state::AppState;
+use crate::transcode::{SessionKind, SessionRequest, StartInfo};
+
+pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
+pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
+pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
+pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
+
+const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
+const START_DEADLINE: Duration = Duration::from_secs(50);
+const ABORT_DEADLINE: Duration = Duration::from_secs(5);
+const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
+const LEASE_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const LEASE_TTL_MS: i64 = 12_000;
+pub(crate) const ACTIVATION_CONFIRMATION_DELAY: Duration = Duration::from_secs(8);
+const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
+const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteStartRequest {
+    pub incarnation_id: String,
+    pub user_id: i64,
+    pub request: SessionRequest,
+}
+
+impl RemoteStartRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
+            && self.user_id > 0
+            && self.request.request_id.as_deref() == Some(self.incarnation_id.as_str())
+            && self.request.file_id > 0
+            && !self.request.playback_id.is_empty()
+            && self.request.playback_id.len() <= 128
+            && !self
+                .request
+                .playback_id
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+            && self.request.start_seconds.is_finite()
+            && self.request.start_seconds >= 0.0
+            && self.request.start_seconds * 1_000.0 <= MAX_MEDIA_MILLIS as f64
+            && self
+                .request
+                .audio_index
+                .is_none_or(|index| (0..=1_024).contains(&index))
+            && self
+                .request
+                .subtitle_burn
+                .is_none_or(|index| (0..=1_024).contains(&index))
+            && (-15_000..=15_000).contains(&self.request.audio_offset_ms)
+            && match &self.request.kind {
+                SessionKind::Transcode { height } => {
+                    (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(height)
+                }
+                SessionKind::Copy { .. } => true,
+            }
+            && matches!(
+                (
+                    &self.request.previous_session_id,
+                    self.request.reopen_reason
+                ),
+                (None, None) | (Some(_), Some(_))
+            )
+            && self
+                .request
+                .previous_session_id
+                .as_deref()
+                .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteStartResponse {
+    pub session_id: String,
+    pub playlist_url: String,
+    pub duration_ms: Option<i64>,
+    pub start_seconds: f64,
+    pub media_origin_seconds: f64,
+    pub target_height: i64,
+    pub kind: SessionKind,
+    pub encoder: String,
+    pub grade: OutputGrade,
+    pub vod: bool,
+}
+
+impl From<StartInfo> for RemoteStartResponse {
+    fn from(info: StartInfo) -> Self {
+        Self {
+            session_id: info.session_id,
+            playlist_url: info.playlist_url,
+            duration_ms: info.duration_ms,
+            start_seconds: info.start_seconds,
+            media_origin_seconds: info.media_origin_seconds,
+            target_height: info.target_height,
+            kind: info.kind,
+            encoder: info.encoder.to_owned(),
+            grade: info.grade,
+            vod: info.vod,
+        }
+    }
+}
+
+impl RemoteStartResponse {
+    fn is_valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
+            && self
+                .duration_ms
+                .is_none_or(|duration| (0..=MAX_MEDIA_MILLIS).contains(&duration))
+            && self.start_seconds.is_finite()
+            && (0.0..=MAX_MEDIA_MILLIS as f64 / 1_000.0).contains(&self.start_seconds)
+            && self.media_origin_seconds.is_finite()
+            && (0.0..=MAX_MEDIA_MILLIS as f64 / 1_000.0).contains(&self.media_origin_seconds)
+            && (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT)
+                .contains(&self.target_height)
+            && match &self.kind {
+                SessionKind::Transcode { height } => *height == self.target_height,
+                SessionKind::Copy { .. } => true,
+            }
+            && !self.encoder.is_empty()
+            && self.encoder.len() <= 256
+            && !self
+                .encoder
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteAbortRequest {
+    pub incarnation_id: String,
+    pub session_id: String,
+}
+
+impl RemoteAbortRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
+            && uuid::Uuid::parse_str(&self.session_id).is_ok()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RelayResource {
+    Status,
+    Playlist {
+        native: Option<u8>,
+        subtitle: Option<i64>,
+    },
+    Master {
+        subtitle: Option<i64>,
+        diagnostic: Option<String>,
+    },
+    VideoPlaylist,
+    SubtitlePlaylist {
+        index: i64,
+    },
+    SubtitleSegment {
+        index: i64,
+        segment: String,
+    },
+    Segment {
+        segment: String,
+    },
+    Delete,
+}
+
+impl RelayResource {
+    pub(crate) fn is_valid(&self) -> bool {
+        match self {
+            Self::Status | Self::VideoPlaylist | Self::Delete => true,
+            Self::Playlist { native, subtitle } => {
+                native.is_none_or(|value| value <= 1)
+                    && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
+            }
+            Self::Master {
+                subtitle,
+                diagnostic,
+            } => {
+                subtitle.is_none_or(|value| (0..=1_024).contains(&value))
+                    && diagnostic.as_ref().is_none_or(|value| {
+                        value.len() <= 64 && !value.contains('\r') && !value.contains('\n')
+                    })
+            }
+            Self::SubtitlePlaylist { index } => (0..=1_024).contains(index),
+            Self::SubtitleSegment { index, segment } => {
+                (0..=1_024).contains(index) && valid_resource_name(segment)
+            }
+            Self::Segment { segment } => valid_resource_name(segment),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelayRequest {
+    pub session_id: String,
+    pub resource: RelayResource,
+}
+
+impl RelayRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.session_id).is_ok() && self.resource.is_valid()
+    }
+}
+
+fn valid_resource_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'\\' | b'\r' | b'\n' | b'\0'))
+        && value != "."
+        && value != ".."
+}
+
+#[derive(Clone)]
+pub(crate) struct MediaSessionCoordinator {
+    membership: MembershipManager,
+    transport: PeerTransport,
+    store: Arc<dyn Store>,
+    routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
+    lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, (String, i64)>>>,
+}
+
+#[derive(Clone)]
+struct CachedRoute {
+    route: MediaSessionRoute,
+    expires_at: tokio::time::Instant,
+}
+
+impl MediaSessionCoordinator {
+    pub(crate) fn new(membership: MembershipManager, store: Arc<dyn Store>) -> Arc<Self> {
+        Arc::new(Self {
+            transport: PeerTransport::new(membership.clone()),
+            membership,
+            store,
+            routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Cache only durable route rows, never misses. A just-activated session
+    /// must become visible immediately even if an earlier legacy request saw
+    /// no row, while a one-second positive TTL removes a consensus read from
+    /// playlist/segment bursts without extending the exact lease boundary.
+    pub(crate) async fn route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let now = tokio::time::Instant::now();
+        {
+            let mut routes = self.routes.lock().await;
+            if let Some(cached) = routes.get(session_id) {
+                if cached.expires_at > now
+                    && (cached.route.state != "active"
+                        || cached.route.lease_expires_at_ms > unix_ms())
+                {
+                    return Ok(Some(cached.route.clone()));
+                }
+            }
+            routes.remove(session_id);
+        }
+        let route = self.store.media_session_route(session_id).await?;
+        if let Some(route) = route.as_ref() {
+            self.cache_route(route.clone()).await;
+        }
+        Ok(route)
+    }
+
+    pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
+        let now = tokio::time::Instant::now();
+        let mut routes = self.routes.lock().await;
+        routes.retain(|_, cached| cached.expires_at > now);
+        if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(&route.session_id) {
+            if let Some(oldest) = routes
+                .iter()
+                .min_by_key(|(_, cached)| cached.expires_at)
+                .map(|(session_id, _)| session_id.clone())
+            {
+                routes.remove(&oldest);
+            }
+        }
+        routes.insert(
+            route.session_id.clone(),
+            CachedRoute {
+                route,
+                expires_at: now + ROUTE_CACHE_TTL,
+            },
+        );
+    }
+
+    pub(crate) async fn invalidate_route(&self, session_id: &str) {
+        self.routes.lock().await.remove(session_id);
+    }
+
+    /// Hand a freshly activated local worker to the renewal loop before its
+    /// next store inventory. If the store disappears in that exact window,
+    /// the worker still knows the committed expiry and self-fences on time.
+    pub(crate) async fn seed_owned_lease(&self, route: &MediaSessionRoute) {
+        self.lease_seeds.lock().await.insert(
+            route.incarnation_id.clone(),
+            (route.session_id.clone(), route.lease_expires_at_ms),
+        );
+    }
+
+    async fn take_lease_seeds(&self) -> HashMap<String, (String, i64)> {
+        std::mem::take(&mut *self.lease_seeds.lock().await)
+    }
+
+    async fn peer_base(&self, node_id: &str) -> Result<String, PeerTransportError> {
+        self.membership
+            .activity_peers()
+            .await
+            .map_err(|_| PeerTransportError::Unreachable)?
+            .into_iter()
+            .find(|peer| peer.node_id == node_id && peer.reachable)
+            .and_then(|peer| peer.http_base)
+            .ok_or(PeerTransportError::Unreachable)
+    }
+
+    pub(crate) async fn start_remote(
+        &self,
+        owner_node_id: &str,
+        request: &RemoteStartRequest,
+    ) -> Result<RemoteStartResponse, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > MAX_CONTROL_REQUEST_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id).await?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                START_PATH,
+                body,
+                deadline_after(START_DEADLINE),
+                MAX_START_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+                PeerTransportError::TimedOut
+            } else {
+                PeerTransportError::InvalidResponse
+            });
+        }
+        serde_json::from_slice::<RemoteStartResponse>(&response.body)
+            .ok()
+            .filter(RemoteStartResponse::is_valid)
+            .ok_or(PeerTransportError::InvalidResponse)
+    }
+
+    pub(crate) async fn abort_remote(&self, owner_node_id: &str, request: &RemoteAbortRequest) {
+        let Ok(body) = serde_json::to_vec(request) else {
+            return;
+        };
+        let Ok(base) = self.peer_base(owner_node_id).await else {
+            return;
+        };
+        let _ = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                ABORT_PATH,
+                body,
+                deadline_after(ABORT_DEADLINE),
+                1_024,
+                PeerAuthMode::ExactRequest,
+            )
+            .await;
+    }
+
+    pub(crate) async fn relay(
+        &self,
+        owner_node_id: &str,
+        request: &RelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > MAX_CONTROL_REQUEST_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let base = self.peer_base(owner_node_id).await?;
+        let response = self
+            .transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                RELAY_PATH,
+                body,
+                deadline_after(RELAY_HEADERS_DEADLINE),
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        relay_response(response)
+    }
+}
+
+fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTransportError> {
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .map_err(|_| PeerTransportError::InvalidResponse)?;
+    let mut builder = Response::builder().status(status);
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::CONTENT_LENGTH,
+        header::CONTENT_RANGE,
+        header::ACCEPT_RANGES,
+        header::ETAG,
+        header::LAST_MODIFIED,
+    ] {
+        if let Some(value) = response.headers().get(name.as_str()) {
+            let name = HeaderName::from_bytes(name.as_str().as_bytes())
+                .map_err(|_| PeerTransportError::InvalidResponse)?;
+            builder = builder.header(name, value.as_bytes());
+        }
+    }
+    let stream = response
+        .bytes_stream()
+        .map_err(|error| std::io::Error::other(error.to_string()));
+    builder
+        .body(Body::from_stream(stream))
+        .map_err(|_| PeerTransportError::InvalidResponse)
+}
+
+pub(crate) fn unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+/// Renew only locally live workers. Lost ownership self-fences immediately;
+/// a transient store outage is allowed to use the already-committed lease but
+/// never past its exact expiry.
+pub(crate) async fn lease_loop(state: AppState) {
+    let mut interval = tokio::time::interval(LEASE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut known = HashMap::<String, (String, i64)>::new();
+    loop {
+        interval.tick().await;
+        let now_ms = unix_ms();
+        let live = state
+            .transcode
+            .active_session_ids()
+            .await
+            .into_iter()
+            .collect::<HashSet<_>>();
+        known.extend(state.media_sessions.take_lease_seeds().await);
+        known.retain(|_, (session_id, _)| live.contains(session_id));
+        let routes = match state.store.owned_media_sessions(&state.node_id).await {
+            Ok(routes) => routes,
+            Err(error) => {
+                tracing::debug!(%error, "media-session lease inventory unavailable");
+                let expired = known
+                    .iter()
+                    .filter(|(_, (session_id, expires_at_ms))| {
+                        live.contains(session_id) && *expires_at_ms <= now_ms
+                    })
+                    .map(|(incarnation_id, (session_id, _))| {
+                        (incarnation_id.clone(), session_id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for (incarnation_id, session_id) in expired {
+                    state
+                        .transcode
+                        .stop_session(&session_id, "cluster lease expired")
+                        .await;
+                    state.media_sessions.invalidate_route(&session_id).await;
+                    known.remove(&incarnation_id);
+                }
+                continue;
+            }
+        };
+        let current = routes
+            .iter()
+            .map(|route| route.incarnation_id.as_str())
+            .collect::<HashSet<_>>();
+        let lost = known
+            .iter()
+            .filter(|(incarnation_id, (session_id, _))| {
+                live.contains(session_id) && !current.contains(incarnation_id.as_str())
+            })
+            .map(|(incarnation_id, (session_id, _))| (incarnation_id.clone(), session_id.clone()))
+            .collect::<Vec<_>>();
+        for (incarnation_id, session_id) in lost {
+            state
+                .transcode
+                .stop_session(&session_id, "cluster lease lost")
+                .await;
+            state.media_sessions.invalidate_route(&session_id).await;
+            known.remove(&incarnation_id);
+        }
+        for route in &routes {
+            known.insert(
+                route.incarnation_id.clone(),
+                (route.session_id.clone(), route.lease_expires_at_ms),
+            );
+        }
+        let active = routes
+            .iter()
+            .filter(|route| live.contains(&route.session_id))
+            .collect::<Vec<_>>();
+        let renewals = active
+            .iter()
+            .map(|route| MediaSessionRenewal {
+                incarnation_id: route.incarnation_id.clone(),
+                owner_epoch: route.owner_epoch,
+            })
+            .collect::<Vec<_>>();
+        match state
+            .store
+            .renew_media_sessions(
+                &state.node_id,
+                &renewals,
+                now_ms,
+                now_ms.saturating_add(LEASE_TTL_MS),
+            )
+            .await
+        {
+            Ok(renewed) => {
+                let renewed = renewed.into_iter().collect::<HashSet<_>>();
+                for route in active {
+                    if renewed.contains(&route.incarnation_id) {
+                        known.insert(
+                            route.incarnation_id.clone(),
+                            (
+                                route.session_id.clone(),
+                                now_ms.saturating_add(LEASE_TTL_MS),
+                            ),
+                        );
+                    } else {
+                        state
+                            .transcode
+                            .stop_session(&route.session_id, "cluster lease lost")
+                            .await;
+                        state
+                            .media_sessions
+                            .invalidate_route(&route.session_id)
+                            .await;
+                        known.remove(&route.incarnation_id);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, "media-session lease renewal unavailable");
+                for route in active {
+                    if route.lease_expires_at_ms <= now_ms {
+                        state
+                            .transcode
+                            .stop_session(&route.session_id, "cluster lease expired")
+                            .await;
+                        state
+                            .media_sessions
+                            .invalidate_route(&route.session_id)
+                            .await;
+                        known.remove(&route.incarnation_id);
+                    }
+                }
+            }
+        }
+        for route in routes
+            .iter()
+            .filter(|route| !live.contains(&route.session_id))
+        {
+            let _ = state
+                .store
+                .end_media_session(&route.session_id, now_ms)
+                .await;
+            state
+                .media_sessions
+                .invalidate_route(&route.session_id)
+                .await;
+            known.remove(&route.incarnation_id);
+        }
+    }
+}

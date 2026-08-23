@@ -1,0 +1,150 @@
+//! Exact-auth worker endpoints for cluster-owned HLS sessions.
+
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+
+use super::peer_transport::exact_auth_from_headers;
+use crate::media_sessions::{
+    unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
+    RemoteStartResponse, ABORT_PATH, ACTIVATION_CONFIRMATION_DELAY, RELAY_PATH, START_PATH,
+};
+use crate::state::AppState;
+
+async fn authorize(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &'static str,
+    body: &[u8],
+) -> Result<(), StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if state
+        .membership
+        .authorize_internal_peer_request(&auth, "POST", path, body)
+        .await
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+pub(crate) async fn start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<RemoteStartResponse>, StatusCode> {
+    authorize(&state, &headers, START_PATH, &body).await?;
+    let request = serde_json::from_slice::<RemoteStartRequest>(&body)
+        .ok()
+        .filter(RemoteStartRequest::is_valid)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let user = state
+        .store
+        .get_user(request.user_id)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let response = state
+        .transcode
+        .create_session(&request.request, &user.username)
+        .await
+        .map(RemoteStartResponse::from)
+        .map_err(|error| {
+            if error.contains("already used") {
+                StatusCode::CONFLICT
+            } else if crate::transcode::is_retryable_capacity_error(&error) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        })?;
+    let confirmation_state = state.clone();
+    let confirmation_incarnation = request.incarnation_id.clone();
+    let confirmation_session = response.session_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(ACTIVATION_CONFIRMATION_DELAY).await;
+        let confirmed = confirmation_state
+            .store
+            .media_session_route_by_incarnation(&confirmation_incarnation)
+            .await
+            .ok()
+            .flatten()
+            .filter(|route| {
+                route.session_id == confirmation_session
+                    && route.owner_node_id == confirmation_state.node_id
+                    && route.state == "active"
+                    && route.lease_expires_at_ms > unix_ms()
+            });
+        if let Some(route) = confirmed {
+            confirmation_state
+                .media_sessions
+                .seed_owned_lease(&route)
+                .await;
+        } else {
+            confirmation_state
+                .transcode
+                .stop_session_for_request(
+                    &confirmation_incarnation,
+                    &confirmation_session,
+                    "cluster activation not confirmed",
+                )
+                .await;
+        }
+    });
+    Ok(Json(response))
+}
+
+pub(crate) async fn abort(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    authorize(&state, &headers, ABORT_PATH, &body).await?;
+    let request = serde_json::from_slice::<RemoteAbortRequest>(&body)
+        .ok()
+        .filter(RemoteAbortRequest::is_valid)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    state
+        .transcode
+        .stop_session_for_request(
+            &request.incarnation_id,
+            &request.session_id,
+            "cluster start aborted",
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn relay(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, RELAY_PATH, &body).await {
+        return status.into_response();
+    }
+    let Some(request) = serde_json::from_slice::<RelayRequest>(&body)
+        .ok()
+        .filter(RelayRequest::is_valid)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let route = match state.media_sessions.route(&request.session_id).await {
+        Ok(Some(route)) => route,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if route.owner_node_id != state.node_id {
+        return StatusCode::CONFLICT.into_response();
+    }
+    if !matches!(&request.resource, RelayResource::Delete)
+        && (route.state != "active" || route.lease_expires_at_ms <= unix_ms())
+    {
+        return StatusCode::GONE.into_response();
+    }
+    super::hls::relay_local(&state, request).await
+}

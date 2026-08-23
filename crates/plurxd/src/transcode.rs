@@ -2663,7 +2663,7 @@ pub struct DeliveryCandidate {
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionRequest {
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
@@ -2708,7 +2708,8 @@ pub struct SessionRequest {
     pub hdr10: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionKind {
     Transcode {
         height: i64,
@@ -2723,7 +2724,7 @@ pub enum SessionKind {
 /// Why a client is replacing an existing session. This is deliberately typed
 /// even while `stall` is the only server-normalized cause: an unknown future
 /// value must be refused, not accidentally treated as ordinary create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
     Stall,
@@ -2797,6 +2798,18 @@ impl SessionRequest {
             self.reopen_reason.map(ReopenReason::as_str),
         ])
         .to_string()
+    }
+
+    /// Fixed-width durable identity used by the replicated session claim.
+    ///
+    /// Keep the established JSON identity above unchanged for process-local
+    /// rolling-deploy recovery, then hash it before it enters replicated
+    /// storage. The digest bounds both the schema and every log/diagnostic
+    /// surface regardless of client-controlled playback identifiers.
+    pub(crate) fn durable_intent_fingerprint(&self, user_name: &str) -> String {
+        hex::encode(Sha256::digest(
+            self.intent_fingerprint(user_name).as_bytes(),
+        ))
     }
 }
 
@@ -9273,6 +9286,28 @@ impl TranscodeManager {
         true
     }
 
+    /// Snapshot the live capability ids without holding the session map while
+    /// replicated lease I/O runs.
+    pub async fn active_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// Abort a remote start only when the worker's process-local idempotency
+    /// record proves that this exact internal incarnation created the session.
+    pub async fn stop_session_for_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        reason: &'static str,
+    ) -> bool {
+        let matches = self.requests.lock().is_ok_and(|requests| {
+            requests.get(request_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+        });
+        matches && self.stop_session(session_id, reason).await
+    }
+
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         *session.last_request.lock().await = LastRequest::now(kind);
@@ -10446,7 +10481,7 @@ fn one_rung_below(current: i64) -> i64 {
 }
 
 /// One advertised rung of the ladder.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rung {
     pub height: i64,
     /// The rung's nominal cost on the wire: video target + audio, in kb/s.

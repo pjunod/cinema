@@ -306,6 +306,8 @@ pub struct AppState {
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
+    /// Authenticated remote start/abort and streaming HLS relay transport.
+    pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -471,6 +473,10 @@ impl AppState {
         let offline =
             OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+            membership.clone(),
+            Arc::clone(&store),
+        );
         AppState {
             store,
             replication,
@@ -479,6 +485,7 @@ impl AppState {
             ),
             membership,
             media_pool,
+            media_sessions,
             server_name,
             node_id,
             artwork_dir,

@@ -17,6 +17,7 @@ mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_media;
+pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
@@ -299,6 +300,24 @@ pub fn router(state: AppState) -> Router {
             crate::media_pool::OFFERS_PATH,
             post(internal_media::offers)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
+        .route(
+            crate::media_sessions::START_PATH,
+            post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ABORT_PATH,
+            post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::RELAY_PATH,
+            post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
         )
         .nest("/api/v1", api)
         .merge(plex_routes)
