@@ -622,6 +622,72 @@ pub struct CachedTranscode {
     pub last_used_at: i64,
 }
 
+/// One node's current proof that it can use a cache storage identity.
+///
+/// Paths deliberately do not cross this boundary. A shared path is node-local
+/// configuration; replicated state records only the stable storage identity
+/// and the result of a recent two-way mount proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheStorageMember {
+    pub storage_id: String,
+    pub node_id: String,
+    /// `local` or `shared`.
+    pub storage_class: String,
+    pub verified_at_ms: i64,
+    /// `verified`, `suspect`, or `unverified`.
+    pub verification_state: String,
+}
+
+/// One immutable, storage-keyed cache generation.
+///
+/// `generation_id` is part of every reader pin and deletion decision. A stale
+/// observation can therefore never pin or retire a replacement generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SharedCacheGeneration {
+    pub recipe_hash: String,
+    pub file_id: i64,
+    pub storage_id: String,
+    pub generation_id: String,
+    pub relative_dir: String,
+    pub bytes: i64,
+    pub manifest_digest: Option<String>,
+    pub last_used_at: i64,
+    /// True after a fenced GC winner retired the readable pointer but before
+    /// the derived filesystem paths and tombstone were durably finalized.
+    pub cleanup_pending: bool,
+}
+
+/// Durable consumers that can keep one shared-cache generation alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheConsumerKind {
+    MediaSession,
+    OfflinePackage,
+    OfflineDownload,
+}
+
+impl CacheConsumerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MediaSession => "media_session",
+            Self::OfflinePackage => "offline_package",
+            Self::OfflineDownload => "offline_download",
+        }
+    }
+}
+
+/// One exact distributed reader pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheConsumerPin {
+    pub storage_id: String,
+    pub recipe_hash: String,
+    pub generation_id: String,
+    pub consumer_kind: CacheConsumerKind,
+    pub consumer_id: String,
+    pub consumer_epoch: i64,
+    pub expires_at_ms: i64,
+}
+
 /// Bounded ownership facts for filesystem cleanup. `complete` is false when
 /// the backend found more rows than the safety ceiling; callers must then
 /// fail closed rather than treating an omitted owner as an orphan.

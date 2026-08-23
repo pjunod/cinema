@@ -15,7 +15,11 @@ use std::sync::atomic::{
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use plurx_core::domain::{PlaybackEvent, PretranscodeJob, PretranscodeWorkerCapabilities};
+use plurx_core::domain::{
+    CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
+    PretranscodeWorkerCapabilities,
+};
+use plurx_core::error::StoreError;
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
     self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,
@@ -46,6 +50,7 @@ const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
+const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
 
 /// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
 /// authorize playback and therefore never belong in logs, traces, metrics, or
@@ -1419,6 +1424,7 @@ struct CachedLocationIdentity {
     recipe_hash: String,
     node_id: String,
     storage_class: String,
+    generation_id: Option<String>,
     relative_dir: String,
     manifest_digest: Option<String>,
 }
@@ -1433,6 +1439,16 @@ enum CacheOfferVerdict {
         verified: bool,
         observed_at: Instant,
     },
+}
+
+struct CacheOfferVerification {
+    verified: bool,
+    revoke_shared_member: bool,
+}
+
+struct PreparedSharedCacheRead {
+    dir: PathBuf,
+    manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
 }
 
 impl LastRequest {
@@ -3900,7 +3916,7 @@ async fn remove_staged_child(
     }
 }
 
-async fn quarantine_remove_cache_tree(
+pub(crate) async fn quarantine_remove_cache_tree(
     path: &std::path::Path,
     max_depth: usize,
 ) -> Result<(), String> {
@@ -4367,6 +4383,7 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    shared_cache: Option<Arc<crate::shared_cache::SharedCacheCoordinator>>,
     /// Last completed cache-filesystem capacity sample. Request and scheduler
     /// paths read only this atomic projection: `statvfs` can block forever on
     /// a hard network mount and therefore belongs to one non-accumulating
@@ -4545,6 +4562,7 @@ impl TranscodeManager {
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            shared_cache: None,
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
@@ -4630,8 +4648,53 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_shared_cache(
+        mut self,
+        shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
+    ) -> Self {
+        self.shared_cache = Some(shared_cache);
+        self
+    }
+
     pub fn cache_readers(&self) -> &crate::cachekeep::ActiveCacheReaders {
         &self.cache_readers
+    }
+
+    /// Pin a shared-cache-backed worker before its durable route is exposed.
+    /// Non-cache and node-local sessions need no distributed pin and succeed
+    /// immediately.
+    pub(crate) async fn pin_shared_session(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+        owner_epoch: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let session = self.sessions.lock().await.get(session_id).cloned();
+        let Some(location) = session
+            .as_ref()
+            .and_then(|session| session.cache_location.as_ref())
+            .filter(|location| location.storage_class == "shared")
+        else {
+            return Ok(true);
+        };
+        let Some(generation_id) = location.generation_id.as_ref() else {
+            return Ok(false);
+        };
+        self.store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: location.node_id.clone(),
+                    recipe_hash: location.recipe_hash.clone(),
+                    generation_id: generation_id.clone(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_id.to_owned(),
+                    consumer_epoch: owner_epoch,
+                    expires_at_ms,
+                },
+                crate::media_sessions::unix_ms(),
+            )
+            .await
     }
 
     #[cfg(test)]
@@ -5566,11 +5629,86 @@ impl TranscodeManager {
             .map(Some)
     }
 
+    /// Prefer a currently verified shared generation, then preserve the
+    /// established node-local lookup as the fallback. Replicated rows are not
+    /// mount proof: the shared coordinator must still expose a live root.
+    async fn cache_read_location(
+        &self,
+        recipe_hash: &str,
+        cache: &CacheConfig,
+    ) -> Result<Option<(CachedLocationIdentity, PathBuf)>, StoreError> {
+        if let Some(shared) = self.shared_cache.as_ref() {
+            if let (Some(storage_id), Some(root)) = (shared.storage_id(), shared.root().await) {
+                if let Some(hit) = self.store.shared_cache_hit(recipe_hash, storage_id).await? {
+                    // Placement and cross-node serving require the immutable
+                    // object inventory. Legacy local entries remain readable,
+                    // but never become shared solely because their directory
+                    // happens to sit under the configured mount.
+                    if hit.manifest_digest.is_some() {
+                        return Ok(Some((
+                            CachedLocationIdentity {
+                                recipe_hash: recipe_hash.to_owned(),
+                                node_id: hit.storage_id,
+                                storage_class: "shared".to_owned(),
+                                generation_id: Some(hit.generation_id),
+                                relative_dir: hit.relative_dir,
+                                manifest_digest: hit.manifest_digest,
+                            },
+                            root,
+                        )));
+                    }
+                }
+            }
+        }
+        self.local_cache_read_location(recipe_hash, cache).await
+    }
+
+    async fn local_cache_read_location(
+        &self,
+        recipe_hash: &str,
+        cache: &CacheConfig,
+    ) -> Result<Option<(CachedLocationIdentity, PathBuf)>, StoreError> {
+        Ok(self
+            .store
+            .cache_hit(recipe_hash, &cache.node_id)
+            .await?
+            .map(|hit| {
+                (
+                    CachedLocationIdentity {
+                        recipe_hash: recipe_hash.to_owned(),
+                        node_id: cache.node_id.clone(),
+                        storage_class: hit.storage_class,
+                        generation_id: None,
+                        relative_dir: hit.relative_dir,
+                        manifest_digest: hit.manifest_digest,
+                    },
+                    cache.dir.clone(),
+                )
+            }))
+    }
+
     async fn invalidate_cache_location(
         &self,
         location: &CachedLocationIdentity,
         reason: &'static str,
     ) -> bool {
+        if location.storage_class == "shared" {
+            if let Some(shared) = self.shared_cache.as_ref() {
+                shared.report_io_failure(reason).await;
+            }
+            // A read failure is evidence about this node's admitted mount,
+            // not proof that every voter lost the portable generation. Keep
+            // the replicated pointer and its reader pins intact so healthy
+            // members may continue serving it; fenced GC owns global
+            // retirement.
+            tracing::warn!(
+                recipe = %location.recipe_hash,
+                storage = %location.node_id,
+                reason,
+                "shared cache read failed; disabled this member without retiring the generation"
+            );
+            return false;
+        }
         Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
     }
 
@@ -5649,26 +5787,15 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-        let Some(hit) = self
-            .store
-            .cache_hit(&hash, &cache.node_id)
-            .await
-            .ok()
-            .flatten()
+        let Some((identity, cache_root)) =
+            self.cache_read_location(&hash, cache).await.ok().flatten()
         else {
             return false;
         };
         // Legacy completions do not carry a byte inventory and therefore
         // cannot make the stronger cluster placement claim.
-        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+        let Some(expected_manifest) = identity.manifest_digest.clone() else {
             return false;
-        };
-        let identity = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
         };
         let now = Instant::now();
         {
@@ -5725,16 +5852,24 @@ impl TranscodeManager {
         let verdicts = Arc::clone(&self.cache_offer_verdicts);
         let store = Arc::clone(&self.store);
         let readers = self.cache_readers.clone();
-        let cache_root = cache.dir.clone();
+        let shared_cache = self.shared_cache.clone();
         tokio::spawn(async move {
-            let verified = Self::verify_cache_offer_location(
+            let verification = Self::verify_cache_offer_location(
                 Arc::clone(&store),
                 readers,
+                shared_cache.clone(),
                 cache_root,
                 identity.clone(),
                 expected_manifest,
             )
             .await;
+            if verification.revoke_shared_member && identity.storage_class == "shared" {
+                if let Some(shared_cache) = shared_cache.as_ref() {
+                    shared_cache
+                        .report_io_failure("offer_integrity_failed")
+                        .await;
+                }
+            }
             let mut verdicts = verdicts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5746,7 +5881,7 @@ impl TranscodeManager {
                     hash,
                     CacheOfferVerdict::Ready {
                         identity,
-                        verified,
+                        verified: verification.verified,
                         observed_at: Instant::now(),
                     },
                 );
@@ -5759,66 +5894,277 @@ impl TranscodeManager {
     async fn verify_cache_offer_location(
         store: Arc<dyn Store>,
         readers: crate::cachekeep::ActiveCacheReaders,
+        shared_cache: Option<Arc<crate::shared_cache::SharedCacheCoordinator>>,
         cache_root: PathBuf,
         identity: CachedLocationIdentity,
         expected_manifest: String,
-    ) -> bool {
-        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
-            return false;
-        };
-        let Some(dir) =
-            crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
-        else {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "unsafe_relative_path",
-            )
-            .await;
-            return false;
-        };
-        let manifest = match crate::manifest_cache::load(
-            crate::manifest_cache::GenerationKey {
-                cache_root,
-                node_id: identity.node_id.clone(),
-                recipe_hash: identity.recipe_hash.clone(),
-                storage_class: identity.storage_class.clone(),
-                relative_dir: identity.relative_dir.clone(),
-                manifest_digest: expected_manifest,
-            },
-            &dir,
+    ) -> CacheOfferVerification {
+        if identity.storage_class == "shared" {
+            let Some(coordinator) = shared_cache else {
+                return CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                };
+            };
+            let task_store = Arc::clone(&store);
+            return coordinator
+                .run_mount_io("offer_verification_timeout", async move {
+                    Ok(Self::verify_cache_offer_location_inner(
+                        task_store,
+                        readers,
+                        cache_root,
+                        identity,
+                        expected_manifest,
+                    )
+                    .await)
+                })
+                .await
+                .unwrap_or(CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                });
+        }
+        Self::verify_cache_offer_location_inner(
+            store,
+            readers,
+            cache_root,
+            identity,
+            expected_manifest,
         )
         .await
-        {
-            Ok(manifest) => manifest,
-            Err(_) => {
+    }
+
+    async fn verify_cache_offer_location_inner(
+        store: Arc<dyn Store>,
+        readers: crate::cachekeep::ActiveCacheReaders,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+    ) -> CacheOfferVerification {
+        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
+            return CacheOfferVerification {
+                verified: false,
+                revoke_shared_member: false,
+            };
+        };
+        let shared_pin = if identity.storage_class == "shared" {
+            let Some(generation_id) = identity.generation_id.as_ref() else {
+                return CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                };
+            };
+            let now_ms = unix_ms();
+            let pin = CacheConsumerPin {
+                storage_id: identity.node_id.clone(),
+                recipe_hash: identity.recipe_hash.clone(),
+                generation_id: generation_id.clone(),
+                consumer_kind: CacheConsumerKind::MediaSession,
+                consumer_id: format!("offer-{}", uuid::Uuid::new_v4().simple()),
+                consumer_epoch: 1,
+                expires_at_ms: now_ms.saturating_add(SHARED_LOOKUP_PIN_MS),
+            };
+            match store.acquire_cache_consumer_pin(&pin, now_ms).await {
+                Ok(true) => Some(pin),
+                Ok(false) | Err(_) => {
+                    return CacheOfferVerification {
+                        verified: false,
+                        revoke_shared_member: false,
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        let verified = async {
+            let Some(dir) =
+                crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
+            else {
+                if identity.storage_class != "shared" {
+                    let _ = Self::invalidate_cache_location_with_store(
+                        store.as_ref(),
+                        &identity,
+                        "unsafe_relative_path",
+                    )
+                    .await;
+                }
+                return false;
+            };
+            let manifest = match crate::manifest_cache::load(
+                crate::manifest_cache::GenerationKey {
+                    cache_root,
+                    node_id: identity.node_id.clone(),
+                    recipe_hash: identity.recipe_hash.clone(),
+                    storage_class: identity.storage_class.clone(),
+                    relative_dir: identity.relative_dir.clone(),
+                    manifest_digest: expected_manifest,
+                },
+                &dir,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(_) => {
+                    if identity.storage_class != "shared" {
+                        let _ = Self::invalidate_cache_location_with_store(
+                            store.as_ref(),
+                            &identity,
+                            "manifest_invalid",
+                        )
+                        .await;
+                    }
+                    return false;
+                }
+            };
+            let playlist_valid = manifest
+                .read_verified_playlist(&dir, "index.m3u8")
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(validated_vod_part)
+                .is_some();
+            if !playlist_valid && identity.storage_class != "shared" {
                 let _ = Self::invalidate_cache_location_with_store(
                     store.as_ref(),
                     &identity,
-                    "manifest_invalid",
+                    "playlist_invalid_vod",
                 )
                 .await;
-                return false;
             }
-        };
-        let playlist_valid = manifest
-            .read_verified_playlist(&dir, "index.m3u8")
-            .await
-            .ok()
-            .flatten()
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(validated_vod_part)
-            .is_some();
-        if !playlist_valid {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "playlist_invalid_vod",
-            )
-            .await;
+            playlist_valid
         }
-        playlist_valid
+        .await;
+
+        if let Some(pin) = shared_pin.as_ref() {
+            let _ = store
+                .release_cache_consumer_pin(
+                    &pin.storage_id,
+                    &pin.recipe_hash,
+                    &pin.generation_id,
+                    pin.consumer_kind,
+                    &pin.consumer_id,
+                    pin.consumer_epoch,
+                )
+                .await;
+        };
+        CacheOfferVerification {
+            verified,
+            revoke_shared_member: !verified && shared_pin.is_some(),
+        }
+    }
+
+    async fn prepare_shared_cached_read(
+        store: Arc<dyn Store>,
+        coordinator: Arc<crate::shared_cache::SharedCacheCoordinator>,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+        consumer_id: String,
+    ) -> Result<PreparedSharedCacheRead, String> {
+        coordinator
+            .run_mount_io("shared_serve_read_timeout", async move {
+                let generation_id = identity
+                    .generation_id
+                    .as_ref()
+                    .ok_or_else(|| "shared cache generation identity is missing".to_owned())?;
+                let now_ms = unix_ms();
+                let pin = CacheConsumerPin {
+                    storage_id: identity.node_id.clone(),
+                    recipe_hash: identity.recipe_hash.clone(),
+                    generation_id: generation_id.clone(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id,
+                    consumer_epoch: 1,
+                    expires_at_ms: now_ms.saturating_add(SHARED_LOOKUP_PIN_MS),
+                };
+                if !store
+                    .acquire_cache_consumer_pin(&pin, now_ms)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(
+                        "shared cache generation retired before it could be pinned".to_owned()
+                    );
+                }
+                // This random session-id pin is only the lookup-to-activation
+                // bridge. The activated route acquires its durable
+                // incarnation/epoch pin separately. Always retire the bridge
+                // at its hard lifetime even when activation succeeds or its
+                // caller is cancelled; otherwise a permanently hot generation
+                // accumulates one expired durable row per playback forever.
+                let cleanup_store = Arc::clone(&store);
+                let cleanup_pin = pin.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(
+                        u64::try_from(SHARED_LOOKUP_PIN_MS).unwrap_or(u64::MAX),
+                    ))
+                    .await;
+                    let _ = cleanup_store
+                        .release_cache_consumer_pin(
+                            &cleanup_pin.storage_id,
+                            &cleanup_pin.recipe_hash,
+                            &cleanup_pin.generation_id,
+                            cleanup_pin.consumer_kind,
+                            &cleanup_pin.consumer_id,
+                            cleanup_pin.consumer_epoch,
+                        )
+                        .await;
+                });
+                let prepared = async {
+                    let dir =
+                        crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir)
+                            .await
+                            .ok_or_else(|| "shared cache generation path is unsafe".to_owned())?;
+                    tokio::fs::metadata(dir.join("index.m3u8"))
+                        .await
+                        .map_err(|error| {
+                            format!("shared cache playlist is unavailable: {error}")
+                        })?;
+                    let manifest = crate::manifest_cache::load(
+                        crate::manifest_cache::GenerationKey {
+                            cache_root,
+                            node_id: identity.node_id.clone(),
+                            recipe_hash: identity.recipe_hash.clone(),
+                            storage_class: identity.storage_class.clone(),
+                            relative_dir: identity.relative_dir.clone(),
+                            manifest_digest: expected_manifest,
+                        },
+                        &dir,
+                    )
+                    .await?;
+                    let playlist_valid = manifest
+                        .read_verified_playlist(&dir, "index.m3u8")
+                        .await
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .and_then(validated_vod_part)
+                        .is_some();
+                    if !playlist_valid {
+                        return Err("shared cache playlist failed integrity validation".to_owned());
+                    }
+                    Ok(PreparedSharedCacheRead { dir, manifest })
+                }
+                .await;
+                if prepared.is_err() {
+                    let _ = store
+                        .release_cache_consumer_pin(
+                            &pin.storage_id,
+                            &pin.recipe_hash,
+                            &pin.generation_id,
+                            pin.consumer_kind,
+                            &pin.consumer_id,
+                            pin.consumer_epoch,
+                        )
+                        .await;
+                }
+                prepared
+            })
+            .await
     }
 
     /// Serve a finished transcode, if this exact one has already been made.
@@ -5842,127 +6188,189 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-
-        // Claim deletion safety before looking at either the row or the
-        // filesystem. A miss is not active playback; upgrade this generic
-        // guard only after the complete generation has been validated.
-        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
-            tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
-            return None;
-        };
-
-        let hit = match self.store.cache_hit(&hash, &cache.node_id).await {
-            Ok(Some(hit)) => hit,
-            other => {
-                // The name is logged on a miss because "why is this not
-                // hitting?" is otherwise unanswerable from outside: the hash
-                // is a pure function of a dozen inputs, and a producer and a
-                // player disagreeing about any one of them looks identical to
-                // an empty cache. With the name in both logs the disagreement
-                // is one `grep` rather than a bisect.
-                if let Err(e) = other {
-                    tracing::warn!(recipe = %hash, error = %e, "cache lookup failed");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (mut cache_location, mut cache_root) =
+            match self.cache_read_location(&hash, cache).await {
+                Ok(Some(hit)) => hit,
+                other => {
+                    // The name is logged on a miss because "why is this not
+                    // hitting?" is otherwise unanswerable from outside: the hash
+                    // is a pure function of a dozen inputs, and a producer and a
+                    // player disagreeing about any one of them looks identical to
+                    // an empty cache. With the name in both logs the disagreement
+                    // is one `grep` rather than a bisect.
+                    if let Err(e) = other {
+                        tracing::warn!(recipe = %hash, error = %e, "cache lookup failed");
+                    }
+                    tracing::debug!(recipe = %hash, file = file.id, "transcode cache miss");
+                    return None;
                 }
-                tracing::debug!(recipe = %hash, file = file.id, "transcode cache miss");
-                return None;
+            };
+        let mut prepared_shared = None;
+        if cache_location.storage_class == "shared" {
+            let prepared = match (
+                self.shared_cache.as_ref(),
+                cache_location.manifest_digest.clone(),
+            ) {
+                (Some(coordinator), Some(expected_manifest)) => {
+                    Self::prepare_shared_cached_read(
+                        Arc::clone(&self.store),
+                        Arc::clone(coordinator),
+                        cache_root.clone(),
+                        cache_location.clone(),
+                        expected_manifest,
+                        session_id.clone(),
+                    )
+                    .await
+                }
+                _ => Err("shared cache generation has no admitted manifest".to_owned()),
+            };
+            match prepared {
+                Ok(prepared) => prepared_shared = Some(prepared),
+                Err(error) => {
+                    if let Some(shared_cache) = self.shared_cache.as_ref() {
+                        shared_cache
+                            .report_io_failure("shared_serve_preflight_failed")
+                            .await;
+                    }
+                    tracing::warn!(recipe = %hash, %error, "shared cache read failed; trying node-local cache");
+                    let local = match self.local_cache_read_location(&hash, cache).await {
+                        Ok(Some(local)) => local,
+                        Ok(None) => return None,
+                        Err(error) => {
+                            tracing::warn!(recipe = %hash, %error, "local cache fallback lookup failed");
+                            return None;
+                        }
+                    };
+                    (cache_location, cache_root) = local;
+                }
             }
-        };
-        let cache_location = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
-        };
-        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
-        else {
-            self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
-                .await;
-            return None;
-        };
-        // The row says the bytes are there; the disk is what actually has to
-        // have them. A cache root on a mount that did not come back after a
-        // reboot would otherwise serve a playlist for an empty directory —
-        // the row survives what the filesystem does not.
-        if tokio::fs::metadata(dir.join("index.m3u8")).await.is_err() {
-            tracing::warn!(
-                recipe = %hash, dir = %dir.display(),
-                "cache row points at a directory with no playlist — treating as a miss"
-            );
-            self.invalidate_cache_location(&cache_location, "playlist_missing")
-                .await;
-            return None;
         }
-        let cache_manifest = if let Some(expected) = hit.manifest_digest.as_deref() {
-            let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
-            if tokio::fs::metadata(&manifest_path).await.is_err() {
+        // Local deletion safety is process-local. Shared generations instead
+        // need a durable exact-generation pin before the first filesystem
+        // read, otherwise GC can retire the row between lookup and owner
+        // publication. The short lookup pin bridges to the durable media
+        // session pin installed before the route is exposed.
+        let cache_lookup = if cache_location.storage_class == "shared" {
+            prepared_shared.as_ref()?;
+            None
+        } else {
+            let Some(guard) = self.cache_readers.begin_lookup(&hash) else {
+                tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
+                return None;
+            };
+            Some(guard)
+        };
+        let (dir, cache_manifest) = if let Some(prepared) = prepared_shared.take() {
+            (prepared.dir, Some(prepared.manifest))
+        } else {
+            let Some(dir) =
+                crate::cachekeep::validated_entry_dir(&cache_root, &cache_location.relative_dir)
+                    .await
+            else {
+                self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
+                    .await;
+                return None;
+            };
+            // The row says the bytes are there; the disk is what actually has
+            // to have them. A cache root on a mount that did not come back
+            // after a reboot would otherwise serve a playlist for an empty
+            // directory — the row survives what the filesystem does not.
+            if tokio::fs::metadata(dir.join("index.m3u8")).await.is_err() {
                 tracing::warn!(
                     recipe = %hash,
                     dir = %dir.display(),
-                    "cache location has a fenced manifest digest but no manifest — treating as a miss"
+                    "cache row points at a directory with no playlist — treating as a miss"
                 );
-                self.invalidate_cache_location(&cache_location, "manifest_missing")
+                self.invalidate_cache_location(&cache_location, "playlist_missing")
                     .await;
                 return None;
             }
-            match crate::manifest_cache::load(
-                crate::manifest_cache::GenerationKey {
-                    cache_root: cache.dir.clone(),
-                    node_id: cache.node_id.clone(),
-                    recipe_hash: hash.clone(),
-                    storage_class: hit.storage_class.clone(),
-                    relative_dir: hit.relative_dir.clone(),
-                    manifest_digest: expected.to_owned(),
-                },
-                &dir,
-            )
-            .await
-            {
-                Ok(manifest) => Some(manifest),
-                Err(error) => {
+            let cache_manifest = if let Some(expected) = cache_location.manifest_digest.as_deref() {
+                let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+                if tokio::fs::metadata(&manifest_path).await.is_err() {
                     tracing::warn!(
                         recipe = %hash,
                         dir = %dir.display(),
-                        %error,
-                        "cache generation manifest is invalid — treating as a miss"
+                        "cache location has a fenced manifest digest but no manifest — treating as a miss"
                     );
-                    self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                    self.invalidate_cache_location(&cache_location, "manifest_missing")
                         .await;
                     return None;
                 }
+                match crate::manifest_cache::load(
+                    crate::manifest_cache::GenerationKey {
+                        cache_root: cache_root.clone(),
+                        node_id: cache_location.node_id.clone(),
+                        recipe_hash: hash.clone(),
+                        storage_class: cache_location.storage_class.clone(),
+                        relative_dir: cache_location.relative_dir.clone(),
+                        manifest_digest: expected.to_owned(),
+                    },
+                    &dir,
+                )
+                .await
+                {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        tracing::warn!(
+                            recipe = %hash,
+                            dir = %dir.display(),
+                            %error,
+                            "cache generation manifest is invalid — treating as a miss"
+                        );
+                        self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                            .await;
+                        return None;
+                    }
+                }
+            } else {
+                // Legacy rows predate fenced manifests. A stray manifest may
+                // be a losing queue adoption, so bounded legacy reads remain
+                // the only authority until a fenced completion installs its
+                // digest.
+                None
+            };
+            let playlist_bytes = match &cache_manifest {
+                Some(manifest) => manifest
+                    .read_verified_playlist(&dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten(),
+                None => plurx_core::transcode::manifest::read_bounded_playlist(&dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            let playlist_valid = playlist_bytes
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(validated_vod_part)
+                .is_some();
+            if !playlist_valid {
+                self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
+                    .await;
+                return None;
             }
-        } else {
-            // Legacy rows predate fenced manifests. A stray manifest may be a
-            // losing queue adoption, so bounded legacy reads remain the only
-            // authority until a fenced completion installs its digest.
+            (dir, cache_manifest)
+        };
+        let cache_reader = if cache_location.storage_class == "shared" {
             None
+        } else {
+            Some(self.cache_readers.begin_playback(&hash)?)
         };
-        let playlist_bytes = match &cache_manifest {
-            Some(manifest) => manifest
-                .read_verified_playlist(&dir, "index.m3u8")
-                .await
-                .ok()
-                .flatten(),
-            None => plurx_core::transcode::manifest::read_bounded_playlist(&dir, "index.m3u8")
-                .await
-                .ok()
-                .flatten(),
-        };
-        let playlist_valid = playlist_bytes
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(validated_vod_part)
-            .is_some();
-        if !playlist_valid {
-            self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
-                .await;
-            return None;
-        }
-        let cache_reader = self.cache_readers.begin_playback(&hash)?;
         drop(cache_lookup);
-        let _ = self.store.touch_cache_entry(&hash, &cache.node_id).await;
-
-        let session_id = uuid::Uuid::new_v4().to_string();
+        if let Some(generation_id) = cache_location.generation_id.as_deref() {
+            let _ = self
+                .store
+                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
+                .await;
+        } else {
+            let _ = self
+                .store
+                .touch_cache_entry(&hash, &cache_location.node_id)
+                .await;
+        }
         let session = Arc::new(Session {
             dir,
             child: Mutex::new(None),
@@ -5981,7 +6389,7 @@ impl TranscodeManager {
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
-            _cache_reader: Some(cache_reader),
+            _cache_reader: cache_reader,
             subtitle_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
@@ -6437,6 +6845,7 @@ impl TranscodeManager {
                 recipe_hash: hash.clone(),
                 node_id: cache.node_id.clone(),
                 storage_class: cached.storage_class.clone(),
+                generation_id: None,
                 relative_dir: cached.relative_dir.clone(),
                 manifest_digest: cached.manifest_digest.clone(),
             };
@@ -6916,6 +7325,27 @@ impl TranscodeManager {
                 .complete_cache_entry(&hash, &cache.node_id, published.bytes)
                 .await
                 .map_err(|error| error.to_string())?;
+        }
+        if let (Some(shared_cache), Some(manifest)) =
+            (self.shared_cache.as_ref(), manifest.as_ref())
+        {
+            match shared_cache
+                .publish_generation(&hash, file.id, CACHE_RECIPE_VERSION, &final_dir, manifest)
+                .await
+            {
+                Ok(true) => tracing::info!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    "portable transcode published to the shared cache"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    %error,
+                    "shared cache publication failed; the node-local generation remains ready"
+                ),
+            }
         }
         drop(publication_guard);
         let _ = quarantine_remove_cache_tree(&temp, 3).await;
@@ -9948,11 +10378,35 @@ impl TranscodeManager {
                 return Err(session.failure_reason());
             }
             let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
-                manifest
-                    .read_verified_playlist(&session.dir, "index.m3u8")
-                    .await
-                    .ok()
-                    .flatten()
+                if session
+                    .cache_location
+                    .as_ref()
+                    .is_some_and(|location| location.storage_class == "shared")
+                {
+                    let Some(shared_cache) = self.shared_cache.as_ref() else {
+                        return Err(PlaylistError::SessionFailed(
+                            "shared cache coordinator is unavailable".to_owned(),
+                        ));
+                    };
+                    let manifest = Arc::clone(manifest);
+                    let directory = session.dir.clone();
+                    shared_cache
+                        .run_mount_io("shared_playlist_read_timeout", async move {
+                            manifest
+                                .read_verified_playlist(&directory, "index.m3u8")
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    manifest
+                        .read_verified_playlist(&session.dir, "index.m3u8")
+                        .await
+                        .ok()
+                        .flatten()
+                }
             } else {
                 plurx_core::transcode::manifest::read_bounded_playlist(&session.dir, "index.m3u8")
                     .await
@@ -10166,7 +10620,30 @@ impl TranscodeManager {
             if !manifest.contains_object(name) {
                 return Ok(None);
             }
-            match manifest.open_verified_object(&session.dir, name).await {
+            let verified_object = if session
+                .cache_location
+                .as_ref()
+                .is_some_and(|location| location.storage_class == "shared")
+            {
+                let Some(shared_cache) = self.shared_cache.as_ref() else {
+                    return Err(SegmentOpenError::Capacity);
+                };
+                let manifest = Arc::clone(manifest);
+                let directory = session.dir.clone();
+                let name = name.to_owned();
+                match shared_cache
+                    .run_mount_io("shared_segment_read_timeout", async move {
+                        Ok(manifest.open_verified_object(&directory, &name).await)
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => return Err(SegmentOpenError::Capacity),
+                }
+            } else {
+                manifest.open_verified_object(&session.dir, name).await
+            };
+            match verified_object {
                 Ok(Some(opened)) => Some(opened),
                 Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {

@@ -228,10 +228,80 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "offline.rs",
+        method: "invalidate_ready_offline_package",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
         method: "put_offline_lease",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
+        method: "mark_offline_package_ready",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
+        method: "delete_offline_package",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "offline.rs",
+        method: "expire_offline_packages",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "claim_shared_cache_entry",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "complete_shared_cache_entry",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "finalize_abandoned_shared_cache_entry",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "renew_cache_consumer_pins",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "retire_shared_cache_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "finalize_retired_shared_cache_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
     },
     SqliteTransactionSite {
         module: "offline.rs",
@@ -428,6 +498,7 @@ mod tests {
         ("publication.rs", include_str!("sqlite/publication.rs")),
         ("reading.rs", include_str!("sqlite/reading.rs")),
         ("sessions.rs", include_str!("sqlite/sessions.rs")),
+        ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
         ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
         ("trakt.rs", include_str!("sqlite/trakt.rs")),
         ("users.rs", include_str!("sqlite/users.rs")),
@@ -532,7 +603,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 23);
+        assert_eq!(methods.len(), 33);
     }
 
     #[test]
