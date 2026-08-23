@@ -58,8 +58,9 @@ mod web;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{Request, StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
@@ -251,7 +252,11 @@ pub fn router(state: AppState) -> Router {
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
         // Images
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     // Plex-compat Tier 1 façade at Plex's absolute paths (docs/CLIENTS.md §3).
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
@@ -272,7 +277,11 @@ pub fn router(state: AppState) -> Router {
         .route("/:/scrobble", get(plex::scrobble))
         .route("/:/unscrobble", get(plex::unscrobble))
         .route("/search", get(plex::search))
-        .route("/hubs/search", get(plex::search));
+        .route("/hubs/search", get(plex::search))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
@@ -382,6 +391,20 @@ async fn healthz() -> &'static str {
 
 /// Readiness: this node can do work (storage answers).
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(policy) = state.serving.http_policy("/readyz") {
+        if policy.status != 200 {
+            return (
+                StatusCode::from_u16(policy.status).expect("serving policy status"),
+                policy.body,
+            );
+        }
+    }
+    // A fresh quorum watermark is already a recent replicated-store proof.
+    // Do not turn readiness into another multi-second Store request exactly
+    // when an isolated node needs to self-fence promptly.
+    if state.serving.is_quorum_managed() {
+        return (StatusCode::OK, "ready\n");
+    }
     match state.store.ping().await {
         Ok(()) => (StatusCode::OK, "ready\n"),
         Err(error) => {
@@ -389,6 +412,29 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n")
         }
     }
+}
+
+async fn mutable_media_serving_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+        return next.run(request).await;
+    };
+
+    let mut response = (
+        StatusCode::from_u16(policy.status).expect("serving policy status"),
+        [(header::CONTENT_TYPE, policy.content_type)],
+        policy.body,
+    )
+        .into_response();
+    if policy.retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 #[cfg(test)]
@@ -498,6 +544,58 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(false);
+
+        let (status, body) = call_text(&app, get("/healthz", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ok\n");
+
+        let (status, body) = call_text(&app, get("/readyz", None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "quorum unavailable\n");
+
+        for path in [
+            "/api/v1/hls/probe/status",
+            "/api/v1/files/7/decision",
+            "/api/v1/files/7/offline-options",
+            "/api/v1/files/7/stream.mp4",
+            "/api/v1/files/7/direct",
+            "/api/v1/files/7/content",
+            "/api/v1/offline/media/capability/0.ts",
+            "/api/v1/publication/capability/chapter.xhtml",
+            "/api/v1/files/7/subs/0",
+            "/api/v1/images/poster.jpg",
+            "/api/v1/items/7/photo",
+            "/library/parts/7/0/movie.mkv",
+            "/library/metadata/7/thumb",
+            "/photo/:/transcode",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("fenced response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&HeaderValue::from_static("1")),
+                "{path}"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let body: Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], "serving_fenced", "{path}");
+            assert!(body.get("retry_nodes").is_none(), "{path}");
+        }
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {

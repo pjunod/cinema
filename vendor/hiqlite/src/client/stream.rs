@@ -60,10 +60,65 @@ pub(crate) enum ClientStreamReq {
 
     // coming from the WebSocket reader
     StreamResponse(ApiStreamResponse),
+    StreamClosed,
     CleanupBuffer,
 
     // may come from `DbClient` or WebSocket reader
     LeaderChange((Option<u64>, Option<Node>)),
+    /// Advance only within the caller-configured proxy pool. The stream
+    /// manager acknowledges after closing the old stream and failing every
+    /// in-flight request without replay.
+    RotateProxy(oneshot::Sender<()>),
+}
+
+impl ClientStreamReq {
+    fn fail_on_shutdown(self) {
+        let error = || Error::Connect("client stream manager stopped".into());
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Execute(payload) | Self::ExecuteReturning(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "sqlite")]
+            Self::Transaction(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "sqlite")]
+            Self::Query(payload) | Self::QueryConsistent(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "sqlite")]
+            Self::Batch(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "sqlite")]
+            Self::Migrate(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "backup")]
+            Self::Backup(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "cache")]
+            Self::KV(payload) | Self::KVGet(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "dlock")]
+            Self::LockAwait(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            #[cfg(feature = "listen_notify_local")]
+            Self::Notify(payload) => {
+                let _ = payload.ack.send(Err(error()));
+            }
+            Self::Shutdown
+            | Self::StreamResponse(_)
+            | Self::StreamClosed
+            | Self::CleanupBuffer
+            | Self::LeaderChange(_)
+            | Self::RotateProxy(_) => {}
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -137,13 +192,19 @@ impl Client {
         rx_client_stream: flume::Receiver<ClientStreamReq>,
         raft_type: RaftType,
     ) {
-        task::spawn(Box::pin(client_stream(
+        let handle = task::spawn(Box::pin(client_stream(
             self.clone(),
             secret,
             leader,
             rx_client_stream,
             raft_type,
+            self.inner.stream_shutdown.subscribe(),
         )));
+        self.inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
     }
 }
 
@@ -155,6 +216,7 @@ async fn client_stream(
     leader: Arc<RwLock<(NodeId, String)>>,
     rx_req: flume::Receiver<ClientStreamReq>,
     raft_type: RaftType,
+    mut stream_shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut in_flight: HashMap<usize, oneshot::Sender<Result<ApiStreamResponsePayload, Error>>> =
         HashMap::with_capacity(8);
@@ -164,16 +226,25 @@ async fn client_stream(
     > = HashMap::new();
 
     let mut shutdown = false;
+    // DB and cache managers each own their cursor. An index, rather than an
+    // address lookup, keeps duplicate configured endpoints from pinning a
+    // stream forever.
+    let mut proxy_index = 0;
 
     loop {
-        let ws = match try_connect(
-            &leader,
-            &raft_type,
-            client.inner.tls_config.clone(),
-            &secret,
-        )
-        .await
-        {
+        let connection = select! {
+            _ = stream_shutdown.changed() => {
+                fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
+                return;
+            }
+            connection = try_connect(
+                &leader,
+                &raft_type,
+                client.inner.tls_config.clone(),
+                &secret,
+            ) => connection,
+        };
+        let ws = match connection {
             Ok(ws) => {
                 info!(
                     "Client API WebSocket to {} opened successfully",
@@ -182,12 +253,35 @@ async fn client_stream(
                 ws
             }
             Err(err) => {
-                if let Error::Connect(_) = &err {
-                    // TODO keep track if we are connected through a proxy and skip ?
-                    client.find_set_active_leader().await;
+                if client.inner.proxy_mode {
+                    // No request was dispatched, so every handshake/TLS/API
+                    // error is safe to recover at the next configured proxy.
+                    rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
+                } else if let Error::Connect(_) = &err {
+                    select! {
+                        _ = stream_shutdown.changed() => {
+                            fail_client_stream_shutdown(
+                                &mut in_flight,
+                                &mut in_flight_buf,
+                                &rx_req,
+                            );
+                            return;
+                        }
+                        () = client.find_set_active_leader() => {}
+                    }
                 }
 
-                time::sleep(Duration::from_millis(1000)).await;
+                select! {
+                    _ = stream_shutdown.changed() => {
+                        fail_client_stream_shutdown(
+                            &mut in_flight,
+                            &mut in_flight_buf,
+                            &rx_req,
+                        );
+                        return;
+                    }
+                    () = time::sleep(Duration::from_millis(1000)) => {}
+                }
                 error!(
                     "Could not connect Client API WebSocket to {}: {}",
                     leader.read().await.1,
@@ -210,19 +304,30 @@ async fn client_stream(
 
         let handle_buf = cleanup_buffer_timeout(tx_read, 10);
         let mut awaiting_timeout = true;
+        let mut rotate_after_disconnect = false;
 
         loop {
             let res = select! {
-                res = rx_read.recv_async() => res,
-                res = rx_req.recv_async() => res,
+                _ = stream_shutdown.changed() => {
+                    shutdown = true;
+                    None
+                }
+                res = rx_read.recv_async() => Some(res),
+                res = rx_req.recv_async() => Some(res),
+            };
+            let Some(res) = res else {
+                let _ = tx_write.try_send(WritePayload::Close);
+                break;
             };
             let req = match res {
                 Ok(req) => req,
                 Err(err) => {
                     error!("Client stream reader error: {}", err,);
                     if rx_req.is_disconnected() {
-                        let _ = tx_write.send_async(WritePayload::Close).await;
+                        let _ = tx_write.try_send(WritePayload::Close);
                         shutdown = true;
+                    } else if client.inner.proxy_mode {
+                        rotate_after_disconnect = true;
                     }
                     break;
                 }
@@ -436,7 +541,7 @@ async fn client_stream(
 
                 ClientStreamReq::LeaderChange((node_id, node)) => {
                     // ignore result just in case the writer has already exited anyway
-                    let _ = tx_write.send_async(WritePayload::Close).await;
+                    let _ = tx_write.try_send(WritePayload::Close);
 
                     // If we don't receive a value here, we expect the lock to
                     // have been updated already somewhere else
@@ -452,6 +557,24 @@ async fn client_stream(
                     break;
                 }
 
+                ClientStreamReq::RotateProxy(ack) => {
+                    // ForwardToLeader proves the triggering request was not
+                    // accepted. This stream task owns its DB/cache cursor:
+                    // close the old connection, fail other in-flight work
+                    // without replay, then advance inside the configured pool.
+                    // Closing is best effort: acknowledgement and rotation
+                    // must not queue behind a writer blocked on the old link.
+                    let _ = tx_write.try_send(WritePayload::Close);
+                    for (_, request_ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+                        let _ = request_ack.send(Err(Error::LeaderChange(
+                            "Action not allowed, proxy endpoint has changed".into(),
+                        )));
+                    }
+                    rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
+                    let _ = ack.send(());
+                    break;
+                }
+
                 ClientStreamReq::StreamResponse(resp) => {
                     try_forward_response(
                         &mut in_flight,
@@ -461,6 +584,11 @@ async fn client_stream(
                     )
                     .await;
                     None
+                }
+
+                ClientStreamReq::StreamClosed => {
+                    rotate_after_disconnect = client.inner.proxy_mode;
+                    break;
                 }
 
                 ClientStreamReq::CleanupBuffer => {
@@ -479,7 +607,18 @@ async fn client_stream(
             };
 
             if let Some((payload, request_id, ack)) = payload {
-                match tx_write.send_async(payload).await {
+                let write_result = select! {
+                    _ = stream_shutdown.changed() => {
+                        shutdown = true;
+                        None
+                    }
+                    result = tx_write.send_async(payload) => Some(result),
+                };
+                let Some(write_result) = write_result else {
+                    let _ = ack.send(Err(Error::Connect("client stream manager stopped".into())));
+                    break;
+                };
+                match write_result {
                     Ok(_) => {
                         in_flight.insert(request_id, ack);
                     }
@@ -487,6 +626,7 @@ async fn client_stream(
                         error!("Error sending txn request to writer: {}", err);
                         let _ =
                             ack.send(Err(Error::Connect("Connection to Raft leader lost".into())));
+                        rotate_after_disconnect = client.inner.proxy_mode;
                         break;
                     }
                 }
@@ -566,8 +706,14 @@ async fn client_stream(
                 ClientStreamReq::LeaderChange((node_id, node)) => {
                     update_leader(&leader, node_id, node).await;
                 }
+                ClientStreamReq::RotateProxy(_) => {
+                    unreachable!("we should never receive RotateProxy from WS reader")
+                }
                 ClientStreamReq::StreamResponse(resp) => {
                     try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
+                }
+                ClientStreamReq::StreamClosed => {
+                    // The outer manager already owns reconnect policy.
                 }
                 ClientStreamReq::CleanupBuffer => {
                     // ignore - we are re-connecting anyway
@@ -576,16 +722,39 @@ async fn client_stream(
         }
 
         if shutdown {
+            fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
             debug!("Shutting down Client stream receiver");
             break;
         }
 
-        for (req_id, ack) in in_flight.drain() {
-            in_flight_buf.insert(req_id, ack);
+        if rotate_after_disconnect {
+            for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+                let _ = ack.send(Err(Error::Connect(
+                    "Connection to proxy endpoint lost".into(),
+                )));
+            }
+            rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
+        } else {
+            for (req_id, ack) in in_flight.drain() {
+                in_flight_buf.insert(req_id, ack);
+            }
         }
         assert!(in_flight.is_empty());
 
         debug!("client stream tasks killed - re-connecting now");
+    }
+}
+
+fn fail_client_stream_shutdown(
+    in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    rx_req: &flume::Receiver<ClientStreamReq>,
+) {
+    for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+        let _ = ack.send(Err(Error::Connect("client stream manager stopped".into())));
+    }
+    while let Ok(request) = rx_req.try_recv() {
+        request.fail_on_shutdown();
     }
 }
 
@@ -648,6 +817,29 @@ async fn update_leader(
     }
 }
 
+fn next_configured_proxy(nodes: &[String], proxy_index: &mut usize) -> Option<String> {
+    if nodes.is_empty() {
+        return None;
+    }
+    *proxy_index = (*proxy_index + 1) % nodes.len();
+    Some(nodes[*proxy_index].clone())
+}
+
+async fn rotate_proxy_endpoint(
+    client: &Client,
+    leader: &Arc<RwLock<(NodeId, String)>>,
+    proxy_index: &mut usize,
+) {
+    debug_assert!(client.inner.proxy_mode);
+    let mut lock = leader.write().await;
+    if let Some(endpoint) = next_configured_proxy(&client.inner.nodes, proxy_index) {
+        // Preserve this stream's synthetic/current id and replace only the
+        // address with a member of the original configured trust boundary.
+        let node_id = lock.0;
+        *lock = (node_id, endpoint);
+    }
+}
+
 fn cleanup_buffer_timeout(tx: flume::Sender<ClientStreamReq>, seconds: u64) -> JoinHandle<()> {
     task::spawn(async move {
         time::sleep(Duration::from_secs(seconds)).await;
@@ -690,6 +882,7 @@ async fn stream_reader(
         }
     }
 
+    let _ = tx.send_async(ClientStreamReq::StreamClosed).await;
     debug!("Exiting Client Stream Reader");
 }
 
@@ -728,4 +921,54 @@ async fn try_connect(
         (lock.0, lock.1.clone())
     };
     web_socket_connect::try_connect(node_id, &addr, raft_type, tls_config, secret).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_failover_cycles_only_through_configured_endpoints() {
+        let nodes = vec![
+            "proxy-a".to_owned(),
+            "proxy-b".to_owned(),
+            "proxy-c".to_owned(),
+        ];
+        let mut proxy_index = 0;
+        assert_eq!(
+            next_configured_proxy(&nodes, &mut proxy_index).as_deref(),
+            Some("proxy-b")
+        );
+        assert_eq!(
+            next_configured_proxy(&nodes, &mut proxy_index).as_deref(),
+            Some("proxy-c")
+        );
+        assert_eq!(
+            next_configured_proxy(&nodes, &mut proxy_index).as_deref(),
+            Some("proxy-a")
+        );
+
+        let duplicates = vec![
+            "proxy-a".to_owned(),
+            "proxy-a".to_owned(),
+            "proxy-b".to_owned(),
+        ];
+        let mut duplicate_index = 0;
+        assert_eq!(
+            next_configured_proxy(&duplicates, &mut duplicate_index).as_deref(),
+            Some("proxy-a")
+        );
+        assert_eq!(
+            next_configured_proxy(&duplicates, &mut duplicate_index).as_deref(),
+            Some("proxy-b")
+        );
+
+        let mut singleton_index = 0;
+        assert_eq!(
+            next_configured_proxy(&["only-proxy".to_owned()], &mut singleton_index).as_deref(),
+            Some("only-proxy")
+        );
+        let mut empty_index = 0;
+        assert_eq!(next_configured_proxy(&[], &mut empty_index), None);
+    }
 }

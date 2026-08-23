@@ -2629,6 +2629,7 @@ mod tests {
             errors: 3,
             leader_changes: 4,
             watermark_source: true,
+            watermark_requires_local_binding: true,
             watermark: Some(QuorumWatermarkSample {
                 committed_index: 45,
                 apply_lag_entries: Some(3),
@@ -2695,6 +2696,7 @@ mod tests {
                 errors: 0,
                 leader_changes: 0,
                 watermark_source: true,
+                watermark_requires_local_binding: true,
                 watermark: None,
                 watermark_age_millis: None,
                 watermark_valid: false,
@@ -2714,6 +2716,7 @@ mod tests {
             errors: 0,
             leader_changes: 0,
             watermark_source: false,
+            watermark_requires_local_binding: false,
             watermark: None,
             watermark_age_millis: None,
             watermark_valid: false,

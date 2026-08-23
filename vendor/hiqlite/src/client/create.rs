@@ -20,8 +20,9 @@ impl Client {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_local(
         state: Arc<AppState>,
+        nodes: Vec<String>,
         tls_config: Option<Arc<rustls::ClientConfig>>,
-        #[cfg(feature = "cache")] tls_no_verify: bool,
+        tls_no_verify: bool,
         #[cfg(feature = "sqlite")] tx_client_db: flume::Sender<ClientStreamReq>,
         #[cfg(feature = "sqlite")] rx_client_db: flume::Receiver<ClientStreamReq>,
         tx_shutdown: watch::Sender<bool>,
@@ -32,6 +33,7 @@ impl Client {
         let leader_addr = state.addr_api.clone();
 
         let secret = state.secret_api.as_bytes().to_vec();
+        let api_secret = state.secret_api.clone();
 
         #[cfg(feature = "cache")]
         let leader_cache = Arc::new(RwLock::new((leader_id, leader_addr.clone())));
@@ -53,9 +55,11 @@ impl Client {
             leader_cache,
             #[cfg(feature = "sqlite")]
             leader_db,
-            // TODO do we even still need this for a local client? -> all raft messages should use internal API ?
-            nodes: Vec::default(),
-            client: None,
+            // Retain the authenticated roster for bounded recovery from a
+            // resumed follower whose local metrics do not know the leader yet.
+            nodes,
+            proxy_mode: false,
+            client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
             #[cfg(feature = "sqlite")]
@@ -63,9 +67,11 @@ impl Client {
             tls_config,
             #[cfg(feature = "cache")]
             tls_no_verify,
-            api_secret: None,
+            api_secret: Some(api_secret),
             request_id: AtomicUsize::new(0),
             tx_shutdown: Some(tx_shutdown),
+            stream_shutdown: watch::channel(false).0,
+            background_handles: std::sync::Mutex::new(Vec::new()),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]
@@ -122,7 +128,9 @@ impl Client {
     /// **Note:**
     /// If your client will be unable to reach all nodes, you can run the Hiqlite Server in proxy
     /// mode like mentioned in the [README](https://github.com/sebadob/hiqlite/blob/main/README.md).
-    /// In this case, only provide the proxy's IP in the `nodes: Vec<String>`.
+    /// In this case, only provide proxy addresses in `nodes` and set `with_proxy` to `true`.
+    /// Those endpoints remain authoritative across reconnects; advertised voter addresses are
+    /// never used as a fallback.
     #[allow(clippy::too_many_arguments)]
     pub async fn remote(
         nodes: Vec<String>,
@@ -159,12 +167,21 @@ impl Client {
         #[cfg(feature = "cache")]
         let (tx_client_cache, rx_client_cache) = flume::bounded(1);
 
+        let stream_shutdown = watch::channel(false).0;
+        #[allow(unused_mut)]
+        let mut background_handles = Vec::new();
+
         #[cfg(feature = "listen_notify")]
-        let rx_notify = Some(RemoteListener::spawn(
-            leader_cache.clone(),
-            tls,
-            api_secret.clone(),
-        ));
+        let rx_notify = {
+            let (receiver, handle) = RemoteListener::spawn(
+                leader_cache.clone(),
+                tls,
+                api_secret.clone(),
+                stream_shutdown.subscribe(),
+            );
+            background_handles.push(handle);
+            Some(receiver)
+        };
 
         #[cfg(all(feature = "listen_notify_local", not(feature = "listen_notify")))]
         let rx_notify = None;
@@ -184,6 +201,7 @@ impl Client {
             #[cfg(feature = "cache")]
             leader_cache,
             nodes,
+            proxy_mode: with_proxy,
             client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
@@ -195,6 +213,8 @@ impl Client {
             api_secret: Some(api_secret),
             request_id: AtomicUsize::new(0),
             tx_shutdown: None,
+            stream_shutdown,
+            background_handles: std::sync::Mutex::new(background_handles),
             #[cfg(feature = "listen_notify_local")]
             app_start: chrono::Utc::now().timestamp_micros(),
             #[cfg(feature = "listen_notify_local")]
@@ -213,8 +233,8 @@ impl Client {
             inner: Arc::new(db_client),
         };
 
-        // It should be enough to check for DB proxy here. When running, the forward to leader
-        // errors should never be forwarded through the proxy.
+        // Proxy endpoints remain authoritative for this client's whole life;
+        // reconnect and ForwardToLeader handling preserve the same boundary.
         if !with_proxy {
             slf.find_set_active_leader().await;
         }

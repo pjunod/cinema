@@ -14,13 +14,19 @@ impl Client {
         cache_await: crossbeam::channel::Receiver<oneshot::Sender<Result<(), Error>>>,
         db_await: crossbeam::channel::Receiver<oneshot::Sender<Result<(), Error>>>,
     ) {
-        task::spawn(Self::run_ticker(
+        let handle = task::spawn(Self::run_ticker(
             self.clone(),
             config_cache,
             config_db,
             cache_await,
             db_await,
+            self.inner.stream_shutdown.subscribe(),
         ));
+        self.inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
     }
 
     #[allow(unused_variables)]
@@ -30,11 +36,29 @@ impl Client {
         config_db: Option<RateLimitConfig>,
         cache_await: crossbeam::channel::Receiver<oneshot::Sender<Result<(), Error>>>,
         db_await: crossbeam::channel::Receiver<oneshot::Sender<Result<(), Error>>>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    #[cfg(feature = "cache")]
+                    while let Ok(tx) = cache_await.try_recv() {
+                        let _ = tx.send(Err(Error::Connect(
+                            "client rate limiter stopped".into(),
+                        )));
+                    }
+                    #[cfg(feature = "sqlite")]
+                    while let Ok(tx) = db_await.try_recv() {
+                        let _ = tx.send(Err(Error::Connect(
+                            "client rate limiter stopped".into(),
+                        )));
+                    }
+                    return;
+                }
+                _ = interval.tick() => {}
+            }
 
             #[cfg(feature = "cache")]
             if let Some(config) = &config_cache {
@@ -89,7 +113,9 @@ impl Client {
             Err(err) => {
                 let (tx, rx) = oneshot::channel();
                 if self.inner.rate_limit_cache_await.try_send(tx).is_ok() {
-                    rx.await.unwrap()
+                    rx.await.unwrap_or_else(|_| {
+                        Err(Error::Connect("client rate limiter stopped".into()))
+                    })
                 } else {
                     Err(err)
                 }
@@ -116,7 +142,9 @@ impl Client {
             Err(err) => {
                 let (tx, rx) = oneshot::channel();
                 if self.inner.rate_limit_db_await.try_send(tx).is_ok() {
-                    rx.await.unwrap()
+                    rx.await.unwrap_or_else(|_| {
+                        Err(Error::Connect("client rate limiter stopped".into()))
+                    })
                 } else {
                     Err(err)
                 }

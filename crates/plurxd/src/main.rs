@@ -19,6 +19,7 @@ mod progress;
 mod progressive;
 mod reader_formats;
 mod schedule;
+mod serving_fence;
 mod state;
 mod storeprobe;
 mod subtitles;
@@ -847,7 +848,16 @@ fn spawn_background_loops(
 ) {
     tokio::spawn(state.clone().store_metrics_loop());
     let replication = state.replication.clone();
-    tokio::spawn(replication.passive_metrics_loop(background_shutdown.cancelled_owned()));
+    tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
+    tokio::spawn(
+        state
+            .serving
+            .clone()
+            .monitor_loop(background_shutdown.clone()),
+    );
+    tokio::spawn(
+        std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
+    );
     tokio::spawn(state.membership.clone().heartbeat_loop());
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
     tokio::spawn(
