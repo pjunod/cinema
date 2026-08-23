@@ -1137,6 +1137,11 @@ pub struct SettingsDto {
     /// Opt-in physical-device experiment: serve new live sessions as typeless
     /// sliding playlists from their first response. Off by default.
     pub hls_typeless_sliding: bool,
+    /// Cluster-wide opt-in for placing new HLS workers on another voter. The
+    /// readiness bit is true only while the replicated flag is enabled and
+    /// every committed voter publishes the current media protocol.
+    pub cluster_media_pool_enabled: bool,
+    pub cluster_media_pool_ready: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -1296,6 +1301,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     );
     let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
     let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
+    let cluster_media_pool_enabled =
+        setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
+    let cluster_media_pool_ready =
+        cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1321,6 +1330,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_scratch_max_bytes,
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
+        cluster_media_pool_enabled,
+        cluster_media_pool_ready,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -1383,6 +1394,10 @@ pub struct UpdateSettings {
     pub hls_ahead_max_bytes: Option<String>,
     pub hls_scratch_max_bytes: Option<String>,
     pub hls_typeless_sliding: Option<bool>,
+    /// Enable remote live-session placement cluster-wide. Enabling is refused
+    /// until every committed voter is freshly publishing this protocol;
+    /// disabling always succeeds.
+    pub cluster_media_pool_enabled: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -1417,6 +1432,13 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    if req.cluster_media_pool_enabled == Some(true)
+        && !state.media_pool.remote_rollout_ready().await
+    {
+        return Err(ApiError::Conflict(
+            "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
+        ));
+    }
     match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => {}
         (Some(requested_mode), Some(quality)) => {
@@ -1482,6 +1504,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HLS_TYPELESS_SLIDING, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.cluster_media_pool_enabled {
+        state
+            .store
+            .put_setting(keys::CLUSTER_MEDIA_POOL_ENABLED, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(mode) = &req.sub_mode {

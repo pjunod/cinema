@@ -594,6 +594,7 @@ const TABLES: &[TablePlan] = &[
             "user_id",
             "request_id",
             "request_fingerprint",
+            "playback_id",
             "state",
             "claim_expires_at_ms",
             "incarnation_id",

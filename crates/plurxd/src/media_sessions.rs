@@ -1,6 +1,8 @@
 //! Cluster placement transport and liveness for capability-authenticated HLS.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,14 +29,29 @@ pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
+pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
+pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
+pub(crate) const ACTIVATION_FAST_RECONCILIATION: Duration = Duration::from_secs(3);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
 const LEASE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
+/// Begins on the worker before the start response leaves it, so it must
+/// strictly outlive every later ingress phase plus a scheduling margin.
+pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(
+    START_DEADLINE.as_secs()
+        + OWNER_ASSIGNMENT_DEADLINE.as_secs()
+        + ACTIVATION_STORE_DEADLINE.as_secs()
+        + ACTIVATION_FAST_RECONCILIATION.as_secs()
+        + ACTIVATION_CONFIRMATION_WINDOW.as_secs()
+        + 10,
+);
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
+const ROUTE_QUERY_SHARDS: usize = 32;
+const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
 const LEASE_RENEWAL_BATCH: usize = 256;
 const LEASE_RENEWAL_FANOUT: usize = 16;
 const LEASE_RENEWAL_DEADLINE: Duration = Duration::from_secs(4);
@@ -56,45 +73,48 @@ impl RemoteStartRequest {
             && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
             && self.user_id > 0
             && self.request.request_id.as_deref() == Some(self.incarnation_id.as_str())
-            && self.request.file_id > 0
-            && !self.request.playback_id.is_empty()
-            && self.request.playback_id.len() <= 128
-            && !self
-                .request
-                .playback_id
-                .bytes()
-                .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
-            && self.request.start_seconds.is_finite()
-            && self.request.start_seconds >= 0.0
-            && self.request.start_seconds * 1_000.0 <= MAX_MEDIA_MILLIS as f64
-            && self
-                .request
-                .audio_index
-                .is_none_or(|index| (0..=1_024).contains(&index))
-            && self
-                .request
-                .subtitle_burn
-                .is_none_or(|index| (0..=1_024).contains(&index))
-            && (-15_000..=15_000).contains(&self.request.audio_offset_ms)
-            && match &self.request.kind {
-                SessionKind::Transcode { height } => {
-                    (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(height)
-                }
-                SessionKind::Copy { .. } => true,
-            }
-            && matches!(
-                (
-                    &self.request.previous_session_id,
-                    self.request.reopen_reason
-                ),
-                (None, None) | (Some(_), Some(_))
-            )
-            && self
-                .request
-                .previous_session_id
-                .as_deref()
-                .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+            && worker_session_request_is_valid(&self.request)
     }
+}
+
+/// The request contract shared by public ingress and private worker ingress.
+///
+/// The cluster envelope separately binds the internal request id to its
+/// incarnation. Public idempotency keys deliberately have a wider syntax, but
+/// every field that reaches a local worker must obey the same media bounds as
+/// a request sent to a peer.
+pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool {
+    request.file_id > 0
+        && !request.playback_id.is_empty()
+        && request.playback_id.len() <= 128
+        && !request
+            .playback_id
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+        && request.start_seconds.is_finite()
+        && request.start_seconds >= 0.0
+        && request.start_seconds * 1_000.0 <= MAX_MEDIA_MILLIS as f64
+        && request
+            .audio_index
+            .is_none_or(|index| (0..=1_024).contains(&index))
+        && request
+            .subtitle_burn
+            .is_none_or(|index| (0..=1_024).contains(&index))
+        && (-15_000..=15_000).contains(&request.audio_offset_ms)
+        && match &request.kind {
+            SessionKind::Transcode { height } => {
+                (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(height)
+            }
+            SessionKind::Copy { .. } => true,
+        }
+        && matches!(
+            (&request.previous_session_id, request.reopen_reason),
+            (None, None) | (Some(_), Some(_))
+        )
+        && request
+            .previous_session_id
+            .as_deref()
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,7 +150,7 @@ impl From<StartInfo> for RemoteStartResponse {
 }
 
 impl RemoteStartResponse {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
             && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
             && self
@@ -295,12 +315,15 @@ pub(crate) struct MediaSessionCoordinator {
     transport: PeerTransport,
     store: Arc<dyn Store>,
     routes: Arc<tokio::sync::Mutex<HashMap<String, CachedRoute>>>,
+    route_queries: Arc<Vec<tokio::sync::Mutex<()>>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, (String, i64)>>>,
+    #[cfg(test)]
+    route_store_queries: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone)]
 struct CachedRoute {
-    route: MediaSessionRoute,
+    route: Option<MediaSessionRoute>,
     expires_at: tokio::time::Instant,
 }
 
@@ -311,43 +334,76 @@ impl MediaSessionCoordinator {
             membership,
             store,
             routes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            route_queries: Arc::new(
+                (0..ROUTE_QUERY_SHARDS)
+                    .map(|_| tokio::sync::Mutex::new(()))
+                    .collect(),
+            ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            route_store_queries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
-    /// Cache only durable route rows, never misses. A just-activated session
-    /// must become visible immediately even if an earlier legacy request saw
-    /// no row, while a one-second positive TTL removes a consensus read from
-    /// playlist/segment bursts without extending the exact lease boundary.
+    /// Cache active routes and short negative answers. Deterministic query
+    /// shards single-flight repeated capabilities and hard-bound concurrent
+    /// consensus reads even when an unauthenticated caller sprays random UUIDs.
+    /// Activation overwrites a prior miss immediately, and no cache entry can
+    /// extend the exact durable lease boundary.
     pub(crate) async fn route(
         &self,
         session_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        let now = tokio::time::Instant::now();
-        {
-            let mut routes = self.routes.lock().await;
-            if let Some(cached) = routes.get(session_id) {
-                if cached.expires_at > now
-                    && (cached.route.state != "active"
-                        || cached.route.lease_expires_at_ms > unix_ms())
-                {
-                    return Ok(Some(cached.route.clone()));
-                }
-            }
-            routes.remove(session_id);
+        if let Some(cached) = self.cached_route(session_id).await {
+            return Ok(cached);
         }
-        let route = self.store.media_session_route(session_id).await?;
-        if let Some(route) = route.as_ref() {
-            self.cache_route(route.clone()).await;
+        let mut hasher = DefaultHasher::new();
+        session_id.hash(&mut hasher);
+        let shard = hasher.finish() as usize % self.route_queries.len();
+        let _query = self.route_queries[shard].lock().await;
+        if let Some(cached) = self.cached_route(session_id).await {
+            return Ok(cached);
         }
+        #[cfg(test)]
+        self.route_store_queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let route = tokio::time::timeout(
+            ROUTE_QUERY_DEADLINE,
+            self.store.media_session_route(session_id),
+        )
+        .await
+        .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??
+        .filter(authorizing_route);
+        self.cache_route_result(session_id, route.clone()).await;
         Ok(route)
     }
 
     pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
+        let session_id = route.session_id.clone();
+        let route = authorizing_route(&route).then_some(route);
+        self.cache_route_result(&session_id, route).await;
+    }
+
+    pub(crate) async fn cache_miss(&self, session_id: &str) {
+        self.cache_route_result(session_id, None).await;
+    }
+
+    async fn cached_route(&self, session_id: &str) -> Option<Option<MediaSessionRoute>> {
+        let now = tokio::time::Instant::now();
+        let mut routes = self.routes.lock().await;
+        let cached = routes.get(session_id)?;
+        if cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route) {
+            return Some(cached.route.clone());
+        }
+        routes.remove(session_id);
+        None
+    }
+
+    async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
         routes.retain(|_, cached| cached.expires_at > now);
-        if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(&route.session_id) {
+        if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
             if let Some(oldest) = routes
                 .iter()
                 .min_by_key(|(_, cached)| cached.expires_at)
@@ -357,7 +413,7 @@ impl MediaSessionCoordinator {
             }
         }
         routes.insert(
-            route.session_id.clone(),
+            session_id.to_owned(),
             CachedRoute {
                 route,
                 expires_at: now + ROUTE_CACHE_TTL,
@@ -488,6 +544,10 @@ impl MediaSessionCoordinator {
     }
 }
 
+fn authorizing_route(route: &MediaSessionRoute) -> bool {
+    route.state == "active" && route.lease_expires_at_ms > unix_ms()
+}
+
 fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTransportError> {
     let status = StatusCode::from_u16(response.status().as_u16())
         .map_err(|_| PeerTransportError::InvalidResponse)?;
@@ -566,46 +626,54 @@ pub(crate) async fn lease_loop(state: AppState) {
         let now_ms = unix_ms();
         let live = state
             .transcode
-            .active_session_ids()
+            .renewable_session_ids()
             .await
             .into_iter()
             .collect::<HashSet<_>>();
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
-        let routes = match state
-            .store
-            .owned_media_sessions(&state.node_id, now_ms)
-            .await
+        let routes = match tokio::time::timeout(
+            LEASE_RENEWAL_DEADLINE,
+            state.store.owned_media_sessions(&state.node_id, now_ms),
+        )
+        .await
         {
-            Ok(routes) => routes,
-            Err(error) => {
+            Ok(Ok(routes)) => Some(routes),
+            Ok(Err(error)) => {
                 tracing::debug!(%error, "media-session lease inventory unavailable");
-                let failure_now_ms = unix_ms();
-                let expired = known
-                    .iter()
-                    .filter(|(_, (session_id, expires_at_ms))| {
-                        live.contains(session_id) && *expires_at_ms <= failure_now_ms
-                    })
-                    .map(|(incarnation_id, (session_id, _))| {
-                        (incarnation_id.clone(), session_id.clone())
-                    })
-                    .collect::<Vec<_>>();
-                let cleanup = expired
-                    .iter()
-                    .map(|(incarnation_id, session_id)| {
-                        (
-                            incarnation_id.clone(),
-                            session_id.clone(),
-                            "cluster lease expired",
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                for (incarnation_id, _) in expired {
-                    known.remove(&incarnation_id);
-                }
-                fence_and_reap_sessions(&state, cleanup).await;
-                continue;
+                None
             }
+            Err(_) => {
+                tracing::debug!("media-session lease inventory timed out");
+                None
+            }
+        };
+        let Some(routes) = routes else {
+            let failure_now_ms = unix_ms();
+            let expired = known
+                .iter()
+                .filter(|(_, (session_id, expires_at_ms))| {
+                    live.contains(session_id) && *expires_at_ms <= failure_now_ms
+                })
+                .map(|(incarnation_id, (session_id, _))| {
+                    (incarnation_id.clone(), session_id.clone())
+                })
+                .collect::<Vec<_>>();
+            let cleanup = expired
+                .iter()
+                .map(|(incarnation_id, session_id)| {
+                    (
+                        incarnation_id.clone(),
+                        session_id.clone(),
+                        "cluster lease expired",
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (incarnation_id, _) in expired {
+                known.remove(&incarnation_id);
+            }
+            fence_and_reap_sessions(&state, cleanup).await;
+            continue;
         };
         let current = routes
             .iter()
@@ -842,6 +910,7 @@ mod tests {
     fn remote_start_contract_rejects_unfenced_or_noncanonical_inputs() {
         let request = valid_start_request();
         assert!(request.is_valid());
+        assert!(worker_session_request_is_valid(&request.request));
 
         let mut incompatible = request.clone();
         incompatible.protocol_version = crate::media_pool::PROTOCOL_VERSION.saturating_sub(1);
@@ -858,6 +927,25 @@ mod tests {
         let mut traversal = request.clone();
         traversal.request.playback_id = "player\r\nforged".to_owned();
         assert!(!traversal.is_valid());
+
+        let mut too_late = request.clone();
+        too_late.request.start_seconds = MAX_MEDIA_MILLIS as f64 / 1_000.0 + 0.001;
+        assert!(!worker_session_request_is_valid(&too_late.request));
+        assert!(!too_late.is_valid());
+
+        let mut audio_out_of_range = request.clone();
+        audio_out_of_range.request.audio_index = Some(1_025);
+        assert!(!worker_session_request_is_valid(
+            &audio_out_of_range.request
+        ));
+        assert!(!audio_out_of_range.is_valid());
+
+        let mut subtitle_out_of_range = request.clone();
+        subtitle_out_of_range.request.subtitle_burn = Some(-1);
+        assert!(!worker_session_request_is_valid(
+            &subtitle_out_of_range.request
+        ));
+        assert!(!subtitle_out_of_range.is_valid());
 
         let mut json = serde_json::to_value(request).expect("serialize start request");
         json.get_mut("request")
@@ -883,6 +971,14 @@ mod tests {
         let mut nonfinite = response;
         nonfinite.start_seconds = f64::NAN;
         assert!(!nonfinite.is_valid());
+
+        let mut too_late = valid_start_response();
+        too_late.media_origin_seconds = MAX_MEDIA_MILLIS as f64 / 1_000.0 + 0.001;
+        assert!(!too_late.is_valid());
+
+        let mut too_long = valid_start_response();
+        too_long.duration_ms = Some(MAX_MEDIA_MILLIS + 1);
+        assert!(!too_long.is_valid());
 
         let mut unknown_copy = valid_start_response();
         unknown_copy.kind = SessionKind::Copy {
@@ -937,6 +1033,84 @@ mod tests {
         assert_eq!(
             renewal_chunks(&admitted_owner).count(),
             LEASE_RENEWAL_FANOUT
+        );
+        assert!(
+            REMOTE_ACTIVATION_CONFIRMATION_WINDOW
+                > START_DEADLINE
+                    + OWNER_ASSIGNMENT_DEADLINE
+                    + ACTIVATION_STORE_DEADLINE
+                    + ACTIVATION_FAST_RECONCILIATION
+                    + ACTIVATION_CONFIRMATION_WINDOW,
+            "the worker fallback must begin earlier and end after every ingress phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_misses_are_single_flight_and_activation_supersedes_them() {
+        use plurx_core::cluster::membership::MembershipManager;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let coordinator = MediaSessionCoordinator::new(MembershipManager::unavailable(), store);
+        let session_id = "00000000-0000-4000-8000-0000000000c1";
+        assert!(coordinator
+            .route(session_id)
+            .await
+            .expect("first miss")
+            .is_none());
+        assert!(coordinator
+            .route(session_id)
+            .await
+            .expect("negative-cache hit")
+            .is_none());
+        assert_eq!(
+            coordinator
+                .route_store_queries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a repeated random capability must cause only one Store read"
+        );
+
+        let mut route = MediaSessionRoute {
+            incarnation_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "player-c".to_owned(),
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "node-c".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms().saturating_add(10_000),
+            state: "active".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: unix_ms(),
+        };
+        coordinator.cache_route(route.clone()).await;
+        assert_eq!(
+            coordinator
+                .route(session_id)
+                .await
+                .expect("activated route")
+                .map(|route| route.incarnation_id),
+            Some("00000000-0000-4000-8000-0000000000c2".to_owned()),
+            "activation must replace an earlier cached miss immediately"
+        );
+
+        route.state = "ended".to_owned();
+        route.lease_expires_at_ms = unix_ms();
+        coordinator.cache_route(route).await;
+        assert!(
+            coordinator
+                .route(session_id)
+                .await
+                .expect("terminal route")
+                .is_none(),
+            "terminal routes must be negative cache entries, never authorizers"
         );
     }
 

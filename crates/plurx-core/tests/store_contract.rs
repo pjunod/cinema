@@ -649,6 +649,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "uppercase-fingerprint",
                     &"A".repeat(64),
+                    "uppercase-playback",
                     "00000000-0000-4000-8000-0000000000f1",
                     1,
                     2,
@@ -666,6 +667,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "expired-attempt",
                     &fingerprint,
+                    "expired-attempt-playback",
                     expired_incarnation,
                     1,
                     2,
@@ -680,6 +682,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "expired-attempt",
                     &fingerprint,
+                    "expired-attempt-playback",
                     recovered_incarnation,
                     2,
                     12,
@@ -707,6 +710,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "retryable-attempt",
                     &fingerprint,
+                    "retryable-attempt-playback",
                     failed_incarnation,
                     10,
                     20,
@@ -726,6 +730,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "retryable-attempt",
                     &fingerprint,
+                    "retryable-attempt-playback",
                     retried_incarnation,
                     12,
                     22,
@@ -741,6 +746,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "retryable-attempt",
                     &conflicting,
+                    "retryable-attempt-playback",
                     failed_incarnation,
                     13,
                     23,
@@ -768,6 +774,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "attempt-a",
                     &fingerprint,
+                    "shared-playback",
                     incarnation_a,
                     100,
                     200,
@@ -785,6 +792,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "attempt-a",
                     &fingerprint,
+                    "shared-playback",
                     incarnation_a_retry,
                     110,
                     210,
@@ -800,6 +808,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "attempt-a",
                     &conflicting,
+                    "shared-playback",
                     incarnation_a_retry,
                     110,
                     210,
@@ -847,6 +856,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "attempt-a",
                     &fingerprint,
+                    "shared-playback",
                     incarnation_a_retry,
                     140,
                     240,
@@ -1044,6 +1054,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "attempt-a",
                     &fingerprint,
+                    "shared-playback",
                     incarnation_a_retry,
                     420,
                     520,
@@ -1061,6 +1072,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "expired-activation",
                     &fingerprint,
+                    "expired-playback",
                     expired_activation_incarnation,
                     430,
                     440,
@@ -1106,6 +1118,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                     first_user.id,
                     "expired-owner",
                     &fingerprint,
+                    "expired-owner-playback",
                     expired_owner_incarnation,
                     450,
                     460,
@@ -1159,6 +1172,113 @@ async fn media_session_contract_runs_through_dyn_store() {
     .await;
 }
 
+#[tokio::test]
+async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("session-cap-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create capped session user: {error}"));
+        let fingerprint = "d".repeat(64);
+        let mut predecessor = None;
+        for index in 0_u128..64 {
+            let incarnation_id = uuid::Uuid::from_u128(0x1000 + index).to_string();
+            let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
+            let playback_id = format!("cap-playback-{index}");
+            store
+                .activate_media_session(&MediaSessionActivation {
+                    incarnation_id: incarnation_id.clone(),
+                    session_id,
+                    user_id: user.id,
+                    playback_id: playback_id.clone(),
+                    expected_predecessor_incarnation_id: None,
+                    fence_predecessor: false,
+                    request_id: None,
+                    request_fingerprint: fingerprint.clone(),
+                    owner_node_id: "cap-node".to_owned(),
+                    recipe_json: "{}".to_owned(),
+                    response_json: "{}".to_owned(),
+                    now_ms: 100,
+                    lease_expires_at_ms: 10_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed capped session: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: capped session {index} must activate"));
+            if index == 0 {
+                predecessor = Some(incarnation_id);
+            }
+        }
+
+        let first_attempt = uuid::Uuid::from_u128(0x3000).to_string();
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "cap-replacement",
+                    &fingerprint,
+                    "cap-playback-0",
+                    &first_attempt,
+                    1_000,
+                    1_001,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim capped replacement: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+
+        let replacement = uuid::Uuid::from_u128(0x3001).to_string();
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "cap-replacement",
+                    &fingerprint,
+                    "cap-playback-0",
+                    &replacement,
+                    1_001,
+                    2_000,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{backend}: reclaim expired capped replacement: {error}")
+                }),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == replacement
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "cap-replacement",
+                &replacement,
+                "cap-node",
+                1_002,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
+        let outcome = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: replacement,
+                session_id: uuid::Uuid::from_u128(0x4000).to_string(),
+                user_id: user.id,
+                playback_id: "cap-playback-0".to_owned(),
+                expected_predecessor_incarnation_id: predecessor,
+                fence_predecessor: true,
+                request_id: Some("cap-replacement".to_owned()),
+                request_fingerprint: fingerprint,
+                owner_node_id: "cap-node".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 1_003,
+                lease_expires_at_ms: 10_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate capped replacement: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: capped replacement must activate"));
+        assert!(outcome.predecessor.is_some(), "{backend}");
+    })
+    .await;
+}
+
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn hiqlite_media_activation_requires_its_lease_mutation() {
@@ -1192,6 +1312,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
                 user.id,
                 "max-revision-attempt",
                 &fingerprint,
+                "max-revision-playback",
                 max_incarnation,
                 100,
                 200,
@@ -1250,6 +1371,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
                 user.id,
                 "removed-owner-attempt",
                 &fingerprint,
+                "removed-owner-playback",
                 removed_incarnation,
                 130,
                 230,

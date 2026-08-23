@@ -28,6 +28,7 @@ pub(super) const MEDIA_SESSION_REQUESTS_SCHEMA: &str =
     user_id             INTEGER NOT NULL,
     request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
     request_fingerprint TEXT NOT NULL,
+    playback_id         TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
     state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),
     claim_expires_at_ms INTEGER NOT NULL,
     incarnation_id      TEXT NOT NULL,
@@ -163,6 +164,7 @@ impl From<&mut Row<'_>> for OwnedLeaseRow {
 
 struct RequestRow {
     request_fingerprint: String,
+    playback_id: String,
     state: String,
     incarnation_id: String,
     owner_node_id: Option<String>,
@@ -173,6 +175,7 @@ impl From<&mut Row<'_>> for RequestRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             request_fingerprint: row.get("request_fingerprint"),
+            playback_id: row.get("playback_id"),
             state: row.get("state"),
             incarnation_id: row.get("incarnation_id"),
             owner_node_id: row.get("owner_node_id"),
@@ -196,6 +199,7 @@ fn validate_claim(
     user_id: i64,
     request_id: &str,
     fingerprint: &str,
+    playback_id: &str,
     incarnation_id: &str,
     now_ms: i64,
     expires_at_ms: i64,
@@ -204,6 +208,11 @@ fn validate_claim(
         || request_id.is_empty()
         || request_id.len() > 128
         || !valid_fingerprint(fingerprint)
+        || playback_id.is_empty()
+        || playback_id.len() > 128
+        || playback_id
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
         || !valid_uuid(incarnation_id)
         || expires_at_ms <= now_ms
     {
@@ -265,7 +274,7 @@ async fn request_row(
     Ok(store
         .client()
         .query_consistent_map::<RequestRow, _>(
-            "SELECT request_fingerprint, state, incarnation_id, owner_node_id,
+            "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
                     claim_expires_at_ms
                FROM media_session_requests WHERE user_id = $1 AND request_id = $2",
             params!(user_id, request_id),
@@ -279,8 +288,9 @@ async fn claim_from_row(
     store: &HiqliteAuthStore,
     row: RequestRow,
     fingerprint: &str,
+    playback_id: &str,
 ) -> Result<MediaSessionRequestClaim, StoreError> {
-    if row.request_fingerprint != fingerprint {
+    if row.request_fingerprint != fingerprint || row.playback_id != playback_id {
         return Ok(MediaSessionRequestClaim::Conflict);
     }
     if row.state == "resolved" {
@@ -305,11 +315,12 @@ async fn claim_existing_or_reacquire(
     user_id: i64,
     request_id: &str,
     fingerprint: &str,
+    playback_id: &str,
     incarnation_id: &str,
     now_ms: i64,
     claim_expires_at_ms: i64,
 ) -> Result<MediaSessionRequestClaim, StoreError> {
-    if row.request_fingerprint != fingerprint {
+    if row.request_fingerprint != fingerprint || row.playback_id != playback_id {
         return Ok(MediaSessionRequestClaim::Conflict);
     }
     if row.state == "failed" || (row.state == "starting" && row.claim_expires_at_ms <= now_ms) {
@@ -323,15 +334,18 @@ async fn claim_existing_or_reacquire(
                   WHERE user_id = $4 AND request_id = $5
                     AND (state = 'failed'
                       OR (state = 'starting' AND claim_expires_at_ms <= $3))
-                    AND request_fingerprint = $6
+                    AND request_fingerprint = $6 AND playback_id = $7
                     AND (SELECT COUNT(*) FROM media_session_requests
                           WHERE user_id = $4 AND state = 'starting'
-                            AND claim_expires_at_ms > $3) < $7
+                            AND claim_expires_at_ms > $3) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $4 AND state IN ('starting', 'active')
-                            AND lease_expires_at_ms > $3) < $8
+                            AND lease_expires_at_ms > $3
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE user_id = $4 AND playback_id = $7), '')) < $9
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $4) < $9",
+                          WHERE user_id = $4) < $10",
                 params!(
                     claim_expires_at_ms,
                     incarnation_id,
@@ -339,6 +353,7 @@ async fn claim_existing_or_reacquire(
                     user_id,
                     request_id,
                     fingerprint,
+                    playback_id,
                     MAX_IN_FLIGHT_PER_USER,
                     MAX_CURRENT_PER_USER,
                     MAX_SESSION_ROWS_PER_USER
@@ -355,15 +370,16 @@ async fn claim_existing_or_reacquire(
             Some(current)
                 if (current.state == "failed"
                     || (current.state == "starting" && current.claim_expires_at_ms <= now_ms))
-                    && current.request_fingerprint == fingerprint =>
+                    && current.request_fingerprint == fingerprint
+                    && current.playback_id == playback_id =>
             {
                 Ok(MediaSessionRequestClaim::Overloaded)
             }
-            Some(current) => claim_from_row(store, current, fingerprint).await,
+            Some(current) => claim_from_row(store, current, fingerprint, playback_id).await,
             None => Ok(MediaSessionRequestClaim::Overloaded),
         };
     }
-    claim_from_row(store, row, fingerprint).await
+    claim_from_row(store, row, fingerprint, playback_id).await
 }
 
 #[async_trait]
@@ -373,6 +389,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         user_id: i64,
         request_id: &str,
         request_fingerprint: &str,
+        playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
@@ -381,6 +398,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             user_id,
             request_id,
             request_fingerprint,
+            playback_id,
             incarnation_id,
             now_ms,
             claim_expires_at_ms,
@@ -394,6 +412,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 user_id,
                 request_id,
                 &fingerprint,
+                playback_id,
                 incarnation_id,
                 now_ms,
                 claim_expires_at_ms,
@@ -404,24 +423,29 @@ impl MediaSessionStore for HiqliteAuthStore {
             .client()
             .execute(
                 "INSERT INTO media_session_requests
-                    (user_id, request_id, request_fingerprint, state, claim_expires_at_ms,
-                     incarnation_id, owner_node_id, response_json, updated_at_ms)
-                 SELECT $1, $2, $3, 'starting', $4, $5, NULL, NULL, $6
+                    (user_id, request_id, request_fingerprint, playback_id, state,
+                     claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
+                     updated_at_ms)
+                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7
                   WHERE (SELECT COUNT(*) FROM media_session_requests
                           WHERE user_id = $1 AND state = 'starting'
-                            AND claim_expires_at_ms > $6) < $7
+                            AND claim_expires_at_ms > $7) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $1 AND state IN ('starting', 'active')
-                            AND lease_expires_at_ms > $6) < $8
+                            AND lease_expires_at_ms > $7
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE user_id = $1 AND playback_id = $4), '')) < $9
                     AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $1) < $9
-                    AND (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $1) < $10
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE user_id = $1) < $11
                  ON CONFLICT(user_id, request_id) DO NOTHING",
                 params!(
                     user_id,
                     request_id,
                     fingerprint.as_str(),
+                    playback_id,
                     claim_expires_at_ms,
                     incarnation_id,
                     now_ms,
@@ -444,6 +468,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 user_id,
                 request_id,
                 &fingerprint,
+                playback_id,
                 incarnation_id,
                 now_ms,
                 claim_expires_at_ms,
@@ -562,7 +587,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND ($12 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $12 AND incarnation_id = $1
-                         AND request_fingerprint = $5 AND owner_node_id = $6
+                         AND request_fingerprint = $5 AND playback_id = $4
+                         AND owner_node_id = $6
                          AND ((state = 'starting' AND claim_expires_at_ms > $10)
                            OR (state = 'resolved' AND response_json = $9))))
                     AND EXISTS (SELECT 1 FROM job_leases
@@ -726,9 +752,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                         claim_expires_at_ms = $2, updated_at_ms = $3
                   WHERE $4 != '' AND user_id = $5 AND request_id = $4
                     AND incarnation_id = $6 AND request_fingerprint = $7
-                    AND owner_node_id = $8 AND EXISTS (
+                    AND owner_node_id = $8 AND playback_id = $9 AND EXISTS (
                       SELECT 1 FROM media_sessions WHERE incarnation_id = $6
-                        AND session_id = $9 AND state = 'active')",
+                        AND session_id = $10 AND state = 'active')",
                 params!(
                     activation.response_json.as_str(),
                     activation.lease_expires_at_ms,
@@ -738,6 +764,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.incarnation_id.as_str(),
                     activation.request_fingerprint.as_str(),
                     activation.owner_node_id.as_str(),
+                    activation.playback_id.as_str(),
                     activation.session_id.as_str()
                 ),
             ),

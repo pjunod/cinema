@@ -11,7 +11,7 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
     unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ABORT_PATH, ACTIVATION_CONFIRMATION_WINDOW, RELAY_PATH, START_PATH,
+    RemoteStartResponse, ABORT_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_PATH,
 };
 use crate::state::AppState;
 
@@ -77,23 +77,29 @@ pub(crate) async fn start(
     // this HTTP future cannot strand the worker before the watcher is armed.
     let start_state = state.clone();
     let start_task = tokio::spawn(async move {
-        let response = start_state
+        let started = start_state
             .transcode
-            .create_cluster_session(&request.request, &user.username)
-            .await
-            .map(RemoteStartResponse::from)?;
+            .create_cluster_session(&request.request, request.user_id, &user.username)
+            .await?;
+        let response = RemoteStartResponse::from(started.info);
         let confirmation_state = start_state.clone();
         let confirmation_incarnation = request.incarnation_id.clone();
         let confirmation_session = response.session_id.clone();
         tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
+            // A second replacement on this worker cannot reap this worker
+            // before its durable activation has been confirmed or refused.
+            let _replacement = started.replacement;
+            let deadline = tokio::time::Instant::now() + REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
             loop {
-                match confirmation_state
-                    .store
-                    .media_session_route_by_incarnation(&confirmation_incarnation)
-                    .await
+                match tokio::time::timeout_at(
+                    deadline,
+                    confirmation_state
+                        .store
+                        .media_session_route_by_incarnation(&confirmation_incarnation),
+                )
+                .await
                 {
-                    Ok(Some(route))
+                    Ok(Ok(Some(route)))
                         if route.session_id == confirmation_session
                             && route.owner_node_id == confirmation_state.node_id
                             && route.state == "active"
@@ -105,11 +111,13 @@ pub(crate) async fn start(
                             .await;
                         return;
                     }
-                    Ok(Some(_)) => break,
-                    Ok(None) | Err(_) if tokio::time::Instant::now() < deadline => {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok(Ok(Some(_))) => break,
+                    Ok(Ok(None)) | Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
                     }
-                    Ok(None) | Err(_) => break,
+                    Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
                 }
             }
             confirmation_state

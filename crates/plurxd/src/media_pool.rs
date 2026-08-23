@@ -232,6 +232,9 @@ pub(crate) struct PlacementDiagnostics {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MediaDirectoryDiagnostics {
     pub protocol_version: i64,
+    pub remote_placement_enabled: bool,
+    pub remote_placement_rollout_ready: bool,
+    pub remote_placement_ready: bool,
     pub snapshot_interval_seconds: u64,
     pub snapshot_expiry_seconds: u64,
     pub nodes: Vec<MediaNodeSnapshot>,
@@ -630,8 +633,21 @@ impl MediaPool {
                 .map(|cached| cached.snapshot.clone()),
         );
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let remote_placement_enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::CLUSTER_MEDIA_POOL_ENABLED)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
+        let remote_placement_rollout_ready = self.remote_rollout_ready().await;
+        let remote_placement_ready = remote_placement_enabled && remote_placement_rollout_ready;
         MediaDirectoryDiagnostics {
             protocol_version: PROTOCOL_VERSION,
+            remote_placement_enabled,
+            remote_placement_rollout_ready,
+            remote_placement_ready,
             snapshot_interval_seconds: SNAPSHOT_INTERVAL.as_secs(),
             snapshot_expiry_seconds: SNAPSHOT_EXPIRY.as_secs(),
             nodes,
@@ -654,6 +670,16 @@ impl MediaPool {
         {
             return false;
         }
+        self.remote_rollout_ready().await
+    }
+
+    /// Prove the committed voter set is uniformly publishing this protocol,
+    /// independent of the operator opt-in bit. The settings API uses this
+    /// precondition before it writes the replicated enable flag.
+    pub(crate) async fn remote_rollout_ready(&self) -> bool {
+        if !self.membership.is_replicated() {
+            return false;
+        }
         self.expire().await;
         let deadline = deadline_after(SNAPSHOT_DEADLINE);
         let directory = tokio::time::timeout_at(deadline, async {
@@ -666,7 +692,7 @@ impl MediaPool {
         let Ok((Ok(peers), Ok(voter_count))) = directory else {
             return false;
         };
-        if voter_count != peers.len().saturating_add(1) {
+        if voter_count <= 1 || voter_count != peers.len().saturating_add(1) {
             return false;
         }
         remote_directory_ready(

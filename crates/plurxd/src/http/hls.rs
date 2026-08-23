@@ -32,11 +32,13 @@ use super::error::ApiError;
 use super::extract::AuthUser;
 use crate::media_pool::MediaOfferRequest;
 use crate::media_sessions::{
-    unix_ms, RelayHeaders, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW, LEASE_TTL_MS, START_DEADLINE,
+    unix_ms, worker_session_request_is_valid, RelayHeaders, RelayRequest, RelayResource,
+    RemoteAbortRequest, RemoteStartRequest, RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW,
+    ACTIVATION_FAST_RECONCILIATION, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
+    OWNER_ASSIGNMENT_DEADLINE, START_DEADLINE,
 };
 use crate::state::AppState;
-use crate::transcode::PlaylistError;
+use crate::transcode::{ClusterReplacementGuard, PlaylistError};
 
 /// How much of an `init.mp4` this module will ever read into memory.
 ///
@@ -45,6 +47,7 @@ use crate::transcode::PlaylistError;
 /// hold their delivery tracker to the same figure, so a larger init reports a
 /// skipped inspection rather than a truncated response.
 const INIT_INSPECTION_LIMIT_BYTES: u64 = 1024 * 1024;
+const MIN_RESOLVED_REPLAY_REMAINING_MS: i64 = 1_000;
 
 #[derive(Deserialize)]
 pub struct StartQuery {
@@ -110,6 +113,7 @@ pub struct StartResponse {
 /// leaving an encoder and its durable start claim behind.
 struct StartedSessionGuard {
     cleanup: Option<StartedSessionCleanup>,
+    _replacement: Option<ClusterReplacementGuard>,
 }
 
 struct StartedSessionCleanup {
@@ -129,6 +133,7 @@ impl StartedSessionGuard {
         session_id: String,
         user_id: i64,
         request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
     ) -> Self {
         Self {
             cleanup: Some(StartedSessionCleanup {
@@ -139,11 +144,13 @@ impl StartedSessionGuard {
                 user_id,
                 request_id,
             }),
+            _replacement: replacement,
         }
     }
 
     fn disarm(&mut self) {
         self.cleanup = None;
+        self._replacement = None;
     }
 }
 
@@ -432,6 +439,11 @@ pub async fn create(
             "request_id must contain 1 to 128 characters".to_owned(),
         ));
     }
+    if !worker_session_request_is_valid(&request) {
+        return Err(ApiError::BadRequest(
+            "media session request exceeds the supported cluster contract".to_owned(),
+        ));
+    }
     let fingerprint = request.durable_intent_fingerprint(user.id);
     let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
@@ -449,6 +461,7 @@ pub async fn create(
             user.id,
             &request_claim_id,
             &fingerprint,
+            &request.playback_id,
             &incarnation_id,
             now_ms,
             now_ms.saturating_add(60_000),
@@ -458,9 +471,7 @@ pub async fn create(
         MediaSessionRequestClaim::Acquired {
             incarnation_id: acquired,
         } => incarnation_id = acquired,
-        MediaSessionRequestClaim::Resolved(route)
-            if route.state == "active" && route.lease_expires_at_ms > now_ms =>
-        {
+        MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
             return serde_json::from_str::<StartResponse>(&route.response_json)
                 .map(Json)
                 .map_err(ApiError::from);
@@ -617,9 +628,10 @@ pub async fn create(
             let guard_user = user.id;
             let mut start_task = tokio::spawn(async move {
                 transcode
-                    .create_cluster_session(&worker_request, &user_name)
+                    .create_cluster_session(&worker_request, guard_user, &user_name)
                     .await
-                    .map(|info| {
+                    .map(|started| {
+                        let info = started.info;
                         let session_id = info.session_id.clone();
                         let response = RemoteStartResponse::from(info);
                         let guard = StartedSessionGuard::new(
@@ -629,6 +641,7 @@ pub async fn create(
                             session_id,
                             guard_user,
                             guard_request,
+                            Some(started.replacement),
                         );
                         (response, guard)
                     })
@@ -661,6 +674,7 @@ pub async fn create(
                         info.session_id.clone(),
                         user.id,
                         request_claim_id.clone(),
+                        None,
                     );
                     (info, guard)
                 })
@@ -671,9 +685,20 @@ pub async fn create(
                 })
         };
         match result {
-            Ok((info, guard)) => {
+            Ok((info, guard)) if info.is_valid() => {
                 started = Some((candidate, info, guard));
                 break;
+            }
+            Ok((_info, _guard)) => {
+                // The armed guard aborts an invalid local result just as the
+                // peer transport rejects and aborts an invalid remote result.
+                tracing::warn!(
+                    owner_node_id = %candidate,
+                    "media worker returned an invalid start contract"
+                );
+                last_error = Some(ApiError::ServiceUnavailable(format!(
+                    "media worker {candidate} returned an invalid start contract"
+                )));
             }
             Err(error) => {
                 tracing::debug!(owner_node_id = %candidate, "media worker start attempt failed");
@@ -690,26 +715,32 @@ pub async fn create(
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
-    match state
-        .store
-        .assign_media_session_request_owner(
+    match tokio::time::timeout(
+        OWNER_ASSIGNMENT_DEADLINE,
+        state.store.assign_media_session_request_owner(
             user.id,
             &request_claim_id,
             &incarnation_id,
             &owner_node_id,
             unix_ms(),
-        )
-        .await
+        ),
+    )
+    .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
             // The armed guard aborts the exact worker and fails this claim.
             return Err(ApiError::ServiceUnavailable(
                 "session ownership changed while placement was being committed".to_owned(),
             ));
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             return Err(error.into());
+        }
+        Err(_) => {
+            return Err(ApiError::ServiceUnavailable(
+                "session ownership assignment timed out".to_owned(),
+            ));
         }
     }
     // The grade the session actually built, not the one the body asked for:
@@ -777,27 +808,58 @@ pub async fn create(
     // reconciliation and accidentally kill an activated winner (or leak an
     // unactivated worker).
     let activation_state = state.clone();
-    let outcome = tokio::spawn(async move {
+    tokio::spawn(async move {
         let mut guard = guard;
-        match activation_state
-            .store
-            .activate_media_session(&activation)
-            .await
+        match tokio::time::timeout(
+            ACTIVATION_STORE_DEADLINE,
+            activation_state.store.activate_media_session(&activation),
+        )
+        .await
         {
-            Ok(Some(outcome)) => {
+            Ok(Ok(Some(outcome))) => {
+                activation_state
+                    .media_sessions
+                    .cache_route(outcome.route.clone())
+                    .await;
+                if outcome.route.owner_node_id == activation_state.node_id {
+                    activation_state
+                        .media_sessions
+                        .seed_owned_lease(&outcome.route)
+                        .await;
+                }
                 guard.disarm();
+                if let Some(predecessor) = outcome.predecessor.as_ref() {
+                    stop_owned_session(&activation_state, predecessor).await;
+                }
                 Ok(outcome)
             }
-            Ok(None) => Err(ApiError::ServiceUnavailable(
+            Ok(Ok(None)) => Err(ApiError::ServiceUnavailable(
                 "session ownership could not be activated".to_owned(),
             )),
-            Err(error) => {
+            uncertain => {
+                let error = match uncertain {
+                    Ok(Err(error)) => error.into(),
+                    Err(_) => ApiError::ServiceUnavailable(
+                        "session activation outcome is still being reconciled".to_owned(),
+                    ),
+                    Ok(Ok(_)) => unreachable!("definitive activation outcomes returned above"),
+                };
                 let reconcile_deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                    tokio::time::Instant::now() + ACTIVATION_FAST_RECONCILIATION;
                 if let Some(route) =
                     wait_for_exact_activation(&activation_state, &activation, reconcile_deadline)
                         .await
                 {
+                    activation_state
+                        .media_sessions
+                        .cache_route(route.clone())
+                        .await;
+                    if route.owner_node_id == activation_state.node_id {
+                        activation_state
+                            .media_sessions
+                            .seed_owned_lease(&route)
+                            .await;
+                    }
                     guard.disarm();
                     Ok(MediaSessionActivationOutcome {
                         route,
@@ -810,26 +872,16 @@ pub async fn create(
                     let reconcile_state = activation_state.clone();
                     let reconcile_activation = activation.clone();
                     tokio::spawn(async move {
-                        reconcile_or_abort_activation(reconcile_state, reconcile_activation).await;
+                        reconcile_or_abort_activation(reconcile_state, reconcile_activation, guard)
+                            .await;
                     });
-                    guard.disarm();
-                    Err(error.into())
+                    Err(error)
                 }
             }
         }
     })
     .await
     .map_err(|error| ApiError::Internal(format!("media activation task failed: {error}")))??;
-    state
-        .media_sessions
-        .cache_route(outcome.route.clone())
-        .await;
-    if outcome.route.owner_node_id == state.node_id {
-        state.media_sessions.seed_owned_lease(&outcome.route).await;
-    }
-    if let Some(predecessor) = outcome.predecessor {
-        stop_owned_session(&state, &predecessor).await;
-    }
     crate::playstart::note_playback_started(
         &state,
         user.id,
@@ -839,6 +891,11 @@ pub async fn create(
         Some(&request.playback_id),
     );
     Ok(Json(response))
+}
+
+fn resolved_replay_is_live(route: &MediaSessionRoute, now_ms: i64) -> bool {
+    route.state == "active"
+        && route.lease_expires_at_ms > now_ms.saturating_add(MIN_RESOLVED_REPLAY_REMAINING_MS)
 }
 
 fn route_matches_activation(
@@ -863,49 +920,49 @@ async fn wait_for_exact_activation(
     deadline: tokio::time::Instant,
 ) -> Option<MediaSessionRoute> {
     loop {
-        match state
-            .store
-            .media_session_route_by_incarnation(&activation.incarnation_id)
-            .await
-        {
-            Ok(Some(route)) if route_matches_activation(&route, activation) => return Some(route),
-            Ok(Some(_)) => return None,
-            Ok(None) | Err(_) => {}
-        }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return None;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(&activation.incarnation_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(route))) if route_matches_activation(&route, activation) => {
+                return Some(route)
+            }
+            Ok(Ok(Some(_))) => return None,
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Err(_) => return None,
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250).min(remaining)).await;
     }
 }
 
-async fn reconcile_or_abort_activation(state: AppState, activation: MediaSessionActivation) {
+async fn reconcile_or_abort_activation(
+    state: AppState,
+    activation: MediaSessionActivation,
+    mut guard: StartedSessionGuard,
+) {
     let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
     if let Some(route) = wait_for_exact_activation(&state, &activation, deadline).await {
         state.media_sessions.cache_route(route.clone()).await;
         if route.owner_node_id == state.node_id {
             state.media_sessions.seed_owned_lease(&route).await;
         }
+        guard.disarm();
         return;
     }
-    abort_started_session(
-        &state,
-        &activation.owner_node_id,
-        &activation.incarnation_id,
-        &activation.session_id,
-    )
-    .await;
-    if let Some(request_id) = activation.request_id.as_deref() {
-        let _ = state
-            .store
-            .fail_media_session_request(
-                activation.user_id,
-                request_id,
-                &activation.incarnation_id,
-                unix_ms(),
-            )
-            .await;
-    }
+    // Dropping the armed guard aborts the exact worker, fails its exact claim,
+    // and releases the replacement gate only after the full bounded verdict.
 }
 
 fn valid_playback_id(playback_id: &str) -> bool {
@@ -1102,6 +1159,20 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
 /// Idempotent: deleting a session that has already gone is a success, because
 /// the caller's intent ("this must not be running") is satisfied either way.
 pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<String>) -> StatusCode {
+    match state.media_sessions.route(&session).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            state
+                .transcode
+                .stop_session(&session, "released by client")
+                .await;
+            return StatusCode::NO_CONTENT;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "durable media-session route unavailable");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    }
     let route = match state.store.end_media_session(&session, unix_ms()).await {
         Ok(route) => route,
         Err(error) => {
@@ -1109,10 +1180,13 @@ pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<Strin
             return StatusCode::SERVICE_UNAVAILABLE;
         }
     };
-    state.media_sessions.invalidate_route(&session).await;
     match route {
-        Some(route) => stop_owned_session(&state, &route).await,
+        Some(route) => {
+            state.media_sessions.cache_route(route.clone()).await;
+            stop_owned_session(&state, &route).await;
+        }
         None => {
+            state.media_sessions.cache_miss(&session).await;
             state
                 .transcode
                 .stop_session(&session, "released by client")
@@ -2761,6 +2835,36 @@ mod tests {
         assert_eq!(requested_byte_range(Some("bytes=10-9"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=0-1,3-4"), 100), Err(()));
+    }
+
+    #[test]
+    fn delayed_resolved_replay_rechecks_the_current_lease_boundary() {
+        let mut route = MediaSessionRoute {
+            incarnation_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000d2".to_owned(),
+            user_id: 7,
+            playback_id: "replay-player".to_owned(),
+            request_fingerprint: "d".repeat(64),
+            owner_node_id: "node-d".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: 2_001,
+            state: "active".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: 1,
+        };
+        assert!(resolved_replay_is_live(&route, 1_000));
+        assert!(!resolved_replay_is_live(&route, 1_001));
+        route.lease_expires_at_ms = 1_000;
+        assert!(
+            !resolved_replay_is_live(&route, 1_000),
+            "a read that returns after exact expiry must never answer a replay"
+        );
     }
 
     // ---- segment delivery, through the real response ------------------------

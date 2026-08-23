@@ -1233,7 +1233,7 @@ impl HiqliteAuthStore {
             "SELECT token_hash, user_id, device, created_at, last_seen_at FROM tokens ORDER BY token_hash",
             "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled FROM api_keys ORDER BY id",
             "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms FROM job_leases ORDER BY resource",
-            "SELECT user_id, request_id, request_fingerprint, state, claim_expires_at_ms, incarnation_id, owner_node_id, response_json, updated_at_ms FROM media_session_requests ORDER BY user_id, request_id",
+            "SELECT user_id, request_id, request_fingerprint, playback_id, state, claim_expires_at_ms, incarnation_id, owner_node_id, response_json, updated_at_ms FROM media_session_requests ORDER BY user_id, request_id",
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
         ] {
@@ -1292,8 +1292,9 @@ impl HiqliteAuthStore {
             )
             .await?,
             media_session_requests: self.client().query_map(
-                "SELECT user_id, request_id, request_fingerprint, state, claim_expires_at_ms, \
-                        incarnation_id, owner_node_id, response_json, updated_at_ms \
+                "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
+                        claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
+                        updated_at_ms \
                    FROM media_session_requests ORDER BY user_id, request_id",
                 params!(),
             )
@@ -2463,6 +2464,7 @@ dump_row!(MediaSessionRequestDumpRow {
     user_id: i64,
     request_id: String,
     request_fingerprint: String,
+    playback_id: String,
     state: String,
     claim_expires_at_ms: i64,
     incarnation_id: String,

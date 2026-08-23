@@ -60,6 +60,7 @@ fn validate_claim(
     user_id: i64,
     request_id: &str,
     fingerprint: &str,
+    playback_id: &str,
     incarnation_id: &str,
     now_ms: i64,
     expires_at_ms: i64,
@@ -68,6 +69,11 @@ fn validate_claim(
         || request_id.is_empty()
         || request_id.len() > 128
         || !valid_fingerprint(fingerprint)
+        || playback_id.is_empty()
+        || playback_id.len() > 128
+        || playback_id
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
         || !valid_uuid(incarnation_id)
         || expires_at_ms <= now_ms
     {
@@ -116,6 +122,7 @@ impl MediaSessionStore for SqliteStore {
         user_id: i64,
         request_id: &str,
         request_fingerprint: &str,
+        playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
@@ -124,6 +131,7 @@ impl MediaSessionStore for SqliteStore {
             user_id,
             request_id,
             request_fingerprint,
+            playback_id,
             incarnation_id,
             now_ms,
             claim_expires_at_ms,
@@ -131,12 +139,13 @@ impl MediaSessionStore for SqliteStore {
         self.maintain_media_sessions(now_ms).await?;
         let request_id = request_id.to_owned();
         let request_fingerprint = request_fingerprint.to_ascii_lowercase();
+        let playback_id = playback_id.to_owned();
         let incarnation_id = incarnation_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let existing = tx
                 .query_row(
-                    "SELECT request_fingerprint, state, incarnation_id, owner_node_id,
+                    "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
                             claim_expires_at_ms
                        FROM media_session_requests WHERE user_id = ?1 AND request_id = ?2",
                     params![user_id, request_id],
@@ -145,74 +154,88 @@ impl MediaSessionStore for SqliteStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     },
                 )
                 .optional()?;
-            if let Some((fingerprint, state, existing_incarnation, owner, expires)) = existing {
-                let outcome = if fingerprint != request_fingerprint {
-                    MediaSessionRequestClaim::Conflict
-                } else if state == "failed" || (state == "starting" && expires <= now_ms) {
-                    let reacquired = tx.execute(
-                        "UPDATE media_session_requests
+            if let Some((
+                fingerprint,
+                existing_playback,
+                state,
+                existing_incarnation,
+                owner,
+                expires,
+            )) = existing
+            {
+                let outcome =
+                    if fingerprint != request_fingerprint || existing_playback != playback_id {
+                        MediaSessionRequestClaim::Conflict
+                    } else if state == "failed" || (state == "starting" && expires <= now_ms) {
+                        let reacquired = tx.execute(
+                            "UPDATE media_session_requests
                             SET state = 'starting', claim_expires_at_ms = ?1,
                                 incarnation_id = ?2, owner_node_id = NULL,
                                 response_json = NULL, updated_at_ms = ?3
                           WHERE user_id = ?4 AND request_id = ?5
                             AND (state = 'failed'
                               OR (state = 'starting' AND claim_expires_at_ms <= ?3))
-                            AND request_fingerprint = ?6
+                            AND request_fingerprint = ?6 AND playback_id = ?7
                             AND (SELECT COUNT(*) FROM media_session_requests
                                   WHERE user_id = ?4 AND state = 'starting'
-                                    AND claim_expires_at_ms > ?3) < ?7
+                                    AND claim_expires_at_ms > ?3) < ?8
                             AND (SELECT COUNT(*) FROM media_sessions
                                   WHERE user_id = ?4 AND state IN ('starting', 'active')
-                                    AND lease_expires_at_ms > ?3) < ?8
+                                    AND lease_expires_at_ms > ?3
+                                    AND incarnation_id != COALESCE((
+                                      SELECT current_incarnation_id FROM media_playback_pointers
+                                       WHERE user_id = ?4 AND playback_id = ?7), '')) < ?9
                             AND (SELECT COUNT(*) FROM media_sessions
-                                  WHERE user_id = ?4) < ?9",
-                        params![
-                            claim_expires_at_ms,
-                            incarnation_id,
-                            now_ms,
-                            user_id,
-                            request_id,
-                            request_fingerprint,
-                            MAX_IN_FLIGHT_PER_USER,
-                            MAX_CURRENT_PER_USER,
-                            MAX_SESSION_ROWS_PER_USER,
-                        ],
-                    )? == 1;
-                    if reacquired {
-                        MediaSessionRequestClaim::Acquired { incarnation_id }
+                                  WHERE user_id = ?4) < ?10",
+                            params![
+                                claim_expires_at_ms,
+                                incarnation_id,
+                                now_ms,
+                                user_id,
+                                request_id,
+                                request_fingerprint,
+                                playback_id,
+                                MAX_IN_FLIGHT_PER_USER,
+                                MAX_CURRENT_PER_USER,
+                                MAX_SESSION_ROWS_PER_USER,
+                            ],
+                        )? == 1;
+                        if reacquired {
+                            MediaSessionRequestClaim::Acquired { incarnation_id }
+                        } else {
+                            MediaSessionRequestClaim::Overloaded
+                        }
+                    } else if state == "resolved" {
+                        tx.query_row(
+                            &format!(
+                                "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                            ),
+                            [existing_incarnation.as_str()],
+                            route_from_row,
+                        )
+                        .optional()?
+                        .map(MediaSessionRequestClaim::Resolved)
+                        .unwrap_or(MediaSessionRequestClaim::InFlight {
+                            incarnation_id: existing_incarnation,
+                            owner_node_id: owner,
+                            claim_expires_at_ms: expires,
+                        })
+                    } else if state == "starting" {
+                        MediaSessionRequestClaim::InFlight {
+                            incarnation_id: existing_incarnation,
+                            owner_node_id: owner,
+                            claim_expires_at_ms: expires,
+                        }
                     } else {
-                        MediaSessionRequestClaim::Overloaded
-                    }
-                } else if state == "resolved" {
-                    tx.query_row(
-                        &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
-                        ),
-                        [existing_incarnation.as_str()],
-                        route_from_row,
-                    )
-                    .optional()?
-                    .map(MediaSessionRequestClaim::Resolved)
-                    .unwrap_or(MediaSessionRequestClaim::InFlight {
-                        incarnation_id: existing_incarnation,
-                        owner_node_id: owner,
-                        claim_expires_at_ms: expires,
-                    })
-                } else if state == "starting" {
-                    MediaSessionRequestClaim::InFlight {
-                        incarnation_id: existing_incarnation,
-                        owner_node_id: owner,
-                        claim_expires_at_ms: expires,
-                    }
-                } else {
-                    MediaSessionRequestClaim::Conflict
-                };
+                        MediaSessionRequestClaim::Conflict
+                    };
                 tx.commit()?;
                 return Ok(outcome);
             }
@@ -225,8 +248,11 @@ impl MediaSessionStore for SqliteStore {
             let current: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_sessions
                   WHERE user_id = ?1 AND state IN ('starting', 'active')
-                    AND lease_expires_at_ms > ?2",
-                params![user_id, now_ms],
+                    AND lease_expires_at_ms > ?2
+                    AND incarnation_id != COALESCE((
+                      SELECT current_incarnation_id FROM media_playback_pointers
+                       WHERE user_id = ?1 AND playback_id = ?3), '')",
+                params![user_id, now_ms, playback_id],
                 |row| row.get(0),
             )?;
             let request_rows: i64 = tx.query_row(
@@ -249,13 +275,15 @@ impl MediaSessionStore for SqliteStore {
             }
             tx.execute(
                 "INSERT INTO media_session_requests
-                    (user_id, request_id, request_fingerprint, state, claim_expires_at_ms,
-                     incarnation_id, owner_node_id, response_json, updated_at_ms)
-                 VALUES (?1, ?2, ?3, 'starting', ?4, ?5, NULL, NULL, ?6)",
+                    (user_id, request_id, request_fingerprint, playback_id, state,
+                     claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
+                     updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 'starting', ?5, ?6, NULL, NULL, ?7)",
                 params![
                     user_id,
                     request_id,
                     request_fingerprint,
+                    playback_id,
                     claim_expires_at_ms,
                     incarnation_id,
                     now_ms,
@@ -314,14 +342,16 @@ impl MediaSessionStore for SqliteStore {
                 let matches: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM media_session_requests
                       WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
-                        AND request_fingerprint = ?4 AND owner_node_id = ?5
-                        AND ((state = 'starting' AND claim_expires_at_ms > ?6)
-                          OR (state = 'resolved' AND response_json = ?7))",
+                        AND request_fingerprint = ?4 AND playback_id = ?5
+                        AND owner_node_id = ?6
+                        AND ((state = 'starting' AND claim_expires_at_ms > ?7)
+                          OR (state = 'resolved' AND response_json = ?8))",
                     params![
                         activation.user_id,
                         request_id,
                         activation.incarnation_id,
                         activation.request_fingerprint,
+                        activation.playback_id,
                         activation.owner_node_id,
                         activation.now_ms,
                         activation.response_json,
@@ -535,7 +565,8 @@ impl MediaSessionStore for SqliteStore {
                     "UPDATE media_session_requests SET state = 'resolved', response_json = ?1,
                             claim_expires_at_ms = ?2, updated_at_ms = ?3
                       WHERE user_id = ?4 AND request_id = ?5 AND incarnation_id = ?6
-                        AND request_fingerprint = ?7 AND owner_node_id = ?8",
+                        AND request_fingerprint = ?7 AND playback_id = ?8
+                        AND owner_node_id = ?9",
                     params![
                         activation.response_json,
                         activation.lease_expires_at_ms,
@@ -544,6 +575,7 @@ impl MediaSessionStore for SqliteStore {
                         request_id,
                         activation.incarnation_id,
                         activation.request_fingerprint,
+                        activation.playback_id,
                         activation.owner_node_id,
                     ],
                 )?;
@@ -590,7 +622,7 @@ impl MediaSessionStore for SqliteStore {
             return Ok(None);
         }
         let session_id = session_id.to_owned();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             Ok(conn
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE session_id = ?1"),
@@ -610,7 +642,7 @@ impl MediaSessionStore for SqliteStore {
             return Ok(None);
         }
         let incarnation_id = incarnation_id.to_owned();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             Ok(conn
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
@@ -851,7 +883,7 @@ impl MediaSessionStore for SqliteStore {
             return Err(StoreError::Task("invalid media-session owner".to_owned()));
         }
         let owner_node_id = owner_node_id.to_owned();
-        self.with_conn(move |conn| {
+        self.with_read(move |conn| {
             let mut statement = conn.prepare(
                 "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms
                    FROM media_sessions

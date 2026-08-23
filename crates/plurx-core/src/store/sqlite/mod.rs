@@ -687,6 +687,7 @@ const MIGRATIONS: &[&str] = &[
         user_id             INTEGER NOT NULL,
         request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
         request_fingerprint TEXT NOT NULL,
+        playback_id         TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
         state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),
         claim_expires_at_ms INTEGER NOT NULL,
         incarnation_id      TEXT NOT NULL,
@@ -2294,7 +2295,7 @@ mod tests {
             SQLITE_SCHEMA_VERSION
         );
         for (table, columns) in [
-            ("media_session_requests", 9),
+            ("media_session_requests", 10),
             ("media_playback_pointers", 4),
             ("media_sessions", 17),
         ] {

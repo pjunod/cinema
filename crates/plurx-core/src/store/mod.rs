@@ -1814,6 +1814,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         user_id: i64,
         request_id: &str,
         request_fingerprint: &str,
+        playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
         claim_expires_at_ms: i64,
