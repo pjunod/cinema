@@ -1315,6 +1315,36 @@ pub trait SharedCacheStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
 
+    /// Fence only the exact still-incomplete publication claim into durable
+    /// cleanup state. A stale or commit-uncertain publisher must never delete
+    /// a completed replacement.
+    async fn abandon_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Forget an exact abandoned claim only after its derived staging/final
+    /// paths have been removed. A crash before this call remains discoverable.
+    async fn finalize_abandoned_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Return a bounded oldest-first inventory of incomplete publication
+    /// claims whose owner has exceeded the publication recovery window.
+    async fn stale_shared_cache_claims(
+        &self,
+        storage_id: &str,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
     /// Insert or renew a pin only while the exact complete generation remains
     /// current. Validation and mutation are one database statement/transaction.
     async fn acquire_cache_consumer_pin(
@@ -1351,6 +1381,15 @@ pub trait SharedCacheStore: Send + Sync + 'static {
     /// current and no live typed consumer pin exists. Filesystem deletion may
     /// happen only after this returns true.
     async fn retire_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<bool, StoreError>;
+
+    /// Remove an exact GC tombstone only after its deterministic final and
+    /// quarantine paths have been removed under the same live GC lease.
+    async fn finalize_retired_shared_cache_generation(
         &self,
         generation: &SharedCacheGeneration,
         now_ms: i64,

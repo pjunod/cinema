@@ -277,6 +277,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "shared_cache.rs",
+        method: "finalize_abandoned_shared_cache_entry",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
         method: "renew_cache_consumer_pins",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -285,6 +292,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "shared_cache.rs",
         method: "retire_shared_cache_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "shared_cache.rs",
+        method: "finalize_retired_shared_cache_generation",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
@@ -589,7 +603,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 31);
+        assert_eq!(methods.len(), 33);
     }
 
     #[test]

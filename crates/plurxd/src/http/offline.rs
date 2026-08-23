@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1002,6 +1002,38 @@ async fn validate_package_candidate(
     })
 }
 
+async fn validate_shared_package_candidate(
+    state: &AppState,
+    package: &OfflinePackage,
+    recipe: &str,
+    candidate: OfflineLocationCandidate,
+) -> Result<PackageLocation, ApiError> {
+    let coordinator = Arc::clone(&state.shared_cache);
+    let task_state = state.clone();
+    let task_package = package.clone();
+    let task_recipe = recipe.to_owned();
+    match coordinator
+        .run_mount_io("offline_generation_read_timeout", async move {
+            Ok(validate_package_candidate(
+                &task_state,
+                &task_package,
+                &task_recipe,
+                candidate,
+                None,
+            )
+            .await)
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared_cache_unavailable",
+            "The shared offline package became unavailable; retry another server node.",
+        )),
+    }
+}
+
 fn corrupt_package() -> ApiError {
     typed(
         StatusCode::GONE,
@@ -1042,7 +1074,7 @@ async fn package_dir(
                     last_used_at: shared.last_used_at,
                 },
             };
-            match validate_package_candidate(state, package, recipe, candidate, None).await {
+            match validate_shared_package_candidate(state, package, recipe, candidate).await {
                 Ok(location) => {
                     let _ = state
                         .store
@@ -1255,6 +1287,29 @@ pub async fn playlist(
     let package = authorized_package(&state, &token).await?;
     let location = package_dir(&state, &package).await?;
     let bytes = match &location.manifest {
+        Some(manifest) if location.cached.storage_class == "shared" => {
+            let manifest = Arc::clone(manifest);
+            let directory = location.dir.clone();
+            match state
+                .shared_cache
+                .run_mount_io("offline_playlist_read_timeout", async move {
+                    manifest
+                        .read_verified_playlist(&directory, "index.m3u8")
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Err(typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "shared_cache_unavailable",
+                        "The shared offline package became unavailable; retry another server node.",
+                    ));
+                }
+            }
+        }
         Some(manifest) => manifest
             .read_verified_playlist(&location.dir, "index.m3u8")
             .await
@@ -1328,17 +1383,44 @@ pub async fn segment(
         return Err(ApiError::NotFound("offline segment"));
     }
     let opened = match &location.manifest {
-        Some(manifest) => match manifest.open_verified_object(&location.dir, &segment).await {
-            Ok(Some(opened)) => Some((opened.file, opened.bytes, Some(opened.lease))),
-            Err(error) if error.is_capacity() => {
-                return Err(ApiError::typed(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "response_snapshot_capacity",
-                    "authenticated media response capacity is full; retry shortly",
-                ));
+        Some(manifest) => {
+            let verified_object = if location.cached.storage_class == "shared" {
+                let manifest = Arc::clone(manifest);
+                let directory = location.dir.clone();
+                let object_name = segment.clone();
+                match state
+                    .shared_cache
+                    .run_mount_io("offline_segment_read_timeout", async move {
+                        Ok(manifest
+                            .open_verified_object(&directory, &object_name)
+                            .await)
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(typed(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "shared_cache_unavailable",
+                            "The shared offline package became unavailable; retry another server node.",
+                        ));
+                    }
+                }
+            } else {
+                manifest.open_verified_object(&location.dir, &segment).await
+            };
+            match verified_object {
+                Ok(Some(opened)) => Some((opened.file, opened.bytes, Some(opened.lease))),
+                Err(error) if error.is_capacity() => {
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "response_snapshot_capacity",
+                        "authenticated media response capacity is full; retry shortly",
+                    ));
+                }
+                Ok(None) | Err(_) => None,
             }
-            Ok(None) | Err(_) => None,
-        },
+        }
         None => {
             plurx_core::transcode::manifest::open_bounded_regular_object(&location.dir, &segment)
                 .await

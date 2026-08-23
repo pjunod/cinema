@@ -6,7 +6,7 @@
 //! immediately; ordinary node-local cache routing remains available.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,10 +27,15 @@ const CANARY_DIRECTORY: &str = ".plurx-canary";
 const CANARY_BYTES: u64 = 128;
 const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
+const CANARY_ORPHAN_AGE: Duration = Duration::from_secs(30);
+const CANARY_SWEEP_LIMIT: usize = 64;
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 const GC_LEASE_MS: i64 = 30_000;
 const GC_BATCH: i64 = 32;
 const GC_MIN_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+const STALE_PUBLICATION_MS: i64 = 60 * 60 * 1_000;
+const MOUNT_IO_DEADLINE: Duration = Duration::from_secs(10);
+const MOUNT_IO_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug)]
 struct SharedConfig {
@@ -38,11 +43,20 @@ struct SharedConfig {
     storage_id: String,
 }
 
+#[derive(Clone, Debug)]
+struct VerifiedRoot {
+    path: PathBuf,
+    identity: plurx_core::fs_secure::FileIdentity,
+}
+
 #[derive(Clone)]
 pub(crate) struct SharedCacheCoordinator {
     config: Option<SharedConfig>,
-    canonical_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    verified_root: Arc<tokio::sync::RwLock<Option<VerifiedRoot>>>,
     verified: Arc<AtomicBool>,
+    loss_generation: Arc<AtomicU64>,
+    verification_transition: Arc<tokio::sync::Mutex<()>>,
+    mount_io: Arc<tokio::sync::Semaphore>,
     node_id: String,
     membership: MembershipManager,
     transport: PeerTransport,
@@ -83,8 +97,11 @@ impl SharedCacheCoordinator {
             });
         Arc::new(Self {
             config,
-            canonical_root: Arc::new(tokio::sync::RwLock::new(None)),
+            verified_root: Arc::new(tokio::sync::RwLock::new(None)),
             verified: Arc::new(AtomicBool::new(false)),
+            loss_generation: Arc::new(AtomicU64::new(0)),
+            verification_transition: Arc::new(tokio::sync::Mutex::new(())),
+            mount_io: Arc::new(tokio::sync::Semaphore::new(MOUNT_IO_CONCURRENCY)),
             node_id,
             transport: PeerTransport::new(membership.clone()),
             membership,
@@ -102,20 +119,95 @@ impl SharedCacheCoordinator {
         self.verified.load(Ordering::Acquire)
     }
 
+    /// Run mount-backed work behind a fixed permit pool and a hard caller
+    /// deadline. A timed-out task is deliberately detached while retaining
+    /// its permit until the kernel operation actually returns; a wedged NAS
+    /// can therefore consume at most `MOUNT_IO_CONCURRENCY` tasks.
+    pub(crate) async fn run_mount_io<T, F>(
+        &self,
+        reason: &'static str,
+        future: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    {
+        let permit = match Arc::clone(&self.mount_io).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.report_io_failure("mount_io_capacity_exhausted").await;
+                return Err("shared cache mount I/O capacity is exhausted".to_owned());
+            }
+        };
+        let mut task = tokio::spawn(async move {
+            let _permit = permit;
+            future.await
+        });
+        match tokio::time::timeout(MOUNT_IO_DEADLINE, &mut task).await {
+            Ok(result) => result.map_err(|error| format!("shared mount task failed: {error}"))?,
+            Err(_) => {
+                self.report_io_failure(reason).await;
+                Err("shared cache mount I/O exceeded its hard deadline".to_owned())
+            }
+        }
+    }
+
     pub(crate) async fn root(&self) -> Option<PathBuf> {
         if !self.is_verified() {
             return None;
         }
-        self.canonical_root.read().await.clone()
+        self.verified_root
+            .read()
+            .await
+            .as_ref()
+            .map(|root| root.path.clone())
+    }
+
+    /// Reopen the admitted root and prove that the pathname still names the
+    /// same filesystem object. Publication and GC mutate portable state, so
+    /// merely retaining the configured spelling after an unmount is unsafe.
+    async fn open_verified_root(&self) -> Result<Option<(PathBuf, SecureDirectory)>, String> {
+        if !self.is_verified() {
+            return Ok(None);
+        }
+        let admitted = self
+            .verified_root
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "verified shared cache has no admitted root".to_owned())?;
+        let root = match SecureDirectory::open(&admitted.path).await {
+            Ok(root) => root,
+            Err(error) => {
+                self.report_io_failure("shared_root_open_failed").await;
+                return Err(format!("opening admitted shared cache root: {error}"));
+            }
+        };
+        let observed = match root.identity().await {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.report_io_failure("shared_root_identity_failed").await;
+                return Err(format!("identifying admitted shared cache root: {error}"));
+            }
+        };
+        if !observed.same_inode(admitted.identity) {
+            self.report_io_failure("shared_root_identity_changed").await;
+            return Err("shared cache root identity changed after admission".to_owned());
+        }
+        if !self.is_verified() {
+            return Ok(None);
+        }
+        Ok(Some((admitted.path, root)))
     }
 
     #[cfg(test)]
     pub(crate) async fn admit_local_for_test(&self) -> Result<(), String> {
+        let attempted_generation = self.loss_generation.load(Ordering::Acquire);
         let config = self
             .config
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        let (root, canaries) = prepare_canary_directory(&config.configured_root).await?;
+        let (path, identity, canaries) = prepare_canary_directory(&config.configured_root).await?;
         let name = canary_name("single");
         let bytes = random_canary_bytes();
         canaries
@@ -130,6 +222,24 @@ impl SharedCacheCoordinator {
         if observed != bytes {
             return Err("test shared-cache canary changed while read".to_owned());
         }
+        self.publish_verified_root(path, identity, attempted_generation)
+            .await
+    }
+
+    async fn publish_verified_root(
+        &self,
+        path: PathBuf,
+        identity: plurx_core::fs_secure::FileIdentity,
+        attempted_generation: u64,
+    ) -> Result<(), String> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| "shared cache is not configured".to_owned())?;
+        let _transition = self.verification_transition.lock().await;
+        if self.loss_generation.load(Ordering::Acquire) != attempted_generation {
+            return Err("shared cache proof was superseded by a newer I/O failure".to_owned());
+        }
         self.store
             .put_cache_storage_member(&CacheStorageMember {
                 storage_id: config.storage_id.clone(),
@@ -140,23 +250,27 @@ impl SharedCacheCoordinator {
             })
             .await
             .map_err(|error| error.to_string())?;
-        *self.canonical_root.write().await = Some(root);
+        *self.verified_root.write().await = Some(VerifiedRoot { path, identity });
         self.verified.store(true, Ordering::Release);
         Ok(())
     }
 
     pub(crate) async fn report_io_failure(&self, reason: &'static str) {
-        if !self.verified.swap(false, Ordering::AcqRel) {
-            return;
-        }
+        // Invalidate in-flight proofs before waiting for the serialized state
+        // transition. An older proof may never re-enable the mount afterward.
+        self.loss_generation.fetch_add(1, Ordering::AcqRel);
+        let _transition = self.verification_transition.lock().await;
+        let was_verified = self.verified.swap(false, Ordering::AcqRel);
         let Some(config) = self.config.as_ref() else {
             return;
         };
-        tracing::warn!(
-            storage_id = %config.storage_id,
-            reason,
-            "shared cache proof lost; falling back to node-local holders"
-        );
+        if was_verified {
+            tracing::warn!(
+                storage_id = %config.storage_id,
+                reason,
+                "shared cache proof lost; falling back to node-local holders"
+            );
+        }
         let _ = self
             .store
             .mark_cache_storage_suspect(&config.storage_id, &self.node_id, unix_ms())
@@ -192,11 +306,20 @@ impl SharedCacheCoordinator {
     }
 
     async fn verify_once(&self) -> Result<(), String> {
+        let coordinator = self.clone();
+        self.run_mount_io("canary_mount_timeout", async move {
+            coordinator.verify_once_inner().await
+        })
+        .await
+    }
+
+    async fn verify_once_inner(&self) -> Result<(), String> {
+        let attempted_generation = self.loss_generation.load(Ordering::Acquire);
         let config = self
             .config
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        let (root, canaries) = prepare_canary_directory(&config.configured_root).await?;
+        let (path, identity, canaries) = prepare_canary_directory(&config.configured_root).await?;
         let voter_count = self
             .membership
             .activity_voter_count()
@@ -247,19 +370,8 @@ impl SharedCacheCoordinator {
                 proof?;
             }
         }
-        self.store
-            .put_cache_storage_member(&CacheStorageMember {
-                storage_id: config.storage_id.clone(),
-                node_id: self.node_id.clone(),
-                storage_class: "shared".to_owned(),
-                verified_at_ms: unix_ms(),
-                verification_state: "verified".to_owned(),
-            })
+        self.publish_verified_root(path, identity, attempted_generation)
             .await
-            .map_err(|error| error.to_string())?;
-        *self.canonical_root.write().await = Some(root);
-        self.verified.store(true, Ordering::Release);
-        Ok(())
     }
 
     async fn verify_peer(
@@ -325,6 +437,15 @@ impl SharedCacheCoordinator {
         &self,
         request: &CanaryRequest,
     ) -> Result<CanaryResponse, String> {
+        let coordinator = self.clone();
+        let request = request.clone();
+        self.run_mount_io("canary_reply_mount_timeout", async move {
+            coordinator.answer_canary_inner(&request).await
+        })
+        .await
+    }
+
+    async fn answer_canary_inner(&self, request: &CanaryRequest) -> Result<CanaryResponse, String> {
         let config = self
             .config
             .as_ref()
@@ -332,10 +453,14 @@ impl SharedCacheCoordinator {
         if request.storage_id != config.storage_id
             || !safe_canary_name(&request.canary_name, "probe")
             || request.canary_digest.len() != 64
+            || !request
+                .canary_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
         {
             return Err("shared cache canary identity does not match".to_owned());
         }
-        let (_, canaries) = prepare_canary_directory(&config.configured_root).await?;
+        let (_, _, canaries) = prepare_canary_directory(&config.configured_root).await?;
         let bytes = canaries
             .read_bounded_child(&request.canary_name, CANARY_BYTES)
             .await
@@ -349,11 +474,62 @@ impl SharedCacheCoordinator {
             .atomic_write_child(&response_name, &response_bytes)
             .await
             .map_err(|error| error.to_string())?;
+        // The requester normally removes this response after proving it. A
+        // lost HTTP response must not leave one file per probe forever.
+        let cleanup_directory = canaries.clone();
+        let cleanup_name = response_name.clone();
+        let cleanup_coordinator = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(CANARY_ORPHAN_AGE).await;
+            let _ = cleanup_coordinator
+                .run_mount_io("canary_cleanup_timeout", async move {
+                    cleanup_directory
+                        .unlink_child(&cleanup_name)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+        });
         Ok(CanaryResponse {
             storage_id: config.storage_id.clone(),
             response_name,
             response_digest: digest(&response_bytes),
         })
+    }
+
+    async fn abandon_publication(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+        fanout: &SecureDirectory,
+        staging_name: &str,
+        final_name: &str,
+        max_entries: usize,
+    ) -> Result<bool, String> {
+        if !self
+            .store
+            .abandon_shared_cache_entry(recipe_hash, storage_id, generation_id, relative_dir)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(false);
+        }
+
+        for name in [staging_name, final_name] {
+            remove_shared_tree_if_present(fanout, name, max_entries).await?;
+        }
+        self.store
+            .finalize_abandoned_shared_cache_entry(
+                recipe_hash,
+                storage_id,
+                generation_id,
+                relative_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(true)
     }
 
     /// Publish an already fenced local generation into the verified shared
@@ -368,11 +544,37 @@ impl SharedCacheCoordinator {
         source_dir: &Path,
         manifest: &plurx_core::transcode::manifest::GenerationManifest,
     ) -> Result<bool, String> {
+        let coordinator = self.clone();
+        let recipe_hash = recipe_hash.to_owned();
+        let source_dir = source_dir.to_owned();
+        let manifest = manifest.clone();
+        self.run_mount_io("shared_publish_timeout", async move {
+            coordinator
+                .publish_generation_inner(
+                    &recipe_hash,
+                    file_id,
+                    recipe_version,
+                    &source_dir,
+                    &manifest,
+                )
+                .await
+        })
+        .await
+    }
+
+    async fn publish_generation_inner(
+        &self,
+        recipe_hash: &str,
+        file_id: i64,
+        recipe_version: i64,
+        source_dir: &Path,
+        manifest: &plurx_core::transcode::manifest::GenerationManifest,
+    ) -> Result<bool, String> {
         let config = self
             .config
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        let Some(root_path) = self.root().await else {
+        let Some((root_path, root)) = self.open_verified_root().await? else {
             return Ok(false);
         };
         let short_hash = recipe_hash
@@ -380,13 +582,6 @@ impl SharedCacheCoordinator {
             .filter(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| "shared cache recipe has no safe generation prefix".to_owned())?;
         let prefix = &short_hash[..2];
-        let root = match SecureDirectory::open(&root_path).await {
-            Ok(root) => root,
-            Err(error) => {
-                self.report_io_failure("shared_publish_root_failed").await;
-                return Err(format!("opening shared cache root: {error}"));
-            }
-        };
         let fanout = match root.open_child_directory(prefix).await {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -407,14 +602,7 @@ impl SharedCacheCoordinator {
         let staging_name = format!(".stage-{nonce}");
         let final_name = format!("{short_hash}-{nonce}");
         let relative_dir = format!("{prefix}/{final_name}");
-        let staging = match fanout.create_child_directory(&staging_name).await {
-            Ok(staging) => staging,
-            Err(error) => {
-                self.report_io_failure("shared_publish_staging_failed")
-                    .await;
-                return Err(format!("creating shared generation staging: {error}"));
-            }
-        };
+        let publication_entries = manifest.objects.len().saturating_add(1);
         let claimed = match self
             .store
             .claim_shared_cache_entry(
@@ -430,28 +618,63 @@ impl SharedCacheCoordinator {
         {
             Ok(claimed) => claimed,
             Err(error) => {
-                let _ = fanout
-                    .remove_child_tree(&staging_name, manifest.objects.len().saturating_add(1), 1)
+                let _ = self
+                    .abandon_publication(
+                        recipe_hash,
+                        &config.storage_id,
+                        &manifest.generation_id,
+                        &relative_dir,
+                        &fanout,
+                        &staging_name,
+                        &final_name,
+                        publication_entries,
+                    )
                     .await;
                 return Err(error.to_string());
             }
         };
         if !claimed {
-            let _ = fanout
-                .remove_child_tree(&staging_name, manifest.objects.len().saturating_add(1), 1)
-                .await;
             return Ok(false);
         }
+
+        // Claim before creating bytes. A crash can now leave only a bounded,
+        // discoverable incomplete row; no untracked `.stage-*` directory is
+        // created before durable ownership exists.
+        let staging = match fanout.create_child_directory(&staging_name).await {
+            Ok(staging) => staging,
+            Err(error) => {
+                let _ = self
+                    .abandon_publication(
+                        recipe_hash,
+                        &config.storage_id,
+                        &manifest.generation_id,
+                        &relative_dir,
+                        &fanout,
+                        &staging_name,
+                        &final_name,
+                        publication_entries,
+                    )
+                    .await;
+                self.report_io_failure("shared_publish_staging_failed")
+                    .await;
+                return Err(format!("creating shared generation staging: {error}"));
+            }
+        };
 
         let source = match SecureDirectory::open(source_dir).await {
             Ok(source) => source,
             Err(error) => {
-                let _ = fanout
-                    .remove_child_tree(&staging_name, manifest.objects.len().saturating_add(1), 1)
-                    .await;
                 let _ = self
-                    .store
-                    .forget_cache_entry(recipe_hash, &config.storage_id, "shared")
+                    .abandon_publication(
+                        recipe_hash,
+                        &config.storage_id,
+                        &manifest.generation_id,
+                        &relative_dir,
+                        &fanout,
+                        &staging_name,
+                        &final_name,
+                        publication_entries,
+                    )
                     .await;
                 return Err(format!(
                     "opening local generation for shared publication: {error}"
@@ -459,7 +682,6 @@ impl SharedCacheCoordinator {
             }
         };
         let staging_path = root_path.join(prefix).join(&staging_name);
-        let mut installed = false;
         let publication = async {
             let mut total_bytes = 0_u64;
             for object in &manifest.objects {
@@ -529,56 +751,271 @@ impl SharedCacheCoordinator {
                     true,
                 ));
             }
-            installed = true;
-            let complete = self
-                .store
-                .complete_shared_cache_entry(
-                    recipe_hash,
-                    &config.storage_id,
-                    &manifest.generation_id,
-                    total_bytes.min(i64::MAX as u64) as i64,
-                    &manifest.manifest_digest,
-                    unix_ms(),
-                )
-                .await
-                .map_err(|error| (error.to_string(), false))?;
-            if !complete {
-                return Err((
-                    "shared cache claim changed before completion".to_owned(),
-                    false,
-                ));
-            }
-            Ok::<(), (String, bool)>(())
+            Ok::<u64, (String, bool)>(total_bytes)
         }
         .await;
-        match publication {
-            Ok(()) => Ok(true),
+        let total_bytes = match publication {
+            Ok(total_bytes) => total_bytes,
             Err((error, io_failure)) => {
-                let child = if installed {
-                    final_name.as_str()
-                } else {
-                    staging_name.as_str()
-                };
-                let _ = fanout
-                    .remove_child_tree(child, manifest.objects.len().saturating_add(1), 1)
-                    .await;
                 let _ = self
-                    .store
-                    .forget_cache_entry(recipe_hash, &config.storage_id, "shared")
+                    .abandon_publication(
+                        recipe_hash,
+                        &config.storage_id,
+                        &manifest.generation_id,
+                        &relative_dir,
+                        &fanout,
+                        &staging_name,
+                        &final_name,
+                        publication_entries,
+                    )
                     .await;
                 if io_failure {
                     self.report_io_failure("shared_publish_failed").await;
                 }
-                Err(error)
+                return Err(error);
             }
+        };
+
+        let completion = self
+            .store
+            .complete_shared_cache_entry(
+                recipe_hash,
+                &config.storage_id,
+                &manifest.generation_id,
+                total_bytes.min(i64::MAX as u64) as i64,
+                &manifest.manifest_digest,
+                unix_ms(),
+            )
+            .await;
+        let completion_error = match completion {
+            Ok(true) => return Ok(true),
+            Ok(false) => "shared cache claim changed before completion".to_owned(),
+            Err(error) => error.to_string(),
+        };
+
+        // Completion can be commit-unknown. Fencing the exact incomplete row
+        // into state 2 wins exclusive cleanup authority. If no incomplete row
+        // remains, preserve bytes until a consistent read proves whether this
+        // exact generation became authoritative.
+        match self
+            .abandon_publication(
+                recipe_hash,
+                &config.storage_id,
+                &manifest.generation_id,
+                &relative_dir,
+                &fanout,
+                &staging_name,
+                &final_name,
+                publication_entries,
+            )
+            .await
+        {
+            Ok(true) => Err(completion_error),
+            Ok(false) => match self
+                .store
+                .shared_cache_hit(recipe_hash, &config.storage_id)
+                .await
+            {
+                Ok(Some(current))
+                    if current.generation_id == manifest.generation_id
+                        && current.relative_dir == relative_dir
+                        && current.manifest_digest.as_deref()
+                            == Some(manifest.manifest_digest.as_str()) =>
+                {
+                    Ok(true)
+                }
+                Ok(_) => Err(completion_error),
+                Err(reconcile_error) => Err(format!(
+                    "{completion_error}; shared completion reconciliation remains unresolved: {reconcile_error}"
+                )),
+            },
+            Err(abandon_error) => Err(format!(
+                "{completion_error}; exact shared claim settlement remains unresolved: {abandon_error}"
+            )),
         }
     }
 
+    async fn reconcile_stale_publication(
+        &self,
+        root: &SecureDirectory,
+        generation: &plurx_core::domain::SharedCacheGeneration,
+    ) -> Result<(), String> {
+        let components = shared_generation_components(&generation.relative_dir)
+            .ok_or_else(|| "stale shared publication has an invalid relative path".to_owned())?;
+        let final_name = components.last().expect("bounded non-empty components");
+        let staging_name = staging_name_for_generation(final_name)
+            .ok_or_else(|| "stale shared publication has an invalid generation name".to_owned())?;
+        if !self
+            .store
+            .abandon_shared_cache_entry(
+                &generation.recipe_hash,
+                &generation.storage_id,
+                &generation.generation_id,
+                &generation.relative_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+
+        let mut parent = root.clone();
+        for component in &components[..components.len().saturating_sub(1)] {
+            parent = match parent.open_child_directory(component).await {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.store
+                        .finalize_abandoned_shared_cache_entry(
+                            &generation.recipe_hash,
+                            &generation.storage_id,
+                            &generation.generation_id,
+                            &generation.relative_dir,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+        }
+        let max_entries = plurx_core::transcode::manifest::MAX_OBJECTS.saturating_add(1);
+        remove_shared_tree_if_present(&parent, &staging_name, max_entries).await?;
+        remove_shared_tree_if_present(&parent, final_name, max_entries).await?;
+        self.store
+            .finalize_abandoned_shared_cache_entry(
+                &generation.recipe_hash,
+                &generation.storage_id,
+                &generation.generation_id,
+                &generation.relative_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn reclaim_retired_generation(
+        &self,
+        root: &SecureDirectory,
+        generation: &plurx_core::domain::SharedCacheGeneration,
+        lease: &plurx_core::cluster::coordination::Lease,
+    ) -> Result<(), String> {
+        let components = shared_generation_components(&generation.relative_dir)
+            .ok_or_else(|| "shared GC generation has an invalid relative path".to_owned())?;
+        let generation_name = components.last().expect("bounded non-empty components");
+        let quarantine = format!(".delete-{generation_name}");
+        let mut parent = root.clone();
+        for component in &components[..components.len().saturating_sub(1)] {
+            parent = match parent.open_child_directory(component).await {
+                Ok(directory) => directory,
+                Err(error)
+                    if generation.cleanup_pending
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    let _ = self
+                        .store
+                        .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    return Ok(());
+                }
+                Err(error) => return Err(format!("opening shared GC parent: {error}")),
+            };
+        }
+
+        let (generation_capability, already_quarantined) = match parent
+            .open_child_directory(generation_name)
+            .await
+        {
+            Ok(directory) => (directory, false),
+            Err(error)
+                if generation.cleanup_pending && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                match parent.open_child_directory(&quarantine).await {
+                    Ok(directory) => (directory, true),
+                    Err(quarantine_error)
+                        if quarantine_error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        let _ = self
+                            .store
+                            .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        return Ok(());
+                    }
+                    Err(quarantine_error) => {
+                        return Err(format!("opening shared GC quarantine: {quarantine_error}"));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "opening complete shared generation before retirement: {error}"
+                ));
+            }
+        };
+        let generation_identity = generation_capability
+            .identity()
+            .await
+            .map_err(|error| format!("identifying shared GC generation: {error}"))?;
+        if !self
+            .store
+            .retire_shared_cache_generation(generation, unix_ms(), lease)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(());
+        }
+
+        if !already_quarantined {
+            match parent
+                .rename_child_noreplace(generation_name, &quarantine)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Err("shared GC quarantine already exists".to_owned()),
+                Err(error) => return Err(format!("quarantining shared generation: {error}")),
+            }
+            let moved_directory = parent
+                .open_child_directory(&quarantine)
+                .await
+                .map_err(|error| format!("opening quarantined shared generation: {error}"))?;
+            let moved_identity = moved_directory
+                .identity()
+                .await
+                .map_err(|error| format!("identifying quarantined shared generation: {error}"))?;
+            if !moved_identity.same_inode(generation_identity) {
+                return Err("shared GC quarantine identity changed".to_owned());
+            }
+        }
+        parent
+            .remove_child_tree(
+                &quarantine,
+                plurx_core::transcode::manifest::MAX_OBJECTS.saturating_add(1),
+                1,
+            )
+            .await
+            .map_err(|error| format!("deleting quarantined shared generation: {error}"))?;
+        let _ = self
+            .store
+            .finalize_retired_shared_cache_generation(generation, unix_ms(), lease)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     async fn gc_once(&self) -> Result<(), String> {
+        let coordinator = self.clone();
+        self.run_mount_io("shared_gc_timeout", async move {
+            coordinator.gc_once_inner().await
+        })
+        .await
+    }
+
+    async fn gc_once_inner(&self) -> Result<(), String> {
         let Some(config) = self.config.as_ref() else {
             return Ok(());
         };
-        let Some(root) = self.root().await else {
+        let Some((_root_path, root)) = self.open_verified_root().await? else {
             return Ok(());
         };
         let now_ms = unix_ms();
@@ -597,6 +1034,32 @@ impl SharedCacheCoordinator {
             LeaseClaim::Acquired(lease) => lease,
             LeaseClaim::Held { .. } => return Ok(()),
         };
+        let stale_claims = self
+            .store
+            .stale_shared_cache_claims(
+                &config.storage_id,
+                now_ms.saturating_sub(STALE_PUBLICATION_MS),
+                GC_BATCH,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        for generation in stale_claims {
+            if let Err(error) = self.reconcile_stale_publication(&root, &generation).await {
+                self.report_io_failure("stale_publication_cleanup_failed")
+                    .await;
+                tracing::warn!(
+                    storage_id = %generation.storage_id,
+                    recipe = %generation.recipe_hash,
+                    %error,
+                    "shared cache stale publication cleanup remains retryable"
+                );
+                break;
+            }
+        }
+        if !self.is_verified() {
+            let _ = self.store.release_lease(&lease, unix_ms()).await;
+            return Ok(());
+        }
         let candidates = self
             .store
             .shared_cache_gc_candidates(&config.storage_id, now_ms, GC_BATCH)
@@ -605,37 +1068,60 @@ impl SharedCacheCoordinator {
         let cutoff = now_ms.saturating_sub(GC_MIN_AGE_MS);
         for generation in candidates
             .into_iter()
-            .filter(|generation| generation.last_used_at <= cutoff)
+            .filter(|generation| generation.cleanup_pending || generation.last_used_at <= cutoff)
         {
-            if self
-                .store
-                .retire_shared_cache_generation(&generation, unix_ms(), &lease)
+            if let Err(error) = self
+                .reclaim_retired_generation(&root, &generation, &lease)
                 .await
-                .map_err(|error| error.to_string())?
             {
-                let Some(directory) =
-                    crate::cachekeep::validated_entry_dir(&root, &generation.relative_dir).await
-                else {
-                    self.report_io_failure("gc_path_invalid").await;
-                    break;
-                };
-                if let Err(error) =
-                    crate::transcode::quarantine_remove_cache_tree(&directory, 1).await
-                {
-                    tracing::warn!(
-                        storage_id = %generation.storage_id,
-                        recipe = %generation.recipe_hash,
-                        %error,
-                        "shared cache pointer retired but filesystem deletion failed"
-                    );
-                    self.report_io_failure("gc_delete_failed").await;
-                    break;
-                }
+                self.report_io_failure("gc_reclamation_failed").await;
+                tracing::warn!(
+                    storage_id = %generation.storage_id,
+                    recipe = %generation.recipe_hash,
+                    %error,
+                    "shared cache GC reclamation remains retryable"
+                );
+                break;
             }
         }
         let _ = self.store.release_lease(&lease, unix_ms()).await;
         Ok(())
     }
+}
+
+async fn remove_shared_tree_if_present(
+    parent: &SecureDirectory,
+    name: &str,
+    max_entries: usize,
+) -> Result<(), String> {
+    match parent.open_child_directory(name).await {
+        Ok(_) => parent
+            .remove_child_tree(name, max_entries, 1)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn shared_generation_components(relative_dir: &str) -> Option<Vec<&str>> {
+    let components = Path::new(relative_dir)
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(component) => component.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!components.is_empty() && components.len() <= 8).then_some(components)
+}
+
+fn staging_name_for_generation(final_name: &str) -> Option<String> {
+    let (prefix, nonce) = final_name.split_once('-')?;
+    (prefix.len() == 16
+        && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && nonce.len() == 32
+        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| format!(".stage-{nonce}"))
 }
 
 fn storage_id(cluster_id: &str, shared_id: &str) -> String {
@@ -646,7 +1132,16 @@ fn storage_id(cluster_id: &str, shared_id: &str) -> String {
     format!("shared:{}", hex::encode(hasher.finalize()))
 }
 
-async fn prepare_canary_directory(root: &Path) -> Result<(PathBuf, SecureDirectory), String> {
+async fn prepare_canary_directory(
+    root: &Path,
+) -> Result<
+    (
+        PathBuf,
+        plurx_core::fs_secure::FileIdentity,
+        SecureDirectory,
+    ),
+    String,
+> {
     let canonical = tokio::fs::canonicalize(root)
         .await
         .map_err(|error| format!("canonicalizing shared cache root: {error}"))?;
@@ -659,6 +1154,7 @@ async fn prepare_canary_directory(root: &Path) -> Result<(PathBuf, SecureDirecto
     let root = SecureDirectory::open(&canonical)
         .await
         .map_err(|error| error.to_string())?;
+    let identity = root.identity().await.map_err(|error| error.to_string())?;
     let canaries = match root.open_child_directory(CANARY_DIRECTORY).await {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => root
@@ -667,7 +1163,46 @@ async fn prepare_canary_directory(root: &Path) -> Result<(PathBuf, SecureDirecto
             .map_err(|error| error.to_string())?,
         Err(error) => return Err(error.to_string()),
     };
-    Ok((canonical, canaries))
+    sweep_canary_orphans(&canonical.join(CANARY_DIRECTORY), &canaries).await?;
+    Ok((canonical, identity, canaries))
+}
+
+async fn sweep_canary_orphans(
+    directory_path: &Path,
+    directory: &SecureDirectory,
+) -> Result<(), String> {
+    let mut entries = tokio::fs::read_dir(directory_path)
+        .await
+        .map_err(|error| error.to_string())?;
+    for _ in 0..CANARY_SWEEP_LIMIT {
+        let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            break;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !["probe", "reply", "single"]
+            .into_iter()
+            .any(|prefix| safe_canary_name(&name, prefix))
+        {
+            continue;
+        }
+        let modified = match tokio::fs::symlink_metadata(entry.path()).await {
+            Ok(metadata) => metadata.modified().ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if modified
+            .is_some_and(|modified| modified.elapsed().unwrap_or_default() >= CANARY_ORPHAN_AGE)
+        {
+            let _ = directory.unlink_child(&name).await;
+        }
+    }
+    Ok(())
 }
 
 fn canary_name(prefix: &str) -> String {
@@ -765,7 +1300,7 @@ mod tests {
             Arc::clone(&store),
         );
 
-        let (_, canaries) = prepare_canary_directory(shared.path())
+        let (_, _, canaries) = prepare_canary_directory(shared.path())
             .await
             .expect("origin canary directory");
         let canary_name = canary_name("probe");
@@ -833,5 +1368,69 @@ mod tests {
         let missing = coordinator(&missing, "media-a", "missing", store);
         assert!(missing.admit_local_for_test().await.is_err());
         assert!(!missing.is_verified());
+    }
+
+    #[tokio::test]
+    async fn gc_refuses_a_replaced_root_before_any_retirement_work() {
+        let parent = tempfile::tempdir().expect("shared parent");
+        let shared_root = parent.path().join("shared");
+        tokio::fs::create_dir(&shared_root)
+            .await
+            .expect("shared root");
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let shared_cache = coordinator(&shared_root, "media-a", "gc-node", Arc::clone(&store));
+        shared_cache
+            .admit_local_for_test()
+            .await
+            .expect("admit original root");
+
+        tokio::fs::rename(&shared_root, parent.path().join("detached"))
+            .await
+            .expect("detach admitted root");
+        tokio::fs::create_dir(&shared_root)
+            .await
+            .expect("replacement mount point");
+
+        assert!(shared_cache.gc_once().await.is_err());
+        assert!(!shared_cache.is_verified());
+        assert_eq!(
+            store
+                .cache_storage_member(shared_cache.storage_id().expect("storage id"), "gc-node",)
+                .await
+                .expect("suspect member")
+                .map(|member| member.verification_state),
+            Some("suspect".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_canary_proof_cannot_reenable_a_failed_mount() {
+        let shared = tempfile::tempdir().expect("shared root");
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let shared_cache = coordinator(shared.path(), "media-a", "reader", Arc::clone(&store));
+        let attempted_generation = shared_cache.loss_generation.load(Ordering::Acquire);
+        let (path, identity, _) = prepare_canary_directory(shared.path())
+            .await
+            .expect("canary proof");
+
+        shared_cache.report_io_failure("newer_mount_loss").await;
+        assert!(shared_cache
+            .publish_verified_root(path, identity, attempted_generation)
+            .await
+            .is_err());
+        assert!(!shared_cache.is_verified());
+    }
+
+    #[test]
+    fn shared_generation_name_derives_only_its_owned_staging_path() {
+        assert_eq!(
+            staging_name_for_generation("0123456789abcdef-0123456789abcdef0123456789abcdef")
+                .as_deref(),
+            Some(".stage-0123456789abcdef0123456789abcdef")
+        );
+        assert!(staging_name_for_generation("../other").is_none());
+        assert!(staging_name_for_generation("0123456789abcdef-short").is_none());
     }
 }

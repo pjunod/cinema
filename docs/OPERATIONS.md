@@ -1718,15 +1718,21 @@ Media sessions, ready offline packages, and active offline downloads hold typed
 replicated pins for the exact storage/recipe/generation identity. Session pins
 renew in the existing owner-liveness batch rather than per segment. Shared GC
 requires the exact `shared-cache-gc:<storage_id>` lease and retires the pointer
-only when no unexpired pin exists in that same transaction; filesystem deletion
-follows pointer retirement.
+only when no unexpired pin exists in that same transaction. Retirement first
+turns the row into a non-readable cleanup tombstone, then quarantines and
+deletes the deterministic generation path, and finally removes the tombstone.
+A crash at any boundary leaves bounded retryable state for the next lease owner.
 
 Any runtime shared-root `ENOENT`, I/O, manifest, or identity failure immediately
 marks this node's proof suspect and disables shared classification. Look for
 `shared cache proof lost; falling back to node-local holders`. The local ready
 generation remains usable when shared publication fails, and a later successful
-canary readmits the shared path. Rolling back is safe: both TOML keys live in the
-forward-compatible `[cluster]` section and older binaries ignore them.
+canary readmits the shared path. The two TOML keys are forward-compatible and
+already-running mixed-version P5 nodes ignore them. That is not a database
+downgrade guarantee: once a restarted P6 node advances SQLite to v26 or the
+replicated cluster schema to v11, a P5 binary refuses that newer schema. Roll
+forward, or restore the matching pre-P6 database snapshot with the older binary;
+do not attempt a code-only downgrade.
 
 Operational evidence is available in Settings → Activity and Logs:
 

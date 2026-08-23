@@ -18,7 +18,7 @@ use crate::error::StoreError;
 use crate::store::SharedCacheStore;
 
 const SHARED_COLS: &str = "l.recipe_hash, r.file_id, l.storage_id, l.generation_id, \
-    l.relative_dir, l.bytes, l.manifest_digest, l.last_used_at";
+    l.relative_dir, l.bytes, l.manifest_digest, l.last_used_at, l.complete";
 
 fn shared_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedCacheGeneration> {
     Ok(SharedCacheGeneration {
@@ -30,6 +30,7 @@ fn shared_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedCacheGener
         bytes: row.get(5)?,
         manifest_digest: row.get(6)?,
         last_used_at: row.get(7)?,
+        cleanup_pending: row.get::<_, i64>(8)? == 3,
     })
 }
 
@@ -200,21 +201,11 @@ impl SharedCacheStore for SqliteStore {
                      manifest_digest, scrub_object_index, last_used_at, last_seen_at,
                      storage_id, generation_id)
                  SELECT ?1, ?2, 'shared', ?4, 0, 0, NULL, 0, ?5, ?5, ?2, ?3
-                  WHERE EXISTS (
+                 WHERE EXISTS (
                     SELECT 1 FROM cache_storage_members
                      WHERE storage_id = ?2 AND storage_class = 'shared'
                        AND verification_state = 'verified')
-                 ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
-                    relative_dir = excluded.relative_dir,
-                    bytes = 0,
-                    complete = 0,
-                    manifest_digest = NULL,
-                    scrub_object_index = 0,
-                    last_used_at = excluded.last_used_at,
-                    last_seen_at = excluded.last_seen_at,
-                    storage_id = excluded.storage_id,
-                    generation_id = excluded.generation_id
-                 WHERE transcode_cache_locations.complete = 0",
+                 ON CONFLICT(recipe_hash, node_id, storage_class) DO NOTHING",
                 params![recipe_hash, storage_id, generation_id, relative_dir, now_ms],
             )?;
             if changed == 0 {
@@ -310,6 +301,101 @@ impl SharedCacheStore for SqliteStore {
             }
             tx.commit()?;
             Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn abandon_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError> {
+        validate_id("recipe hash", recipe_hash)?;
+        validate_id("storage id", storage_id)?;
+        validate_id("generation id", generation_id)?;
+        validate_generation(recipe_hash, storage_id, generation_id, relative_dir)?;
+        let recipe_hash = recipe_hash.to_owned();
+        let storage_id = storage_id.to_owned();
+        let generation_id = generation_id.to_owned();
+        let relative_dir = relative_dir.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE transcode_cache_locations SET complete = 2
+                  WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
+                    AND relative_dir = ?4 AND storage_class = 'shared'
+                    AND complete IN (0, 2)",
+                params![recipe_hash, storage_id, generation_id, relative_dir],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn finalize_abandoned_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError> {
+        validate_id("recipe hash", recipe_hash)?;
+        validate_id("storage id", storage_id)?;
+        validate_id("generation id", generation_id)?;
+        validate_generation(recipe_hash, storage_id, generation_id, relative_dir)?;
+        let recipe_hash = recipe_hash.to_owned();
+        let storage_id = storage_id.to_owned();
+        let generation_id = generation_id.to_owned();
+        let relative_dir = relative_dir.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let finalized = tx.execute(
+                "DELETE FROM transcode_cache_locations
+                  WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
+                    AND relative_dir = ?4 AND storage_class = 'shared' AND complete = 2",
+                params![recipe_hash, storage_id, generation_id, relative_dir],
+            )?;
+            if finalized == 1 {
+                tx.execute(
+                    "DELETE FROM transcode_cache_recipes
+                      WHERE recipe_hash = ?1
+                        AND NOT EXISTS (
+                            SELECT 1 FROM transcode_cache_locations WHERE recipe_hash = ?1)",
+                    params![recipe_hash],
+                )?;
+            }
+            tx.commit()?;
+            Ok(finalized == 1)
+        })
+        .await
+    }
+
+    async fn stale_shared_cache_claims(
+        &self,
+        storage_id: &str,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError> {
+        validate_id("storage id", storage_id)?;
+        if !(1..=1_000).contains(&limit) {
+            return Err(StoreError::Task(
+                "stale shared cache claim limit must be between 1 and 1000".to_owned(),
+            ));
+        }
+        let storage_id = storage_id.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SHARED_COLS}
+                   FROM transcode_cache_locations l
+                   JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
+                  WHERE l.storage_id = ?1 AND l.storage_class = 'shared'
+                    AND (l.complete = 2 OR (l.complete = 0 AND l.last_seen_at <= ?2))
+                  ORDER BY l.last_seen_at, l.recipe_hash, l.generation_id
+                  LIMIT ?3"
+            ))?;
+            Ok(stmt
+                .query_map(params![storage_id, before_ms, limit], shared_from_row)?
+                .collect::<Result<Vec<_>, _>>()?)
         })
         .await
     }
@@ -462,16 +548,17 @@ impl SharedCacheStore for SqliteStore {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {SHARED_COLS}
                    FROM transcode_cache_locations l
-                   JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
+                  JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
                   WHERE l.storage_id = ?1 AND l.storage_class = 'shared'
-                    AND l.complete = 1
-                    AND NOT EXISTS (
-                        SELECT 1 FROM cache_consumer_pins p
-                         WHERE p.storage_id = l.storage_id
-                           AND p.recipe_hash = l.recipe_hash
-                           AND p.generation_id = l.generation_id
-                           AND p.expires_at_ms > ?2)
-                  ORDER BY l.last_used_at, l.recipe_hash, l.generation_id
+                    AND (l.complete = 3 OR (
+                        l.complete = 1 AND NOT EXISTS (
+                            SELECT 1 FROM cache_consumer_pins p
+                             WHERE p.storage_id = l.storage_id
+                               AND p.recipe_hash = l.recipe_hash
+                               AND p.generation_id = l.generation_id
+                               AND p.expires_at_ms > ?2)))
+                  ORDER BY CASE WHEN l.complete = 3 THEN 0 ELSE 1 END,
+                           l.last_used_at, l.recipe_hash, l.generation_id
                   LIMIT ?3"
             ))?;
             Ok(stmt
@@ -506,9 +593,9 @@ impl SharedCacheStore for SqliteStore {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let retired = tx.execute(
-                "DELETE FROM transcode_cache_locations
+                "UPDATE transcode_cache_locations SET complete = 3
                   WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
-                    AND storage_class = 'shared' AND complete = 1
+                    AND storage_class = 'shared' AND complete IN (1, 3)
                     AND relative_dir = ?4
                     AND (manifest_digest = ?5
                          OR (manifest_digest IS NULL AND ?5 IS NULL))
@@ -535,16 +622,70 @@ impl SharedCacheStore for SqliteStore {
                     now_ms
                 ],
             )?;
-            if retired == 1 {
+            tx.commit()?;
+            Ok(retired == 1)
+        })
+        .await
+    }
+
+    async fn finalize_retired_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<bool, StoreError> {
+        validate_generation(
+            &generation.recipe_hash,
+            &generation.storage_id,
+            &generation.generation_id,
+            &generation.relative_dir,
+        )?;
+        let expected_resource = format!("shared-cache-gc:{}", generation.storage_id);
+        if lease.resource != expected_resource || lease.expires_at_unix_ms <= now_ms {
+            return Ok(false);
+        }
+        let fence = i64::try_from(lease.fence)
+            .map_err(|error| StoreError::Task(format!("GC lease fence is invalid: {error}")))?;
+        let revision = i64::try_from(lease.revision)
+            .map_err(|error| StoreError::Task(format!("GC lease revision is invalid: {error}")))?;
+        let generation = generation.clone();
+        let lease = lease.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let finalized = tx.execute(
+                "DELETE FROM transcode_cache_locations
+                  WHERE recipe_hash = ?1 AND storage_id = ?2 AND generation_id = ?3
+                    AND storage_class = 'shared' AND complete = 3
+                    AND relative_dir = ?4
+                    AND (manifest_digest = ?5
+                         OR (manifest_digest IS NULL AND ?5 IS NULL))
+                    AND EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = ?6 AND owner_node_id = ?7
+                           AND fence = ?8 AND revision = ?9
+                           AND expires_at_ms = ?10 AND expires_at_ms > ?11)",
+                params![
+                    generation.recipe_hash,
+                    generation.storage_id,
+                    generation.generation_id,
+                    generation.relative_dir,
+                    generation.manifest_digest,
+                    lease.resource,
+                    lease.owner_node_id,
+                    fence,
+                    revision,
+                    lease.expires_at_unix_ms,
+                    now_ms
+                ],
+            )?;
+            if finalized == 1 {
                 tx.execute(
                     "DELETE FROM cache_consumer_pins
-                      WHERE storage_id = ?1 AND recipe_hash = ?2
-                        AND generation_id = ?3 AND expires_at_ms <= ?4",
+                      WHERE storage_id = ?1 AND recipe_hash = ?2 AND generation_id = ?3",
                     params![
                         generation.storage_id,
                         generation.recipe_hash,
-                        generation.generation_id,
-                        now_ms
+                        generation.generation_id
                     ],
                 )?;
                 tx.execute(
@@ -556,7 +697,7 @@ impl SharedCacheStore for SqliteStore {
                 )?;
             }
             tx.commit()?;
-            Ok(retired == 1)
+            Ok(finalized == 1)
         })
         .await
     }

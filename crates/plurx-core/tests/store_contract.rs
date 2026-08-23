@@ -246,11 +246,15 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "touch_shared_cache_entry",
     "claim_shared_cache_entry",
     "complete_shared_cache_entry",
+    "abandon_shared_cache_entry",
+    "finalize_abandoned_shared_cache_entry",
+    "stale_shared_cache_claims",
     "acquire_cache_consumer_pin",
     "renew_cache_consumer_pins",
     "release_cache_consumer_pin",
     "shared_cache_gc_candidates",
     "retire_shared_cache_generation",
+    "finalize_retired_shared_cache_generation",
 ];
 const PRETRANSCODE_METHODS: &[&str] = &[
     "pretranscode_job",
@@ -10171,6 +10175,72 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             "{backend}"
         );
 
+        let abandoned_recipe = format!("shared-abandoned-recipe-{backend}");
+        assert!(store
+            .claim_shared_cache_entry(
+                &abandoned_recipe,
+                file_id,
+                1,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+                101,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim abandoned generation: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, 100, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list fresh claims: {error}"))
+            .is_empty());
+        let stale_claims = store
+            .stale_shared_cache_claims(&storage_id, 101, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list stale claims: {error}"));
+        assert_eq!(stale_claims.len(), 1, "{backend}");
+        assert_eq!(stale_claims[0].generation_id, "generation-abandon");
+        assert!(!store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-successor",
+                "shared/abandon/generation-successor",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject stale abandon: {error}")));
+        assert!(store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact abandon: {error}")));
+        assert_eq!(
+            store
+                .stale_shared_cache_claims(&storage_id, 0, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list abandoned claim: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .finalize_abandoned_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize abandoned claim: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, i64::MAX, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list finalized claims: {error}"))
+            .is_empty());
+
         let recipe_hash = format!("shared-cache-recipe-{backend}");
         let generation_id = "generation-a";
         assert!(store
@@ -10369,6 +10439,21 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: retired shared lookup: {error}"))
             .is_none());
+        let cleanup_candidates = store
+            .shared_cache_gc_candidates(&storage_id, 222, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
+        assert_eq!(cleanup_candidates.len(), 1, "{backend}");
+        assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
+        assert!(store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}")));
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 224, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalized GC candidates: {error}"))
+            .is_empty());
 
         let offline_recipe = format!("shared-offline-recipe-{backend}");
         assert!(store

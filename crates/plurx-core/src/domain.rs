@@ -652,6 +652,9 @@ pub struct SharedCacheGeneration {
     pub bytes: i64,
     pub manifest_digest: Option<String>,
     pub last_used_at: i64,
+    /// True after a fenced GC winner retired the readable pointer but before
+    /// the derived filesystem paths and tombstone were durably finalized.
+    pub cleanup_pending: bool,
 }
 
 /// Durable consumers that can keep one shared-cache generation alive.
