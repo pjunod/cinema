@@ -40,6 +40,10 @@ const ROOT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const ROOT_READABILITY_TTL: Duration = Duration::from_secs(45);
 const ROOT_PROBE_COLLECTION_DEADLINE: Duration = Duration::from_secs(2);
 const MAX_LIBRARY_ROOTS: usize = 64;
+// One complete timed-out predecessor generation cannot prevent the current
+// configured generation from being observed. The process ceiling remains
+// hard; exhaustion fails source evidence closed.
+const MAX_ROOT_PROBE_CHILDREN: usize = MAX_LIBRARY_ROOTS * 2;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -337,7 +341,8 @@ impl MediaPool {
                 return;
             }
         };
-        let roots = bounded_absolute_roots(libraries.into_iter().flat_map(|library| library.paths));
+        let roots =
+            bounded_command_safe_roots(libraries.into_iter().flat_map(|library| library.paths));
         self.root_readability
             .write()
             .await
@@ -345,10 +350,21 @@ impl MediaPool {
         let mut outcomes = self.reap_root_probes();
         outcomes.extend(self.start_root_probes(&roots));
         let deadline = deadline_after(ROOT_PROBE_COLLECTION_DEADLINE);
-        while tokio::time::Instant::now() < deadline && self.has_running_root_probe(&roots) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
             outcomes.extend(self.reap_root_probes());
+            if !self.has_running_root_probe(&roots) {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                self.signal_timed_out_root_probes(&roots);
+                break;
+            }
+            tokio::time::sleep_until((now + Duration::from_millis(20)).min(deadline)).await;
         }
+        // Mark deadline expiry before the final reap. A process that completed
+        // after the deadline but before this observation can only publish a
+        // failed fact, never a fresh positive one.
         self.signal_timed_out_root_probes(&roots);
         outcomes.extend(self.reap_root_probes());
         let mut readability = self.root_readability.write().await;
@@ -366,7 +382,9 @@ impl MediaPool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for root in roots {
-            if registry.running.contains_key(root) || registry.running.len() >= MAX_LIBRARY_ROOTS {
+            if registry.running.contains_key(root)
+                || registry.running.len() >= MAX_ROOT_PROBE_CHILDREN
+            {
                 continue;
             }
             match spawn_library_root_probe(root) {
@@ -463,6 +481,7 @@ impl MediaPool {
 
     async fn root_likely_readable(&self, path: &Path) -> bool {
         let now = tokio::time::Instant::now();
+        let path = command_safe_path(path);
         self.root_readability
             .read()
             .await
@@ -664,13 +683,23 @@ async fn fetch_snapshot(
     accepted_snapshot(snapshot, &peer.node_id)
 }
 
-fn bounded_absolute_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTreeSet<PathBuf> {
+fn command_safe_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    }
+}
+
+fn bounded_command_safe_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTreeSet<PathBuf> {
     roots
         .into_iter()
-        // An absolute root is both the storage contract and the command-line
-        // grammar boundary: expression-like relative values such as
-        // `-delete` must never become `find` arguments.
-        .filter(|root| root.is_absolute())
+        // Preserve the scanner's supported cwd-relative semantics while
+        // turning expression-like values such as `-delete` into absolute
+        // command data rather than `find` grammar.
+        .map(|root| command_safe_path(&root))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .take(MAX_LIBRARY_ROOTS)
@@ -685,9 +714,13 @@ fn bounded_absolute_roots(roots: impl IntoIterator<Item = PathBuf>) -> BTreeSet<
 /// hard mount into unbounded PID growth.
 fn spawn_library_root_probe(root: &Path) -> std::io::Result<tokio::process::Child> {
     debug_assert!(root.is_absolute());
+    // Appending `.` forces directory traversal. A dangling symlink or a link
+    // to a regular file fails instead of being mistaken for an empty readable
+    // directory by `find -H`.
+    let directory = root.join(".");
     tokio::process::Command::new("find")
         .arg("-H")
-        .arg(root)
+        .arg(directory)
         .args(["-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1351,15 +1384,17 @@ mod tests {
     }
 
     #[test]
-    fn root_probe_command_accepts_only_bounded_absolute_paths() {
-        let roots = bounded_absolute_roots([
+    fn root_probe_command_makes_relative_paths_safe_and_keeps_a_hard_bound() {
+        let roots = bounded_command_safe_roots([
             PathBuf::from("-delete"),
             PathBuf::from("relative/library"),
             PathBuf::from("/media/library"),
         ]);
-        assert_eq!(roots, BTreeSet::from([PathBuf::from("/media/library")]));
+        assert_eq!(roots.len(), 3);
+        assert!(roots.iter().all(|root| root.is_absolute()));
+        assert!(roots.contains(&PathBuf::from("/media/library")));
 
-        let bounded = bounded_absolute_roots(
+        let bounded = bounded_command_safe_roots(
             (0..=MAX_LIBRARY_ROOTS).map(|index| PathBuf::from(format!("/media/{index}"))),
         );
         assert_eq!(bounded.len(), MAX_LIBRARY_ROOTS);

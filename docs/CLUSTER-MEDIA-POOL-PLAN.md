@@ -983,10 +983,12 @@ generation's fenced manifest and verified VOD playlist. Cache scratch capacity
 is sampled by one non-accumulating background OS worker and expires fail-closed,
 keeping a hard cache mount and an indefinitely stale positive result out of the
 async offer deadline. When a reachable remote candidate exists, tracked child
-processes refresh absolute, command-line-symlink-following library roots under
-one common deadline. A timed-out probe is signalled but remains registered
-until the OS confirms exit, so a hard mount can reduce future evidence but
-cannot cause resubmission or exceed the fixed global process bound. Offer
+processes refresh command-safe absolute projections of both absolute and
+cwd-relative library roots under one common deadline. Probing `root/.` forces
+command-line symlinks to resolve to directories. A timed-out probe is signalled
+but remains registered until the OS confirms exit; the fixed global process
+bound reserves one complete configured generation beyond the root limit, so
+one retired generation cannot block its replacement. Offer
 fan-out consults only that age-limited signal, replicated media facts, recent
 file availability, local capacity, and local cache bytes, so an offer never
 opens a candidate source path. Requested audio and subtitle indices must exist

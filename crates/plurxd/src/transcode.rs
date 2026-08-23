@@ -10266,7 +10266,11 @@ fn read_scratch_sample(
         }
         let bytes = bytes.load(Relaxed);
         let sampled_at = sampled_at_unix_ms.load(Relaxed);
-        let after = generation.load(Acquire);
+        // Conventional seqlock reader ordering: data loads must complete
+        // before the relaxed validation read, while the fence pairs with the
+        // writer's release publication.
+        std::sync::atomic::fence(Acquire);
+        let after = generation.load(Relaxed);
         if before == after {
             return (bytes, sampled_at);
         }
