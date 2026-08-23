@@ -669,6 +669,14 @@ that the voter can use replicated storage or sees a leader. The private Ansible
 deployment uses `serial: 1`, fails the whole play on the first node error, and
 now gates each Cinema host on `/readyz`.
 
+**Keep bounded catalogue reads disabled during this compatibility step.** This
+release negotiates the protocol and provides the lag-gated catalogue boundary,
+but does not move an HTTP handler onto it. Leave
+`cluster.bounded_replica_reads = false`; a later route-activation release will
+name the eligible handlers and the rolling enable/rollback procedure. The safe
+default means this boundary can roll through a mixed-version cluster without
+changing any request's consistency or query path.
+
 **Use readiness conservatively at the reverse proxy.** `/readyz` is an active
 replicated-store proof, not a free process counter: it checks cluster health and
 performs an authority `SELECT 1`. Start with a 10-second interval, a 2-second
@@ -891,6 +899,8 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Database, artwork, transcode cache (created if missing) |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Reserved cluster-wide opt-in and Authority-read kill switch for the lag-gated catalogue boundary. Keep disabled until the route-activation release documents its eligible handlers |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

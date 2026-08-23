@@ -129,6 +129,7 @@ struct OperationCounters {
     consistent_query_calls: AtomicU64,
     non_consistent_query_calls: AtomicU64,
     write_calls: AtomicU64,
+    fail_next_non_consistent_query: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
@@ -137,6 +138,8 @@ impl OperationCounters {
         self.consistent_query_calls.store(0, Ordering::Relaxed);
         self.non_consistent_query_calls.store(0, Ordering::Relaxed);
         self.write_calls.store(0, Ordering::Relaxed);
+        self.fail_next_non_consistent_query
+            .store(false, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> HiqliteOperationCounts {
@@ -574,6 +577,16 @@ impl TimedClient {
         self.operations
             .non_consistent_query_calls
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "cluster-read-cost-validation")]
+        if self
+            .operations
+            .fail_next_non_consistent_query
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(StoreError::Task(
+                "injected bounded-replica query failure".to_owned(),
+            ));
+        }
         time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::LocalRead,
@@ -705,6 +718,18 @@ impl HiqliteAuthStore {
     #[doc(hidden)]
     pub fn validation_operation_counts(&self) -> HiqliteOperationCounts {
         self.client.operations.snapshot()
+    }
+
+    /// Fail exactly the next local-query client call before network IO. This
+    /// validation-only hook proves the catalogue boundary retries Authority
+    /// rather than exposing a new application-visible error.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_fail_next_non_consistent_query(&self) {
+        self.client
+            .operations
+            .fail_next_non_consistent_query
+            .store(true, Ordering::Relaxed);
     }
 
     /// Snapshot successful calls from the production metrics recorder. The

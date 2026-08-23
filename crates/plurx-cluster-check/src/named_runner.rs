@@ -406,6 +406,7 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
             nodes: specs.clone(),
             listen_addr: "0.0.0.0".to_owned(),
             emulate_old_watermark_handler: false,
+            emulate_p3a_watermark_handler: false,
         };
         match spawn_remote_node(
             voter,

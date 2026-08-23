@@ -2280,12 +2280,16 @@ fn render_passive_raft_metrics(
          plurx_raft_metric_sample_errors_total{{source=\"watermark\"}} {}\n\
          # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
          # TYPE plurx_raft_leader_changes_total counter\n\
-         plurx_raft_leader_changes_total {}\n",
+         plurx_raft_leader_changes_total {}\n\
+         # HELP plurx_raft_local_read_protocol_supported Whether the watermark source supports this binary's bounded local-read protocol.\n\
+         # TYPE plurx_raft_local_read_protocol_supported gauge\n\
+         plurx_raft_local_read_protocol_supported {}\n",
         u8::from(view.valid),
         u8::from(view.watermark_valid),
         view.errors,
         view.watermark_errors,
         view.leader_changes,
+        u8::from(view.watermark_local_reads_supported),
     );
     if view.age_seconds.is_some() || view.watermark_age_millis.is_some() {
         out.push_str(
@@ -2636,6 +2640,7 @@ mod tests {
             }),
             watermark_age_millis: Some(250),
             watermark_valid: true,
+            watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
                 build_ok: DbSnapshotHistogram {
@@ -2664,6 +2669,7 @@ mod tests {
         assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
         assert!(rendered.contains("plurx_raft_commit_index 45"));
         assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
+        assert!(rendered.contains("plurx_raft_local_read_protocol_supported 1"));
         assert!(rendered.contains(
             "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"0.1\"} 1"
         ));
@@ -2700,6 +2706,7 @@ mod tests {
                 watermark: None,
                 watermark_age_millis: None,
                 watermark_valid: false,
+                watermark_local_reads_supported: true,
                 watermark_errors: 1,
                 snapshot_metrics: None,
             }
@@ -2720,6 +2727,7 @@ mod tests {
             watermark: None,
             watermark_age_millis: None,
             watermark_valid: false,
+            watermark_local_reads_supported: false,
             watermark_errors: 0,
             snapshot_metrics: None,
         });
