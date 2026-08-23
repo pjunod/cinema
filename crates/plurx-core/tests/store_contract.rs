@@ -252,6 +252,7 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "acquire_cache_consumer_pin",
     "renew_cache_consumer_pins",
     "release_cache_consumer_pin",
+    "prune_expired_cache_consumer_pins",
     "shared_cache_gc_candidates",
     "retire_shared_cache_generation",
     "finalize_retired_shared_cache_generation",
@@ -7592,7 +7593,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 220, "review the Store method count");
+    assert_eq!(declared.len(), 221, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -10395,6 +10396,44 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: release session pin: {error}")));
 
+        let lookup_pin = CacheConsumerPin {
+            consumer_id: "lookup-crash-bridge".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 215,
+            ..session_pin.clone()
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&lookup_pin, 210)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire crash bridge pin: {error}")));
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(214, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early pin prune: {error}")),
+            0,
+            "{backend}: live bridge pin must survive pruning"
+        );
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(215, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired pin prune: {error}")),
+            1,
+            "{backend}: a crashed lookup owner must not leak its expired pin"
+        );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &lookup_pin.consumer_id,
+                lookup_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned bridge pin: {error}")));
+
         let racing_pin = CacheConsumerPin {
             consumer_kind: CacheConsumerKind::OfflineDownload,
             consumer_id: "racing-reader".to_owned(),
@@ -10453,6 +10492,18 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
         assert_eq!(cleanup_candidates.len(), 1, "{backend}");
         assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
+        let mut wrong_generation = cleanup_candidates[0].clone();
+        wrong_generation.relative_dir.push_str("-wrong");
+        assert!(store
+            .finalize_retired_shared_cache_generation(&wrong_generation, 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: wrong tombstone finalization: {error}"))
+            .is_none());
+        lease = store
+            .renew_lease(&lease, 223, 2_100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after wrong finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: wrong finalization advanced the GC lease"));
         lease = store
             .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
             .await
@@ -10463,6 +10514,16 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: finalized GC candidates: {error}"))
             .is_empty());
+        assert!(store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 224, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat finalization: {error}"))
+            .is_none());
+        lease = store
+            .renew_lease(&lease, 224, 2_200)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after repeat finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: absent finalization advanced the GC lease"));
 
         let offline_recipe = format!("shared-offline-recipe-{backend}");
         assert!(store

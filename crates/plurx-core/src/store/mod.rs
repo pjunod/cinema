@@ -1370,6 +1370,15 @@ pub trait SharedCacheStore: Send + Sync + 'static {
         consumer_epoch: i64,
     ) -> Result<bool, StoreError>;
 
+    /// Delete at most `limit` expired durable pins, oldest first. Lookup-pin
+    /// release is best effort, so crash recovery must not depend on the
+    /// process that acquired a short-lived bridge pin surviving its expiry.
+    async fn prune_expired_cache_consumer_pins(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<usize, StoreError>;
+
     async fn shared_cache_gc_candidates(
         &self,
         storage_id: &str,

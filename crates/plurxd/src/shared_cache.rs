@@ -32,6 +32,7 @@ const CANARY_SWEEP_LIMIT: usize = 64;
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 const GC_LEASE_MS: i64 = 30_000;
 const GC_BATCH: i64 = 32;
+const PIN_PRUNE_BATCH: i64 = 1_024;
 const GC_MIN_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const STALE_PUBLICATION_MS: i64 = 60 * 60 * 1_000;
 const MOUNT_IO_DEADLINE: Duration = Duration::from_secs(10);
@@ -61,6 +62,8 @@ pub(crate) struct SharedCacheCoordinator {
     verification_transition: Arc<tokio::sync::Mutex<()>>,
     mount_io: Arc<tokio::sync::Semaphore>,
     mount_publications: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    publication_install_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     node_id: String,
     membership: MembershipManager,
     transport: PeerTransport,
@@ -111,6 +114,8 @@ impl SharedCacheCoordinator {
             mount_publications: Arc::new(tokio::sync::Semaphore::new(
                 MOUNT_PUBLICATION_CONCURRENCY,
             )),
+            #[cfg(test)]
+            publication_install_pause: Arc::new(std::sync::Mutex::new(None)),
             node_id,
             transport: PeerTransport::new(membership.clone()),
             membership,
@@ -128,6 +133,12 @@ impl SharedCacheCoordinator {
         self.verified.load(Ordering::Acquire)
             && self.admitted_generation.load(Ordering::Acquire)
                 == self.loss_generation.load(Ordering::Acquire)
+    }
+
+    fn generation_is_admitted(&self, generation: u64) -> bool {
+        self.verified.load(Ordering::Acquire)
+            && self.admitted_generation.load(Ordering::Acquire) == generation
+            && self.loss_generation.load(Ordering::Acquire) == generation
     }
 
     /// Run mount-backed work behind a fixed permit pool and a hard caller
@@ -177,7 +188,7 @@ impl SharedCacheCoordinator {
     /// Reopen the admitted root and prove that the pathname still names the
     /// same filesystem object. Publication and GC mutate portable state, so
     /// merely retaining the configured spelling after an unmount is unsafe.
-    async fn open_verified_root(&self) -> Result<Option<(PathBuf, SecureDirectory)>, String> {
+    async fn open_verified_root(&self) -> Result<Option<(PathBuf, SecureDirectory, u64)>, String> {
         if !self.is_verified() {
             return Ok(None);
         }
@@ -205,10 +216,11 @@ impl SharedCacheCoordinator {
             self.report_io_failure("shared_root_identity_changed").await;
             return Err("shared cache root identity changed after admission".to_owned());
         }
-        if !self.is_verified() {
+        let admitted_generation = self.admitted_generation.load(Ordering::Acquire);
+        if !self.generation_is_admitted(admitted_generation) {
             return Ok(None);
         }
-        Ok(Some((admitted.path, root)))
+        Ok(Some((admitted.path, root, admitted_generation)))
     }
 
     #[cfg(test)]
@@ -598,16 +610,23 @@ impl SharedCacheCoordinator {
         let recipe_hash = recipe_hash.to_owned();
         let source_dir = source_dir.to_owned();
         let manifest = manifest.clone();
-        let _permit = permit;
-        coordinator
-            .publish_generation_inner(
-                &recipe_hash,
-                file_id,
-                recipe_version,
-                &source_dir,
-                &manifest,
-            )
-            .await
+        // The task, not its caller, owns the permit. Dropping a request future
+        // therefore detaches at most one still-counted publication instead of
+        // freeing capacity while descriptor-backed blocking copies continue.
+        tokio::spawn(async move {
+            let _permit = permit;
+            coordinator
+                .publish_generation_inner(
+                    &recipe_hash,
+                    file_id,
+                    recipe_version,
+                    &source_dir,
+                    &manifest,
+                )
+                .await
+        })
+        .await
+        .map_err(|error| format!("shared publication task failed: {error}"))?
     }
 
     async fn publish_generation_inner(
@@ -622,7 +641,7 @@ impl SharedCacheCoordinator {
             .config
             .as_ref()
             .ok_or_else(|| "shared cache is not configured".to_owned())?;
-        let Some((root_path, root)) = self.open_verified_root().await? else {
+        let Some((root_path, root, admitted_generation)) = self.open_verified_root().await? else {
             return Ok(false);
         };
         let short_hash = recipe_hash
@@ -789,6 +808,24 @@ impl SharedCacheCoordinator {
                     ));
                 }
             }
+            #[cfg(test)]
+            {
+                let pause = self
+                    .publication_install_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(pause) = pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+            }
+            if !self.generation_is_admitted(admitted_generation) {
+                return Err((
+                    "shared cache authority changed before generation installation".to_owned(),
+                    false,
+                ));
+            }
             if !fanout
                 .rename_child_noreplace(&staging_name, &final_name)
                 .await
@@ -797,6 +834,12 @@ impl SharedCacheCoordinator {
                 return Err((
                     "shared generation destination already exists".to_owned(),
                     true,
+                ));
+            }
+            if !self.generation_is_admitted(admitted_generation) {
+                return Err((
+                    "shared cache authority changed during generation installation".to_owned(),
+                    false,
                 ));
             }
             Ok::<u64, (String, bool)>(total_bytes)
@@ -824,6 +867,22 @@ impl SharedCacheCoordinator {
             }
         };
 
+        if !self.generation_is_admitted(admitted_generation) {
+            let _ = self
+                .abandon_publication(
+                    recipe_hash,
+                    &config.storage_id,
+                    &manifest.generation_id,
+                    &relative_dir,
+                    &fanout,
+                    &staging_name,
+                    &final_name,
+                    publication_entries,
+                )
+                .await;
+            return Ok(false);
+        }
+
         let completion = self
             .store
             .complete_shared_cache_entry(
@@ -836,7 +895,24 @@ impl SharedCacheCoordinator {
             )
             .await;
         let completion_error = match completion {
-            Ok(true) => return Ok(true),
+            Ok(true) if self.generation_is_admitted(admitted_generation) => return Ok(true),
+            Ok(true) => {
+                let _invalidated = self
+                    .store
+                    .invalidate_cache_entry(
+                        recipe_hash,
+                        &config.storage_id,
+                        "shared",
+                        &relative_dir,
+                        Some(&manifest.manifest_digest),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for name in [&staging_name, &final_name] {
+                    remove_shared_tree_if_present(&fanout, name, publication_entries).await?;
+                }
+                return Ok(false);
+            }
             Ok(false) => "shared cache claim changed before completion".to_owned(),
             Err(error) => error.to_string(),
         };
@@ -870,7 +946,29 @@ impl SharedCacheCoordinator {
                         && current.manifest_digest.as_deref()
                             == Some(manifest.manifest_digest.as_str()) =>
                 {
-                    Ok(true)
+                    if self.generation_is_admitted(admitted_generation) {
+                        Ok(true)
+                    } else {
+                        self.store
+                            .invalidate_cache_entry(
+                                recipe_hash,
+                                &config.storage_id,
+                                "shared",
+                                &relative_dir,
+                                Some(&manifest.manifest_digest),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        for name in [&staging_name, &final_name] {
+                            remove_shared_tree_if_present(
+                                &fanout,
+                                name,
+                                publication_entries,
+                            )
+                            .await?;
+                        }
+                        Ok(false)
+                    }
                 }
                 Ok(_) => Err(completion_error),
                 Err(reconcile_error) => Err(format!(
@@ -1069,7 +1167,8 @@ impl SharedCacheCoordinator {
         let Some(config) = self.config.as_ref() else {
             return Ok(());
         };
-        let Some((_root_path, root)) = self.open_verified_root().await? else {
+        let Some((_root_path, root, _admitted_generation)) = self.open_verified_root().await?
+        else {
             return Ok(());
         };
         let now_ms = unix_ms();
@@ -1088,6 +1187,10 @@ impl SharedCacheCoordinator {
             LeaseClaim::Acquired(lease) => lease,
             LeaseClaim::Held { .. } => return Ok(()),
         };
+        self.store
+            .prune_expired_cache_consumer_pins(now_ms, PIN_PRUNE_BATCH)
+            .await
+            .map_err(|error| error.to_string())?;
         let stale_claims = self
             .store
             .stale_shared_cache_claims(
@@ -1336,6 +1439,31 @@ mod tests {
         .expect("bounded suspect membership publication");
     }
 
+    async fn source_generation(
+        directory: &Path,
+        generation_id: &str,
+    ) -> plurx_core::transcode::manifest::GenerationManifest {
+        tokio::fs::create_dir_all(directory)
+            .await
+            .expect("source generation directory");
+        tokio::fs::write(
+            directory.join("index.m3u8"),
+            b"#EXTM3U\n#EXTINF:2,\nseg00000.ts\n",
+        )
+        .await
+        .expect("source playlist");
+        tokio::fs::write(directory.join("seg00000.ts"), b"generation bytes")
+            .await
+            .expect("source segment");
+        plurx_core::transcode::manifest::publish(
+            directory,
+            generation_id,
+            &["index.m3u8".to_owned(), "seg00000.ts".to_owned()],
+        )
+        .await
+        .expect("source manifest")
+    }
+
     #[test]
     fn storage_identity_is_cluster_scoped_and_canary_names_are_single_components() {
         assert_eq!(
@@ -1493,6 +1621,119 @@ mod tests {
             .await
             .is_err());
         assert!(!shared_cache.is_verified());
+    }
+
+    #[tokio::test]
+    async fn cancelled_publication_callers_do_not_release_copy_capacity() {
+        let shared = tempfile::tempdir().expect("shared root");
+        let sources = tempfile::tempdir().expect("source roots");
+        let source_a = sources.path().join("a");
+        let source_b = sources.path().join("b");
+        let manifest_a = source_generation(&source_a, "generation-a").await;
+        let manifest_b = source_generation(&source_b, "generation-b").await;
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let shared_cache = coordinator(shared.path(), "media-a", "publisher", store);
+        shared_cache
+            .admit_local_for_test()
+            .await
+            .expect("verified shared mount");
+
+        let pause = Arc::new(tokio::sync::Barrier::new(3));
+        *shared_cache
+            .publication_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let publisher_a = Arc::clone(&shared_cache);
+        let publication_a = tokio::spawn(async move {
+            publisher_a
+                .publish_generation(&"a".repeat(64), 1, 1, &source_a, &manifest_a)
+                .await
+        });
+        let publisher_b = Arc::clone(&shared_cache);
+        let publication_b = tokio::spawn(async move {
+            publisher_b
+                .publish_generation(&"b".repeat(64), 2, 1, &source_b, &manifest_b)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), pause.wait())
+            .await
+            .expect("both publications reached installation");
+        publication_a.abort();
+        publication_b.abort();
+        tokio::task::yield_now().await;
+        assert_eq!(shared_cache.mount_publications.available_permits(), 0);
+
+        *shared_cache
+            .publication_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        pause.wait().await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while shared_cache.mount_publications.available_permits()
+                != MOUNT_PUBLICATION_CONCURRENCY
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached publications retained then released their permits");
+    }
+
+    #[tokio::test]
+    async fn mount_loss_during_publication_cannot_install_or_complete_generation() {
+        let shared = tempfile::tempdir().expect("shared root");
+        let sources = tempfile::tempdir().expect("source roots");
+        let source = sources.path().join("generation");
+        let manifest = source_generation(&source, "generation-revoked").await;
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
+        let shared_cache = coordinator(
+            shared.path(),
+            "media-a",
+            "revoked-publisher",
+            Arc::clone(&store),
+        );
+        shared_cache
+            .admit_local_for_test()
+            .await
+            .expect("verified shared mount");
+        let storage_id = shared_cache.storage_id().expect("storage id").to_owned();
+        let recipe_hash = "c".repeat(64);
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *shared_cache
+            .publication_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let publisher = Arc::clone(&shared_cache);
+        let published_recipe = recipe_hash.clone();
+        let publication = tokio::spawn(async move {
+            publisher
+                .publish_generation(&published_recipe, 3, 1, &source, &manifest)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), pause.wait())
+            .await
+            .expect("publication reached installation fence");
+        shared_cache
+            .report_io_failure("test_publication_mount_loss")
+            .await;
+        pause.wait().await;
+        let outcome = tokio::time::timeout(Duration::from_secs(3), publication)
+            .await
+            .expect("revoked publication finished")
+            .expect("publication task joined");
+        assert!(!matches!(outcome, Ok(true)));
+        assert!(store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .expect("shared cache lookup")
+            .is_none());
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, i64::MAX, 8)
+            .await
+            .expect("stale publication inventory")
+            .is_empty());
     }
 
     #[test]

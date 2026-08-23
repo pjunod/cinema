@@ -532,6 +532,30 @@ impl SharedCacheStore for SqliteStore {
         .await
     }
 
+    async fn prune_expired_cache_consumer_pins(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<usize, StoreError> {
+        if now_ms < 0 || !(1..=4_096).contains(&limit) {
+            return Err(StoreError::Task(
+                "expired cache pin prune inputs are invalid".to_owned(),
+            ));
+        }
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM cache_consumer_pins WHERE rowid IN (
+                   SELECT rowid FROM cache_consumer_pins
+                    WHERE expires_at_ms <= ?1
+                    ORDER BY expires_at_ms, storage_id, recipe_hash, generation_id,
+                             consumer_kind, consumer_id
+                    LIMIT ?2)",
+                params![now_ms, limit],
+            )?)
+        })
+        .await
+    }
+
     async fn shared_cache_gc_candidates(
         &self,
         storage_id: &str,
