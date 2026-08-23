@@ -767,7 +767,9 @@ pub(crate) async fn lease_loop(state: AppState) {
             .iter()
             .map(|route| route.session_id.as_str())
             .collect::<HashSet<_>>();
-        settlement_backoff.retain(|session_id, _| routed_session_ids.contains(session_id.as_str()));
+        settlement_backoff.retain(|session_id, _| {
+            routed_session_ids.contains(session_id.as_str()) && !live.contains(session_id)
+        });
         let current = routes
             .iter()
             .map(|route| route.incarnation_id.as_str())
@@ -901,28 +903,17 @@ pub(crate) async fn lease_loop(state: AppState) {
         cleanup.dedup_by(|left, right| left.1 == right.1);
         fence_and_reap_sessions(&state, cleanup).await;
         let settlement_now = tokio::time::Instant::now();
-        let settlement_capacity =
-            stale_settlement_capacity(settling.len(), &settlement_backoff, settlement_now);
-        let unsettled = routes
-            .iter()
-            .filter(|route| !live.contains(&route.session_id))
-            .filter(|route| !settling.contains(&route.session_id))
-            .filter(|route| {
-                settlement_backoff
-                    .get(&route.session_id)
-                    .is_none_or(|retry| retry.next_attempt <= settlement_now)
-            })
-            .take(settlement_capacity)
-            .cloned()
-            .collect::<Vec<_>>();
-        for route in unsettled {
+        let unsettled = take_stale_settlement_candidates(
+            &routes,
+            &live,
+            &mut settling,
+            &mut settlement_backoff,
+            settlement_now,
+        );
+        for (route, previous_failures) in unsettled {
             let cleanup_state = state.clone();
             let session_id = route.session_id.clone();
             let settled_tx = settled_tx.clone();
-            let previous_failures = settlement_backoff
-                .remove(&session_id)
-                .map_or(0, |retry| retry.failures);
-            settling.insert(session_id.clone());
             tokio::spawn(async move {
                 let failed = match tokio::time::timeout(
                     STALE_SETTLEMENT_DEADLINE,
@@ -989,13 +980,53 @@ fn stale_settlement_retry_delay(failures: u32) -> Duration {
 fn stale_settlement_capacity(
     settling: usize,
     backoff: &HashMap<String, StaleSettlementBackoff>,
-    now: tokio::time::Instant,
 ) -> usize {
-    let deferred = backoff
-        .values()
-        .filter(|retry| retry.next_attempt > now)
-        .count();
-    MAX_STALE_SETTLEMENTS_PER_TICK.saturating_sub(settling.saturating_add(deferred))
+    MAX_STALE_SETTLEMENTS_PER_TICK.saturating_sub(settling.saturating_add(backoff.len()))
+}
+
+fn take_stale_settlement_candidates(
+    routes: &[MediaSessionRoute],
+    live: &HashSet<String>,
+    settling: &mut HashSet<String>,
+    backoff: &mut HashMap<String, StaleSettlementBackoff>,
+    now: tokio::time::Instant,
+) -> Vec<(MediaSessionRoute, u32)> {
+    let mut candidates = Vec::new();
+
+    // A due retry already owns one of the fixed slots. Convert that exact slot
+    // from retained backoff to in-flight before fresh rows are considered, so
+    // route ordering cannot let unrelated work steal it.
+    for route in routes {
+        if live.contains(&route.session_id) || settling.contains(&route.session_id) {
+            continue;
+        }
+        let Some(retry) = backoff.get(&route.session_id).copied() else {
+            continue;
+        };
+        if retry.next_attempt > now {
+            continue;
+        }
+        backoff.remove(&route.session_id);
+        settling.insert(route.session_id.clone());
+        candidates.push((route.clone(), retry.failures));
+    }
+
+    let mut fresh_capacity = stale_settlement_capacity(settling.len(), backoff);
+    for route in routes {
+        if fresh_capacity == 0 {
+            break;
+        }
+        if live.contains(&route.session_id)
+            || settling.contains(&route.session_id)
+            || backoff.contains_key(&route.session_id)
+        {
+            continue;
+        }
+        settling.insert(route.session_id.clone());
+        candidates.push((route.clone(), 0));
+        fresh_capacity -= 1;
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -1046,6 +1077,28 @@ mod tests {
             encoder: "qsv".to_owned(),
             grade: OutputGrade::Sdr,
             vod: false,
+        }
+    }
+
+    fn media_route(session_id: &str) -> MediaSessionRoute {
+        MediaSessionRoute {
+            incarnation_id: format!("incarnation-{session_id}"),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "player-c".to_owned(),
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "node-c".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms().saturating_add(10_000),
+            state: "active".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: unix_ms(),
         }
     }
 
@@ -1221,17 +1274,35 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
-        assert_eq!(
-            stale_settlement_capacity(1, &backoff, now),
-            0,
-            "in-flight and deferred retries share one fixed 64-slot boundary"
-        );
+        assert_eq!(stale_settlement_capacity(1, &backoff), 0);
 
         backoff.get_mut("deferred-0").expect("fixture").next_attempt = now;
         assert_eq!(
-            stale_settlement_capacity(1, &backoff, now),
-            1,
-            "only a retry whose backoff elapsed may reclaim its retained slot"
+            stale_settlement_capacity(1, &backoff),
+            0,
+            "a due retry retains its slot until that exact retry is selected"
+        );
+
+        let mut settling = HashSet::from(["in-flight".to_owned()]);
+        let candidates = take_stale_settlement_candidates(
+            &[media_route("fresh-first"), media_route("deferred-0")],
+            &HashSet::new(),
+            &mut settling,
+            &mut backoff,
+            now,
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(route, failures)| (route.session_id.as_str(), *failures))
+                .collect::<Vec<_>>(),
+            vec![("deferred-0", 1)],
+            "a due retry reclaims its own slot before a fresh earlier route"
+        );
+        assert!(!settling.contains("fresh-first"));
+        assert_eq!(
+            settling.len() + backoff.len(),
+            MAX_STALE_SETTLEMENTS_PER_TICK
         );
     }
 
@@ -1261,25 +1332,8 @@ mod tests {
             "a repeated random capability must cause only one Store read"
         );
 
-        let mut route = MediaSessionRoute {
-            incarnation_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
-            session_id: session_id.to_owned(),
-            user_id: 7,
-            playback_id: "player-c".to_owned(),
-            request_fingerprint: "c".repeat(64),
-            owner_node_id: "node-c".to_owned(),
-            owner_epoch: 1,
-            lease_expires_at_ms: unix_ms().saturating_add(10_000),
-            state: "active".to_owned(),
-            recipe_json: "{}".to_owned(),
-            response_json: "{}".to_owned(),
-            produced_playable_through_ms: 0,
-            fetched_through_ms: 0,
-            media_origin_ms: 0,
-            media_sequence: 0,
-            discontinuity_sequence: 0,
-            updated_at_ms: unix_ms(),
-        };
+        let mut route = media_route(session_id);
+        route.incarnation_id = "00000000-0000-4000-8000-0000000000c2".to_owned();
         let generation_shard = route_hash(session_id) % coordinator.route_generations.len();
         let stale_miss_generation = coordinator.route_generations[generation_shard]
             .load(std::sync::atomic::Ordering::Acquire);

@@ -83,6 +83,10 @@ fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
 }
 
+fn replacement_deadline_error() -> String {
+    capacity_error("the replacement start expired before it could reap its predecessor")
+}
+
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
     error.starts_with(RETRYABLE_CAPACITY_PREFIX)
 }
@@ -8213,8 +8217,27 @@ impl TranscodeManager {
     /// annoyance into a loop. A player instance restarts its own stream all
     /// the time and never anyone else's, which is exactly the scope wanted.
     async fn reap_superseded(&self, supersession_user: &str, playback_id: &str) {
+        self.reap_superseded_until(None, supersession_user, playback_id)
+            .await
+            .expect("unbounded predecessor reap cannot expire");
+    }
+
+    async fn reap_superseded_until(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
         let doomed: Vec<(String, Arc<Session>)> = {
-            let sessions = self.sessions.lock().await;
+            let sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(replacement_deadline_error());
+            }
             sessions
                 .iter()
                 .filter(|(_, s)| {
@@ -8227,7 +8250,10 @@ impl TranscodeManager {
             // Retirement releases both admission pools before the caller goes
             // on to ask for a slot of its own. A player replacing its own
             // session must not queue behind the session it just replaced.
-            if !self.retire_session(&session_id, &session).await {
+            if !self
+                .retire_session_until(&session_id, &session, deadline)
+                .await?
+            {
                 continue;
             }
             self.emit_session_event(
@@ -8246,6 +8272,7 @@ impl TranscodeManager {
                 "reaped superseded transcode session (this player started a new one)"
             );
         }
+        Ok(())
     }
 
     /// Preserve the cluster ingress deadline across request recovery and
@@ -8258,13 +8285,8 @@ impl TranscodeManager {
         supersession_user: &str,
         playback_id: &str,
     ) -> Result<(), String> {
-        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-            return Err(capacity_error(
-                "the replacement start expired before it could reap its predecessor",
-            ));
-        }
-        self.reap_superseded(supersession_user, playback_id).await;
-        Ok(())
+        self.reap_superseded_until(deadline, supersession_user, playback_id)
+            .await
     }
 
     /// Start a transcode session for a file, superseding this viewer's previous
@@ -9575,15 +9597,39 @@ impl TranscodeManager {
     /// therefore complete before the other can act: a late replacement sees
     /// `retired`, while a late retirement kills the published successor.
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
+        self.retire_session_until(session_id, session, None)
+            .await
+            .expect("unbounded session retirement cannot expire")
+    }
+
+    async fn retire_session_until(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, String> {
         #[cfg(test)]
         session.retirement_started.store(true, Release);
-        let _transition = session.child_transition.lock().await;
+        let _transition = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
+                .await
+                .map_err(|_| replacement_deadline_error())?,
+            None => session.child_transition.lock().await,
+        };
         let removed = {
-            let mut sessions = self.sessions.lock().await;
+            let mut sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
             let still_live = sessions
                 .get(session_id)
                 .is_some_and(|active| Arc::ptr_eq(active, session));
             if still_live {
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(replacement_deadline_error());
+                }
                 session.retired.store(true, Release);
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
@@ -9591,13 +9637,13 @@ impl TranscodeManager {
             still_live
         };
         if !removed {
-            return false;
+            return Ok(false);
         }
         session.release_hardware();
         session.release_software();
         session.kill_child().await;
         session.discard_dir().await;
-        true
+        Ok(true)
     }
 
     /// End one session now. True if it existed.
@@ -18177,23 +18223,45 @@ mod tests {
         let mut predecessor = test_session(predecessor_dir.path().to_path_buf());
         predecessor.supersession_user = immutable_scope.clone();
         predecessor.playback_id = "deadline-player".into();
+        let predecessor = Arc::new(predecessor);
         mgr.sessions
             .lock()
             .await
-            .insert("still-playable".into(), Arc::new(predecessor));
+            .insert("still-playable".into(), Arc::clone(&predecessor));
 
-        let error = mgr
+        let sessions_guard = mgr.sessions.lock().await;
+        let sessions_error = mgr
             .reap_superseded_before(
-                Some(tokio::time::Instant::now()),
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
                 &immutable_scope,
                 "deadline-player",
             )
             .await
-            .expect_err("an expired start must stop immediately before predecessor reap");
-        assert!(is_retryable_capacity_error(&error), "{error}");
+            .expect_err("session-map contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&sessions_error),
+            "{sessions_error}"
+        );
+        drop(sessions_guard);
+
+        let transition_guard = predecessor.child_transition.lock().await;
+        let transition_error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("child-transition contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&transition_error),
+            "{transition_error}"
+        );
+        drop(transition_guard);
+
         assert!(
             mgr.sessions.lock().await.contains_key("still-playable"),
-            "the expired replacement must leave its predecessor live"
+            "both expired lock acquisitions must leave the predecessor live"
         );
     }
 
