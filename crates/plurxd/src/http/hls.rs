@@ -162,7 +162,7 @@ impl Drop for StartedSessionGuard {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let _ = runtime.spawn(async move {
+        std::mem::drop(runtime.spawn(async move {
             abort_started_session(
                 &cleanup.state,
                 &cleanup.owner_node_id,
@@ -180,7 +180,7 @@ impl Drop for StartedSessionGuard {
                     unix_ms(),
                 )
                 .await;
-        });
+        }));
     }
 }
 
@@ -964,7 +964,6 @@ async fn reconcile_or_abort_activation(
             state.media_sessions.seed_owned_lease(&route).await;
         }
         guard.disarm();
-        return;
     }
     // Dropping the armed guard aborts the exact worker, fails its exact claim,
     // and releases the replacement gate only after the full bounded verdict.

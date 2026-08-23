@@ -7279,6 +7279,7 @@ impl TranscodeManager {
     /// caller holding a session its twin's supersession had already killed.
     /// Now the second caller finds the reservation and waits for the first
     /// one's session instead.
+    #[cfg(test)]
     pub async fn create_session(
         &self,
         req: &SessionRequest,
@@ -8236,12 +8237,6 @@ impl TranscodeManager {
     /// automatic quality restarts would have turned that from a rare
     /// annoyance into a loop. A player instance restarts its own stream all
     /// the time and never anyone else's, which is exactly the scope wanted.
-    async fn reap_superseded(&self, supersession_user: &str, playback_id: &str) {
-        self.reap_superseded_until(None, supersession_user, playback_id)
-            .await
-            .expect("unbounded predecessor reap cannot expire");
-    }
-
     async fn reap_superseded_until(
         &self,
         deadline: Option<tokio::time::Instant>,
@@ -8310,7 +8305,7 @@ impl TranscodeManager {
     }
 
     /// Start a transcode session for a file, superseding this viewer's previous
-    /// session on the same file (see [`Self::reap_superseded`]).
+    /// session on the same file (see [`Self::reap_superseded_before`]).
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub async fn start(
