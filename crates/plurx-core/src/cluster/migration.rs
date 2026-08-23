@@ -3492,6 +3492,7 @@ mod tests {
         source_config.cluster.advertise_host.clear();
         source_config.server.bind = coordinator_addr;
         source_config.cluster.join_url = format!("http://{coordinator_addr}");
+        source_config.cluster.artwork_url = format!("http://localhost:{}", coordinator_addr.port());
         drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
         let source = select_daemon_store(&source_config)
             .await
