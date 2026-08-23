@@ -5504,7 +5504,7 @@ pub mod status {
         }
 
         #[test]
-        fn remote_authority_rejects_delayed_or_conflicting_generations() {
+        fn remote_authority_rejects_delayed_and_invalidates_conflicting_generations() {
             let metrics = PassiveRaftMetrics::remote_authority();
             assert!(metrics.publish_watermark_at(
                 watermark(7, 1, 45),
@@ -5528,7 +5528,10 @@ pub mod status {
             ));
 
             let current = metrics.snapshot_at_times(10, 10_600_000_000);
-            assert!(current.watermark_valid);
+            assert!(
+                !current.watermark_valid,
+                "a conflicting same-term leader must revoke the retained proof immediately"
+            );
             let watermark = current.watermark.expect("latest remote authority");
             assert_eq!(watermark.committed_index, 46);
             assert_eq!(watermark.apply_lag_entries, None);
