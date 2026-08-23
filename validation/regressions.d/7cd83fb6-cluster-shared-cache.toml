@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["7cd83fb6", "21fbd17e", "47154014", "9e1e792e", "52643af8", "d2752fb3"]
+commits = ["7cd83fb6", "21fbd17e", "47154014", "9e1e792e", "52643af8", "d2752fb3", "c064733a"]
 points = ["cluster.auth", "playback.pipeline", "offline.viewing"]
 checks = ["rust-gate", "cluster-auth", "offline-contract", "resource-bounds"]
 reason = """
