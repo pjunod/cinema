@@ -405,10 +405,8 @@ paths = [
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
   "crates/plurxd/src/http/browse.rs",
   "crates/plurxd/src/http/system.rs",
-  "crates/plurxd/src/web/index.html",
   "scripts/cluster-page-latency",
   "tests/benchmark/test_cluster_page_latency.py",
-  "tests/web/page-read-budget.test.js",
 ]
 checks = ["rust-gate", "cluster-auth", "benchmark-contract", "web-static"]
 depends_on = ["cluster.auth"]
