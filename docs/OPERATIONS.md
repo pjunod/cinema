@@ -49,31 +49,32 @@ runbook. Until that work lands, a post-activation rollback means roll forward
 with an M2-capable binary against the retained active target. The commands
 below are only for the pre-activation SQLite case.
 
-### Upgrading an activated v5, v6, or v7 cluster to v8
+### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
 Replicated schema v6 added ebook reading state. Schema v7 adds nullable
 `author`, `book_work_id`, `book_edition_id`, and `book_metadata_source` item
 columns plus the partial work-id index. Schema v8 adds the monotone
-`job_leases` coordination table; it does not change the peer protocol. Stop
+`job_leases` coordination table. Schema v9 adds the distributed whole-title
+pre-transcode queue and the nullable authoritative manifest digest on cache
+locations; it does not change the peer protocol. Stop
 application traffic and update every voter as one maintenance operation. The
-first v8 daemon that reaches quorum accepts any activation marker from v5 to
-the current v8 and applies every missing step in order. Each step commits its
+first v9 daemon that reaches quorum accepts any activation marker from v5 to
+the current v9 and applies every missing step in order. Each step commits its
 table/columns/index and compatibility row in one Raft transaction before the
-daemon starts producers or binds HTTP. A v5 source therefore commits v5→v6,
-v6→v7, and v7→v8; a v6 source commits the last two transactions; a v7 source
-commits only the lease-table transaction. Each voter atomically rewrites its
-local `activation.json` to v8 only after the replicated transactions are
-visible.
+daemon starts producers or binds HTTP. A v5 source commits all four additive
+steps through v9; v6, v7, and v8 sources start at their corresponding next
+step. Each voter atomically rewrites its local `activation.json` to v9 only
+after the replicated transactions are visible.
 
 A death before a step leaves the preceding schema authoritative. A death after
 the replicated write but before the local marker rewrite replays only the
-marker write on the next boot. Do not restart a v5, v6, or v7 binary after v8
+marker write on the next boot. Do not restart a v5, v6, v7, or v8 binary after v9
 commits: its strict compatibility check correctly refuses the newer schema. If
-a node fails during the maintenance window, leave the v8 quorum authoritative
-and roll that node forward with the same v8-or-newer binary. `reset-password`,
+a node fails during the maintenance window, leave the v9 quorum authoritative
+and roll that node forward with the same v9-or-newer binary. `reset-password`,
 `refresh-metadata`, and other maintenance clients do not own migration and
 will refuse until the running daemon has completed it. Replicated v4 has no
-supported direct path to v8 and remains refused.
+supported direct path to v9 and remains refused.
 
 Every Ansible redeploy stops the Plurx Compose stack long enough to copy the
 closed SQLite database. The three newest copies stay on each node under
@@ -1535,6 +1536,102 @@ Ownership is process-local. It coordinates handlers and housekeeping inside
 one `plurxd`; two processes pointed at the same data directory have separate
 registries and are unsupported because one can delete bytes the other is
 serving.
+
+### Distributed speculative production
+
+When `cache_produce_mins` is non-zero, one cluster lease owner ranks Continue
+Watching, Next Up, and Recently Added candidates and enqueues immutable source
+generations. It does not encode them. The generation identity includes the
+requested encoder and rate-control policy plus normalized audio language,
+subtitle language, and subtitle mode. Every voter with a configured local
+cache then competes for a distinct compatible row, so three idle workers can
+prepare three titles at once without three schedulers selecting the same work.
+
+Workers advertise the capabilities the local daemon actually proved at boot.
+A row that needs an unsupported decoder, encoder family, HLS output contract,
+tone-map path, output grade, or scratch budget stays queued instead of failing
+on the wrong node. Decoder names come from this ffmpeg's boot inventory;
+scratch is current free space on the cache filesystem after a 512 MiB safety
+reserve, compared with a full-title peak-output estimate plus 64 MiB overhead.
+Dolby Vision remains on the live path because its RPU renderer requires a more
+specific proof than the queue's ordinary HDR bit. After claiming, a worker
+opens and stats the source snapshot before starting ffmpeg. A node without that
+mount yields without consuming a shared failure attempt and temporarily
+excludes that job only from its own claims, so a mounted peer remains eligible
+immediately. A claim lasts 30 seconds and renews every 10 seconds. A renewal
+response at or after the predecessor's exact expiry self-fences even if the
+backend committed it. If a worker dies, another voter may take over after
+expiry; because staging is local, that voter starts the title from zero. A
+yielded job reclaimed on the same node resumes its numbered parts. Foreground
+playback still has priority and receives the encoder lane inside the existing
+five-second admission window.
+
+The queue admits at most 4,096 active and 10,000 total rows. Each candidate
+pass removes up to 512 ready rows whose local location has been evicted and
+retains only the newest 4,096 failed/cancelled dedupe tombstones. This bounds
+Raft history while preserving recent terminal suppression; terminal rows
+discard their capability/policy and staging payloads. Capability scans
+page in groups of 128 until they find the highest compatible row; a large band
+of GPU-specific work cannot starve a software-capable title behind it.
+Worker polling measures current free space and makes one cheap claim; it does
+not run a cache walk on every empty-queue poll. Each producer-enabled node also
+rate-limits one bounded local cache sweep to every 15 minutes, even while its
+queue is empty; the normal cleanup schedule remains an independent backstop.
+Both paths recognize queue staging and fenced final-directory syntax, so
+abandoned queue bytes remain reclaimable after restart even when there are no
+cache-location rows. Rename-to-publication holds both the recipe eviction
+guard and final-directory orphan guard until fenced completion.
+
+The cache bytes remain node-local. Until P5 placement lands, a completed title
+accelerates playback only when the request reaches the node holding that
+location. Do not point multiple daemons at one cache directory to simulate a
+shared cache; verified shared roots and distributed reader pins are P6.
+
+Operational evidence is available in Settings → Activity and Logs:
+
+| Evidence | Meaning |
+|---|---|
+| `queued speculative transcode` | The singleton scheduler inserted a new immutable generation |
+| `distributed speculative transcode ready` | This node atomically published a complete local generation |
+| `pre-transcode queue job lost its fence` | Renewal failed; the child self-preempts and cannot publish |
+| `producer_candidates` telemetry | Counts enqueued, deduplicated, missing, and rejected candidates |
+| `producer_pass` telemetry | Counts completed, yielded, capacity-delayed, lease-lost, and failed work |
+
+Every distributed generation has `generation-manifest.json`. Starting a cache
+hit authenticates that bounded manifest without walking the film; each playlist
+or segment request authenticates the exact bytes or open file it returns. A
+corrupt or unlisted requested object fails closed. The fenced manifest digest
+is stored on the cache-location row and must match the manifest before a cache
+start, so a self-consistent replacement is not trusted.
+
+Scheduled cache cleanup also scrubs unrequested objects. One pass considers at
+most 128 locations. It first performs a descriptor-bound manifest-presence
+heartbeat for broad holder freshness, then deep-verifies up to 4,096 objects
+under a two-second wall-clock ceiling and a physical-read ceiling of 132 MiB
+plus two EOF-probe bytes: one 128 MiB object · one 4 MiB manifest · one probe
+for each. The per-location object cursor is durable, and a location that
+consumed deep I/O sorts behind presence-only peers on the next rotation. One
+maximum-sized object therefore cannot starve every later generation.
+
+Cursor and heartbeat updates across a pass use one backend
+transaction/consensus entry. The scrubber holds a reader guard, checks for
+same-title foreground readers between objects, and yields that title when
+playback arrives; unrelated playback does not stop integrity work for the
+rest of the cache. On corruption it retires only the exact location row;
+guarded orphan cleanup owns the later directory removal. Unsafe relative paths
+are invalidated without touching the filesystem. In `cache: swept`, `corrupt`
+counts retired generations and `scrub_bytes` is physical manifest/object data
+read during this pass. Scheduled deep scrubbing is opportunistic, not a promise
+that every object was checked within a fixed time. Requested playlists and
+segments are always authenticated before they are returned.
+
+Ready offline downloads use the same manifest contract. If their exact cache
+generation fails an integrity check, the location is retired and the package
+changes to failed with `cache_integrity`; prepare it again. A request racing a
+newer replacement may fail itself, but its stale identity cannot retire the
+new package generation. Legacy and non-queue cache entries have neither an
+authoritative digest nor a scrub cursor and remain serveable as the explicit
+legacy path.
 
 ### Offline package storage and quotas
 

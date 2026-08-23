@@ -1,0 +1,23 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "a609a9b8",
+  "f2194723",
+  "2fda4a38",
+  "46b11ee8",
+  "ec07356d",
+  "2e53ccbe",
+  "5060afbd",
+  "d56eb829",
+  "4ae99c5b",
+]
+points = [
+  "cluster.auth",
+  "library.catalog",
+  "metadata.enrichment",
+  "offline.viewing",
+  "playback.pipeline",
+]
+checks = ["rust-gate"]
+reason = "The retained Rust regressions exercise the distributed publication corrections end to end: store-contract cases pin fenced settlement and bounded inventories; manifest and transcode cases pin authenticated generation IDs, resumable checkpoints, immutable source handles, exact object bounds, and stale-authority rejection; artwork, offline, and subtitle cases pin bounded admission, symlink-safe publication and repair, and exact-handle delivery; cachekeep cases pin deferred reconciliation and distinguish transient cache ownership from active cached playback."

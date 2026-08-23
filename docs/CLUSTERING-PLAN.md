@@ -879,9 +879,9 @@ daemon lease-heartbeat source. A follower begins a blocked provider request,
 both peers are refused without making another physical call, and the follower
 is stopped past the expiry read from the authoritative lease row. One surviving
 peer takes over with the next fence, publishes a distinct response, and the
-resumed production task self-fences. Replaying the pre-takeover token at a time
-inside its old TTL is rejected, proving the new generation—not wall-clock
-expiry alone—guards the transaction. Both live peers contest takeover, exactly
+resumed production task self-fences. Replaying the pre-takeover token is
+rejected by the atomic successor-generation transaction independently of its
+former wall-clock TTL. Both live peers contest takeover, exactly
 one observes acquisition while the other observes its new fence, and the proof
 allows exactly two provider calls and at most eight post-baseline Raft entries.
 The serving-node partition acceptance above remains separate.

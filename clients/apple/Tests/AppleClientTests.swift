@@ -553,7 +553,11 @@ final class AppleClientTests: XCTestCase {
             itemId: 9,
             fileId: 90
         ))
-        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line",9,90);"#)
+        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line","9","90");"#)
+        XCTAssertEqual(
+            NativeReaderHandoff.startScript(token: "bearer", itemId: Int.max, fileId: Int.max),
+            "window.startNativeReader(\"bearer\",\"\(Int.max)\",\"\(Int.max)\");"
+        )
         XCTAssertNil(NativeReaderHandoff.startScript(token: "", itemId: 9, fileId: 90))
         XCTAssertNil(NativeReaderHandoff.shellURL(origin: "file:///tmp/cinema"))
         XCTAssertTrue(NativeReaderHandoff.permitsNavigation(

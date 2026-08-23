@@ -6,6 +6,7 @@ mod ffmpeg;
 mod http;
 mod job_lease;
 mod logbuf;
+mod manifest_cache;
 mod meter;
 mod offline;
 mod pgs_overlay;
@@ -119,7 +120,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Route a parsed command, separated from `main` so every subcommand but the
 /// server itself is reachable without a process launch.
-async fn dispatch(command: Command, config: Config) -> anyhow::Result<()> {
+async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
+    if matches!(
+        &command,
+        Command::Run | Command::ResetPassword { .. } | Command::RefreshMetadata { .. }
+    ) {
+        canonicalize_data_dir(&mut config)?;
+    }
     match command {
         Command::Run => run(config).await,
         Command::Healthcheck => {
@@ -136,6 +143,28 @@ async fn dispatch(command: Command, config: Config) -> anyhow::Result<()> {
         }
         Command::RefreshMetadata { library } => refresh_metadata(&config, library).await,
     }
+}
+
+/// Resolve a configured relocation symlink once, before any store or cache
+/// path is derived. Capability-style I/O deliberately rejects symlink
+/// components; anchoring every daemon path to this canonical trusted root
+/// preserves the common "data directory on another disk" deployment without
+/// reopening per-request path traversal races.
+fn canonicalize_data_dir(config: &mut Config) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&config.storage.data_dir).with_context(|| {
+        format!(
+            "creating configured data directory {}",
+            config.storage.data_dir.display()
+        )
+    })?;
+    config.storage.data_dir =
+        std::fs::canonicalize(&config.storage.data_dir).with_context(|| {
+            format!(
+                "canonicalizing configured data directory {}",
+                config.storage.data_dir.display()
+            )
+        })?;
+    Ok(())
 }
 
 /// Re-fetch provider-backed metadata through the activated replicated store.
@@ -642,6 +671,7 @@ async fn probe_system(
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
     // Detect available hardware encoders once at startup.
     let encoder_caps = plurx_core::transcode::detect_encoders(&ffmpeg).await;
+    let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
@@ -663,6 +693,7 @@ async fn probe_system(
             false
         },
         encoder_selected,
+        decoders,
         tone_map,
     };
     let system = system_info(config, ffmpeg, hwaccel_pref, encoder_caps.clone(), measured);
@@ -678,6 +709,7 @@ struct Measured {
     dovi_passthrough: bool,
     dovi_passthrough_qsv: bool,
     encoder_selected: String,
+    decoders: Vec<String>,
     tone_map: pipeprobe::PipelineReport,
 }
 
@@ -701,6 +733,7 @@ fn system_info(
         ffprobe: crate::ffmpeg::ffprobe_bin(),
         hwaccel_pref,
         encoders,
+        decoders: measured.decoders,
         encoder_selected: measured.encoder_selected,
         tone_map: measured.tone_map,
         pacing: measured.pacing,
@@ -2682,6 +2715,7 @@ mod startup_tests {
                 dovi_passthrough: true,
                 dovi_passthrough_qsv: true,
                 encoder_selected: selected.clone(),
+                decoders: vec!["h264".to_owned(), "hevc".to_owned()],
                 tone_map: pipeprobe::PipelineReport::cpu_only("not probed"),
             },
         );

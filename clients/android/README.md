@@ -19,8 +19,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.2.7**, build `41` — native viewer parity across phone, foldable,
-> and TV. Build 41 compacts the shared Mini, Standard, and Debug playback-info
+> Status: **v0.2.7**, build `42` — native viewer parity across phone, foldable,
+> and TV. Build 42 quotes native reader item/file identifiers so JavaScript
+> preserves the full signed 64-bit route across the WebView handoff. Build 41
+> compacts the shared Mini, Standard, and Debug playback-info
 > modes, keeps Debug inside every supported screen, and colors fields that need
 > attention. Build 40 introduced the three shared modes and live server-session
 > diagnostics. Build 39

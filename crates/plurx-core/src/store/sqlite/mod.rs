@@ -15,6 +15,7 @@ mod library;
 mod media;
 mod offline;
 mod outbox;
+mod pretranscode;
 mod publication;
 mod reading;
 mod telemetry;
@@ -622,6 +623,62 @@ const MIGRATIONS: &[&str] = &[
         expires_at_ms  INTEGER NOT NULL,
         updated_at_ms  INTEGER NOT NULL
     ) STRICT;",
+    // v24: candidate generation stays a singleton, while compatible workers
+    // claim distinct whole-title speculative transcodes from this durable
+    // queue. The row's own fence is the publication authority; it is not the
+    // candidate pass's generic scheduler lease.
+    "ALTER TABLE transcode_cache_locations ADD COLUMN manifest_digest TEXT;
+    ALTER TABLE transcode_cache_locations
+        ADD COLUMN scrub_object_index INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE pretranscode_jobs (
+        id                TEXT PRIMARY KEY,
+        dedupe_key        TEXT NOT NULL,
+        file_id           INTEGER NOT NULL,
+        source_size       INTEGER NOT NULL,
+        source_mtime      INTEGER NOT NULL,
+        target_height     INTEGER NOT NULL,
+        policy_generation TEXT NOT NULL,
+        requirements_json TEXT NOT NULL,
+        reason            TEXT NOT NULL CHECK (
+                              reason IN ('in_progress', 'next_up', 'recent')),
+        priority          INTEGER NOT NULL,
+        state             TEXT NOT NULL CHECK (
+                              state IN ('queued', 'running', 'ready', 'failed',
+                                        'cancelled')),
+        owner_node_id     TEXT,
+        staging_node_id   TEXT,
+        fence             INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms  INTEGER,
+        attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms     INTEGER NOT NULL,
+        last_error_code   TEXT,
+        recipe_hash       TEXT,
+        storage_id        TEXT,
+        relative_dir      TEXT,
+        manifest_digest   TEXT,
+        created_at_ms     INTEGER NOT NULL,
+        updated_at_ms     INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX pretranscode_jobs_due
+        ON pretranscode_jobs(state, not_before_ms, priority DESC, created_at_ms, id);
+    CREATE INDEX pretranscode_jobs_dedupe
+        ON pretranscode_jobs(dedupe_key, state);
+    CREATE INDEX pretranscode_jobs_staging
+        ON pretranscode_jobs(staging_node_id, state, id);
+    CREATE UNIQUE INDEX pretranscode_jobs_active
+        ON pretranscode_jobs(dedupe_key)
+        WHERE state IN ('queued', 'running');
+
+    CREATE TRIGGER pretranscode_jobs_cancel_source BEFORE DELETE ON files
+    BEGIN
+        DELETE FROM pretranscode_jobs
+         WHERE file_id = OLD.id AND state IN ('ready', 'failed', 'cancelled');
+        UPDATE pretranscode_jobs
+           SET state = 'cancelled', owner_node_id = NULL, staging_node_id = NULL,
+               lease_expires_ms = NULL, policy_generation = '', requirements_json = '{}'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running');
+    END;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -972,7 +1029,7 @@ impl SqliteStore {
     async fn with_fenced_conn<T, F>(
         &self,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
         f: F,
     ) -> Result<T, StoreError>
     where
@@ -980,18 +1037,36 @@ impl SqliteStore {
         T: Send + 'static,
     {
         let lease = lease.clone();
+        let replacement = replacement.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let current: bool = tx.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM job_leases
-                     WHERE resource = ?1 AND owner_node_id = ?2
-                       AND fence = ?3 AND revision = ?4
-                       AND expires_at_ms = ?5 AND expires_at_ms > ?6
-                 )",
+            let execution_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| {
+                    StoreError::Task(format!("system clock precedes unix epoch: {error}"))
+                })?
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
+            let replacement_valid = replacement.resource == lease.resource
+                && replacement.owner_node_id == lease.owner_node_id
+                && replacement.fence == lease.fence
+                && replacement.revision == lease.revision.saturating_add(1)
+                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms
+                && replacement.expires_at_unix_ms > execution_time_ms;
+            if !replacement_valid {
+                return Err(StoreError::Task(
+                    "invalid atomic publication lease replacement".to_owned(),
+                ));
+            }
+            let renewed = tx.execute(
+                "UPDATE job_leases
+                    SET revision = ?6, expires_at_ms = ?7, updated_at_ms = ?8
+                  WHERE resource = ?1 AND owner_node_id = ?2
+                    AND fence = ?3 AND revision = ?4
+                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
                 params![
-                    lease.resource,
-                    lease.owner_node_id,
+                    &lease.resource,
+                    &lease.owner_node_id,
                     i64::try_from(lease.fence).map_err(|error| {
                         StoreError::Database(format!("lease fence is out of range: {error}"))
                     })?,
@@ -999,11 +1074,14 @@ impl SqliteStore {
                         StoreError::Database(format!("lease revision is out of range: {error}"))
                     })?,
                     lease.expires_at_unix_ms,
-                    observed_at_unix_ms,
+                    i64::try_from(replacement.revision).map_err(|error| {
+                        StoreError::Database(format!("lease revision is out of range: {error}"))
+                    })?,
+                    replacement.expires_at_unix_ms,
+                    execution_time_ms,
                 ],
-                |row| row.get(0),
             )?;
-            if !current {
+            if renewed != 1 {
                 return Err(StoreError::FenceRejected {
                     resource: lease.resource,
                     owner_node_id: lease.owner_node_id,
@@ -1244,6 +1322,25 @@ impl SettingsStore for SqliteStore {
                 ],
             )?;
             Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError> {
+        let filename = filename.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM settings
+                  WHERE substr(key, 1, 27) = 'internal.book_cover_origin.'
+                    AND json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,
+                                     '$.filename') = ?1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM items WHERE poster_path = ?1 OR backdrop_path = ?1)",
+                params![filename],
+            )?)
         })
         .await
     }
@@ -1494,7 +1591,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 23,
+            version, 24,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2028,6 +2125,84 @@ mod tests {
             6
         );
     }
+
+    #[tokio::test]
+    async fn v24_adds_the_pretranscode_queue_without_losing_v23_state() {
+        use crate::store::SettingsStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(23) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.proof', 'survives-v23')",
+                [],
+            )
+            .expect("seed v23 row");
+            conn.pragma_update(None, "user_version", 23)
+                .expect("version");
+        }
+
+        let store = SqliteStore::open(&db).expect("migrate v23 to v24");
+        assert_eq!(
+            store
+                .get_setting("migration.proof")
+                .await
+                .expect("read v23 proof")
+                .as_deref(),
+            Some("survives-v23")
+        );
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('pretranscode_jobs')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("queue columns"),
+            24
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transcode_cache_locations')
+                  WHERE name = 'manifest_digest'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cache manifest column"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transcode_cache_locations')
+                  WHERE name = 'scrub_object_index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("cache scrub cursor column"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'trigger' AND name = 'pretranscode_jobs_cancel_source'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("source trigger"),
+            1
+        );
+    }
+
     /// v13 adds a column to `items`, which is the migration shape with a
     /// silent failure mode: `ITEM_COLS` and `ITEM_COL_COUNT` are positional,
     /// and four queries select `ITEM_COLS` and then read their own trailing

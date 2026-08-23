@@ -290,6 +290,11 @@ pub struct BookMetadataPatch {
     pub edition_id: Option<String>,
     pub poster_path: Option<String>,
     pub source: BookMetadataSource,
+    /// Exact immutable Curator origin row that must still exist when a
+    /// conditional item update commits. Orphan pruning may remove the row
+    /// between origin publication and this CAS; requiring it here turns that
+    /// interleaving into a retry instead of a cover with no repair authority.
+    pub required_origin: Option<(String, String)>,
 }
 
 /// The outcome of one artwork download.
@@ -608,7 +613,187 @@ pub struct CachedTranscode {
     pub bytes: i64,
     /// A partial entry is a producer that died. Nothing may serve one.
     pub complete: bool,
+    /// Fenced digest of the generation manifest. `None` is the explicit
+    /// legacy path for cache entries produced before manifests existed.
+    pub manifest_digest: Option<String>,
+    /// Durable next object for the bounded background integrity scrub. Bound
+    /// to this location generation and reset whenever publication replaces it.
+    pub scrub_object_index: i64,
     pub last_used_at: i64,
+}
+
+/// Bounded ownership facts for filesystem cleanup. `complete` is false when
+/// the backend found more rows than the safety ceiling; callers must then
+/// fail closed rather than treating an omitted owner as an orphan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheOwnershipInventory {
+    pub rows: Vec<CachedTranscode>,
+    pub complete: bool,
+}
+
+/// One exact generation cursor advance after a bounded integrity-scrub page.
+/// Backends apply a page of these in one transaction so routine maintenance
+/// costs one consensus write rather than one write per cache location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheManifestCheck {
+    pub recipe_hash: String,
+    pub node_id: String,
+    pub storage_class: String,
+    pub relative_dir: String,
+    pub manifest_digest: String,
+    pub next_object_index: i64,
+    /// Descriptor-bound presence observation. A location that performed deep
+    /// verification is placed one second later than presence-only peers so
+    /// oldest-first pages durably rotate the deep-I/O starting point.
+    pub observed_at: i64,
+}
+
+/// One immutable candidate inserted by the cluster-wide speculative scheduler.
+///
+/// The source snapshot is part of the row rather than looked up when a worker
+/// finishes. A rescan may keep the same file id while replacing the bytes; the
+/// completion CAS checks size and mtime so work from the old incarnation can
+/// never become a cache hit for the new one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewPretranscodeJob {
+    pub id: String,
+    pub dedupe_key: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub target_height: i64,
+    pub policy_generation: String,
+    pub requirements_json: String,
+    /// `in_progress` | `next_up` | `recent`.
+    pub reason: String,
+    /// Larger values win. Stable creation/id ordering breaks ties.
+    pub priority: i64,
+    pub not_before_ms: i64,
+    pub created_at_ms: i64,
+}
+
+/// A claimed distributed speculative-transcode job.
+///
+/// `fence` advances on every takeover. Renewals keep the same fence and move
+/// only the expiry; every settlement checks id + owner + fence + live expiry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PretranscodeJob {
+    pub id: String,
+    pub dedupe_key: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub target_height: i64,
+    pub policy_generation: String,
+    pub requirements_json: String,
+    pub reason: String,
+    pub priority: i64,
+    pub state: String,
+    pub owner_node_id: String,
+    pub fence: i64,
+    pub lease_expires_ms: i64,
+    pub attempts: i64,
+    pub not_before_ms: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Versioned, bounded filter attached to a queue row.
+///
+/// This describes an output contract, not the candidate generator's own
+/// hardware. Any listed encoder family may claim because the recipe hash still
+/// records which family actually produced the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PretranscodeRequirements {
+    pub version: u16,
+    pub decoder: String,
+    pub acceptable_encoder_families: Vec<String>,
+    pub output_contract: String,
+    pub tone_map: bool,
+    pub output_grade: String,
+    pub scratch_bytes: i64,
+}
+
+/// What one worker can prove about the local producer it is about to run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PretranscodeWorkerCapabilities {
+    pub version: u16,
+    pub decoders: Vec<String>,
+    pub encoder_families: Vec<String>,
+    /// Highest output geometry this node's proved encoder path may claim.
+    pub max_target_height: i64,
+    pub output_contracts: Vec<String>,
+    pub tone_map: bool,
+    pub output_grades: Vec<String>,
+    pub scratch_bytes: i64,
+}
+
+impl PretranscodeRequirements {
+    pub const VERSION: u16 = 1;
+    const MAX_VALUES: usize = 16;
+    const MAX_VALUE_BYTES: usize = 64;
+
+    /// Reject rows that could turn a claim scan into unbounded JSON work.
+    pub fn validate(&self) -> bool {
+        self.version == Self::VERSION
+            && self.scratch_bytes > 0
+            && !self.decoder.is_empty()
+            && self.decoder.len() <= Self::MAX_VALUE_BYTES
+            && !self.acceptable_encoder_families.is_empty()
+            && self.acceptable_encoder_families.len() <= Self::MAX_VALUES
+            && self
+                .acceptable_encoder_families
+                .iter()
+                .all(|value| !value.is_empty() && value.len() <= Self::MAX_VALUE_BYTES)
+            && !self.output_contract.is_empty()
+            && self.output_contract.len() <= Self::MAX_VALUE_BYTES
+            && !self.output_grade.is_empty()
+            && self.output_grade.len() <= Self::MAX_VALUE_BYTES
+    }
+
+    pub fn compatible_with(&self, worker: &PretranscodeWorkerCapabilities) -> bool {
+        self.validate()
+            && worker.validate()
+            && worker.scratch_bytes >= self.scratch_bytes
+            && (worker.decoders.iter().any(|value| value == "*")
+                || worker.decoders.iter().any(|value| value == &self.decoder))
+            && self.acceptable_encoder_families.iter().any(|required| {
+                worker
+                    .encoder_families
+                    .iter()
+                    .any(|value| value == required)
+            })
+            && worker
+                .output_contracts
+                .iter()
+                .any(|value| value == &self.output_contract)
+            && (!self.tone_map || worker.tone_map)
+            && worker
+                .output_grades
+                .iter()
+                .any(|value| value == &self.output_grade)
+    }
+}
+
+impl PretranscodeWorkerCapabilities {
+    /// Keep claim evaluation bounded even if a future caller builds
+    /// capabilities from an external snapshot rather than local boot facts.
+    pub fn validate(&self) -> bool {
+        let valid_values = |values: &[String]| {
+            !values.is_empty()
+                && values.len() <= PretranscodeRequirements::MAX_VALUES
+                && values.iter().all(|value| {
+                    !value.is_empty() && value.len() <= PretranscodeRequirements::MAX_VALUE_BYTES
+                })
+        };
+        self.version == PretranscodeRequirements::VERSION
+            && self.scratch_bytes > 0
+            && self.max_target_height > 0
+            && valid_values(&self.decoders)
+            && valid_values(&self.encoder_families)
+            && valid_values(&self.output_contracts)
+            && valid_values(&self.output_grades)
+    }
 }
 
 /// A durable request for an app-managed offline HLS package.

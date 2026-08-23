@@ -128,10 +128,6 @@ impl ActiveJobLease {
         self.lost.clone()
     }
 
-    pub(crate) fn publication_fence(&self) -> PublicationFence {
-        self.fence.clone()
-    }
-
     pub(crate) async fn release(mut self) -> Result<(), StoreError> {
         self.fence.revoke();
         self.cancel.cancel();

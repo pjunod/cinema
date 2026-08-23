@@ -108,11 +108,7 @@ impl AniListClient {
         if !resp.status().is_success() {
             return Err(MetadataError::Status(resp.status().as_u16()));
         }
-        Ok(resp
-            .bytes()
-            .await
-            .map_err(|e| MetadataError::Http(e.to_string()))?
-            .to_vec())
+        super::bounded_artwork_response(resp).await
     }
 }
 

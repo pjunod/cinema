@@ -460,3 +460,11 @@ source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "enum TVPlaybackInfoPresentation"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale"
+
+[[fixes]]
+id = "clients.native-reader-lossless-route-ids"
+commits = ["5d4c0d5a"]
+source = "clients/apple/Sources/ReaderView.swift"
+source_anchor = "IDs are quoted deliberately"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"

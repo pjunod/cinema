@@ -1294,7 +1294,7 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let cached = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
+    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
         .await
         .map_err(|why| {
             // Keep the endpoint's existing diagnostic while sharing the
@@ -1302,9 +1302,6 @@ pub async fn subtitles_vtt(
             tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
             ApiError::Internal("subtitle extraction failed".into())
         })?;
-    let bytes = tokio::fs::read(&cached)
-        .await
-        .map_err(|e| ApiError::Internal(format!("reading extracted subtitles: {e}")))?;
     Ok(vtt_response(bytes))
 }
 

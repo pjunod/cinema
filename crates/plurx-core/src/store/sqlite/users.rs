@@ -78,6 +78,22 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError> {
+        if after_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task("invalid bounded user page".to_owned()));
+        }
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {USER_COLS} FROM users WHERE id > ?1 ORDER BY id LIMIT ?2"
+            ))?;
+            let users = stmt
+                .query_map(params![after_id, limit], user_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(users)
+        })
+        .await
+    }
+
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute("DELETE FROM users WHERE id = ?1", params![id])? > 0)

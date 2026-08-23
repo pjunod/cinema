@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P2 delivered; P3 is next ·
+**Status:** P0–P3 delivered; P4 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -332,6 +332,7 @@ CREATE TABLE pretranscode_jobs (
                           state IN ('queued', 'running', 'ready', 'failed',
                                     'cancelled')),
     owner_node_id     TEXT,
+    staging_node_id   TEXT,
     fence             INTEGER NOT NULL DEFAULT 0,
     lease_expires_ms  INTEGER,
     attempts          INTEGER NOT NULL DEFAULT 0,
@@ -339,12 +340,21 @@ CREATE TABLE pretranscode_jobs (
     last_error_code   TEXT,
     recipe_hash       TEXT,
     storage_id        TEXT,
+    relative_dir      TEXT,
+    manifest_digest   TEXT,
     created_at_ms     INTEGER NOT NULL,
     updated_at_ms     INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX pretranscode_jobs_due
-    ON pretranscode_jobs(state, not_before_ms, priority, created_at_ms);
+    ON pretranscode_jobs(
+        state, not_before_ms, priority DESC, created_at_ms, id);
+
+CREATE INDEX pretranscode_jobs_dedupe
+    ON pretranscode_jobs(dedupe_key, state);
+
+CREATE INDEX pretranscode_jobs_staging
+    ON pretranscode_jobs(staging_node_id, state, id);
 
 CREATE UNIQUE INDEX pretranscode_jobs_active
     ON pretranscode_jobs(dedupe_key)
@@ -352,6 +362,12 @@ CREATE UNIQUE INDEX pretranscode_jobs_active
 ```
 
 `dedupe_key` covers file id · size · mtime · target height · policy generation.
+Policy generation hashes the cache recipe/output-contract version plus the
+cluster-wide requested encoder, rate-control, audio language, subtitle
+language, and subtitle-mode policy snapshot. Language aliases are normalized.
+A mutable policy change therefore creates new work instead of letting a ready
+row for obsolete bytes suppress it, while a spelling-only language change or
+a different scheduler node's local hardware does not invent a new generation.
 The worker still builds the canonical node-local `Recipe` immediately before
 claiming cache output; the queue is scheduling identity, not byte identity.
 Track selection and validated effective rate control continue through the
@@ -370,12 +386,32 @@ candidate generation may create a new active row for the same dedupe key.
 Eviction therefore rewarms, while the partial unique index still prevents two
 active copies.
 
+Production decoder capability comes from the boot-time `ffmpeg -decoders`
+inventory, encoder and tone-map facts come from the existing behavioral boot
+probes, and scratch capacity is the cache filesystem's current available bytes
+minus a 512 MiB emergency reserve. Candidate scratch is the full-title peak
+ladder estimate plus 64 MiB generation overhead, never zero. Dolby Vision is
+not queued under the ordinary HDR bit; it remains on the live path until the
+claim contract can name the RPU renderer proof.
+
+Queue retention is bounded: admission stops at 4,096 active or 10,000 total
+rows, every enqueue prunes up to 512 ready generations whose complete local
+location is gone, and only the newest 4,096 failed/cancelled dedupe tombstones
+are retained. Terminal transitions clear capability/policy and staging
+payloads while retaining the dedupe/source identity needed for suppression.
+Claim scans use bounded 128-row keyset pages, so incompatible
+high-priority work cannot hide a compatible lower row.
+
 ### 5.2 Queue claims allocate their own fence atomically
 
 `claim_pretranscode_job(node, capabilities, now)` moves one due row to running,
 increments its fence, and returns its immutable source snapshot. Renew,
-complete, yield, and fail compare id · owner · fence in their update. Staging
-and final directories include the job fence/generation. The worker completes
+complete, yield, and fail compare id · owner · fence in their update. Node-local
+source-open failures yield without attempts and enter a bounded process-local
+claim exclusion; they never make a replicated path look mounted on every node,
+and they do not prevent another worker claiming immediately. Node-local
+staging uses a job-stable identity so the same node can resume numbered parts;
+the final directory includes the job fence/generation. The worker completes
 the filesystem rename first, then one fenced transaction publishes that exact
 generation's cache-location row and completes the job. An expired worker may
 leave unreferenced bytes, but cannot replace an authoritative URI or publish a
@@ -386,6 +422,13 @@ complete cache location plus `state='ready'`, `recipe_hash`, and `storage_id`.
 A successor checks for that canonical result before encoding. No state may say
 ready without a complete location or running after its own completed location
 was accepted.
+
+The process-local cache ownership registry pins both a reused recipe and a
+newly renamed queue generation until that transaction finishes. Housekeeping
+therefore cannot delete bytes in either publication gap. The nullable
+authoritative manifest digest lives on the cache location itself and is
+written in the same fenced transaction; cache start compares the loaded
+manifest to that digest. Null is the explicit legacy-cache path.
 
 Completion also writes an immutable generation manifest containing format
 version, generation id, object count, ordered names/sizes/digests, and one
@@ -858,6 +901,60 @@ deletion cancels it; eviction re-enqueues it; the generation manifest detects
 a corrupt requested object without an offer-time full walk; one live start preempts
 speculative work inside five seconds; the resulting local cache hit starts
 with no ffmpeg child.
+
+**Delivered:** SQLite v24 and replicated schema v9 add the bounded
+`pretranscode_jobs` queue. The existing `candidate:pretranscode` singleton now
+does only immutable source ranking and fenced enqueue; every voter
+independently claims the highest-priority row its decoder, encoder family, HLS
+contract, tone-map, output-grade, and scratch capabilities satisfy. The
+generation key includes normalized audio/subtitle preferences as well as the
+requested encoder and rate-control policy. Job leases last 30 s and renew every
+10 s; an in-flight renewal is raced against the exact local expiry and
+self-fences if consensus has not answered in time or its response arrives on
+the deadline. Each claimant opens/stats the immutable source snapshot before
+ffmpeg; an unreadable mount is a bounded node-local refusal, not a global
+failure attempt. Claim takeover advances a row-local fence, completion checks
+the exact source generation and fence, and the ready state plus node-local
+cache location commit in one transaction.
+
+Yielded work keeps a job-stable staging identity on its current node, so the
+existing numbered-part checkpoint resumes there. A different node that takes
+over receives the durable staging identity but starts from zero because the
+bytes never travelled; its final generation path includes the new fence. Queue
+staging is now part of cache housekeeping's fail-closed ownership inventory,
+so a sweep neither deletes live checkpoints nor preserves a predecessor's
+abandoned copy after takeover. Queue-shaped staging and final paths are
+reconciled from the authoritative queue inventory even after a restart with an
+empty cache-location inventory. Publication holds both recipe-eviction and
+final-path guards through fenced completion. Empty queue polls only remeasure
+free space and attempt a cheap claim; producer-enabled nodes separately
+rate-limit one bounded local cache sweep to every 15 minutes even when the
+queue stays empty, while the normal cleanup schedule remains a backstop.
+Source deletion cancels active rows, and local
+eviction makes a formerly ready dedupe key eligible again. Missing ready
+locations and old terminal history are pruned under the singleton enqueue
+fence, with hard active/total admission ceilings.
+
+Every new distributed generation carries a bounded authenticated object
+manifest. Cache offer/start reads only that small file; playlist and segment
+handlers authenticate the exact bytes or file handle they return. Scheduled
+housekeeping rotates presence heartbeats through at most 128 locations and
+deep-verifies as many as 4,096 objects under one 132 MiB plus two-byte
+EOF-probe physical-read ceiling and a two-second wall-clock ceiling. It
+durably sorts the location that consumed deep I/O behind presence-only peers,
+so one maximum-sized object cannot monopolize later passes. It persists object cursors in
+one backend batch, yields between objects when playback arrives, and removes
+only the exact corrupt location before orphan cleanup may touch its bytes.
+Unsafe relative paths are invalidated without filesystem deletion. Offline
+leases fail coherently when their exact authoritative generation is removed;
+a stale reader cannot fail a package after a replacement wins the location
+race. The fenced digest is stored with the cache location, so replacing both
+bytes and their self-declared manifest cannot manufacture a valid generation.
+Legacy local cache entries remain readable without a manifest. Production
+still uses the shipped background admission lane, five-second live handoff,
+track/recipe selection, stop control, and cached-session path with no child
+process. Shared cache, remote offers, and live placement remain deferred to
+P4–P6.
 
 ### 8.5 P4 — publish media snapshots and bounded offers
 
