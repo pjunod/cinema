@@ -85,7 +85,7 @@ impl RemoteStartRequest {
 /// a request sent to a peer.
 pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool {
     request.file_id > 0
-        && !request.playback_id.is_empty()
+        && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
             .playback_id
@@ -927,6 +927,11 @@ mod tests {
         let mut traversal = request.clone();
         traversal.request.playback_id = "player\r\nforged".to_owned();
         assert!(!traversal.is_valid());
+
+        let mut blank_playback = request.clone();
+        blank_playback.request.playback_id = "   ".to_owned();
+        assert!(!worker_session_request_is_valid(&blank_playback.request));
+        assert!(!blank_playback.is_valid());
 
         let mut too_late = request.clone();
         too_late.request.start_seconds = MAX_MEDIA_MILLIS as f64 / 1_000.0 + 0.001;
