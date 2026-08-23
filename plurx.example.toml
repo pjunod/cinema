@@ -27,9 +27,8 @@ scan_prune_percent = 10
 # advertise_host = ""
 # join_token_file = ""
 # trusted_network = ""
-# Reserved for the route-activation release. Keep disabled while this build's
-# bounded catalogue boundary has no HTTP consumers. False is the immediate
-# Authority-read kill switch once those named routes land.
+# Opt in cluster-wide only after every voter advertises the same bounded-read
+# protocol. False is the immediate Authority-read kill switch.
 # bounded_replica_reads = false
 # Fresh local reads also require commit-to-apply lag at or below this value.
 # Range: 0..10000 entries. Keep identical on every voter.

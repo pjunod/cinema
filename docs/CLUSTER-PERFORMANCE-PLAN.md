@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P2e landed; M4 singleton process proof staged; P0c/P2f and P3–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P3 implementation and deterministic acceptance delivered; M4 singleton and serving-partition proofs delivered; P0c/P2f physical evidence and P4–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -393,9 +393,10 @@ lifecycle into the three-process harness, pauses a follower owner past its
 authoritative TTL, admits one successor, bounds provider calls and Raft
 entries, and rejects the resumed token inside the publication transaction.
 That closes the duplication risk which could contaminate an ordinary-load
-baseline. M4's separate serving-node partition/readiness/capability proof
-remains before P0c; `SIGSTOP` is process unavailability and is not relabelled
-as a live network partition.
+baseline. The separate serving-node partition/readiness/capability proof also
+landed in #526; `SIGSTOP` remains process unavailability and is not relabelled
+as a live network partition. P0c now awaits only the named-runner physical
+baseline and its reviewed evidence.
 
 **Acceptance:** CI's replicated-storage contract passes and validates that the
 artifact contains both voter counts, exact workload identity, quorum, commit
@@ -696,11 +697,10 @@ documented discontinuity behavior.
 | 7 | proxy fixture + final failure/SLO record | PRs 3, 5, and 6 | none |
 
 `CLUSTERING-PLAN.md` M4's core implementation landed in #505. Its real-process
-singleton pause/takeover proof is staged here; the serving-node partition
-acceptance remains before P0c and before any PR in this table claims
-ordinary-load performance. Code instrumentation may be
-prepared before the named-runner baseline, but P0c/P2f acceptance and tuning
-decisions remain blocked until that remaining singleton-work proof passes.
+singleton pause/takeover proof landed in #523, and the serving-node partition
+acceptance landed in #526. Code instrumentation may proceed before the
+named-runner baseline, but P0c/P2f acceptance and tuning decisions remain
+blocked until the physical evidence is recorded and reviewed.
 
 ### 7.2 Existing work and shared-file ownership
 

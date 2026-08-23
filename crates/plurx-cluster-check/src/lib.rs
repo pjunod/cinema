@@ -48,7 +48,7 @@ use plurx_core::domain::{
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    ApiKeyStore, ArtworkRepairFence, ClusterCompatibility, CoordinationStore,
+    ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility, CoordinationStore,
     FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
     PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
@@ -390,6 +390,8 @@ async fn controller() -> Result<()> {
     run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: P3a three-column watermark compatibility");
     run_p3a_watermark_rolling_compatibility_case().await?;
+    println!("cluster-check: bounded catalogue apply-pause and follower partition");
+    run_bounded_catalogue_failure_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
     println!("cluster-check: isolated serving-node readiness and media fence");
@@ -2135,6 +2137,231 @@ async fn run_p3a_watermark_rolling_compatibility_case() -> Result<()> {
         .request(2, Request::ProveP3aWatermarkCompatibility)
         .await?
         .require_ok()?;
+    cluster.shutdown_all().await
+}
+
+#[derive(Debug)]
+struct BoundedReadObservation {
+    title: Option<String>,
+    error: Option<String>,
+    consistent_query_calls: u64,
+    non_consistent_query_calls: u64,
+    watermark_valid: bool,
+    watermark_age_millis: Option<u64>,
+    local_reads_supported: bool,
+    apply_lag_entries: Option<u64>,
+    serving_ready: bool,
+}
+
+async fn bounded_read(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<BoundedReadObservation> {
+    match cluster
+        .request(node_id, Request::BoundedCatalogueGetItem { item_id })
+        .await?
+    {
+        Response::BoundedCatalogueRead {
+            title,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            watermark_age_millis,
+            local_reads_supported,
+            apply_lag_entries,
+            serving_ready,
+        } => Ok(BoundedReadObservation {
+            title,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            watermark_age_millis,
+            local_reads_supported,
+            apply_lag_entries,
+            serving_ready,
+        }),
+        response => bail!("bounded catalogue request returned {response:?}"),
+    }
+}
+
+async fn wait_for_local_catalogue_read(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+    expected_title: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observation = bounded_read(cluster, node_id, item_id).await?;
+        if observation.error.is_none()
+            && observation.title.as_deref() == Some(expected_title)
+            && observation.consistent_query_calls == 0
+            && observation.non_consistent_query_calls == 1
+            && observation.watermark_valid
+            && observation
+                .watermark_age_millis
+                .is_some_and(|age| age <= 250)
+            && observation.local_reads_supported
+            && observation.apply_lag_entries == Some(0)
+            && observation.serving_ready
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("bounded catalogue local read did not recover: {observation:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Drive the P3 acceptance against three real voter processes. Apply pause is
+/// below Raft's log and transport paths; the partition cuts this follower's
+/// Raft and cluster-query transports while leaving the harness control pipe.
+async fn run_bounded_catalogue_failure_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("bounded catalogue failure data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move { ClusterProcesses::start(&executable, &attempt_root, reservation?).await }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+    let follower = [1_u64, 2, 3]
+        .into_iter()
+        .find(|node_id| *node_id != leader)
+        .context("three-voter cluster had no follower")?;
+    let item_id = match cluster
+        .request(
+            leader,
+            Request::SeedArtworkRepairFenceItem { ordinal: 7_003 },
+        )
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("bounded catalogue seed returned {response:?}"),
+    };
+    const EXPECTED_TITLE: &str = "Original artwork fence title";
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+
+    cluster
+        .request(follower, Request::PauseApply)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: "bounded.apply-pause".to_owned(),
+                value: "committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let pause_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match cluster
+            .request(follower, Request::ApplyPauseObserved)
+            .await?
+        {
+            Response::ApplyPauseObserved { observed: true } => break,
+            Response::ApplyPauseObserved { observed: false } => {}
+            response => bail!("apply-pause observation returned {response:?}"),
+        }
+        if Instant::now() >= pause_deadline {
+            bail!("follower did not block inside its SQLite apply path");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let fallback_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let observation = bounded_read(&mut cluster, follower, item_id).await?;
+        if observation.title.as_deref() == Some(EXPECTED_TITLE)
+            && observation.error.is_none()
+            && observation.non_consistent_query_calls == 0
+            && observation.consistent_query_calls == 1
+            && !observation.serving_ready
+            && observation.apply_lag_entries.is_some_and(|lag| lag > 0)
+        {
+            break;
+        }
+        if Instant::now() >= fallback_deadline {
+            bail!("apply-paused follower did not fall back and self-fence: {observation:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cluster
+        .request(follower, Request::ResumeApply)
+        .await?
+        .require_ok()?;
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+
+    cluster
+        .request(follower, Request::SetRaftPartitioned { partitioned: true })
+        .await?
+        .require_ok()?;
+    let partition_started = Instant::now();
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: "bounded.partition-majority".to_owned(),
+                value: "committed".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let before_expiry = bounded_read(&mut cluster, follower, item_id).await?;
+    if before_expiry.error.is_some()
+        || before_expiry.title.as_deref() != Some(EXPECTED_TITLE)
+        || before_expiry.consistent_query_calls != 0
+        || before_expiry.non_consistent_query_calls != 1
+        || !before_expiry.watermark_valid
+        || before_expiry.apply_lag_entries != Some(0)
+    {
+        bail!("partition precondition did not execute one zero-gap local read: {before_expiry:?}");
+    }
+
+    let isolated = loop {
+        let observation = bounded_read(&mut cluster, follower, item_id).await?;
+        if observation.non_consistent_query_calls == 0 {
+            break observation;
+        }
+        if partition_started.elapsed() >= Duration::from_millis(1_200) {
+            bail!("partitioned follower still executed local SQL after the watermark lease");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    if partition_started.elapsed() >= Duration::from_millis(1_200)
+        || isolated.consistent_query_calls != 1
+        || isolated.error.is_none()
+        || isolated.watermark_valid
+        || isolated.serving_ready
+    {
+        bail!(
+            "partitioned follower did not fail closed by the one-second lease: elapsed={:?}, observation={isolated:?}",
+            partition_started.elapsed()
+        );
+    }
+
+    cluster
+        .request(follower, Request::SetRaftPartitioned { partitioned: false })
+        .await?
+        .require_ok()?;
+    wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
     cluster.shutdown_all().await
 }
 
@@ -5145,6 +5372,15 @@ pub enum Request {
     Metrics,
     PassiveRaftMetrics,
     QuorumWatermark,
+    PauseApply,
+    ApplyPauseObserved,
+    ResumeApply,
+    SetRaftPartitioned {
+        partitioned: bool,
+    },
+    BoundedCatalogueGetItem {
+        item_id: i64,
+    },
     ProveOldWatermarkStreamCompatibility,
     ProveP3aWatermarkCompatibility,
     ReplicationStatus,
@@ -5226,6 +5462,20 @@ pub enum Response {
         term: u64,
         leader_id: u64,
         committed_index: u64,
+    },
+    ApplyPauseObserved {
+        observed: bool,
+    },
+    BoundedCatalogueRead {
+        title: Option<String>,
+        error: Option<String>,
+        consistent_query_calls: u64,
+        non_consistent_query_calls: u64,
+        watermark_valid: bool,
+        watermark_age_millis: Option<u64>,
+        local_reads_supported: bool,
+        apply_lag_entries: Option<u64>,
+        serving_ready: bool,
     },
     ReplicationStatus {
         status: ReplicationStatus,
@@ -6524,6 +6774,8 @@ struct SingletonProbe {
 #[derive(Default)]
 struct NodeMutableState {
     store: Option<Arc<HiqliteAuthStore>>,
+    catalogue_store: Option<Arc<HiqliteAuthStore>>,
+    catalogue: Option<CatalogueReader>,
     membership: Option<MembershipManager>,
     singleton_probe: Option<SingletonProbe>,
 }
@@ -6560,6 +6812,9 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
         let _ = passive_shutdown_signal.await;
     }));
+    let serving = ServingFence::new(replication.metrics_handle());
+    let serving_shutdown = tokio_util::sync::CancellationToken::new();
+    tokio::spawn(serving.clone().monitor_loop(serving_shutdown.clone()));
 
     write_response(&Response::Ready {
         node_id: launch.node_id,
@@ -6570,23 +6825,20 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         .root
         .join(format!("node-{}", launch.node_id))
         .join("telemetry.db");
+    let request_context = NodeRequestContext {
+        client: &client,
+        replication: &replication,
+        serving: &serving,
+        launch: &launch,
+        telemetry_path: &telemetry_path,
+        node_started,
+    };
     let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
     while let Some(line) = input.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                handle_request(
-                    request,
-                    &client,
-                    &replication,
-                    &launch,
-                    &telemetry_path,
-                    node_started,
-                    &mut state,
-                )
-                .await
-            }
+            Ok(request) => handle_request(request, &request_context, &mut state).await,
             Err(error) => Err(error.into()),
         };
         match response {
@@ -6600,20 +6852,36 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         }
     }
     let _ = passive_shutdown.send(());
+    serving_shutdown.cancel();
     Ok(())
+}
+
+struct NodeRequestContext<'a> {
+    client: &'a Client,
+    replication: &'a ReplicationMonitor,
+    serving: &'a ServingFence,
+    launch: &'a NodeLaunch,
+    telemetry_path: &'a Path,
+    node_started: Instant,
 }
 
 async fn handle_request(
     request: Request,
-    client: &Client,
-    replication: &ReplicationMonitor,
-    launch: &NodeLaunch,
-    telemetry_path: &Path,
-    node_started: Instant,
+    context: &NodeRequestContext<'_>,
     state: &mut NodeMutableState,
 ) -> Result<Response> {
+    let &NodeRequestContext {
+        client,
+        replication,
+        serving,
+        launch,
+        telemetry_path,
+        node_started,
+    } = context;
     let NodeMutableState {
         store,
+        catalogue_store,
+        catalogue,
         membership,
         singleton_probe,
     } = state;
@@ -6678,17 +6946,39 @@ async fn handle_request(
         }
         Request::Bootstrap => {
             let opened = Arc::new(
-                HiqliteAuthStore::bootstrap(client.clone(), INSTANCE_ID, telemetry_path).await?,
+                HiqliteAuthStore::bootstrap((*client).clone(), INSTANCE_ID, telemetry_path).await?,
+            );
+            // Keep exact catalogue routing counters isolated from membership's
+            // background probes while sharing this node's real replicated DB.
+            let opened_catalogue_store = Arc::new(
+                HiqliteAuthStore::open(
+                    (*client).clone(),
+                    &telemetry_path.with_extension("catalogue-validation.db"),
+                )
+                .await?,
+            );
+            let authority: Arc<dyn plurx_core::store::Store> = opened_catalogue_store.clone();
+            let opened_catalogue = CatalogueReader::validation_replicated(
+                authority,
+                Arc::clone(&opened_catalogue_store),
+                replication.metrics_handle(),
+                0,
             );
             let opened_membership = membership_manager(client, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
+            *catalogue = Some(opened_catalogue);
+            *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
             Ok(Response::Ok)
         }
         Request::RejectIdentityDrift => {
-            match HiqliteAuthStore::bootstrap(client.clone(), "wrong-instance-id", telemetry_path)
-                .await
+            match HiqliteAuthStore::bootstrap(
+                (*client).clone(),
+                "wrong-instance-id",
+                telemetry_path,
+            )
+            .await
             {
                 Err(error) if error.to_string().contains("refusing bootstrap") => Ok(Response::Ok),
                 Err(error) => bail!("identity drift failed for the wrong reason: {error}"),
@@ -6696,10 +6986,26 @@ async fn handle_request(
             }
         }
         Request::Open => {
-            let opened = Arc::new(HiqliteAuthStore::open(client.clone(), telemetry_path).await?);
+            let opened = Arc::new(HiqliteAuthStore::open((*client).clone(), telemetry_path).await?);
+            let opened_catalogue_store = Arc::new(
+                HiqliteAuthStore::open(
+                    (*client).clone(),
+                    &telemetry_path.with_extension("catalogue-validation.db"),
+                )
+                .await?,
+            );
+            let authority: Arc<dyn plurx_core::store::Store> = opened_catalogue_store.clone();
+            let opened_catalogue = CatalogueReader::validation_replicated(
+                authority,
+                Arc::clone(&opened_catalogue_store),
+                replication.metrics_handle(),
+                0,
+            );
             let opened_membership = membership_manager(client, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
+            *catalogue = Some(opened_catalogue);
+            *catalogue_store = Some(opened_catalogue_store);
             *store = Some(opened);
             Ok(Response::Ok)
         }
@@ -7642,6 +7948,45 @@ async fn handle_request(
                 committed_index: watermark.committed_index,
             })
         }
+        Request::PauseApply => {
+            hiqlite::validation_pause_apply();
+            Ok(Response::Ok)
+        }
+        Request::ApplyPauseObserved => Ok(Response::ApplyPauseObserved {
+            observed: hiqlite::validation_apply_pause_observed(),
+        }),
+        Request::ResumeApply => {
+            hiqlite::validation_resume_apply();
+            Ok(Response::Ok)
+        }
+        Request::SetRaftPartitioned { partitioned } => {
+            hiqlite::validation_set_raft_partitioned(partitioned);
+            Ok(Response::Ok)
+        }
+        Request::BoundedCatalogueGetItem { item_id } => {
+            let store = catalogue_store_ref(catalogue_store)?;
+            store.validation_reset_operation_counts();
+            let result = catalogue_ref(catalogue)?.get_item(item_id).await;
+            let counts = store.validation_operation_counts();
+            let view = replication.metrics_handle().snapshot();
+            let (title, error) = match result {
+                Ok(item) => (item.map(|item| item.title), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            Ok(Response::BoundedCatalogueRead {
+                title,
+                error,
+                consistent_query_calls: counts.consistent_query_calls,
+                non_consistent_query_calls: counts.non_consistent_query_calls,
+                watermark_valid: view.watermark_valid,
+                watermark_age_millis: view.watermark_age_millis,
+                local_reads_supported: view.watermark_local_reads_supported,
+                apply_lag_entries: view
+                    .watermark
+                    .and_then(|watermark| watermark.apply_lag_entries),
+                serving_ready: serving.is_ready(),
+            })
+        }
         Request::ProveOldWatermarkStreamCompatibility => {
             let error = client
                 .db_quorum_watermark()
@@ -7935,6 +8280,18 @@ impl From<&mut Row<'_>> for MembershipTombstoneRow {
 
 fn store_ref(store: &Option<Arc<HiqliteAuthStore>>) -> Result<&HiqliteAuthStore> {
     store.as_deref().context("auth store has not been opened")
+}
+
+fn catalogue_ref(catalogue: &Option<CatalogueReader>) -> Result<&CatalogueReader> {
+    catalogue
+        .as_ref()
+        .context("catalogue reader has not been opened")
+}
+
+fn catalogue_store_ref(store: &Option<Arc<HiqliteAuthStore>>) -> Result<&Arc<HiqliteAuthStore>> {
+    store
+        .as_ref()
+        .context("catalogue validation store has not been opened")
 }
 
 fn membership_ref(membership: &Option<MembershipManager>) -> Result<&MembershipManager> {

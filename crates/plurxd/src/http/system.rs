@@ -174,7 +174,7 @@ pub async fn system_info(
         instance_id: state.store.instance_id().await?,
         uptime_seconds: state.started_at.elapsed().as_secs(),
         users: state.store.count_users().await?,
-        libraries: state.store.list_libraries().await?.len(),
+        libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
         replication,
         hw_slots_in_use: hw_in_use,
@@ -215,7 +215,7 @@ pub async fn library_shape(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<MediaShapeDto>, ApiError> {
-    let s = state.store.media_shape().await?;
+    let s = state.catalogue.media_shape().await?;
     Ok(Json(MediaShapeDto {
         probed: s.probed,
         unprobed: s.unprobed,

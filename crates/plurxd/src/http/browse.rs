@@ -142,7 +142,7 @@ pub async fn list_items(
     Path(library_id): Path<i64>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ItemListResponse>, ApiError> {
-    if state.store.get_library(library_id).await?.is_none() {
+    if state.catalogue.get_library(library_id).await?.is_none() {
         return Err(ApiError::NotFound("library"));
     }
     let sort = q
@@ -157,7 +157,7 @@ pub async fn list_items(
     // thing as omitting it, rather than "the genre whose name is one space".
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());
     let page = state
-        .store
+        .catalogue
         .list_top_items_in_genre(library_id, sort, offset, limit, genre)
         .await?;
     let watch = watch_lookup(&state, user.id, &page.items).await?;
@@ -170,7 +170,7 @@ pub async fn list_items(
         .filter(|i| matches!(i.kind, ItemKind::Movie | ItemKind::Video))
         .map(|i| i.id)
         .collect();
-    let heights = state.store.item_max_heights(&badged).await?;
+    let heights = state.catalogue.item_max_heights(&badged).await?;
     // Codec/HDR/audio/size for the same set of items, and only when asked.
     // One query for the page, never one per item: `badged` is already the
     // page's playable ids, so this is a second constant-cost lookup, not a
@@ -188,7 +188,7 @@ pub async fn list_items(
         .map(|i| i.id)
         .collect();
     let mut facts = if q.facts == Some(1) {
-        state.store.item_media_facts(&file_backed).await?
+        state.catalogue.item_media_facts(&file_backed).await?
     } else {
         HashMap::new()
     };
@@ -199,7 +199,7 @@ pub async fn list_items(
         .filter(|i| i.kind == ItemKind::Folder)
         .map(|i| i.id)
         .collect();
-    let counts = state.store.child_counts(&folder_ids).await?;
+    let counts = state.catalogue.child_counts(&folder_ids).await?;
     // Containers carry no watch row of their own, so a grid filtering by
     // "Watched"/"In progress" has nothing to filter a show on — the state
     // lives on its episodes, which aren't in this response. One batched
@@ -262,7 +262,7 @@ pub async fn item_detail(
     Path(id): Path<i64>,
 ) -> Result<Json<ItemDetail>, ApiError> {
     let item = state
-        .store
+        .catalogue
         .get_item(id)
         .await?
         .ok_or(ApiError::NotFound("item"))?;
@@ -273,7 +273,7 @@ pub async fn item_detail(
     let mut ancestors = Vec::new();
     let mut cursor = item.parent_id;
     while let Some(parent_id) = cursor {
-        match state.store.get_item(parent_id).await? {
+        match state.catalogue.get_item(parent_id).await? {
             Some(parent) => {
                 cursor = parent.parent_id;
                 ancestors.push(parent);
@@ -286,9 +286,9 @@ pub async fn item_detail(
     }
     ancestors.reverse();
 
-    let children = state.store.get_item_children(id).await?;
+    let children = state.catalogue.get_item_children(id).await?;
     let child_counts = state
-        .store
+        .catalogue
         .child_counts(
             &children
                 .iter()
@@ -309,7 +309,7 @@ pub async fn item_detail(
             .filter(|child| child.kind == ItemKind::Episode)
             .map(|child| child.id)
             .collect();
-        state.store.item_media_facts(&episode_ids).await?
+        state.catalogue.item_media_facts(&episode_ids).await?
     } else {
         HashMap::new()
     };
@@ -321,7 +321,7 @@ pub async fn item_detail(
         | ItemKind::Book
         | ItemKind::Audiobook
         | ItemKind::Video
-        | ItemKind::Photo => state.store.files_for_item(id).await?,
+        | ItemKind::Photo => state.catalogue.files_for_item(id).await?,
         _ => Vec::new(),
     };
     if item.kind == ItemKind::Audiobook {
@@ -347,7 +347,7 @@ pub async fn item_detail(
     for f in files {
         let path = f.path.clone();
         let available = tokio::fs::metadata(&path).await.is_ok();
-        let raw_probe = state.store.get_file_probe_json(f.id).await?;
+        let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.available = available;
@@ -444,8 +444,8 @@ pub async fn home_previews(
     // the browser does not need.
     const HOME_PREVIEW_LIMIT: i64 = 24;
     let (libraries, pages) = tokio::try_join!(
-        state.store.list_libraries(),
-        state.store.home_preview_pages(HOME_PREVIEW_LIMIT),
+        state.catalogue.list_libraries(),
+        state.catalogue.home_preview_pages(HOME_PREVIEW_LIMIT),
     )?;
 
     let all_items: Vec<&Item> = pages.iter().flat_map(|page| page.items.iter()).collect();
@@ -472,8 +472,8 @@ pub async fn home_previews(
         .collect();
     let (watch, heights, counts, rollups) = tokio::try_join!(
         state.store.watch_map(user.id, &item_ids),
-        state.store.item_max_heights(&badged),
-        state.store.child_counts(&folder_ids),
+        state.catalogue.item_max_heights(&badged),
+        state.catalogue.child_counts(&folder_ids),
         state.store.watch_rollups(user.id, &container_ids),
     )?;
     let watch: HashMap<i64, WatchState> = watch.into_iter().collect();
@@ -530,7 +530,7 @@ pub async fn hubs(
     };
     let recent_rows = async {
         state
-            .store
+            .catalogue
             .recently_added(q.library_id, 20)
             .await
             .map_err(ApiError::from)
@@ -551,7 +551,7 @@ pub async fn hubs(
         .collect();
     let (watch, counts) = tokio::try_join!(watch_lookup(&state, user.id, &recent_items), async {
         state
-            .store
+            .catalogue
             .child_counts(&folder_ids)
             .await
             .map_err(ApiError::from)
@@ -576,7 +576,7 @@ pub async fn hubs(
         .map(|d| d.id)
         .collect();
     if !badged.is_empty() {
-        let heights = state.store.item_max_heights(&badged).await?;
+        let heights = state.catalogue.item_max_heights(&badged).await?;
         for d in continue_watching
             .iter_mut()
             .chain(next_up.iter_mut())
