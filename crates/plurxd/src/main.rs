@@ -358,6 +358,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let store = Arc::clone(&selected.store);
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
+        let catalogue = selected.catalogue_reader();
         let dirs = create_dirs(&config.storage.data_dir)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
@@ -376,6 +377,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             store,
             replication,
             membership,
+            catalogue,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
             dirs,
@@ -396,6 +398,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
 /// What a measured node hands to the server it is about to become.
 struct Boot {
     store: Arc<dyn plurx_core::store::Store>,
+    catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     identity: plurx_core::cluster::ClusterIdentity,
@@ -425,6 +428,7 @@ async fn boot(
         store,
         replication,
         membership,
+        catalogue,
         identity,
         credential_key,
         dirs,
@@ -441,6 +445,7 @@ async fn boot(
         credential_key,
         replication,
         membership,
+        catalogue,
         store,
         dirs,
         encoder_caps,
@@ -791,6 +796,7 @@ fn build_state(
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
+    catalogue: plurx_core::store::CatalogueReader,
     store: Arc<dyn plurx_core::store::Store>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
@@ -805,6 +811,7 @@ fn build_state(
             credential_key,
             replication,
             membership,
+            catalogue,
         },
         store,
         dirs,
@@ -2391,13 +2398,16 @@ mod startup_tests {
     /// Everything a request needs, assembled the way `run` assembles it.
     fn booted_state(dir: &std::path::Path) -> AppState {
         let config = config_in(dir);
+        let store = store_in(dir);
+        let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&store));
         build_state(
             &config,
             "test-node".to_owned(),
             Arc::new(plurx_core::secrets::CredentialKey::generate()),
             plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             plurx_core::cluster::membership::MembershipManager::unavailable(),
-            store_in(dir),
+            catalogue,
+            store,
             create_dirs(dir).expect("dirs"),
             Default::default(),
             Default::default(),
@@ -2670,12 +2680,14 @@ mod startup_tests {
         let handle = plurx_core::cluster::open_store(&config)
             .await
             .expect("store");
+        let catalogue = plurx_core::store::CatalogueReader::authority(Arc::clone(&handle.store));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
         let booted = tokio::spawn(boot(
             config.clone(),
             Boot {
                 store: handle.store,
+                catalogue,
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
                 identity: handle.identity,

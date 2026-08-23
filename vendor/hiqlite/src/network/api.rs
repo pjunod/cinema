@@ -513,6 +513,9 @@ async fn handle_socket_concurrent(
     #[cfg(feature = "sqlite")]
     let emulate_old_watermark_handler =
         std::env::var_os("HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER").is_some();
+    #[cfg(feature = "sqlite")]
+    let emulate_p3a_watermark_handler =
+        std::env::var_os("HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER").is_some();
     // TODO splitting needs `unstable-split` feature right now but is about to be stabilized soon
     let (rx, mut write) = ws.split(tokio::io::split);
     // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
@@ -671,7 +674,15 @@ async fn handle_socket_concurrent(
                 ApiStreamRequestPayload::QueryConsistent(Query { sql, params }) => {
                     let is_watermark_marker =
                         sql == DB_QUORUM_WATERMARK_MARKER && params.is_empty();
-                    let res = if is_watermark_marker && !emulate_old_watermark_handler {
+                    let res = if is_watermark_marker && emulate_p3a_watermark_handler {
+                        db_quorum_watermark_local(&state.0).await.map(|watermark| {
+                            let mut row = RowOwned::from_db_quorum_watermark(watermark);
+                            row.columns.retain(|column| {
+                                column.name != "local_read_protocol_version"
+                            });
+                            vec![row]
+                        })
+                    } else if is_watermark_marker && !emulate_old_watermark_handler {
                         db_quorum_watermark_local(&state.0)
                             .await
                             .map(|watermark| vec![RowOwned::from_db_quorum_watermark(watermark)])

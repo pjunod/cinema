@@ -98,6 +98,7 @@ pub use topology::{
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
 const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
+const P3A_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER";
 const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
@@ -387,6 +388,8 @@ async fn controller() -> Result<()> {
     run_degraded_four_voter_leader_self_leave_case().await?;
     println!("cluster-check: rolling quorum-watermark stream compatibility");
     run_quorum_watermark_rolling_compatibility_case().await?;
+    println!("cluster-check: P3a three-column watermark compatibility");
+    run_p3a_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
     println!("cluster-check: isolated serving-node readiness and media fence");
@@ -2086,6 +2089,55 @@ async fn run_quorum_watermark_rolling_compatibility_case() -> Result<()> {
     cluster.shutdown_all().await
 }
 
+/// Prove a P3b follower preserves P3a's three-column quorum proof for serving
+/// readiness while keeping bounded local reads disabled at protocol version 0.
+async fn run_p3a_watermark_rolling_compatibility_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("P3a watermark compatibility data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move {
+            ClusterProcesses::start_with_p3a_watermark_handler(
+                &executable,
+                &attempt_root,
+                reservation?,
+                1,
+            )
+            .await
+        }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    if cluster.leader().await? != 1 {
+        cluster
+            .request(1, Request::TriggerElection)
+            .await?
+            .require_ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cluster.leader().await? != 1 {
+            if Instant::now() >= deadline {
+                bail!("P3a-handler voter 1 did not become compatibility leader");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    cluster
+        .request(2, Request::ProveP3aWatermarkCompatibility)
+        .await?
+        .require_ok()?;
+    cluster.shutdown_all().await
+}
+
 async fn run_membership_lifecycle_case() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("membership lifecycle data root")?;
@@ -2293,6 +2345,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     nodes: specs[..node_id as usize].to_vec(),
                     listen_addr: default_listen_addr(),
                     emulate_old_watermark_handler: false,
+                    emulate_p3a_watermark_handler: false,
                 },
             )
             .await?;
@@ -4063,6 +4116,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         nodes: specs,
         listen_addr: default_listen_addr(),
         emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     // The reservation is dropped here: hiqlite binds its own sockets from the
     // address strings, so we must release the port before it can bind it. A
@@ -4856,6 +4910,8 @@ pub struct NodeLaunch {
     pub listen_addr: String,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
+    #[serde(default)]
+    pub emulate_p3a_watermark_handler: bool,
 }
 
 fn default_listen_addr() -> String {
@@ -5090,6 +5146,7 @@ pub enum Request {
     PassiveRaftMetrics,
     QuorumWatermark,
     ProveOldWatermarkStreamCompatibility,
+    ProveP3aWatermarkCompatibility,
     ReplicationStatus,
     Ping,
     ReadWithoutQuorum,
@@ -5637,6 +5694,9 @@ impl NodeProcess {
         if launch.emulate_old_watermark_handler {
             command.env(OLD_WATERMARK_HANDLER_ENV, "1");
         }
+        if launch.emulate_p3a_watermark_handler {
+            command.env(P3A_WATERMARK_HANDLER_ENV, "1");
+        }
         let mut child = command.spawn().context("spawn cluster voter")?;
         let input = child.stdin.take().context("voter stdin")?;
         let output = BufReader::new(child.stdout.take().context("voter stdout")?);
@@ -5797,7 +5857,7 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, None).await
+        Self::start_inner(executable, root, reservation, None, None).await
     }
 
     async fn start_with_old_watermark_handler(
@@ -5806,7 +5866,16 @@ impl ClusterProcesses {
         reservation: PortReservation,
         old_handler_node: u64,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, Some(old_handler_node)).await
+        Self::start_inner(executable, root, reservation, Some(old_handler_node), None).await
+    }
+
+    async fn start_with_p3a_watermark_handler(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        p3a_handler_node: u64,
+    ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, None, Some(p3a_handler_node)).await
     }
 
     async fn start_inner(
@@ -5814,6 +5883,7 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
         old_handler_node: Option<u64>,
+        p3a_handler_node: Option<u64>,
     ) -> Result<Self> {
         let (_listeners, specs) = reservation.into_inner();
         // Listeners are dropped here: the child process must bind the same
@@ -5829,6 +5899,7 @@ impl ClusterProcesses {
                 nodes: specs.clone(),
                 listen_addr: default_listen_addr(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
+                emulate_p3a_watermark_handler: p3a_handler_node == Some(node_id),
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
         }
@@ -7590,6 +7661,41 @@ async fn handle_request(
             {
                 bail!("ordinary consistent query returned the wrong rolling-compatibility proof");
             }
+            Ok(Response::Ok)
+        }
+        Request::ProveP3aWatermarkCompatibility => {
+            let watermark = client.db_quorum_watermark().await?;
+            if watermark.local_read_protocol_version != 0 {
+                bail!(
+                    "P3a three-column watermark advertised local-read protocol {}",
+                    watermark.local_read_protocol_version
+                );
+            }
+
+            let fence = ServingFence::new(replication.metrics_handle());
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let monitor = tokio::spawn(fence.clone().monitor_loop(shutdown.clone()));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let view = replication.metrics_handle().snapshot();
+                if view.watermark_valid && !view.watermark_local_reads_supported && fence.is_ready()
+                {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    shutdown.cancel();
+                    let _ = monitor.await;
+                    bail!(
+                        "P3a watermark did not preserve readiness while local reads stayed disabled: valid={}, local_reads_supported={}, ready={}",
+                        view.watermark_valid,
+                        view.watermark_local_reads_supported,
+                        fence.is_ready()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            shutdown.cancel();
+            monitor.await.context("join compatibility serving fence")?;
             Ok(Response::Ok)
         }
         Request::ReplicationStatus => Ok(Response::ReplicationStatus {
@@ -9524,6 +9630,7 @@ mod tests {
             }],
             listen_addr: default_listen_addr(),
             emulate_old_watermark_handler: false,
+            emulate_p3a_watermark_handler: false,
         };
 
         let config = node_config(&launch).expect("build the voter config");
