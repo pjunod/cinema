@@ -224,6 +224,8 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
             .expected_predecessor_incarnation_id
             .as_ref()
             .is_none_or(|value| valid_uuid(value))
+        && (activation.fence_predecessor
+            || activation.expected_predecessor_incarnation_id.is_none())
         && activation
             .request_id
             .as_ref()
@@ -495,10 +497,9 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0);
-        if activation
-            .expected_predecessor_incarnation_id
-            .as_deref()
-            .is_some_and(|expected| current_pointer.as_deref() != Some(expected))
+        if activation.fence_predecessor
+            && current_pointer.as_deref()
+                != activation.expected_predecessor_incarnation_id.as_deref()
         {
             return Ok(None);
         }

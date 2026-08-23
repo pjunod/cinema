@@ -785,6 +785,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 user_id: first_user.id,
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
                 request_id: Some("attempt-a".to_owned()),
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),
@@ -822,6 +823,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 user_id: second_user.id,
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
                 request_id: None,
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-b".to_owned(),
@@ -844,6 +846,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 user_id: first_user.id,
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+                fence_predecessor: true,
                 request_id: None,
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),
@@ -889,6 +892,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 user_id: first_user.id,
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+                fence_predecessor: true,
                 request_id: None,
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),
@@ -902,6 +906,28 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(
             stale.is_none(),
             "{backend}: stale predecessor CAS must lose"
+        );
+        let stale_legacy = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 161,
+                lease_expires_at_ms: 361,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale legacy successor verdict: {error}"));
+        assert!(
+            stale_legacy.is_none(),
+            "{backend}: a legacy reopen must require the pointer to remain absent"
         );
         assert_eq!(
             store
@@ -1018,6 +1044,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 user_id: first_user.id,
                 playback_id: "expired-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
                 request_id: Some("expired-activation".to_owned()),
                 request_fingerprint: fingerprint.clone(),
                 owner_node_id: "node-a".to_owned(),

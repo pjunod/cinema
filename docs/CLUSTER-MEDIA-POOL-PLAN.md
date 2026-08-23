@@ -637,7 +637,10 @@ incarnations. Rate/spam tests assert bounded rows and WAL under endlessly
 unique authenticated ids.
 A new request for the same user/playback atomically changes the pointer and
 ends the predecessor. Two users may use the same playback id without sharing
-state. The selected worker receives no user bearer; the signed internal
+state. A stall reopen additionally compares the pointer with the exact durable
+predecessor it named; a rolling-upgrade reopen of a process-local legacy
+session compares against an absent pointer, so either form loses rather than
+superseding a newer start. The selected worker receives no user bearer; the signed internal
 request carries only the already-authorized user id and resolves the current
 display name from replicated user state.
 

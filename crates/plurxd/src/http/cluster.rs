@@ -209,6 +209,7 @@ mod tests {
                 user_id: user.id,
                 playback_id: "player-a".to_owned(),
                 expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
                 request_id: None,
                 request_fingerprint: "a".repeat(64),
                 owner_node_id: "test-node".to_owned(),

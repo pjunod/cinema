@@ -433,6 +433,7 @@ pub async fn create(
     // predecessor state is process-local and automatic migration does not
     // become legal until the fenced P7 takeover protocol exists.
     let mut expected_predecessor_incarnation_id = None;
+    let mut fence_predecessor = false;
     let pinned_owner = if let Some(previous_session_id) = request
         .previous_session_id
         .as_deref()
@@ -461,6 +462,7 @@ pub async fn create(
                     "the session being reopened is no longer current",
                 ));
             }
+            fence_predecessor = true;
             expected_predecessor_incarnation_id = Some(route.incarnation_id);
             Some(route.owner_node_id)
         } else if state
@@ -474,6 +476,7 @@ pub async fn create(
             // Its reopen state is nevertheless process-local, so pin that
             // rolling-upgrade legacy predecessor to this node rather than
             // ranking a peer that cannot possess it.
+            fence_predecessor = true;
             Some(state.node_id.clone())
         } else {
             None
@@ -678,6 +681,7 @@ pub async fn create(
         user_id: user.id,
         playback_id: request.playback_id.clone(),
         expected_predecessor_incarnation_id,
+        fence_predecessor,
         request_id: Some(request_claim_id.clone()),
         request_fingerprint: fingerprint,
         owner_node_id: owner_node_id.clone(),

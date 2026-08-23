@@ -88,6 +88,8 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
             .expected_predecessor_incarnation_id
             .as_ref()
             .is_none_or(|value| valid_uuid(value))
+        && (activation.fence_predecessor
+            || activation.expected_predecessor_incarnation_id.is_none())
         && activation
             .request_id
             .as_ref()
@@ -326,7 +328,7 @@ impl MediaSessionStore for SqliteStore {
                     return Ok(None);
                 }
             }
-            if let Some(expected) = activation.expected_predecessor_incarnation_id.as_deref() {
+            if activation.fence_predecessor {
                 let current = tx
                     .query_row(
                         "SELECT current_incarnation_id FROM media_playback_pointers
@@ -335,7 +337,7 @@ impl MediaSessionStore for SqliteStore {
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?;
-                if current.as_deref() != Some(expected) {
+                if current.as_deref() != activation.expected_predecessor_incarnation_id.as_deref() {
                     tx.commit()?;
                     return Ok(None);
                 }

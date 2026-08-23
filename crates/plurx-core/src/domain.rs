@@ -751,6 +751,10 @@ pub struct MediaSessionActivation {
     /// the playback pointer must still name this exact incarnation. Ordinary
     /// starts leave this unset and replace whichever route is current.
     pub expected_predecessor_incarnation_id: Option<String>,
+    /// Distinguishes an unfenced ordinary start from a legacy reopen that
+    /// observed no durable predecessor. When true with no expected id, the
+    /// atomic activation requires the playback pointer to remain absent.
+    pub fence_predecessor: bool,
     pub request_id: Option<String>,
     pub request_fingerprint: String,
     pub owner_node_id: String,
