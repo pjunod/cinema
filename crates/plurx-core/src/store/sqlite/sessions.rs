@@ -891,7 +891,7 @@ impl MediaSessionStore for SqliteStore {
                     AND lease_expires_at_ms > ?2
                   ORDER BY updated_at_ms, incarnation_id LIMIT ?3",
             )?;
-            Ok(statement
+            let leases = statement
                 .query_map(params![owner_node_id, now_ms, MAX_OWNED], |row| {
                     Ok(OwnedMediaSessionLease {
                         incarnation_id: row.get(0)?,
@@ -900,7 +900,8 @@ impl MediaSessionStore for SqliteStore {
                         lease_expires_at_ms: row.get(3)?,
                     })
                 })?
-                .collect::<Result<Vec<_>, _>>()?)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(leases)
         })
         .await
     }

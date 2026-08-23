@@ -259,7 +259,7 @@ async fn route_by(
     validate_sql(&sql)?;
     Ok(store
         .client()
-        .query_consistent_map::<RouteRow, _>(&sql, params!(value))
+        .query_consistent_map::<RouteRow, _>(sql, params!(value))
         .await?
         .into_iter()
         .next()
