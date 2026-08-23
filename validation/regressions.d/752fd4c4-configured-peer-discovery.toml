@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["752fd4c4"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained singleton takeover proof resumes an embedded follower before its local Raft watch necessarily knows the successor leader. Missing-leader recovery now races authenticated metrics requests across the exact configured API roster under one detached two-second budget, validates a unique current-leader membership entry, and queues that result atomically before the existing single retry. The cluster-auth gate also runs focused vendor regressions proving a permanently pending first peer cannot block a later healthy peer and that management clients refuse redirects without forwarding the custom API-secret header outside the roster."
