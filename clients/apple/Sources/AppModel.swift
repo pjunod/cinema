@@ -146,6 +146,7 @@ final class AppModel: ObservableObject {
         let a = PlurxAPI(origin: normalized)
         do {
             let info = try await a.serverInfo()
+            Session.shared.configureNodeOrigins(info.nodeUrls ?? [], primary: normalized)
             origin = normalized
             api = a
             serverName = info.name
@@ -340,6 +341,7 @@ final class AppModel: ObservableObject {
         api = PlurxAPI(origin: recovered.origin)
         Session.shared.origin = recovered.origin
         Session.shared.token = token
+        Session.shared.configureNodeOrigins(recovered.nodeUrls, primary: recovered.origin)
         // The same server instance at a new address: a move, not a change of
         // identity, so this token stays with it. `matchesSavedServer` already
         // proved the instance id matches before we got here.
@@ -383,17 +385,18 @@ final class AppModel: ObservableObject {
             return RecoveredServer(
                 origin: candidateOrigin,
                 instanceId: info.instanceId,
-                name: info.name
+                name: info.name,
+                nodeUrls: info.nodeUrls ?? []
             )
         }
         return nil
     }
 
     private func backfillServerIdentityIfNeeded() async {
-        guard settings.instanceId == nil,
-              let info = try? await requireAPI().serverInfo() else { return }
-        settings.instanceId = info.instanceId
+        guard let info = try? await requireAPI().serverInfo() else { return }
+        if settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
+        Session.shared.configureNodeOrigins(info.nodeUrls ?? [], primary: origin)
     }
 
     private func showReconnectFailure() {
@@ -927,4 +930,5 @@ private struct RecoveredServer {
     let origin: String
     let instanceId: String?
     let name: String?
+    let nodeUrls: [String]
 }

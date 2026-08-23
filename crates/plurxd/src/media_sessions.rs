@@ -3,8 +3,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{header, HeaderName, Response, StatusCode};
@@ -69,6 +70,96 @@ const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
 const TAKEOVER_OVERLAP_MS: i64 = 2_000;
+const TAKEOVER_BUCKETS_MS: [u64; 7] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000];
+
+struct TakeoverMetrics {
+    outcomes: [[AtomicU64; 4]; 3],
+    buckets: [[AtomicU64; 8]; 3],
+    duration_micros: [AtomicU64; 3],
+}
+
+static TAKEOVER_METRICS: LazyLock<TakeoverMetrics> = LazyLock::new(|| TakeoverMetrics {
+    outcomes: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+    buckets: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+    duration_micros: std::array::from_fn(|_| AtomicU64::new(0)),
+});
+
+struct TakeoverMetricGuard {
+    method: usize,
+    outcome: usize,
+    started: Instant,
+}
+
+impl TakeoverMetricGuard {
+    fn new() -> Self {
+        Self {
+            method: 2,
+            outcome: 3,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for TakeoverMetricGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        TAKEOVER_METRICS.outcomes[self.method][self.outcome].fetch_add(1, Ordering::Relaxed);
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let bucket = TAKEOVER_BUCKETS_MS
+            .iter()
+            .position(|bound| elapsed_ms <= *bound)
+            .unwrap_or(TAKEOVER_BUCKETS_MS.len());
+        TAKEOVER_METRICS.buckets[self.method][bucket].fetch_add(1, Ordering::Relaxed);
+        TAKEOVER_METRICS.duration_micros[self.method].fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+pub(crate) fn prometheus() -> String {
+    let mut out = String::from(
+        "# HELP plurx_media_session_takeovers_total Expired media-session takeover decisions.\n\
+         # TYPE plurx_media_session_takeovers_total counter\n",
+    );
+    for (method_index, method) in ["copy", "transcode", "unknown"].iter().enumerate() {
+        for (outcome_index, outcome) in ["won", "lost", "skipped", "failed"].iter().enumerate() {
+            let count =
+                TAKEOVER_METRICS.outcomes[method_index][outcome_index].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "plurx_media_session_takeovers_total{{method=\"{method}\",outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+    }
+    out.push_str(
+        "# HELP plurx_media_session_takeover_seconds Time spent deciding and settling a takeover.\n\
+         # TYPE plurx_media_session_takeover_seconds histogram\n",
+    );
+    for (method_index, method) in ["copy", "transcode", "unknown"].iter().enumerate() {
+        let mut cumulative = 0_u64;
+        for (bucket_index, bound_ms) in TAKEOVER_BUCKETS_MS.iter().enumerate() {
+            cumulative = cumulative.saturating_add(
+                TAKEOVER_METRICS.buckets[method_index][bucket_index].load(Ordering::Relaxed),
+            );
+            out.push_str(&format!(
+                "plurx_media_session_takeover_seconds_bucket{{method=\"{method}\",le=\"{}\"}} {cumulative}\n",
+                *bound_ms as f64 / 1_000.0
+            ));
+        }
+        cumulative = cumulative.saturating_add(
+            TAKEOVER_METRICS.buckets[method_index][TAKEOVER_BUCKETS_MS.len()]
+                .load(Ordering::Relaxed),
+        );
+        let sum = TAKEOVER_METRICS.duration_micros[method_index].load(Ordering::Relaxed) as f64
+            / 1_000_000.0;
+        out.push_str(&format!(
+            "plurx_media_session_takeover_seconds_bucket{{method=\"{method}\",le=\"+Inf\"}} {cumulative}\n\
+             plurx_media_session_takeover_seconds_sum{{method=\"{method}\"}} {sum}\n\
+             plurx_media_session_takeover_seconds_count{{method=\"{method}\"}} {cumulative}\n"
+        ));
+    }
+    out
+}
 
 #[derive(Clone, Copy, Debug)]
 struct StaleSettlementBackoff {
@@ -1043,7 +1134,9 @@ pub(crate) async fn takeover_loop(state: AppState) {
 }
 
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
+    let mut metric = TakeoverMetricGuard::new();
     if route.owner_node_id == state.node_id || route.owner_epoch >= i64::MAX {
+        metric.outcome = 2;
         return Ok(());
     }
     let mut envelope = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
@@ -1054,6 +1147,10 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     {
         return Err("persisted takeover recipe no longer matches its route".to_owned());
     }
+    metric.method = match envelope.request.kind {
+        SessionKind::Copy { .. } => 0,
+        SessionKind::Transcode { .. } => 1,
+    };
     let file = state
         .store
         .get_file(envelope.request.file_id)
@@ -1085,6 +1182,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     .map_err(str::to_owned)?;
     let offers = state.media_pool.offers(state, offer_request).await;
     if offers.selected_node_id.as_deref() != Some(state.node_id.as_str()) {
+        metric.outcome = 2;
         return Ok(());
     }
     let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
@@ -1141,6 +1239,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             .transcode
             .stop_session(&provisional_id, "media-session takeover lost")
             .await;
+        metric.outcome = 1;
         return Ok(());
     };
     let adopted = state
@@ -1186,6 +1285,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     state.media_sessions.cache_route(claimed.clone()).await;
     state.media_sessions.seed_owned_lease(&claimed).await;
     drop(started.replacement);
+    metric.outcome = 0;
     Ok(())
 }
 

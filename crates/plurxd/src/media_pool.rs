@@ -235,6 +235,9 @@ pub(crate) struct MediaDirectoryDiagnostics {
     pub remote_placement_enabled: bool,
     pub remote_placement_rollout_ready: bool,
     pub remote_placement_ready: bool,
+    pub session_takeover_enabled: bool,
+    pub session_takeover_ready: bool,
+    pub local_active_sessions: usize,
     pub snapshot_interval_seconds: u64,
     pub snapshot_expiry_seconds: u64,
     pub nodes: Vec<MediaNodeSnapshot>,
@@ -643,11 +646,22 @@ impl MediaPool {
             == Some("1");
         let remote_placement_rollout_ready = self.remote_rollout_ready().await;
         let remote_placement_ready = remote_placement_enabled && remote_placement_rollout_ready;
+        let session_takeover_enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
         MediaDirectoryDiagnostics {
             protocol_version: PROTOCOL_VERSION,
             remote_placement_enabled,
             remote_placement_rollout_ready,
             remote_placement_ready,
+            session_takeover_enabled,
+            session_takeover_ready: session_takeover_enabled && remote_placement_ready,
+            local_active_sessions: state.transcode.active_sessions().await,
             snapshot_interval_seconds: SNAPSHOT_INTERVAL.as_secs(),
             snapshot_expiry_seconds: SNAPSHOT_EXPIRY.as_secs(),
             nodes,

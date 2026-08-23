@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P7 delivered; P8 is next ·
+**Status:** P0–P8 delivered ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -1179,6 +1179,16 @@ codec-compatibility fallback ladders.
 **Acceptance:** PR CI plus the named physical-device corpus passes; one-voter
 mode retains the same routes and no peer polling; an operator can explain every
 placement, proxy, queue, fence rejection, and takeover from Settings/metrics.
+
+**Delivered:** `/api/v1/server` publishes bounded reachable node-specific
+origins and Apple/Android retry the unchanged media path through those origins
+only for transport failures, without moving the account origin or consuming a
+codec/HDR fallback. Cluster media diagnostics expose placement/takeover policy,
+effective readiness, active local sessions, and per-node capacity snapshots;
+takeover outcome counters and duration histograms are exported to Prometheus.
+Concrete HAProxy, keepalived, and Kubernetes routing examples use `/readyz`,
+and the operations runbook defines sticky routing, one-voter drain/re-admit,
+permanent-leave separation, and the exact backup/restore boundary.
 
 ## 9. Failure behavior — degraded must remain correct
 

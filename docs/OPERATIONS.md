@@ -717,6 +717,50 @@ fine; stickiness is an optimization, not an availability dependency. If that
 backend becomes unready, the next request may move to a survivor and the
 client-visible recovery contract still applies.
 
+### Cluster ingress, drain, and recovery
+
+Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
+live in [`deploy/cluster-routing/`](../deploy/cluster-routing/). All three use
+`/readyz`, not `/healthz`, for new traffic. Configure each voter's
+`cluster.artwork_url` as its node-specific public base even when
+`cluster.join_url` names the shared VIP or proxy; `/api/v1/server` returns the
+other currently reachable node bases to native clients as bounded media-only
+failover candidates.
+
+Inspect the media plane directly on each backend before and during a rollout:
+
+```bash
+curl -fsS "$PLURX_NODE/api/v1/cluster/media" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | \
+  jq '{remote_placement_ready,session_takeover_ready,local_active_sessions,nodes}'
+```
+
+For a rolling restart, remove one voter from new load-balancer traffic without
+removing it from Raft membership. Keep its existing connections draining and
+wait for `local_active_sessions` to reach zero, then restart that same node and
+data directory. Re-admit it only after `/readyz` succeeds and the media status
+shows the current protocol. Advance to the next voter only then. The permanent
+leave endpoint is not a rolling-drain command; it refuses an active media owner
+and permanently changes quorum membership.
+
+If a node dies instead of draining, P7 takeover is a separately gated recovery
+path. `session_takeover_ready` is true only when both placement and takeover
+policy are effective. Native clients retry the unchanged relative direct/HLS
+URL through advertised survivors on transport failures; this does not consume
+their codec/HDR fallback ladders. Counters and latency are exported as
+`plurx_media_session_takeovers_total{method,outcome}` and
+`plurx_media_session_takeover_seconds{method}`.
+
+Backups do not become interchangeable merely because the database is
+replicated. Preserve the data directory, node identity, and cluster secrets for
+each voter in host/storage backups so the original majority can be restored.
+The shared cache, node-local transcode scratch, and session directories are
+rebuildable accelerators and must not be treated as the authoritative backup;
+the media sources remain external inputs. Do not restore one voter's copied
+Raft state as a fresh cluster or start two restored copies with the same node
+identity. Until quorum-aware restore is shipped, disaster recovery means
+restoring enough original voters to recover the original majority.
+
 **Let artwork converge before relying on a voter for failover.** Item rows name
 poster and backdrop files through Raft, while the image bytes remain in each
 node's local artwork directory. Every voter reconciles those names in the

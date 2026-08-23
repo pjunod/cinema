@@ -146,6 +146,34 @@ private struct DetailNavigationTestHost<Content: View>: View {
 #endif
 
 final class AppleClientTests: XCTestCase {
+    func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            [
+                "http://primary.local:32400",
+                "http://node-b.local:32400/",
+                "ftp://bad.local:32400",
+                "http://user:pass@bad.local:32400",
+                "http://node-b.local:32400",
+                "https://node-c.local:443",
+            ],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/api/v1/hls/cap/index.m3u8"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/files/7/content", authenticated: true)?.query,
+            "token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(session.origin, "http://primary.local:32400")
+    }
+
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
         XCTAssertEqual(
             PlayerController.recoveryTransport(hasOfflineAsset: true),

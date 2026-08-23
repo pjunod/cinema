@@ -202,6 +202,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             val recovered = rediscoverSavedServer(saved.instanceId, saved.origin)
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
+                                Session.configureNodeOrigins(
+                                    recovered.info.node_urls,
+                                    recovered.origin,
+                                )
                                 serverName = recovered.info.name
                                 settings.saveServerIdentity(
                                     recovered.origin,
@@ -223,7 +227,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 validation.user.id,
                             )
                             username = validation.user.username
-                            if (saved.instanceId == null) backfillServerIdentity()
+                            backfillServerIdentity()
                             _phase.value = Phase.Ready
                             loadHome()
                             resumeOfflineProfile()
@@ -760,6 +764,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.origin = normalized
         val candidate = Net.api(normalized)
         val info = candidate.server()
+        Session.configureNodeOrigins(info.node_urls, normalized)
         origin = normalized
         api = candidate
         serverName = info.name
@@ -809,6 +814,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         settings.saveServerIdentity(origin, info.instance_id)
+        Session.configureNodeOrigins(info.node_urls, origin)
     }
 }
 

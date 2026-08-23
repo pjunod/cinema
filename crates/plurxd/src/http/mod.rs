@@ -2939,6 +2939,9 @@ mod tests {
         assert_eq!(media["remote_placement_enabled"], false);
         assert_eq!(media["remote_placement_rollout_ready"], false);
         assert_eq!(media["remote_placement_ready"], false);
+        assert_eq!(media["session_takeover_enabled"], false);
+        assert_eq!(media["session_takeover_ready"], false);
+        assert_eq!(media["local_active_sessions"], 0);
         assert_eq!(media["nodes"].as_array().map(Vec::len), Some(1));
         assert!(
             !media.to_string().contains("path"),

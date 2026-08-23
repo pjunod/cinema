@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: plurx
+spec:
+  selector:
+    app.kubernetes.io/name: plurx
+  ports:
+    - name: http
+      port: 32400
+      targetPort: http
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: plurx
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/session-cookie-name: PLURX_NODE
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "2"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "75"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "75"
+spec:
+  rules:
+    - host: cinema.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: plurx
+                port:
+                  name: http

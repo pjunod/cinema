@@ -272,6 +272,7 @@ class Controller(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+    private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
         plan = plan,
@@ -354,6 +355,7 @@ class Controller(
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            if (!mediaCompatibilityFailure && retryMediaOnNextNode(error)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -501,8 +503,10 @@ class Controller(
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
                 val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
+                Session.resetMediaFailover()
                 baseMs = t
                 val uri = remuxUri(t)
+                activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
@@ -615,12 +619,14 @@ class Controller(
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
+        Session.resetMediaFailover()
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         when {
             !subtitleDelivery.usesPlanTransport -> openSession(positionMs, attempt)
             planMode == "direct" -> {
                 leaveSessionPlayback()
+                activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
@@ -631,6 +637,7 @@ class Controller(
                 leaveSessionPlayback()
                 baseMs = positionMs
                 val uri = remuxUri(positionMs)
+                activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
@@ -707,6 +714,7 @@ class Controller(
             // starts at zero and the player seeks, exactly like direct play.
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
             baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
             player.setMediaItem(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
@@ -817,6 +825,7 @@ class Controller(
             hls.delivered_dynamic_range?.let { deliveredRange = it }
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
             baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
             player.setMediaItem(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
@@ -1011,6 +1020,33 @@ class Controller(
         caps = caps,
         encode = Uri::encode,
     )
+
+    /** Retry the exact delivery URL through another advertised ingress. The
+     * media recipe, session capability, and compatibility flags do not move. */
+    private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
+        val path = activeMediaPath ?: return false
+        val next = Session.nextMediaFailoverUrl(path, authenticated = false) ?: return false
+        val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
+        playbackTelemetry.report(
+            event = "playback_transport_failover",
+            level = "warn",
+            message = error.errorCodeName,
+            code = error.errorCode,
+            detail = "delivery=$deliveryMode compatibility_ladder=false",
+        )
+        player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        player.prepare()
+        player.playWhenReady = true
+        armTrackSelections()
+        return true
+    }
+
+    private fun relativeMediaPath(value: String): String? {
+        val uri = Uri.parse(value)
+        if (uri.scheme.isNullOrEmpty()) return value.takeIf { it.startsWith('/') && !it.startsWith("//") }
+        val path = uri.encodedPath?.takeIf { it.startsWith('/') } ?: return null
+        return uri.encodedQuery?.let { "$path?$it" } ?: path
+    }
 }
 
 /**
