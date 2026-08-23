@@ -15,6 +15,7 @@ mod offline;
 mod pgs_overlay;
 mod pipeprobe;
 mod playstart;
+mod prodsched;
 mod produce;
 mod progress;
 mod progressive;
