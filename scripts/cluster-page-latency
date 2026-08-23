@@ -96,6 +96,7 @@ API_ROUTES = {
     "/api/v1/activity",
     "/api/v1/cluster/nodes",
     "/api/v1/coming-soon",
+    "/api/v1/home/previews",
     "/api/v1/hubs",
     "/api/v1/libraries",
     "/api/v1/scan/status",

@@ -12,7 +12,7 @@ use plurx_core::mediafacts::MediaFacts;
 use serde::{Deserialize, Serialize};
 
 use super::dto::{
-    chapters_from_probe_json, in_progress_dto, recent_dto, FileDto, ItemDto, ReadingDto,
+    chapters_from_probe_json, in_progress_dto, recent_dto, FileDto, ItemDto, LibraryDto, ReadingDto,
 };
 use super::error::ApiError;
 use super::extract::AuthUser;
@@ -418,6 +418,99 @@ pub struct Hubs {
     pub continue_watching: Vec<ItemDto>,
     pub next_up: Vec<ItemDto>,
     pub recently_added: Vec<ItemDto>,
+}
+
+#[derive(Serialize)]
+pub struct HomePreviews {
+    pub libraries: Vec<HomeLibraryPreview>,
+}
+
+#[derive(Serialize)]
+pub struct HomeLibraryPreview {
+    pub library: LibraryDto,
+    pub items: Vec<ItemDto>,
+    pub total: i64,
+}
+
+/// GET /api/v1/home/previews — every library's recent preview in one bounded
+/// catalog read, followed by page-wide annotations whose call count does not
+/// grow with the number of libraries.
+pub async fn home_previews(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<HomePreviews>, ApiError> {
+    // Home has one card budget. Keeping it server-owned prevents a caller
+    // from widening the replicated read while preserving a parameter surface
+    // the browser does not need.
+    const HOME_PREVIEW_LIMIT: i64 = 24;
+    let (libraries, pages) = tokio::try_join!(
+        state.store.list_libraries(),
+        state.store.home_preview_pages(HOME_PREVIEW_LIMIT),
+    )?;
+
+    let all_items: Vec<&Item> = pages.iter().flat_map(|page| page.items.iter()).collect();
+    let item_ids: Vec<i64> = all_items.iter().map(|item| item.id).collect();
+    let badged: Vec<i64> = all_items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Movie | ItemKind::Video))
+        .map(|item| item.id)
+        .collect();
+    let folder_ids: Vec<i64> = all_items
+        .iter()
+        .filter(|item| item.kind == ItemKind::Folder)
+        .map(|item| item.id)
+        .collect();
+    let container_ids: Vec<i64> = all_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::Show | ItemKind::Season | ItemKind::Folder
+            )
+        })
+        .map(|item| item.id)
+        .collect();
+    let (watch, heights, counts, rollups) = tokio::try_join!(
+        state.store.watch_map(user.id, &item_ids),
+        state.store.item_max_heights(&badged),
+        state.store.child_counts(&folder_ids),
+        state.store.watch_rollups(user.id, &container_ids),
+    )?;
+    let watch: HashMap<i64, WatchState> = watch.into_iter().collect();
+    let mut pages: HashMap<_, _> = pages
+        .into_iter()
+        .map(|page| (page.library_id, page))
+        .collect();
+
+    let libraries = libraries
+        .into_iter()
+        .map(|library| {
+            let page = pages.remove(&library.id);
+            let total = page.as_ref().map_or(0, |page| page.total);
+            let items = page
+                .map(|page| {
+                    page.items
+                        .into_iter()
+                        .map(|item| {
+                            let id = item.id;
+                            ItemDto::from(item)
+                                .with_watch(watch.get(&id).copied())
+                                .with_resolution(heights.get(&id).copied())
+                                .with_child_count(counts.get(&id).copied())
+                                .with_rollup(rollups.get(&id).copied())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            HomeLibraryPreview {
+                library: library.into(),
+                items,
+                total,
+            }
+        })
+        .collect();
+
+    Ok(Json(HomePreviews { libraries }))
 }
 
 /// GET /api/v1/hubs — the home screen rows.

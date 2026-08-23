@@ -95,6 +95,12 @@ class ClusterPageLatencyTests(unittest.TestCase):
             "/api/v1/libraries/{library_id}/items",
         )
         self.assertEqual(
+            LATENCY.normalize_api_route(
+                "https://server.invalid/api/v1/home/previews?limit=24"
+            ),
+            "/api/v1/home/previews",
+        )
+        self.assertEqual(
             LATENCY.normalize_api_route("https://server.invalid/api/v1/private/123"),
             "/api/v1/other",
         )

@@ -10,13 +10,14 @@ use super::{
     file_from_row, item_cols, item_from_row, SqliteStore, FILE_COLS, ITEM_COLS, ITEM_COL_COUNT,
 };
 use crate::domain::{
-    sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
+    sort_title_for, ArtworkAttempt, BookMetadataPatch, HomePreviewPage, Item, ItemEdit, ItemKind,
+    ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
 };
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
@@ -428,10 +429,6 @@ impl MediaStore for SqliteStore {
                 }
                 ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
             };
-            // Top level = what a library's grid shows: movies, shows, books,
-            // audiobooks, plus (home libraries) whatever sits under a root.
-            const TOP: &str = "(kind IN ('movie','show','book','audiobook') \
-                 OR (kind IN ('folder','video','photo') AND parent_id IS NULL))";
             // Genres are a JSON array (migration v13), so membership is a
             // `json_each` scan rather than an index probe. Written as
             // "no filter asked, OR the array contains it" in ONE clause so
@@ -451,13 +448,16 @@ impl MediaStore for SqliteStore {
             // is the point: two hand-written copies of "does this item have
             // this genre" is how a total stops agreeing with its page.
             let total: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM items WHERE library_id = ?1 AND {TOP} AND {GENRE}"),
+                &format!(
+                    "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
+                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                ),
                 params![library_id, 0, 0, genre],
                 |row| row.get(0),
             )?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {ITEM_COLS} FROM items
-                 WHERE library_id = ?1 AND {TOP} AND {GENRE}
+                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}
                  ORDER BY {order} LIMIT ?3 OFFSET ?2"
             ))?;
             let items = stmt
@@ -466,6 +466,55 @@ impl MediaStore for SqliteStore {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(ItemPage { items, total })
+        })
+        .await
+    }
+
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        let limit_per_library = limit_per_library.clamp(1, 24);
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "WITH ranked AS (
+                     SELECT id, library_id,
+                            COUNT(*) OVER (PARTITION BY library_id) AS library_total,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY library_id
+                                ORDER BY added_at DESC, id DESC
+                            ) AS preview_rank
+                       FROM items
+                      WHERE {TOP_LEVEL_ITEM_PREDICATE}
+                 ), selected AS (
+                     SELECT id, library_id, library_total, preview_rank
+                       FROM ranked
+                      WHERE preview_rank <= ?1
+                 )
+                 SELECT {}, selected.library_total
+                   FROM selected
+                   JOIN items i ON i.id = selected.id
+                  ORDER BY selected.library_id, selected.preview_rank",
+                item_cols("i")
+            ))?;
+            let rows = stmt
+                .query_map([limit_per_library], |row| {
+                    Ok((item_from_row(row, 0)?, row.get::<_, i64>(ITEM_COL_COUNT)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let mut pages: Vec<HomePreviewPage> = Vec::new();
+            for (item, total) in rows {
+                match pages.last_mut() {
+                    Some(page) if page.library_id == item.library_id => page.items.push(item),
+                    _ => pages.push(HomePreviewPage {
+                        library_id: item.library_id,
+                        items: vec![item],
+                        total,
+                    }),
+                }
+            }
+            Ok(pages)
         })
         .await
     }

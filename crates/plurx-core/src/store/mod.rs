@@ -60,13 +60,14 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CacheManifestCheck, CachedTranscode, InProgressItem, Item, ItemEdit,
-    ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaShape, MetadataPatch, NetworkPrior,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, PlaybackEvent,
-    PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState,
-    ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup, WatchState,
+    BookMetadataPatch, CacheManifestCheck, CachedTranscode, HomePreviewPage, InProgressItem, Item,
+    ItemEdit, ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaShape, MetadataPatch,
+    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
+    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
+    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup,
+    WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -552,6 +553,15 @@ pub trait MediaStore: Send + Sync + 'static {
         self.list_top_items_in_genre(library_id, sort, offset, limit, None)
             .await
     }
+    /// A recent-items preview for every library in one catalog query.
+    ///
+    /// This is the Store half of Home's constant-cardinality contract: the
+    /// number of replicated authority reads must not grow with the library
+    /// roster. Empty libraries are omitted and joined back in by the caller.
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError>;
     async fn recently_added(
         &self,
         library_id: Option<i64>,
@@ -780,6 +790,14 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Remove items left childless/file-less after a scan. Returns rows removed.
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError>;
 }
+
+/// Exactly the items displayed by a top-level library grid.
+///
+/// Shared by ordinary library pages and the catalog-wide Home preview so the
+/// two surfaces cannot silently acquire different membership rules.
+pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
+    "(kind IN ('movie','show','book','audiobook') OR \
+     (kind IN ('folder','video','photo') AND parent_id IS NULL))";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
