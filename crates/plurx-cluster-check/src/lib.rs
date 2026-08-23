@@ -14,15 +14,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::io::Write as _;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
-use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -2532,12 +2530,11 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         nodes: specs,
         emulate_old_watermark_handler: false,
     };
-    // This voter runs hiqlite in-process rather than behind the stdin/stdout
-    // protocol, so a lost port would otherwise surface as a growth verdict.
     // The reservation is dropped here: hiqlite binds its own sockets from the
-    // address strings, so we must release the port before it can bind it.
+    // address strings, so we must release the port before it can bind it. A
+    // collision is returned synchronously and the binary maps it to the
+    // retryable bind-failure exit status.
     drop(listeners);
-    install_bind_failure_guard(BindFailureChannel::Stderr, voter_listen_addrs(&launch)?);
     let mut config = node_config(&launch)?;
     config.filename_db = Cow::Borrowed("growth.db");
     config.raft_config = NodeConfig::default_raft_config(GROWTH_COMPACTION_LOGS);
@@ -4137,7 +4134,7 @@ impl ClusterProcesses {
         // Listeners are dropped here: the child process must bind the same
         // ports, so we cannot hold them across the spawn. The window between
         // releasing the port and the child binding it is the residual race
-        // that [`install_bind_failure_guard`] + retry handle.
+        // that synchronous listener binding plus the retry wrapper handle.
         drop(_listeners);
         let mut nodes = Vec::with_capacity(specs.len());
         for node_id in 1..=specs.len() as u64 {
@@ -4760,11 +4757,7 @@ struct NodeMutableState {
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
-    // Arm this before hiqlite can spawn a listener, so a bind that lost its
-    // port is reported as a port collision rather than surviving as a voter
-    // that answers every later request with a durable-state symptom.
     let listeners = voter_listen_addrs(&launch)?;
-    install_bind_failure_guard(BindFailureChannel::Protocol, listeners.clone());
     let _ = ServerTlsConfig::server_config_self_signed(LISTEN_ADDR).await;
     let client = match hiqlite::start_node(node_config(&launch)?).await {
         Ok(client) => client,
@@ -7385,20 +7378,6 @@ pub fn free_port() -> Result<u16> {
     Ok(TcpListener::bind((LISTEN_ADDR, 0))?.local_addr()?.port())
 }
 
-/// The last port collision this process observed, recorded by
-/// [`install_bind_failure_guard`].
-static BIND_FAILURE: OnceLock<String> = OnceLock::new();
-
-/// Where a voter reports a listener that never bound.
-#[derive(Clone, Copy, Debug)]
-pub enum BindFailureChannel {
-    /// Write a [`Response::Error`] on the stdin/stdout voter protocol, so the
-    /// controller reads the collision as this voter's own startup verdict.
-    Protocol,
-    /// Print to stderr, for a harness voter that has no protocol peer.
-    Stderr,
-}
-
 /// Is this error a port taken between allocation and bind, rather than
 /// anything the cluster contract asserts?
 ///
@@ -7410,62 +7389,6 @@ pub enum BindFailureChannel {
 pub fn is_port_collision(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
     text.contains(PORT_COLLISION) || text.contains("Address already in use")
-}
-
-/// Make a listener that never bound the voter's own verdict.
-///
-/// hiqlite serves its raft and its API listener from detached `tokio::spawn`
-/// tasks that `.unwrap()` the serve future (`hiqlite-0.14.0/src/start.rs:148`
-/// and `:231`). A bind that loses its port panics one of those tasks and
-/// nothing else: `start_node` has already returned `Ok`,
-/// `wait_until_healthy_db` probes only the *local* database, and the process
-/// stays alive serving one dead listener. The collision then reached the
-/// controller as whatever the crippled voter failed at next — a replicated
-/// deadline for the API port, or `no such table: cluster_meta` for a
-/// linearizable read that never reached a state machine, which reads as an
-/// un-migrated store rather than a busy port.
-///
-/// This hook turns that panic into a classified verdict and stops the voter,
-/// so a port collision cannot go on to be reported as durable-state damage.
-/// Panics that are not bind failures keep their previous behaviour.
-pub fn install_bind_failure_guard(channel: BindFailureChannel, addresses: Vec<String>) {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let Some(payload) = bind_failure_payload(info) else {
-            previous(info);
-            return;
-        };
-        let message = format!(
-            "{PORT_COLLISION}: a voter listener could not bind one of [{}]: {payload}",
-            addresses.join(", ")
-        );
-        let _ = BIND_FAILURE.set(message.clone());
-        match channel {
-            BindFailureChannel::Protocol => {
-                // A panic hook cannot drive the async writer, so emit the same
-                // newline framing the controller reads synchronously.
-                if let Ok(mut line) = serde_json::to_vec(&Response::Error { message }) {
-                    line.push(b'\n');
-                    let mut stdout = std::io::stdout();
-                    let _ = stdout.write_all(&line);
-                    let _ = stdout.flush();
-                }
-            }
-            BindFailureChannel::Stderr => eprintln!("{message}"),
-        }
-        // Leaving the voter alive is the defect being fixed: it would keep
-        // answering with downstream symptoms of the dead listener. `exit`
-        // rather than `abort` so an instrumented build still writes its
-        // coverage profile.
-        std::process::exit(BIND_FAILURE_EXIT);
-    }));
-}
-
-/// The panic message, when the panic is a listener that could not bind.
-fn bind_failure_payload(info: &PanicHookInfo<'_>) -> Option<String> {
-    let payload = info.payload_as_str()?;
-    (payload.contains("AddrInUse") || payload.contains("Address already in use"))
-        .then(|| payload.to_owned())
 }
 
 /// The addresses this voter's hiqlite node will bind.
@@ -7492,19 +7415,15 @@ pub fn voter_listen_addrs(launch: &NodeLaunch) -> Result<Vec<String>> {
 
 /// Prove both of a voter's listeners accept before it announces readiness.
 ///
-/// Readiness used to depend on nothing but the local database, so a voter
-/// whose listener lost its port still wrote `Response::Ready`. Connecting to
-/// each address is the positive half of the proof — it catches a listener that
-/// is simply absent. The negative half is [`install_bind_failure_guard`],
-/// which is what separates "my listener is up" from "somebody else's listener
-/// is up on my port", because a squatter accepts connections too.
+/// `hiqlite::start_node` now pre-binds both sockets before returning, which is
+/// the identity proof: another process cannot own either address after that
+/// successful return. These bounded connects are only the readiness half,
+/// proving both spawned servers are accepting before the voter announces
+/// itself to the controller.
 async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
     for address in addresses {
         let deadline = TokioInstant::now() + LISTENER_PROOF_TIMEOUT;
         loop {
-            if let Some(failure) = BIND_FAILURE.get() {
-                bail!("{failure}");
-            }
             match tokio::net::TcpStream::connect(address).await {
                 Ok(_) => break,
                 Err(error) if TokioInstant::now() >= deadline => {
@@ -7514,28 +7433,6 @@ async fn prove_listeners_bound(addresses: &[String]) -> Result<()> {
                 }
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
-        }
-        // A successful connection means *something* is listening on the port,
-        // but it may be a squatter rather than our own listener. Try to bind
-        // the same address to check whether the port is actually free.
-        // If we can bind, our listener never bound — the port was taken by
-        // another process between allocation and hiqlite's bind attempt.
-        // hiqlite's bind failure panics in a spawned task where the panic
-        // hook does not fire, so BIND_FAILURE would not be set. This check
-        // catches that case.
-        let probe = std::net::TcpListener::bind(address);
-        if let Ok(listener) = probe {
-            // The port is free — our listener never bound. Release the probe
-            // and report the collision so the controller can retry.
-            drop(listener);
-            bail!(
-                "{PORT_COLLISION}: voter listener {address} was never bound; the port was taken between allocation and bind"
-            );
-        }
-        // EADDRINUSE means someone has the port — either our listener or a
-        // squatter. Check BIND_FAILURE in case the panic guard caught it.
-        if let Some(failure) = BIND_FAILURE.get() {
-            bail!("{failure}");
         }
     }
     Ok(())
