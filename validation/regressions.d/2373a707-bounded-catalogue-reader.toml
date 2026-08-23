@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["2373a707", "3cc43073"]
+commits = ["2373a707", "3cc43073", "7c2b3b7d"]
 points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades", "server.api"]
 checks = ["cluster-auth", "database-upgrades", "rust-gate"]
 reason = "The retained seeded three-voter Store contract invokes every named catalogue operation through both bounded-local and Authority paths, compares serialized results including non-vacuous recent, height, and probe data, and proves exactly one Authority fallback after an injected local-query error or in-flight proof revocation while a missing proof never invokes local SQL. The separate-process compatibility case returns P3a's exact serialized three-column watermark over the authenticated shared stream and requires the production ServingFence to remain ready while protocol 0 keeps local reads closed. Compile-time handler construction, safe-default configuration, and documented multi-statement semantics retain the rollout boundary."
