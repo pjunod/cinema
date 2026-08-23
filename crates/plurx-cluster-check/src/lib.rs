@@ -292,6 +292,7 @@ struct ProviderFixture {
     calls: Arc<std::sync::atomic::AtomicU64>,
     events: mpsc::UnboundedReceiver<u64>,
     release_first: Arc<Notify>,
+    release_second: Arc<Notify>,
     shutdown: tokio_util::sync::CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -305,9 +306,11 @@ impl ProviderFixture {
         let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (event_tx, events) = mpsc::unbounded_channel();
         let release_first = Arc::new(Notify::new());
+        let release_second = Arc::new(Notify::new());
         let shutdown = tokio_util::sync::CancellationToken::new();
         let task_calls = Arc::clone(&calls);
-        let task_release = Arc::clone(&release_first);
+        let task_release_first = Arc::clone(&release_first);
+        let task_release_second = Arc::clone(&release_second);
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -320,7 +323,8 @@ impl ProviderFixture {
                 };
                 let calls = Arc::clone(&task_calls);
                 let events = event_tx.clone();
-                let release = Arc::clone(&task_release);
+                let release_first = Arc::clone(&task_release_first);
+                let release_second = Arc::clone(&task_release_second);
                 tokio::spawn(async move {
                     const MAX_REQUEST_BYTES: usize = 8 * 1024;
                     let mut request = Vec::with_capacity(1024);
@@ -368,8 +372,10 @@ impl ProviderFixture {
                     }
                     let ordinal = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     let _ = events.send(ordinal);
-                    if ordinal == 1 {
-                        release.notified().await;
+                    match ordinal {
+                        1 => release_first.notified().await,
+                        2 => release_second.notified().await,
+                        _ => {}
                     }
                     let (status, body) = match ordinal {
                         1 => ("200 OK", "stale-owner".to_owned()),
@@ -390,6 +396,7 @@ impl ProviderFixture {
             calls,
             events,
             release_first,
+            release_second,
             shutdown,
             task,
         })
@@ -412,6 +419,10 @@ impl ProviderFixture {
 
     fn release_old_owner(&self) {
         self.release_first.notify_one();
+    }
+
+    fn release_successor(&self) {
+        self.release_second.notify_one();
     }
 
     async fn shutdown(self) {
@@ -552,6 +563,7 @@ async fn run_singleton_takeover_case() -> Result<()> {
         }
     }
     provider.expect_call(2).await?;
+    provider.release_successor();
     wait_singleton_outcome(&mut cluster, *successor_node, &["published"]).await?;
     require_singleton_value(&mut cluster, leader, "successor", false).await?;
 

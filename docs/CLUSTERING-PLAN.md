@@ -877,8 +877,8 @@ readiness, kills children, and stops capability-URL serving.
 The retained singleton slice uses three real voter processes and the exact
 daemon lease-heartbeat source. A follower begins a blocked provider request,
 both peers are refused without making another physical call, and the follower
-is stopped past the expiry read from the authoritative lease row. The stable
-leader takes over with the next fence, publishes a distinct response, and the
+is stopped past the expiry read from the authoritative lease row. One surviving
+peer takes over with the next fence, publishes a distinct response, and the
 resumed production task self-fences. Replaying the pre-takeover token at a time
 inside its old TTL is rejected, proving the new generation—not wall-clock
 expiry alone—guards the transaction. Both live peers contest takeover, exactly
