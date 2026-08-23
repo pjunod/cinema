@@ -9717,8 +9717,8 @@ function membershipRefusalText(code,message){
       "it can read the source; otherwise it fails the package cleanly so the client can request it again.",
     cluster_leader_removal_refused:
       "That node is the cluster's current leader, so another voter cannot remove it remotely. Open Cinema "+
-      "on the leader itself and use Leave this cluster; it elects and confirms a successor before committing "+
-      "its own removal, and then shuts down.",
+      "on the leader itself and use Leave this cluster; it coordinates its own removal with the surviving "+
+      "quorum and then shuts down.",
     self_removal_requires_leave:
       "That row is this server. Use Leave this cluster below so the daemon settles local work, commits its "+
       "own removal, drains active connections, and shuts down instead of leaving a tombstoned process online.",
@@ -9730,6 +9730,13 @@ function membershipRefusalText(code,message){
       "another browser or another server. The current roster is being refreshed now.",
     membership_unavailable:
       "This server is not running a replicated store, so it has no cluster membership to change.",
+    membership_upgrade_required:
+      "Finish upgrading every active cluster node before changing membership, then retry. No new removal "+
+      "fence, offline-work settlement, leadership handoff, or Raft membership proposal was created by this request.",
+    membership_removal_pending:
+      "This node is still protected by a pending removal fence because another, ambiguous, or older-version "+
+      "attempt may still commit. Finish upgrading every cluster node and retry this same removal; do not return "+
+      "the fenced node to service while its outcome is unresolved.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
   return message?`The server refused this removal: ${message}`
@@ -9748,13 +9755,14 @@ function clusterNodeRow(n,localNodeId){
   const seen=n.last_seen_at?esc(fmtAgo(Math.floor(n.last_seen_at/1000))):`<span class="muted">never</span>`;
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
+  const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
   const hostname=n.hostname||n.node_id;
   const advertised=n.advertised_host
     ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
   const action=n.node_id===localNodeId
     ? `<span class="muted">Use graceful leave below</span>`
-    : `<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>Remove</button>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}</div>
+    : `<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
+  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
     <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
     <td data-label="Role">${role}</td>
@@ -9832,8 +9840,8 @@ function leavePanel(localNodeId){
   return `<h2 class="section">Remove this node</h2>
     <button class="ghost sm" onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
-      its owned offline work and, if it is the leader, elects and confirms a successor before committing its
-      own removal. It then drains and shuts down. Rejoining this machine requires a fresh data directory and
+      its owned offline work and coordinates a safe membership change with the surviving quorum. It then
+      drains and shuts down. Rejoining this machine requires a fresh data directory and
       a new join token.</div>`;
 }
 // Deliberately loud. Anyone holding the complete token can join a node to this
