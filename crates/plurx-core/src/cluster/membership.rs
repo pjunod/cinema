@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use hiqlite::macros::params;
-use hiqlite::{Client, Node, Row};
+use hiqlite::{Client, Node, Param, Row};
 use hmac::{Hmac, Mac};
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
@@ -148,6 +148,8 @@ pub enum MembershipError {
     Incompatible,
     #[error("cluster HTTP endpoint must be an http(s) origin without credentials or a path")]
     InvalidHttpEndpoint,
+    #[error("cluster HTTP endpoint is already owned by another active node")]
+    HttpEndpointInUse,
     #[error("node was not found in current cluster membership")]
     NodeNotFound,
     #[error("the current Raft leader cannot be removed; retry after leadership moves")]
@@ -181,6 +183,7 @@ impl MembershipError {
             Self::ReservedToken => "join_token_reserved",
             Self::Incompatible => "join_incompatible",
             Self::InvalidHttpEndpoint => "cluster_http_endpoint_invalid",
+            Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
             Self::NodeNotFound => "cluster_node_not_found",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
             Self::SelfRemovalRequiresLeave => "self_removal_requires_leave",
@@ -750,6 +753,14 @@ impl MembershipManager {
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
+        let http_base = if request.http_base.is_empty() {
+            None
+        } else {
+            Some(
+                normalize_internal_http_base(&request.http_base)
+                    .ok_or(MembershipError::InvalidHttpEndpoint)?,
+            )
+        };
         let now = unix_ms()?;
         let record = self.token_record(&request.token_digest).await?;
         if record.raft_id != request.raft_id as i64 {
@@ -765,6 +776,18 @@ impl MembershipManager {
             // still refuses an unused token below, and a different node id is
             // refused above, so this does not restore bearer authority.
             "redeeming" => {
+                if let Some(http_base) = http_base.as_deref() {
+                    let rows = inner
+                        .client
+                        .query_consistent_map::<HttpUrlRow, _>(
+                            "SELECT public_http_url FROM cluster_node_http WHERE node_id = $1",
+                            params!(request.node_id.as_str()),
+                        )
+                        .await?;
+                    if rows.first().map(|row| row.public_http_url.as_str()) != Some(http_base) {
+                        return Err(MembershipError::HttpEndpointInUse);
+                    }
+                }
                 self.upsert_hostname(
                     &request.node_id,
                     &membership_hostname(&request.hostname, &request.api_address),
@@ -777,61 +800,116 @@ impl MembershipManager {
             _ => return Err(MembershipError::InvalidToken),
         }
 
-        let changed = inner
-            .client
-            .execute(
+        // Claiming the origin, reserving the token, and publishing the staged
+        // node are one Raft transaction. The first statement returns the
+        // claimed node id; every later statement consumes that output, so a
+        // duplicate origin produces no output and Hiqlite rolls the entire
+        // transaction back. No voter promotion can begin from a partial
+        // redemption.
+        let mut statements = Vec::new();
+        if let Some(http_base) = http_base.as_deref() {
+            statements.push((
+                "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                 SELECT $1, $2 WHERE EXISTS (\
+                   SELECT 1 FROM cluster_join_tokens token \
+                   WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                     AND token.state = 'issued' AND token.expires_at > $5) \
+                 AND NOT EXISTS (\
+                   SELECT 1 FROM cluster_nodes claimed_node \
+                   WHERE claimed_node.node_id = $1 AND claimed_node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing_claim \
+                       WHERE removing_claim.node_id = claimed_node.node_id)) \
+                 AND NOT EXISTS (\
+                   SELECT 1 FROM cluster_node_http owner_http \
+                   JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                   WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                     AND owner_node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                       WHERE removing.node_id = owner_node.node_id)) \
+                 ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url \
+                 RETURNING node_id"
+                    .to_owned(),
+                params!(
+                    request.node_id.as_str(),
+                    http_base,
+                    request.token_digest.as_str(),
+                    request.raft_id as i64,
+                    now
+                ),
+            ));
+            statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
-                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3",
+                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(0, "node_id".into()),
+                    Param::Text(request.token_digest.clone()),
+                    Param::Integer(now),
+                ],
+            ));
+        } else {
+            statements.push((
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                 RETURNING node_id"
+                    .to_owned(),
                 params!(request.node_id.as_str(), request.token_digest.as_str(), now),
-            )
-            .await?;
-        if changed != 1 {
-            let latest = self.token_record(&request.token_digest).await?;
-            return if latest.expires_at <= now {
-                Err(MembershipError::ExpiredToken)
-            } else if latest.state == "redeemed" {
-                Err(MembershipError::ReusedToken)
-            } else {
-                Err(MembershipError::ReservedToken)
-            };
+            ));
         }
-        inner
-            .client
-            .execute(
+        statements.extend([
+            (
                 "INSERT INTO cluster_nodes \
                  (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
                  VALUES ($1, $2, $3, $4, $5, NULL) \
                  ON CONFLICT(node_id) DO UPDATE SET \
                    raft_id = excluded.raft_id, raft_address = excluded.raft_address, \
                    api_address = excluded.api_address, last_seen_at = excluded.last_seen_at, \
-                   removed_at = NULL",
-                params!(
-                    request.node_id.as_str(),
-                    request.raft_id as i64,
-                    request.raft_address.as_str(),
-                    request.api_address.as_str(),
-                    now
-                ),
-            )
-            .await?;
-        if !request.http_base.is_empty() {
-            let http_base = normalize_internal_http_base(&request.http_base)
-                .ok_or(MembershipError::InvalidHttpEndpoint)?;
-            inner
-                .client
-                .execute(
-                    "INSERT INTO cluster_node_http (node_id, public_http_url) VALUES ($1, $2) \
-                     ON CONFLICT(node_id) DO UPDATE SET \
-                     public_http_url = excluded.public_http_url",
-                    params!(request.node_id.as_str(), http_base),
-                )
-                .await?;
+                   removed_at = NULL"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(0, "node_id".into()),
+                    Param::Integer(request.raft_id as i64),
+                    Param::Text(request.raft_address.clone()),
+                    Param::Text(request.api_address.clone()),
+                    Param::Integer(now),
+                ],
+            ),
+            (
+                "INSERT INTO cluster_node_hostnames (node_id, hostname) VALUES ($1, $2) \
+                 ON CONFLICT(node_id) DO UPDATE SET hostname = excluded.hostname"
+                    .to_owned(),
+                vec![
+                    Param::StmtOutputNamed(0, "node_id".into()),
+                    Param::Text(membership_hostname(&request.hostname, &request.api_address)),
+                ],
+            ),
+        ]);
+        let transaction = inner.client.txn(statements).await;
+        match transaction {
+            Ok(results) => {
+                let changed = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                if changed.iter().any(|count| *count != 1) {
+                    return Err(MembershipError::Internal(
+                        "join redemption transaction did not publish every row".to_owned(),
+                    ));
+                }
+            }
+            Err(error) if error.to_string().contains("StmtIndex(0)") => {
+                let latest = self.token_record(&request.token_digest).await?;
+                return if latest.expires_at <= now {
+                    Err(MembershipError::ExpiredToken)
+                } else if latest.state == "redeemed" {
+                    Err(MembershipError::ReusedToken)
+                } else if latest.state == "redeeming" {
+                    Err(MembershipError::ReservedToken)
+                } else if http_base.is_some() {
+                    Err(MembershipError::HttpEndpointInUse)
+                } else {
+                    Err(MembershipError::InvalidToken)
+                };
+            }
+            Err(error) => return Err(error.into()),
         }
-        self.upsert_hostname(
-            &request.node_id,
-            &membership_hostname(&request.hostname, &request.api_address),
-        )
-        .await?;
         Ok(())
     }
 

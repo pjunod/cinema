@@ -38,7 +38,8 @@
 //! all three sources, and each keeps the lock discipline its own lifetime
 //! needs.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -120,11 +121,40 @@ impl Method {
 }
 
 /// One player, not one request — see the module doc on the 206 storm.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key {
     user_id: i64,
     /// The client's playback id when it sent one, else `file:{id}`.
     id: String,
+}
+
+/// Select the newest stable ids while retaining only `limit` cloned keys.
+/// The root of this heap is the worst retained candidate: the oldest start,
+/// then the lexicographically largest id. This makes replacement O(log limit)
+/// and keeps diagnostics from allocating in proportion to a damaged registry.
+pub(crate) fn newest_ids_bounded<'a>(
+    entries: impl Iterator<Item = (&'a str, i64)>,
+    limit: usize,
+) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut selected = BinaryHeap::new();
+    for (id, started_unix) in entries {
+        let candidate = (Reverse(started_unix), id);
+        if selected.len() < limit {
+            selected.push((candidate.0, candidate.1.to_owned()));
+        } else if selected
+            .peek()
+            .is_some_and(|worst| candidate < (worst.0, worst.1.as_str()))
+        {
+            selected.pop();
+            selected.push((candidate.0, candidate.1.to_owned()));
+        }
+    }
+    let mut ids = selected.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 impl Key {
@@ -157,6 +187,7 @@ struct Entry {
 /// One live delivery that has no session of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Live {
+    pub registry_id: String,
     pub user_name: String,
     pub file_id: i64,
     pub item_id: i64,
@@ -267,11 +298,29 @@ impl DirectPlays {
         let Ok(live) = self.live.lock() else {
             return Vec::new();
         };
-        let mut out = live
-            .values()
-            .take(limit)
-            .filter(|entry| is_live(now.saturating_duration_since(entry.last_seen), IDLE_TIMEOUT))
-            .map(|entry| Live {
+        let mut selected = BinaryHeap::new();
+        if limit == 0 {
+            return Vec::new();
+        }
+        for (key, entry) in live.iter().filter(|(_, entry)| {
+            is_live(now.saturating_duration_since(entry.last_seen), IDLE_TIMEOUT)
+        }) {
+            let candidate = (Reverse(entry.started_unix), key);
+            if selected.len() < limit {
+                selected.push((candidate.0, candidate.1.clone()));
+            } else if selected
+                .peek()
+                .is_some_and(|worst| candidate < (worst.0, &worst.1))
+            {
+                selected.pop();
+                selected.push((candidate.0, candidate.1.clone()));
+            }
+        }
+        let mut out = selected
+            .into_iter()
+            .filter_map(|(_, key)| live.get(&key).map(|entry| (key, entry)))
+            .map(|(key, entry)| Live {
+                registry_id: format!("{}:{}", key.user_id, key.id),
                 user_name: entry.user_name.clone(),
                 file_id: entry.file_id,
                 item_id: entry.item_id,
@@ -284,6 +333,7 @@ impl DirectPlays {
                 .started_unix
                 .cmp(&left.started_unix)
                 .then(left.file_id.cmp(&right.file_id))
+                .then(left.user_name.cmp(&right.user_name))
         });
         out
     }
@@ -294,8 +344,9 @@ impl DirectPlays {
         };
         live.retain(|_, e| is_live(now.saturating_duration_since(e.last_seen), IDLE_TIMEOUT));
         let mut out: Vec<Live> = live
-            .values()
-            .map(|e| Live {
+            .iter()
+            .map(|(key, e)| Live {
+                registry_id: format!("{}:{}", key.user_id, key.id),
                 user_name: e.user_name.clone(),
                 file_id: e.file_id,
                 item_id: e.item_id,
@@ -457,6 +508,39 @@ mod tests {
             pb.record(Key::new(7, 42, Some(&format!("pb-{n}"))), "paul", 42, 5);
         }
         assert_eq!(pb.list().len(), MAX_PER_USER, "the oldest were evicted");
+    }
+
+    #[test]
+    fn bounded_direct_listing_keeps_the_actual_newest_entries() {
+        let pb = DirectPlays::new();
+        for n in 0..600_i64 {
+            pb.record(Key::new(n, n, None), "viewer", n, n);
+        }
+        {
+            let mut live = pb.live.lock().expect("direct-play registry");
+            for entry in live.values_mut() {
+                entry.started_unix = entry.file_id;
+            }
+        }
+
+        let listed = pb.list_bounded(512);
+        assert_eq!(listed.len(), 512);
+        assert_eq!(listed.first().expect("newest").file_id, 599);
+        assert_eq!(listed.last().expect("oldest retained").file_id, 88);
+        assert!(listed.iter().all(|play| play.file_id >= 88));
+    }
+
+    #[test]
+    fn shared_top_k_selector_is_stable_above_the_activity_limit() {
+        let ids = (0..600_i64)
+            .map(|n| (format!("session-{n:04}"), n))
+            .collect::<Vec<_>>();
+        let selected =
+            newest_ids_bounded(ids.iter().map(|(id, started)| (id.as_str(), *started)), 512);
+        assert_eq!(selected.len(), 512);
+        assert!(selected.iter().any(|id| id == "session-0599"));
+        assert!(selected.iter().any(|id| id == "session-0088"));
+        assert!(!selected.iter().any(|id| id == "session-0087"));
     }
 
     #[test]

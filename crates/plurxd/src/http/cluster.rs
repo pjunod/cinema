@@ -119,6 +119,7 @@ fn api_error(error: MembershipError) -> ApiError {
         MembershipError::InvalidToken
         | MembershipError::Incompatible
         | MembershipError::InvalidHttpEndpoint => StatusCode::BAD_REQUEST,
+        MembershipError::HttpEndpointInUse => StatusCode::CONFLICT,
         MembershipError::ExpiredToken => StatusCode::GONE,
         MembershipError::ReusedToken
         | MembershipError::ReservedToken

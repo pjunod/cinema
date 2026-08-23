@@ -882,14 +882,61 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     };
     require_dump_setting(&initial_dump, "instance.id", INSTANCE_ID)?;
 
+    // A joiner must claim its HTTP origin before any staged membership row is
+    // visible or voter promotion can start. Reuse the same token after the
+    // refusal to prove the failed claim reserved neither the credential nor
+    // an unusable second voter.
+    let first_issued = match cluster
+        .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
+        .await?
+    {
+        Response::IssuedJoinToken { token } => token,
+        response => bail!("unexpected duplicate-origin join token response: {response:?}"),
+    };
+    let first_spec = specs[1].clone();
+    require_membership_error(
+        cluster
+            .request(
+                1,
+                Request::RedeemJoin {
+                    request: RedeemJoinRequest {
+                        token_digest: join_token_digest(&first_issued.token),
+                        raft_id: first_issued.raft_id,
+                        node_id: "node-2".to_owned(),
+                        hostname: "cluster-node-2".to_owned(),
+                        raft_address: first_spec.raft,
+                        api_address: first_spec.api,
+                        http_base: "http://127.0.0.1:33001".to_owned(),
+                        schema_version: AUTH_SCHEMA_VERSION,
+                        protocol_version: AUTH_PROTOCOL_VERSION,
+                    },
+                },
+            )
+            .await?,
+        "cluster_http_endpoint_in_use",
+    )?;
+    let after_duplicate = match cluster.request(1, Request::MembershipStatus).await? {
+        Response::MembershipStatus { status } => status,
+        response => bail!("unexpected post-duplicate membership status: {response:?}"),
+    };
+    if after_duplicate.availability != ClusterAvailability::SingleNode
+        || after_duplicate.nodes.len() != 1
+    {
+        bail!("duplicate origin changed singleton membership: {after_duplicate:?}");
+    }
+
+    let mut first_issued = Some(first_issued);
     let mut first_redeemed = None;
     for node_id in 2..=3 {
-        let issued = match cluster
-            .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
-            .await?
-        {
-            Response::IssuedJoinToken { token } => token,
-            response => bail!("unexpected join-token response: {response:?}"),
+        let issued = match first_issued.take().filter(|_| node_id == 2) {
+            Some(issued) => issued,
+            None => match cluster
+                .request(1, Request::IssueJoinToken { ttl_ms: 120_000 })
+                .await?
+            {
+                Response::IssuedJoinToken { token } => token,
+                response => bail!("unexpected join-token response: {response:?}"),
+            },
         };
         if issued.raft_id != node_id {
             bail!(
@@ -906,7 +953,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             hostname: format!("cluster-node-{node_id}"),
             raft_address: spec.raft,
             api_address: spec.api,
-            http_base: format!("http://127.0.0.1:{}", 32_400 + node_id),
+            http_base: format!("http://127.0.0.1:{}", 33_000 + node_id),
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_VERSION,
         };

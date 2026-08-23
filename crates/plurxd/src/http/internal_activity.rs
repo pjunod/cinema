@@ -9,7 +9,8 @@ use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::CACHE_CONTROL;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{ActivityPeer, ActivityPeerAuth, MembershipError};
@@ -164,7 +165,7 @@ where
 pub async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ActivitySnapshot>, StatusCode> {
+) -> Result<(HeaderMap, Json<ActivitySnapshot>), StatusCode> {
     let auth = peer_auth_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
     if !state
         .membership
@@ -174,7 +175,16 @@ pub async fn snapshot(
     {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(Json(local_snapshot(&state).await))
+    Ok((
+        snapshot_response_headers(),
+        Json(local_snapshot(&state).await),
+    ))
+}
+
+fn snapshot_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    headers
 }
 
 fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ActivityPeerAuth> {
@@ -255,60 +265,79 @@ fn bounded_text(value: String, max_bytes: usize) -> String {
 }
 
 async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
-    let sessions = state
+    let transcodes = state
         .transcode
-        .list_deliveries_bounded(MAX_DELIVERIES)
+        .delivery_candidates_bounded(MAX_DELIVERIES)
         .await;
-    let mut deliveries = sessions
-        .into_iter()
-        .take(MAX_DELIVERIES)
-        .map(|(session, method)| ActivityDelivery {
-            method: method.as_str().to_owned(),
-            user: bounded_text(session.user_name, MAX_USER_BYTES),
-            file_id: session.file_id,
-            item_id: session.item_id,
-            title: bounded_text(session.item_title, MAX_TITLE_BYTES),
-            started_unix: session.started_unix,
-            idle_seconds: session.idle_seconds,
-            delivered_bytes: Some(session.delivered_bytes),
-            delivered_bps: session.delivered_bps,
+    let candidates = activity_candidates_bounded(
+        transcodes,
+        state.streams.list_bounded(MAX_DELIVERIES),
+        state.direct_plays.list_bounded(MAX_DELIVERIES),
+        MAX_DELIVERIES,
+    );
+    let transcode_ids = candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            ActivityCandidate::Transcode(candidate) => Some(candidate.id.clone()),
+            ActivityCandidate::Remux(_) | ActivityCandidate::Direct(_) => None,
         })
         .collect::<Vec<_>>();
+    let mut transcode_details = state
+        .transcode
+        .delivery_details_bounded(&transcode_ids, MAX_DELIVERIES)
+        .await
+        .into_iter()
+        .map(|detail| (detail.0.id.clone(), detail))
+        .collect::<HashMap<_, _>>();
+    let mut deliveries = Vec::with_capacity(candidates.len());
     let mut titles = HashMap::new();
-    for stream in state.streams.list_bounded(MAX_DELIVERIES) {
-        let item_id = state
-            .store
-            .get_file(stream.file_id)
-            .await
-            .ok()
-            .flatten()
-            .map_or(0, |file| file.item_id);
-        let title = title(state, item_id, &mut titles).await;
-        deliveries.push(ActivityDelivery {
-            method: "remux".to_owned(),
-            user: bounded_text(stream.user_name, MAX_USER_BYTES),
-            file_id: stream.file_id,
-            item_id,
-            title: bounded_text(title, MAX_TITLE_BYTES),
-            started_unix: stream.started_unix,
-            idle_seconds: (stream.delivered_idle_ms.max(0) / 1_000) as u64,
-            delivered_bytes: Some(stream.delivered_bytes),
-            delivered_bps: stream.delivered_bps,
-        });
-    }
-    for play in state.direct_plays.list_bounded(MAX_DELIVERIES) {
-        let title = title(state, play.item_id, &mut titles).await;
-        deliveries.push(ActivityDelivery {
-            method: "direct".to_owned(),
-            user: bounded_text(play.user_name, MAX_USER_BYTES),
-            file_id: play.file_id,
-            item_id: play.item_id,
-            title: bounded_text(title, MAX_TITLE_BYTES),
-            started_unix: play.started_unix,
-            idle_seconds: play.idle_seconds,
-            delivered_bytes: None,
-            delivered_bps: None,
-        });
+    for candidate in candidates {
+        match candidate {
+            ActivityCandidate::Transcode(candidate) => {
+                let Some((session, method)) = transcode_details.remove(&candidate.id) else {
+                    continue;
+                };
+                deliveries.push(ActivityDelivery {
+                    method: method.as_str().to_owned(),
+                    user: bounded_text(session.user_name, MAX_USER_BYTES),
+                    file_id: session.file_id,
+                    item_id: session.item_id,
+                    title: bounded_text(session.item_title, MAX_TITLE_BYTES),
+                    started_unix: session.started_unix,
+                    idle_seconds: session.idle_seconds,
+                    delivered_bytes: Some(session.delivered_bytes),
+                    delivered_bps: session.delivered_bps,
+                });
+            }
+            ActivityCandidate::Remux(stream) => {
+                let title = title(state, stream.item_id, &mut titles).await;
+                deliveries.push(ActivityDelivery {
+                    method: "remux".to_owned(),
+                    user: bounded_text(stream.user_name, MAX_USER_BYTES),
+                    file_id: stream.file_id,
+                    item_id: stream.item_id,
+                    title: bounded_text(title, MAX_TITLE_BYTES),
+                    started_unix: stream.started_unix,
+                    idle_seconds: (stream.delivered_idle_ms.max(0) / 1_000) as u64,
+                    delivered_bytes: Some(stream.delivered_bytes),
+                    delivered_bps: stream.delivered_bps,
+                });
+            }
+            ActivityCandidate::Direct(play) => {
+                let title = title(state, play.item_id, &mut titles).await;
+                deliveries.push(ActivityDelivery {
+                    method: "direct".to_owned(),
+                    user: bounded_text(play.user_name, MAX_USER_BYTES),
+                    file_id: play.file_id,
+                    item_id: play.item_id,
+                    title: bounded_text(title, MAX_TITLE_BYTES),
+                    started_unix: play.started_unix,
+                    idle_seconds: play.idle_seconds,
+                    delivered_bytes: None,
+                    delivered_bps: None,
+                });
+            }
+        }
     }
     deliveries.sort_by(|left, right| {
         right
@@ -319,6 +348,48 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             .then(left.user.cmp(&right.user))
     });
     bounded_snapshot(state.node_id.clone(), deliveries)
+}
+
+#[derive(Debug)]
+enum ActivityCandidate {
+    Transcode(crate::transcode::DeliveryCandidate),
+    Remux(crate::progressive::StreamListing),
+    Direct(crate::delivery::Live),
+}
+
+impl ActivityCandidate {
+    fn ordering_key(&self) -> (i64, &'static str, &str) {
+        match self {
+            Self::Transcode(candidate) => (candidate.started_unix, "hls", &candidate.id),
+            Self::Remux(stream) => (stream.started_unix, "remux", &stream.id),
+            Self::Direct(play) => (play.started_unix, "direct", &play.registry_id),
+        }
+    }
+}
+
+fn activity_candidates_bounded(
+    transcodes: Vec<crate::transcode::DeliveryCandidate>,
+    remuxes: Vec<crate::progressive::StreamListing>,
+    direct: Vec<crate::delivery::Live>,
+    limit: usize,
+) -> Vec<ActivityCandidate> {
+    let mut candidates = transcodes
+        .into_iter()
+        .map(ActivityCandidate::Transcode)
+        .chain(remuxes.into_iter().map(ActivityCandidate::Remux))
+        .chain(direct.into_iter().map(ActivityCandidate::Direct))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left = left.ordering_key();
+        let right = right.ordering_key();
+        right
+            .0
+            .cmp(&left.0)
+            .then(left.1.cmp(right.1))
+            .then(left.2.cmp(right.2))
+    });
+    candidates.truncate(limit);
+    candidates
 }
 
 /// Keep the producer and consumer on the same exact wire budget. Serializing
@@ -384,6 +455,17 @@ mod tests {
     use axum::routing::get;
     use axum::Router;
     use bytes::Bytes;
+
+    #[test]
+    fn authenticated_snapshot_is_never_share_cacheable() {
+        let headers = snapshot_response_headers();
+        assert_eq!(
+            headers
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+    }
 
     #[tokio::test]
     async fn ordinary_bearer_and_missing_cluster_authority_are_rejected() {
@@ -487,6 +569,44 @@ mod tests {
         assert!(encoded.len() <= MAX_RESPONSE_BYTES as usize);
         assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
+    }
+
+    #[test]
+    fn global_candidate_cap_precedes_all_expensive_enrichment() {
+        let transcodes = (0..MAX_DELIVERIES)
+            .map(|index| crate::transcode::DeliveryCandidate {
+                id: format!("transcode-{index:04}"),
+                started_unix: index as i64,
+            })
+            .collect();
+        let remuxes = (0..MAX_DELIVERIES)
+            .map(|index| crate::progressive::StreamListing {
+                id: format!("remux-{index:04}"),
+                user_name: "viewer".to_owned(),
+                file_id: index as i64,
+                item_id: index as i64,
+                started_unix: MAX_DELIVERIES as i64 + index as i64,
+                delivered_bytes: 0,
+                delivered_bps: None,
+                delivered_idle_ms: 0,
+            })
+            .collect();
+        let direct = (0..MAX_DELIVERIES)
+            .map(|index| crate::delivery::Live {
+                registry_id: format!("direct-{index:04}"),
+                user_name: "viewer".to_owned(),
+                file_id: index as i64,
+                item_id: index as i64,
+                started_unix: (MAX_DELIVERIES * 2) as i64 + index as i64,
+                idle_seconds: 0,
+            })
+            .collect();
+
+        let selected = activity_candidates_bounded(transcodes, remuxes, direct, MAX_DELIVERIES);
+        assert_eq!(selected.len(), MAX_DELIVERIES);
+        assert!(selected
+            .iter()
+            .all(|candidate| matches!(candidate, ActivityCandidate::Direct(_))));
     }
 
     #[tokio::test]

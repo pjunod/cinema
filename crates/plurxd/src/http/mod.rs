@@ -7220,7 +7220,7 @@ mod tests {
         // it is guessable by construction — ownership is what protects it.
         let (_stream, _guard) = state
             .streams
-            .register("pb-1-s1", 9999, "someone-else", 42, 4.0);
+            .register("pb-1-s1", 9999, "someone-else", 42, 5, 4.0);
         assert_eq!(
             call(&app, get("/api/v1/stream/pb-1-s1/status", Some(&admin)))
                 .await

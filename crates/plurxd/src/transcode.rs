@@ -2634,6 +2634,14 @@ pub struct SessionInfo {
     pub suspend_count: u64,
 }
 
+/// Cheap identity used to choose the globally newest activity before walking
+/// any session telemetry locks.
+#[derive(Clone, Debug)]
+pub struct DeliveryCandidate {
+    pub id: String,
+    pub started_unix: i64,
+}
+
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
@@ -8716,17 +8724,78 @@ impl TranscodeManager {
         &self,
         limit: usize,
     ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let candidates = self.delivery_candidates_bounded(limit).await;
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let mut details = self
+            .delivery_details_bounded(&ids, limit)
+            .await
+            .into_iter()
+            .map(|detail| (detail.0.id.clone(), detail))
+            .collect::<HashMap<_, _>>();
+        candidates
+            .into_iter()
+            .filter_map(|candidate| details.remove(&candidate.id))
+            .collect()
+    }
+
+    /// Top-K session identities without awaiting any per-session telemetry.
+    pub async fn delivery_candidates_bounded(&self, limit: usize) -> Vec<DeliveryCandidate> {
+        let sessions = self.sessions.lock().await;
+        let ids = crate::delivery::newest_ids_bounded(
+            sessions
+                .iter()
+                .map(|(id, session)| (id.as_str(), session.started_unix)),
+            limit,
+        );
+        let mut candidates = ids
+            .into_iter()
+            .filter_map(|id| {
+                sessions.get(&id).map(|session| DeliveryCandidate {
+                    id,
+                    started_unix: session.started_unix,
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .started_unix
+                .cmp(&left.started_unix)
+                .then(left.id.cmp(&right.id))
+        });
+        candidates
+    }
+
+    /// Enrich only explicitly selected sessions. Clone the Arcs under the map
+    /// lock, then release it before awaiting any session-owned lock.
+    pub async fn delivery_details_bounded(
+        &self,
+        ids: &[String],
+        limit: usize,
+    ) -> Vec<(SessionInfo, crate::delivery::Method)> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            ids.iter()
+                .take(limit)
+                .filter_map(|id| {
+                    sessions
+                        .get(id)
+                        .cloned()
+                        .map(|session| (id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
-        let sessions = self.sessions.lock().await;
-        let mut out = Vec::with_capacity(sessions.len().min(limit));
-        for (id, s) in sessions.iter().take(limit) {
+        let mut out = Vec::with_capacity(selected.len());
+        for (id, s) in selected {
             out.push((
-                session_info(id, s, limits, global_live_bytes, global_ahead_bytes).await,
+                session_info(&id, &s, limits, global_live_bytes, global_ahead_bytes).await,
                 s.method,
             ));
         }
-        out.sort_by_key(|(s, _)| s.started_unix);
         out
     }
 

@@ -1999,34 +1999,17 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
         })
         .collect();
 
-    // The two routes that hold no session. Titles are resolved here rather
-    // than carried in the registries: a registry that stored a title would go
-    // stale against a rename, and this page is polled by an admin looking at a
-    // handful of rows, not by every player.
+    // The two routes that hold no session. A remux carries the item id already
+    // loaded at stream start, while titles are resolved here so they do not go
+    // stale against a rename.
     let mut titles: HashMap<i64, String> = HashMap::new();
-    let mut item_of_file: HashMap<i64, i64> = HashMap::new();
     for stream in state.streams.list() {
-        let item_id = match item_of_file.get(&stream.file_id) {
-            Some(id) => *id,
-            None => {
-                let id = state
-                    .store
-                    .get_file(stream.file_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|f| f.item_id)
-                    .unwrap_or(0);
-                item_of_file.insert(stream.file_id, id);
-                id
-            }
-        };
         out.push(Delivery {
             method: crate::delivery::Method::Remux.as_str(),
             user: stream.user_name,
             file_id: stream.file_id,
-            item_id,
-            title: title_of(state, item_id, &mut titles).await,
+            item_id: stream.item_id,
+            title: title_of(state, stream.item_id, &mut titles).await,
             started_unix: stream.started_unix,
             // A remux is one pipe with no `last_access` of its own; how long
             // since a byte left it is the same question.
