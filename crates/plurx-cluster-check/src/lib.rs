@@ -718,8 +718,28 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
         Response::Flag { value: false } => {}
         response => bail!("authoritative stale singleton rejection not observed: {response:?}"),
     }
-    wait_singleton_cleanup(&mut cluster, *successor_node).await?;
-    wait_singleton_cleanup(&mut cluster, old_owner).await?;
+    let cleanup_result = async {
+        wait_singleton_cleanup(&mut cluster, *successor_node).await?;
+        wait_singleton_cleanup(&mut cluster, old_owner).await
+    }
+    .await;
+    if let Err(cleanup_error) = cleanup_result {
+        // Cleanup remains strict in a stable term. If unrelated Raft churn
+        // made the release outcome ambiguous, classify the whole fresh trial
+        // as unstable so the parent can discard it instead of weakening the
+        // lease-retirement assertion.
+        let observed_leader = cluster.leader().await?;
+        let (observed_term, _) = raft_term_and_index(&mut cluster, observed_leader).await?;
+        if observed_term != stable_term || observed_leader != leader {
+            provider.shutdown().await;
+            cluster.shutdown_all().await?;
+            println!(
+                "{SINGLETON_UNSTABLE_MARKER} stage=cleanup expected_leader={leader} observed_leader={observed_leader} expected_term={stable_term} observed_term={observed_term}"
+            );
+            bail!("singleton proof changed leader/term during cleanup: {cleanup_error}");
+        }
+        return Err(cleanup_error);
+    }
 
     for node_id in 1..=3 {
         require_singleton_value(&mut cluster, node_id, "successor", true).await?;
