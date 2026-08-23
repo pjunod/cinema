@@ -19,6 +19,7 @@ use plurx_core::domain::{
     CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
     PretranscodeWorkerCapabilities,
 };
+use plurx_core::error::StoreError;
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
     self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,

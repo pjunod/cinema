@@ -10802,13 +10802,13 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: release offline pin: {error}")));
         }
-        lease = store
+        assert!(store
             .retire_shared_cache_generation(&offline_generation, 252, &lease)
             .await
             .unwrap_or_else(|error| {
                 panic!("{backend}: retire unpinned offline generation: {error}")
             })
-            .unwrap_or_else(|| panic!("{backend}: offline generation was not retired"));
+            .is_some());
 
         assert!(store
             .mark_cache_storage_suspect(&storage_id, &member.node_id, 300)

@@ -444,7 +444,7 @@ async fn boot(
     let state = build_state(
         &config,
         identity.node_id,
-        instance_id,
+        instance_id.clone(),
         credential_key,
         replication,
         membership,
