@@ -1,9 +1,9 @@
 version = 1
 
 [[coverage]]
-commits = ["7cd83fb6", "21fbd17e", "47154014", "9e1e792e"]
+commits = ["7cd83fb6", "21fbd17e", "47154014", "52643af8", "d2752fb3", "c064733a", "58fe7db6", "b2abeebf"]
 points = ["cluster.auth", "playback.pipeline", "offline.viewing"]
 checks = ["rust-gate", "cluster-auth", "offline-contract", "resource-bounds"]
 reason = """
-The retained shared-cache coordinator and backend-neutral Store fixtures cover failed canary cleanup, monotone exact-generation reader-pin renewal, node-scoped shared-mount failure fallback for playback and offline delivery, and lexically ordered Hiqlite parameters across the same shared-generation mutations. Resource-bound and cluster gates retain the bounded cleanup, replicated fencing, and fallback behavior without claiming a live blackholed NAS test.
+The retained shared-cache coordinator and backend-neutral Store fixtures cover failed canary cleanup, monotone exact-generation reader-pin renewal, node-scoped shared-mount failure fallback for playback and offline delivery, lexically ordered Hiqlite parameters, cancellation-safe publication admission, admitted-generation fencing, expired-pin crash pruning, root-identity fencing, publication tombstones, and exact crash-retryable GC retirement across the same shared-generation mutations. Resource-bound and cluster gates retain those bounds and failure transitions without claiming a live blackholed NAS test.
 """

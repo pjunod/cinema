@@ -24,7 +24,7 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationStore, Store,
+    keys, ArtworkRepairFence, CatalogueReader, PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -296,6 +296,8 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
+    pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     /// Monotonic, Store-free authority for mutable media and readiness.
@@ -392,6 +394,7 @@ impl AppState {
         system: SystemInfo,
         logs: Arc<LogBuffer>,
     ) -> Self {
+        let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 server_name,
@@ -407,6 +410,7 @@ impl AppState {
                 cluster_id: String::new(),
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
+                catalogue,
             },
             store,
             dirs,
@@ -437,6 +441,7 @@ impl AppState {
             cluster_id,
             shared_cache_dir,
             shared_cache_id,
+            catalogue,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -500,6 +505,7 @@ impl AppState {
         );
         AppState {
             store,
+            catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
@@ -608,6 +614,7 @@ pub struct AppConfig {
     pub cluster_id: String,
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
+    pub catalogue: CatalogueReader,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

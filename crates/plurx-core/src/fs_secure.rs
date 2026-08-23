@@ -766,6 +766,10 @@ impl SecureDirectory {
                     };
                     return Err(io::Error::other("source changed while it was linked"));
                 }
+                // The file inode already existed, but this directory entry did
+                // not. Persist the destination directory before a caller can
+                // rename and publish its enclosing generation.
+                destination.sync_all()?;
                 return Ok(identity.size);
             }
             let link_error = io::Error::last_os_error();
@@ -806,10 +810,21 @@ impl SecureDirectory {
                 }
                 Ok(identity.size)
             })();
-            if result.is_err() {
-                unsafe { libc::unlinkat(destination.as_raw_fd(), destination_name.as_ptr(), 0) };
+            match result {
+                Ok(size) => {
+                    // `output.sync_all()` persists contents; this persists the
+                    // new name in the destination directory as well.
+                    destination.sync_all()?;
+                    Ok(size)
+                }
+                Err(error) => {
+                    unsafe {
+                        libc::unlinkat(destination.as_raw_fd(), destination_name.as_ptr(), 0)
+                    };
+                    let _ = destination.sync_all();
+                    Err(error)
+                }
             }
-            result
         })
         .await
         .map_err(io::Error::other)?

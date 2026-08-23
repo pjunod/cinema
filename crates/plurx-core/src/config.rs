@@ -18,6 +18,10 @@ pub const DEFAULT_RAFT_PORT: u16 = 32401;
 pub const DEFAULT_CLUSTER_API_PORT: u16 = 32402;
 /// Maximum share of a library that one complete scan may remove.
 pub const DEFAULT_SCAN_PRUNE_PERCENT: u8 = 10;
+/// Default bounded-replica apply backlog. The optimization remains disabled
+/// until an operator explicitly enables it cluster-wide.
+pub const DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 64;
+pub const MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 10_000;
 
 const DEFAULT_CONFIG_PATHS: &[&str] = &["plurx.toml", "/etc/plurx/plurx.toml"];
 
@@ -112,6 +116,12 @@ pub struct ClusterConfig {
     /// Operator-stable identity for the shared filesystem. Combined with the
     /// replicated cluster id so unrelated clusters cannot alias one mount.
     pub shared_cache_id: String,
+    /// Opt-in/kill switch for lag-gated local catalogue reads. Keep identical
+    /// on every voter during rollout and rollback.
+    pub bounded_replica_reads: bool,
+    /// Maximum quorum-commit to local-applied entry gap admitted for one
+    /// bounded catalogue query.
+    pub bounded_replica_max_lag_entries: u64,
 }
 
 impl Default for ClusterConfig {
@@ -127,6 +137,8 @@ impl Default for ClusterConfig {
             credential_key_file: PathBuf::new(),
             shared_cache_dir: PathBuf::new(),
             shared_cache_id: String::new(),
+            bounded_replica_reads: false,
+            bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
         }
     }
 }
@@ -190,6 +202,14 @@ impl Config {
                     .to_owned(),
             });
         }
+        if config.cluster.bounded_replica_max_lag_entries > MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES {
+            return Err(ConfigError::Value {
+                key: "cluster.bounded_replica_max_lag_entries".to_owned(),
+                message: format!(
+                    "must be between 0 and {MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES} entries"
+                ),
+            });
+        }
         Ok(config)
     }
 
@@ -226,6 +246,19 @@ impl Config {
         if let Some(id) = env_var("PLURX_SHARED_CACHE_ID") {
             self.cluster.shared_cache_id = id;
         }
+        if let Some(value) = env_var("PLURX_CLUSTER_BOUNDED_REPLICA_READS") {
+            self.cluster.bounded_replica_reads = value.parse().map_err(|_| ConfigError::Env {
+                var: "PLURX_CLUSTER_BOUNDED_REPLICA_READS".to_owned(),
+                message: "must be `true` or `false`".to_owned(),
+            })?;
+        }
+        if let Some(value) = env_var("PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES") {
+            self.cluster.bounded_replica_max_lag_entries =
+                value.parse().map_err(|_| ConfigError::Env {
+                    var: "PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES".to_owned(),
+                    message: "must be an integer from 0 through 10000".to_owned(),
+                })?;
+        }
         if let Some(value) = env_var("PLURX_SCAN_PRUNE_PERCENT") {
             self.storage.scan_prune_percent = value.parse().map_err(|_| ConfigError::Env {
                 var: "PLURX_SCAN_PRUNE_PERCENT".to_owned(),
@@ -258,6 +291,11 @@ mod tests {
         assert_eq!(config.cluster.api_bind.port(), DEFAULT_CLUSTER_API_PORT);
         assert!(config.cluster.join_url.is_empty());
         assert!(config.cluster.artwork_url.is_empty());
+        assert!(!config.cluster.bounded_replica_reads);
+        assert_eq!(
+            config.cluster.bounded_replica_max_lag_entries,
+            DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES
+        );
     }
 
     #[test]
@@ -360,6 +398,22 @@ mod tests {
         assert!(matches!(
             Config::load(Some(&path)),
             Err(ConfigError::Value { key, .. }) if key == "cluster.shared_cache_id"
+        ));
+    }
+
+    #[test]
+    fn bounded_replica_lag_budget_is_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+        std::fs::write(
+            &path,
+            "[cluster]\nbounded_replica_max_lag_entries = 10001\n",
+        )
+        .expect("write config");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. })
+                if key == "cluster.bounded_replica_max_lag_entries"
         ));
     }
 }

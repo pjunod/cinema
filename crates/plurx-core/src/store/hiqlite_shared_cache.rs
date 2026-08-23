@@ -198,7 +198,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(recipe_hash, storage_id))
+            .query_consistent_map::<SharedRow, _>(sql, params!(recipe_hash, storage_id))
             .await?
             .into_iter()
             .next()
@@ -469,7 +469,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(storage_id, before_ms, limit))
+            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, before_ms, limit))
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -573,9 +573,8 @@ impl SharedCacheStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?
             .into_iter()
-            .sum::<u64>();
-        usize::try_from(changed)
-            .map_err(|error| StoreError::Database(format!("pin renewal count overflow: {error}")))
+            .sum::<usize>();
+        Ok(changed)
     }
 
     async fn release_cache_consumer_pin(
@@ -617,6 +616,30 @@ impl SharedCacheStore for HiqliteAuthStore {
             == 1)
     }
 
+    async fn prune_expired_cache_consumer_pins(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<usize, StoreError> {
+        validate_id("storage id", storage_id)?;
+        if now_ms < 0 || !(1..=4_096).contains(&limit) {
+            return Err(StoreError::Task(
+                "expired cache pin prune inputs are invalid".to_owned(),
+            ));
+        }
+        let sql = "DELETE FROM cache_consumer_pins WHERE rowid IN (
+                   SELECT rowid FROM cache_consumer_pins
+                    WHERE storage_id = $1 AND expires_at_ms <= $2
+                    ORDER BY expires_at_ms, recipe_hash, generation_id,
+                             consumer_kind, consumer_id
+                    LIMIT $3)";
+        validate_sql(sql)?;
+        self.client()
+            .execute(sql, params!(storage_id, now_ms, limit))
+            .await
+    }
+
     async fn shared_cache_gc_candidates(
         &self,
         storage_id: &str,
@@ -647,7 +670,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         );
         validate_sql(&sql)?;
         self.client()
-            .query_consistent_map::<SharedRow, _>(&sql, params!(storage_id, now_ms, limit))
+            .query_consistent_map::<SharedRow, _>(sql, params!(storage_id, now_ms, limit))
             .await?
             .into_iter()
             .map(TryInto::try_into)
@@ -659,7 +682,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<Lease>, StoreError> {
         validate_generation(
             &generation.recipe_hash,
             &generation.storage_id,
@@ -668,14 +691,16 @@ impl SharedCacheStore for HiqliteAuthStore {
         )?;
         let expected_resource = format!("shared-cache-gc:{}", generation.storage_id);
         if lease.resource != expected_resource || lease.expires_at_unix_ms <= now_ms {
-            return Ok(false);
+            return Ok(None);
         }
+        let successor = lease.publication_successor()?;
         let fence = i64::try_from(lease.fence)
             .map_err(|error| StoreError::Task(format!("GC lease fence is invalid: {error}")))?;
         let revision = i64::try_from(lease.revision)
             .map_err(|error| StoreError::Task(format!("GC lease revision is invalid: {error}")))?;
-        let statements = vec![(
-            "UPDATE transcode_cache_locations SET complete = 3
+        let statements = vec![
+            (
+                "UPDATE transcode_cache_locations SET complete = 3
                   WHERE recipe_hash = $1 AND storage_id = $2 AND generation_id = $3
                     AND storage_class = 'shared' AND complete IN (1, 3)
                     AND relative_dir = $4
@@ -690,21 +715,61 @@ impl SharedCacheStore for HiqliteAuthStore {
                         SELECT 1 FROM cache_consumer_pins p
                          WHERE p.storage_id = $2 AND p.recipe_hash = $1
                            AND p.generation_id = $3 AND p.expires_at_ms > $11)"
-                .to_owned(),
-            params!(
-                &generation.recipe_hash,
-                &generation.storage_id,
-                &generation.generation_id,
-                &generation.relative_dir,
-                &generation.manifest_digest,
-                &lease.resource,
-                &lease.owner_node_id,
-                fence,
-                revision,
-                lease.expires_at_unix_ms,
-                now_ms
+                    .to_owned(),
+                params!(
+                    &generation.recipe_hash,
+                    &generation.storage_id,
+                    &generation.generation_id,
+                    &generation.relative_dir,
+                    &generation.manifest_digest,
+                    &lease.resource,
+                    &lease.owner_node_id,
+                    fence,
+                    revision,
+                    lease.expires_at_unix_ms,
+                    now_ms
+                ),
             ),
-        )];
+            (
+                "UPDATE job_leases
+                    SET revision = $1, expires_at_ms = $2, updated_at_ms = $3
+                  WHERE resource = $4 AND owner_node_id = $5 AND fence = $6
+                    AND revision = $7 AND expires_at_ms = $8
+                    AND expires_at_ms > $9
+                    AND EXISTS (
+                        SELECT 1 FROM transcode_cache_locations l
+                         WHERE l.recipe_hash = $10 AND l.storage_id = $11
+                           AND l.generation_id = $12 AND l.storage_class = 'shared'
+                           AND l.complete = 3 AND l.relative_dir = $13
+                           AND (l.manifest_digest = $14
+                                OR (l.manifest_digest IS NULL AND $14 IS NULL))
+                           AND NOT EXISTS (
+                               SELECT 1 FROM cache_consumer_pins p
+                                WHERE p.storage_id = l.storage_id
+                                  AND p.recipe_hash = l.recipe_hash
+                                  AND p.generation_id = l.generation_id
+                                  AND p.expires_at_ms > $9))"
+                    .to_owned(),
+                params!(
+                    i64::try_from(successor.revision).map_err(|error| StoreError::Task(
+                        format!("GC successor revision is invalid: {error}")
+                    ))?,
+                    successor.expires_at_unix_ms,
+                    now_ms,
+                    &lease.resource,
+                    &lease.owner_node_id,
+                    fence,
+                    revision,
+                    lease.expires_at_unix_ms,
+                    now_ms,
+                    &generation.recipe_hash,
+                    &generation.storage_id,
+                    &generation.generation_id,
+                    &generation.relative_dir,
+                    &generation.manifest_digest
+                ),
+            ),
+        ];
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -715,7 +780,7 @@ impl SharedCacheStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.first().copied().unwrap_or_default() == 1)
+        Ok((results.as_slice() == [1, 1]).then_some(successor))
     }
 
     async fn finalize_retired_shared_cache_generation(
@@ -723,7 +788,7 @@ impl SharedCacheStore for HiqliteAuthStore {
         generation: &SharedCacheGeneration,
         now_ms: i64,
         lease: &Lease,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<Lease>, StoreError> {
         validate_generation(
             &generation.recipe_hash,
             &generation.storage_id,
@@ -732,13 +797,48 @@ impl SharedCacheStore for HiqliteAuthStore {
         )?;
         let expected_resource = format!("shared-cache-gc:{}", generation.storage_id);
         if lease.resource != expected_resource || lease.expires_at_unix_ms <= now_ms {
-            return Ok(false);
+            return Ok(None);
         }
+        let successor = lease.publication_successor()?;
         let fence = i64::try_from(lease.fence)
             .map_err(|error| StoreError::Task(format!("GC lease fence is invalid: {error}")))?;
         let revision = i64::try_from(lease.revision)
             .map_err(|error| StoreError::Task(format!("GC lease revision is invalid: {error}")))?;
+        let successor_revision = i64::try_from(successor.revision).map_err(|error| {
+            StoreError::Task(format!("GC successor revision is invalid: {error}"))
+        })?;
         let statements = vec![
+            (
+                "UPDATE job_leases
+                    SET revision = $1, expires_at_ms = $2, updated_at_ms = $3
+                  WHERE resource = $4 AND owner_node_id = $5 AND fence = $6
+                    AND revision = $7 AND expires_at_ms = $8
+                    AND expires_at_ms > $9
+                    AND EXISTS (
+                        SELECT 1 FROM transcode_cache_locations
+                         WHERE recipe_hash = $10 AND storage_id = $11
+                           AND generation_id = $12 AND storage_class = 'shared'
+                           AND complete = 3 AND relative_dir = $13
+                           AND (manifest_digest = $14
+                             OR (manifest_digest IS NULL AND $14 IS NULL)))"
+                    .to_owned(),
+                params!(
+                    successor_revision,
+                    successor.expires_at_unix_ms,
+                    now_ms,
+                    &lease.resource,
+                    &lease.owner_node_id,
+                    fence,
+                    revision,
+                    lease.expires_at_unix_ms,
+                    now_ms,
+                    &generation.recipe_hash,
+                    &generation.storage_id,
+                    &generation.generation_id,
+                    &generation.relative_dir,
+                    &generation.manifest_digest
+                ),
+            ),
             (
                 "DELETE FROM transcode_cache_locations
                   WHERE recipe_hash = $1 AND storage_id = $2 AND generation_id = $3
@@ -761,8 +861,8 @@ impl SharedCacheStore for HiqliteAuthStore {
                     &lease.resource,
                     &lease.owner_node_id,
                     fence,
-                    revision,
-                    lease.expires_at_unix_ms,
+                    successor_revision,
+                    successor.expires_at_unix_ms,
                     now_ms
                 ),
             ),
@@ -772,21 +872,45 @@ impl SharedCacheStore for HiqliteAuthStore {
                     AND generation_id = $3
                     AND NOT EXISTS (
                         SELECT 1 FROM transcode_cache_locations
-                         WHERE storage_id = $1 AND recipe_hash = $2 AND generation_id = $3)"
+                         WHERE storage_id = $1 AND recipe_hash = $2 AND generation_id = $3)
+                    AND EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $4 AND owner_node_id = $5
+                           AND fence = $6 AND revision = $7
+                           AND expires_at_ms = $8 AND expires_at_ms > $9)"
                     .to_owned(),
                 params!(
                     &generation.storage_id,
                     &generation.recipe_hash,
-                    &generation.generation_id
+                    &generation.generation_id,
+                    &lease.resource,
+                    &lease.owner_node_id,
+                    fence,
+                    successor_revision,
+                    successor.expires_at_unix_ms,
+                    now_ms
                 ),
             ),
             (
                 "DELETE FROM transcode_cache_recipes
                   WHERE recipe_hash = $1
                     AND NOT EXISTS (
-                        SELECT 1 FROM transcode_cache_locations WHERE recipe_hash = $1)"
+                        SELECT 1 FROM transcode_cache_locations WHERE recipe_hash = $1)
+                    AND EXISTS (
+                        SELECT 1 FROM job_leases
+                         WHERE resource = $2 AND owner_node_id = $3
+                           AND fence = $4 AND revision = $5
+                           AND expires_at_ms = $6 AND expires_at_ms > $7)"
                     .to_owned(),
-                params!(&generation.recipe_hash),
+                params!(
+                    &generation.recipe_hash,
+                    &lease.resource,
+                    &lease.owner_node_id,
+                    fence,
+                    successor_revision,
+                    successor.expires_at_unix_ms,
+                    now_ms
+                ),
             ),
         ];
         for (sql, _) in &statements {
@@ -799,7 +923,7 @@ impl SharedCacheStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.first().copied().unwrap_or_default() == 1)
+        Ok((results.first() == Some(&1) && results.get(1) == Some(&1)).then_some(successor))
     }
 }
 

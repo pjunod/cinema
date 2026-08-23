@@ -22,10 +22,12 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   replication maps, and quorum-ack state so passive application metrics cannot
   be mistaken for a quorum-confirmed watermark.
 - `Client::db_quorum_watermark` asks the current database leader to run
-  OpenRaft's quorum-backed linearizable-read proof and returns only the proof
-  term, leader identity, and committed index. Followers use the existing
-  authenticated leader stream; callers remain responsible for a monotonic
-  lease and matching the proof to their local Raft observation.
+  OpenRaft's quorum-backed linearizable-read proof and returns only
+  `(term, leader_id, committed_index, local_read_protocol_version)`. Followers
+  use the existing authenticated leader stream; callers remain responsible for
+  a monotonic lease and matching the proof to their local Raft observation. A
+  P3a leader's three-column response remains a valid Authority/readiness proof
+  but maps to protocol `0`, so bounded local reads stay closed during rollout.
 - The SQLite snapshot builder and installer publish process-local, lock-free
   duration histograms through `Client::local_db_snapshot_metrics`. Explicit
   RAII start/finish hooks classify build/install success and every error or
@@ -71,6 +73,10 @@ exact release's registry source and checksum before a second advisory scan.
 That check must remain until this directory is removed.
 
 Source: <https://crates.io/crates/hiqlite/0.14.0>
+
+The `validation-test-helpers` feature adds process-local apply-pause and
+transport-partition controls used only by Plurx's separate-process acceptance
+harness. Production binaries do not enable or compile those controls.
 
 The retained lockfile, README, tests, and static assets are upstream
 provenance, not an in-place test suite; the workspace excludes this directory

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["98277877", "d579bbac"]
+points = ["persistence.upgrades"]
+checks = ["cluster-auth", "database-upgrades", "rust-gate"]
+reason = "The retained deterministic permit contracts prove fresh local and quorum binding, exact monotonic expiry, apply-lag limits, immediate conflicting-generation invalidation before and after one FnOnce local query, result discard on in-flight proof loss, remote-authority exclusion, and recovery only under a matching successor proof."

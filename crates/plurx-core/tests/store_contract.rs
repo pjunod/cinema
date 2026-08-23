@@ -44,8 +44,6 @@ use plurx_core::domain::{
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
-#[cfg(feature = "cluster-read-cost-validation")]
-use plurx_core::store::MetricsStore;
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
@@ -57,6 +55,8 @@ use plurx_core::store::{
     ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
     RootFingerprintStatus, SqliteStore, Store,
 };
+#[cfg(feature = "cluster-read-cost-validation")]
+use plurx_core::store::{CatalogueReader, MetricsStore};
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "hiqlite-store")]
@@ -252,6 +252,7 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "acquire_cache_consumer_pin",
     "renew_cache_consumer_pins",
     "release_cache_consumer_pin",
+    "prune_expired_cache_consumer_pins",
     "shared_cache_gc_candidates",
     "retire_shared_cache_generation",
     "finalize_retired_shared_cache_generation",
@@ -1124,10 +1125,11 @@ async fn media_session_contract_runs_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: pin active media session: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&shared_generation, 199, &shared_gc_lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}"))
+            .is_none());
 
         assert_eq!(
             store
@@ -1162,7 +1164,8 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(!store
             .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}"))
+            .is_none());
         assert!(store
             .renew_media_sessions(
                 "node-a",
@@ -1272,7 +1275,8 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!(
                 "{backend}: retire generation after session end: {error}"
-            )));
+            ))
+            .is_some());
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -7633,7 +7637,10 @@ async fn sqlite_import_verification_refusals_have_teeth() {
 
 #[test]
 fn contract_inventory_matches_every_store_method() {
-    let source = include_str!("../src/store/mod.rs");
+    let source = include_str!("../src/store/mod.rs")
+        .split_once("pub trait Store:")
+        .expect("Store composite boundary")
+        .0;
     let declared = source
         .lines()
         .filter_map(|line| line.strip_prefix("    async fn "))
@@ -7665,7 +7672,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 218, "review the Store method count");
+    assert_eq!(declared.len(), 223, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -8191,6 +8198,198 @@ async fn clustered_page_read_primitives_have_bounded_client_calls() {
     assert_eq!(counts.write_calls, 1);
     assert_eq!(success_after.write_calls, success_before.write_calls);
     assert_eq!(failure_after, failure_before + 1);
+}
+
+/// Every P3b catalogue operation must return the same serialized value through
+/// its local and Authority paths against one real replicated fixture. The
+/// genre and media-shape cases intentionally cover their existing
+/// multi-statement semantics while the fixture is quiescent; bounded reads do
+/// not claim a stronger snapshot than Authority.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once() {
+    use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ReplicationMonitor};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset bounded catalogue target");
+
+    let fixture = tempfile::tempdir().expect("bounded catalogue fixture");
+    let source = populated_current_import_fixture(fixture.path());
+    let connection = rusqlite::Connection::open(&source).expect("open catalogue fixture");
+    connection
+        .execute_batch(
+            "UPDATE files
+                SET height = 1080, probe_json = '{\"streams\":[]}'
+              WHERE id = 30;
+             INSERT INTO items
+                (id, library_id, kind, parent_id, title, sort_title,
+                 season_number, episode_number, added_at, updated_at, tags, genres)
+             VALUES
+                (11, 9, 'episode', 10, 'Imported Episode', 'Imported Episode',
+                 1, 1, 201, 202, '[]', '[\"Drama\"]');",
+        )
+        .expect("seed non-vacuous catalogue rows");
+    drop(connection);
+    let prepared = prepare_sqlite_import(fixture.path()).expect("prepare catalogue fixture");
+    store
+        .import_sqlite_backup(
+            &prepared.backup_path,
+            &prepared.backup_sha256,
+            prepared.schema_version,
+        )
+        .await
+        .expect("import bounded catalogue fixture");
+
+    let authority_store: Arc<dyn Store> = store.clone();
+    let authority = CatalogueReader::authority(Arc::clone(&authority_store));
+    assert!(
+        !authority
+            .recently_added(Some(9), 20)
+            .await
+            .expect("Authority recent seed")
+            .is_empty(),
+        "recently-added parity must exercise an eligible row"
+    );
+    assert_eq!(
+        authority
+            .item_max_heights(&[10])
+            .await
+            .expect("Authority height seed")
+            .get(&10),
+        Some(&1080),
+        "height parity must exercise a non-null aggregate"
+    );
+    assert_eq!(
+        authority
+            .get_file_probe_json(30)
+            .await
+            .expect("Authority probe seed")
+            .as_deref(),
+        Some(r#"{"streams":[]}"#),
+        "probe parity must exercise a non-null JSON payload"
+    );
+
+    macro_rules! assert_catalogue_parity {
+        ($label:literal, $method:ident($($arg:expr),* $(,)?)) => {{
+            let expected = serde_json::to_value(
+                authority
+                    .$method($($arg),*)
+                    .await
+                    .unwrap_or_else(|error| panic!("Authority {}: {error}", $label)),
+            )
+            .unwrap_or_else(|error| panic!("serialize Authority {}: {error}", $label));
+
+            store.validation_reset_operation_counts();
+            let reader = CatalogueReader::validation_replicated(
+                Arc::clone(&authority_store),
+                Arc::clone(&store),
+                PassiveRaftMetrics::validation_bounded_ready(),
+                64,
+            );
+            let actual = serde_json::to_value(
+                reader
+                    .$method($($arg),*)
+                    .await
+                    .unwrap_or_else(|error| panic!("bounded {}: {error}", $label)),
+            )
+            .unwrap_or_else(|error| panic!("serialize bounded {}: {error}", $label));
+            assert_eq!(actual, expected, "{} local/Authority parity", $label);
+            let counts = store.validation_operation_counts();
+            assert_eq!(
+                counts.consistent_query_calls, 0,
+                "{} unexpectedly fell back to Authority",
+                $label
+            );
+            assert!(
+                counts.non_consistent_query_calls > 0,
+                "{} did not exercise its local SQL",
+                $label
+            );
+        }};
+    }
+
+    assert_catalogue_parity!("get library", get_library(9));
+    assert_catalogue_parity!("list libraries", list_libraries());
+    assert_catalogue_parity!("get item", get_item(20));
+    assert_catalogue_parity!("item children", get_item_children(20));
+    assert_catalogue_parity!(
+        "genre page",
+        list_top_items_in_genre(9, ItemSort::Title, 0, 20, Some("Drama"))
+    );
+    assert_catalogue_parity!("home previews", home_preview_pages(8));
+    assert_catalogue_parity!("recently added", recently_added(Some(9), 20));
+    assert_catalogue_parity!("get file", get_file(30));
+    assert_catalogue_parity!("files for item", files_for_item(10));
+    assert_catalogue_parity!("child counts", child_counts(&[10, 20]));
+    assert_catalogue_parity!("item max heights", item_max_heights(&[10, 20]));
+    assert_catalogue_parity!("item media facts", item_media_facts(&[10, 20]));
+    assert_catalogue_parity!("media shape", media_shape());
+    assert_catalogue_parity!("probe JSON", get_file_probe_json(30));
+
+    let expected = authority
+        .get_item(20)
+        .await
+        .expect("Authority fallback value");
+
+    store.validation_reset_operation_counts();
+    store.validation_fail_next_non_consistent_query();
+    let query_error_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    let actual = query_error_reader
+        .get_item(20)
+        .await
+        .expect("local query error must fall back");
+    assert_eq!(
+        serde_json::to_value(actual).expect("serialize query-error result"),
+        serde_json::to_value(&expected).expect("serialize expected item")
+    );
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store.validation_reset_operation_counts();
+    let proof_loss_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    proof_loss_reader.validation_revoke_after_next_local();
+    let actual = proof_loss_reader
+        .get_item(20)
+        .await
+        .expect("proof loss must discard and fall back");
+    assert_eq!(
+        serde_json::to_value(actual).expect("serialize proof-loss result"),
+        serde_json::to_value(&expected).expect("serialize expected item")
+    );
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store.validation_reset_operation_counts();
+    let no_proof_reader = CatalogueReader::validation_replicated(
+        authority_store,
+        Arc::clone(&store),
+        ReplicationMonitor::sqlite().metrics_handle(),
+        64,
+    );
+    no_proof_reader
+        .get_item(20)
+        .await
+        .expect("missing proof must use Authority");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.consistent_query_calls, 1);
 }
 
 #[tokio::test]
@@ -10375,7 +10574,7 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             "{backend}: shared cache uses millisecond timestamps"
         );
 
-        let lease = match store
+        let mut lease = match store
             .acquire_lease(
                 &format!("shared-cache-gc:{storage_id}"),
                 "gc-owner",
@@ -10418,10 +10617,11 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: pinned GC candidates: {error}"))
             .is_empty());
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&generation, 200, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}"))
+            .is_none());
         assert_eq!(
             store
                 .renew_cache_consumer_pins(
@@ -10467,6 +10667,44 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: release session pin: {error}")));
 
+        let lookup_pin = CacheConsumerPin {
+            consumer_id: "lookup-crash-bridge".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 215,
+            ..session_pin.clone()
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&lookup_pin, 210)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire crash bridge pin: {error}")));
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 214, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early pin prune: {error}")),
+            0,
+            "{backend}: live bridge pin must survive pruning"
+        );
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 215, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired pin prune: {error}")),
+            1,
+            "{backend}: a crashed lookup owner must not leak its expired pin"
+        );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &lookup_pin.consumer_id,
+                lookup_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned bridge pin: {error}")));
+
         let racing_pin = CacheConsumerPin {
             consumer_kind: CacheConsumerKind::OfflineDownload,
             consumer_id: "racing-reader".to_owned(),
@@ -10488,7 +10726,8 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: racing retirement: {error}"))
         };
-        let (pin_won, gc_won) = tokio::join!(pin_future, retire_future);
+        let (pin_won, gc_successor) = tokio::join!(pin_future, retire_future);
+        let gc_won = gc_successor.is_some();
         assert_ne!(
             pin_won, gc_won,
             "{backend}: pin acquisition and retirement must choose exactly one winner"
@@ -10505,10 +10744,13 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: release racing pin: {error}")));
-            assert!(store
+            lease = store
                 .retire_shared_cache_generation(&generation, 221, &lease)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}")));
+                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: race survivor was not retired"));
+        } else {
+            lease = gc_successor.expect("GC race winner successor");
         }
         assert!(store
             .shared_cache_hit(&recipe_hash, &storage_id)
@@ -10521,15 +10763,50 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
         assert_eq!(cleanup_candidates.len(), 1, "{backend}");
         assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
+        let mut wrong_generation = cleanup_candidates[0].clone();
+        wrong_generation.relative_dir.push_str("-wrong");
         assert!(store
+            .finalize_retired_shared_cache_generation(&wrong_generation, 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: wrong tombstone finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after wrong finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: wrong finalization advanced the GC lease"));
+        lease = store
             .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retired generation was not finalized"));
         assert!(store
             .shared_cache_gc_candidates(&storage_id, 224, 10)
             .await
             .unwrap_or_else(|error| panic!("{backend}: finalized GC candidates: {error}"))
             .is_empty());
+        assert!(store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 224, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after repeat finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: absent finalization advanced the GC lease"));
 
         let offline_recipe = format!("shared-offline-recipe-{backend}");
         assert!(store
@@ -10584,10 +10861,11 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: acquire offline pin: {error}")));
         }
         for pin in &offline_pins {
-            assert!(!store
+            assert!(store
                 .retire_shared_cache_generation(&offline_generation, 251, &lease)
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}")));
+                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}"))
+                .is_none());
             assert!(store
                 .release_cache_consumer_pin(
                     &pin.storage_id,
@@ -10603,9 +10881,10 @@ async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
         assert!(store
             .retire_shared_cache_generation(&offline_generation, 252, &lease)
             .await
-            .unwrap_or_else(|error| panic!(
-                "{backend}: retire unpinned offline generation: {error}"
-            )));
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire unpinned offline generation: {error}")
+            })
+            .is_some());
 
         assert!(store
             .mark_cache_storage_suspect(&storage_id, &member.node_id, 300)
@@ -10639,7 +10918,7 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
-        let lease = match store
+        let mut lease = match store
             .acquire_lease(
                 &format!("shared-cache-gc:{storage_id}"),
                 "offline-gc-owner",
@@ -10706,20 +10985,22 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: ready shared package: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&package_generation, 140, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}"))
+            .is_none());
         assert!(store
             .delete_offline_package(&package.id, user_id)
             .await
             .unwrap_or_else(|error| panic!("{backend}: delete shared package: {error}")));
-        assert!(store
+        lease = store
             .retire_shared_cache_generation(&package_generation, 150, &lease)
             .await
-            .unwrap_or_else(|error| panic!(
-                "{backend}: retire generation after package deletion: {error}"
-            )));
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire generation after package deletion: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: package generation was not retired"));
 
         let download_recipe = format!("offline-download-pin-{backend}");
         let download_generation_id = "offline-download-generation";
@@ -10793,10 +11074,11 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: isolate download pin: {error}")));
-        assert!(!store
+        assert!(store
             .retire_shared_cache_generation(&download_generation, 190, &lease)
             .await
-            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}")));
+            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}"))
+            .is_none());
         assert!(store
             .delete_offline_package(&download.id, user_id)
             .await
@@ -10806,7 +11088,8 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!(
                 "{backend}: retire generation after download deletion: {error}"
-            )));
+            ))
+            .is_some());
     })
     .await;
 }

@@ -128,7 +128,7 @@ pub async fn sections(
     _user: PlexUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
-    let libs = state.store.list_libraries().await?;
+    let libs = state.catalogue.list_libraries().await?;
     // Home libraries are skipped: the façade has no honest Plex section type
     // for a folder tree of camera files (see docs/HOMEVIDEO-PLAN.md §2).
     let dirs = libs.iter().filter_map(map::section_directory).collect();
@@ -153,11 +153,11 @@ async fn views(
 /// Fetch an item, 404ing if it lives in a library the façade doesn't expose.
 async fn visible_item(state: &AppState, id: i64, what: &'static str) -> Result<Item, ApiError> {
     let item = state
-        .store
+        .catalogue
         .get_item(id)
         .await?
         .ok_or(ApiError::NotFound(what))?;
-    let visible = match state.store.get_library(item.library_id).await? {
+    let visible = match state.catalogue.get_library(item.library_id).await? {
         Some(lib) => map::is_plex_visible(lib.kind),
         None => false,
     };
@@ -172,11 +172,11 @@ async fn visible_item(state: &AppState, id: i64, what: &'static str) -> Result<I
 async fn element_for(state: &AppState, item: &Item, view: View) -> Result<plex::Element, ApiError> {
     match item.kind {
         ItemKind::Movie | ItemKind::Episode => {
-            let files = state.store.files_for_item(item.id).await?;
+            let files = state.catalogue.files_for_item(item.id).await?;
             Ok(map::video_element(item, &files, view))
         }
         ItemKind::Show | ItemKind::Season => {
-            let children = state.store.get_item_children(item.id).await?;
+            let children = state.catalogue.get_item_children(item.id).await?;
             Ok(map::directory_element(
                 item,
                 Some(children.len() as i64),
@@ -199,14 +199,14 @@ pub async fn section_all(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    match state.store.get_library(id).await? {
+    match state.catalogue.get_library(id).await? {
         Some(lib) if map::is_plex_visible(lib.kind) => {}
         // Absent, or a library the façade doesn't expose — same answer.
         _ => return Err(ApiError::NotFound("section")),
     }
     let page = state
-        .store
-        .list_top_items(id, Default::default(), 0, 5000)
+        .catalogue
+        .list_top_items_in_genre(id, Default::default(), 0, 5000, None)
         .await?;
     let views = views(&state, user.id, &page.items).await?;
     let mut elements = Vec::with_capacity(page.items.len());
@@ -237,7 +237,7 @@ pub async fn children(
     Path(key): Path<i64>,
 ) -> Result<Response, ApiError> {
     visible_item(&state, key, "metadata").await?;
-    let kids = state.store.get_item_children(key).await?;
+    let kids = state.catalogue.get_item_children(key).await?;
     let views = views(&state, user.id, &kids).await?;
     let mut elements = Vec::with_capacity(kids.len());
     for item in &kids {
@@ -255,7 +255,7 @@ pub async fn part(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = state
-        .store
+        .catalogue
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("part"))?;
@@ -298,7 +298,7 @@ pub async fn photo_transcode(
     let kind = parts.next().unwrap_or("thumb").to_owned();
 
     let item = state
-        .store
+        .catalogue
         .get_item(key)
         .await?
         .ok_or(ApiError::NotFound("image"))?;

@@ -111,6 +111,7 @@ sqlite = [
 ]
 toml = ["dep:toml"]
 webpki-roots = ["dep:webpki-root-certs"]
+validation-test-helpers = ["sqlite"]
 
 [lib]
 name = "hiqlite"
