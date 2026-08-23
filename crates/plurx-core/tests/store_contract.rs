@@ -35,11 +35,11 @@ use plurx_core::cluster::migration::{
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheManifestCheck,
-    CredentialGeneration, ItemEdit, ItemKind, ItemSort, LibraryKind, MetadataPatch,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
-    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
-    TraktAuth,
+    CredentialGeneration, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
+    MediaSessionRenewal, MediaSessionRequestClaim, MetadataPatch, NetworkPriorObservation, NewItem,
+    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth,
 };
 use plurx_core::error::StoreError;
 use plurx_core::secrets::CredentialKey;
@@ -290,6 +290,17 @@ const NETWORK_PRIOR_METHODS: &[&str] = &[
     "prune_network_priors",
 ];
 const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
+const MEDIA_SESSION_METHODS: &[&str] = &[
+    "claim_media_session_request",
+    "assign_media_session_request_owner",
+    "activate_media_session",
+    "fail_media_session_request",
+    "media_session_route",
+    "media_session_route_by_incarnation",
+    "renew_media_sessions",
+    "end_media_session",
+    "owned_media_sessions",
+];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "put_setting_fenced",
     "put_setting_if_absent_fenced",
@@ -609,6 +620,258 @@ async fn monotone_lease_contract_runs_through_dyn_store() {
             store.acquire_lease("probe", "node-a", 2, 2).await.is_err(),
             "{backend}: non-future expiry must fail before a write"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn media_session_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let first_user = store
+            .create_user("session-user-a", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create first session user: {error}"));
+        let second_user = store
+            .create_user("session-user-b", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create second session user: {error}"));
+        let fingerprint = "a".repeat(64);
+        let conflicting = "b".repeat(64);
+        let incarnation_a = "00000000-0000-4000-8000-0000000000a1";
+        let incarnation_a_retry = "00000000-0000-4000-8000-0000000000a2";
+        let session_a = "00000000-0000-4000-8000-0000000000b1";
+
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    incarnation_a,
+                    100,
+                    200,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim session request: {error}")),
+            MediaSessionRequestClaim::Acquired {
+                incarnation_id: incarnation_a.to_owned(),
+            },
+            "{backend}"
+        );
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    incarnation_a_retry,
+                    110,
+                    210,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay in-flight request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. }
+                if incarnation_id == incarnation_a
+        ));
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &conflicting,
+                    incarnation_a_retry,
+                    110,
+                    210,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: conflict session request: {error}")),
+            MediaSessionRequestClaim::Conflict,
+            "{backend}"
+        );
+        assert!(store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "attempt-a",
+                incarnation_a,
+                "node-a",
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
+
+        let first = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_a.to_owned(),
+                session_id: session_a.to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                request_id: Some("attempt-a".to_owned()),
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: r#"{"version":1}"#.to_owned(),
+                response_json: r#"{"session":"a"}"#.to_owned(),
+                now_ms: 130,
+                lease_expires_at_ms: 330,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate first session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first activation must win"));
+        assert!(first.predecessor.is_none(), "{backend}");
+        assert_eq!(first.route.owner_epoch, 1, "{backend}");
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    incarnation_a_retry,
+                    140,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay resolved request: {error}")),
+            MediaSessionRequestClaim::Resolved(route) if route.session_id == session_a
+        ));
+
+        let session_b = "00000000-0000-4000-8000-0000000000b2";
+        let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
+        let second = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_b.to_owned(),
+                session_id: session_b.to_owned(),
+                user_id: second_user.id,
+                playback_id: "shared-playback".to_owned(),
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-b".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 145,
+                lease_expires_at_ms: 345,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate cross-user session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: cross-user activation must win"));
+        assert!(second.predecessor.is_none(), "{backend}");
+
+        let session_a2 = "00000000-0000-4000-8000-0000000000b3";
+        let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
+        let superseding = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_a2.to_owned(),
+                session_id: session_a2.to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                now_ms: 150,
+                lease_expires_at_ms: 350,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: supersede session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: superseding activation must win"));
+        assert_eq!(
+            superseding
+                .predecessor
+                .as_ref()
+                .map(|route| route.session_id.as_str()),
+            Some(session_a),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .media_session_route(session_a)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_a2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect current incarnation: {error}"))
+                .map(|route| route.session_id),
+            Some(session_a2.to_owned()),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "node-a",
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_a2.to_owned(),
+                        owner_epoch: 1,
+                    }],
+                    200,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew current session: {error}")),
+            vec![incarnation_a2.to_owned()],
+            "{backend}"
+        );
+        assert!(store
+            .renew_media_sessions(
+                "node-a",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_a2.to_owned(),
+                    owner_epoch: 1,
+                }],
+                400,
+                500,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject exact-expiry renewal: {error}"))
+            .is_empty());
+
+        let owned_a = store
+            .owned_media_sessions("node-a")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list node-a sessions: {error}"));
+        assert_eq!(owned_a.len(), 1, "{backend}");
+        assert_eq!(owned_a[0].session_id, session_a2, "{backend}");
+        assert_eq!(
+            store
+                .owned_media_sessions("node-b")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list node-b sessions: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
+
+        let ended = store
+            .end_media_session(session_a2, 410)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end current session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ended route exists"));
+        assert_eq!(ended.session_id, session_a2, "{backend}");
+        assert!(store
+            .owned_media_sessions("node-a")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list sessions after end: {error}"))
+            .is_empty());
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    incarnation_a_retry,
+                    420,
+                    520,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay superseded request: {error}")),
+            MediaSessionRequestClaim::Resolved(route)
+                if route.session_id == session_a && route.state == "ended"
+        ));
     })
     .await;
 }
@@ -3532,7 +3795,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
+async fn replicated_v5_store_migrates_atomically_through_v10_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start();
     let client = Client::remote(
@@ -3561,6 +3824,9 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
     let results = client
         .txn([
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3638,7 +3904,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v5 through v9 migration");
+        .expect("daemon v5 through v10 migration");
     assert_eq!(
         migrated
             .get_setting("migration.proof")
@@ -3689,7 +3955,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
+async fn replicated_v6_store_migrates_atomically_to_v10_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start();
     let client = Client::remote(
@@ -3717,6 +3983,9 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let results = client
         .txn([
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3789,7 +4058,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v6 to v9 migration");
+        .expect("daemon v6 to v10 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v6.proof")
@@ -3831,7 +4100,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
+async fn replicated_v7_store_migrates_atomically_to_v10_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start();
     let client = Client::remote(
@@ -3863,6 +4132,9 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
     client
         .txn([
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3917,7 +4189,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v7 to v9 migration");
+        .expect("daemon v7 to v10 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v7.proof")
@@ -3947,7 +4219,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
+async fn replicated_v8_store_migrates_exactly_to_v10_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start();
     let client = Client::remote(
@@ -3979,6 +4251,9 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
 
     client
         .txn([
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -4032,7 +4307,7 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v8 to v9 migration");
+        .expect("daemon v8 to v10 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v8.proof")
@@ -4071,11 +4346,116 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
              AND name = 'pretranscode_jobs_cancel_source'",
             1,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('media_session_requests', 'media_playback_pointers', 'media_sessions')",
+            3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner')",
+            2,
+        ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v9 schema");
+            .expect("inspect migrated v10 schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v9_store_migrates_exactly_to_v10_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start();
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect v9 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v9-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v9 migration fixture");
+    current
+        .put_setting("migration.v9.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version = 9 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v9 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v9 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 9 is incompatible"),
+        "{strict_error}"
+    );
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v9 to v10 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v9.proof")
+            .await
+            .expect("read v9 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('media_session_requests', 'media_playback_pointers', 'media_sessions')",
+            3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner')",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v10 session schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -6064,6 +6444,7 @@ fn contract_inventory_matches_every_store_method() {
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
         COORDINATION_METHODS,
+        MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
         METRICS_METHODS,
     ]
@@ -6072,7 +6453,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 194, "review the Store method count");
+    assert_eq!(declared.len(), 203, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

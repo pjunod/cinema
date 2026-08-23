@@ -18,6 +18,7 @@ mod outbox;
 mod pretranscode;
 mod publication;
 mod reading;
+mod sessions;
 mod telemetry;
 mod trakt;
 mod users;
@@ -679,6 +680,53 @@ const MIGRATIONS: &[&str] = &[
                lease_expires_ms = NULL, policy_generation = '', requirements_json = '{}'
          WHERE file_id = OLD.id AND state IN ('queued', 'running');
     END;",
+    // v25: cluster-wide idempotency and owner routing for live HLS sessions.
+    // SQLite uses the same tables so one-voter and replicated behavior cannot
+    // diverge at the storage boundary.
+    "CREATE TABLE media_session_requests (
+        user_id             INTEGER NOT NULL,
+        request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
+        request_fingerprint TEXT NOT NULL,
+        state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),
+        claim_expires_at_ms INTEGER NOT NULL,
+        incarnation_id      TEXT NOT NULL,
+        owner_node_id       TEXT,
+        response_json       TEXT,
+        updated_at_ms       INTEGER NOT NULL,
+        PRIMARY KEY (user_id, request_id)
+    ) STRICT;
+    CREATE INDEX media_session_requests_expiry
+        ON media_session_requests(state, claim_expires_at_ms);
+
+    CREATE TABLE media_playback_pointers (
+        user_id                INTEGER NOT NULL,
+        playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
+        current_incarnation_id TEXT NOT NULL UNIQUE,
+        updated_at_ms           INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id)
+    ) STRICT;
+
+    CREATE TABLE media_sessions (
+        incarnation_id                TEXT PRIMARY KEY,
+        session_id                    TEXT NOT NULL UNIQUE,
+        user_id                       INTEGER NOT NULL,
+        playback_id                   TEXT NOT NULL,
+        request_fingerprint           TEXT NOT NULL,
+        owner_node_id                 TEXT NOT NULL,
+        owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),
+        lease_expires_at_ms           INTEGER NOT NULL,
+        state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),
+        recipe_json                   TEXT NOT NULL,
+        response_json                 TEXT NOT NULL,
+        produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,
+        fetched_through_ms            INTEGER NOT NULL DEFAULT 0,
+        media_origin_ms               INTEGER NOT NULL DEFAULT 0,
+        media_sequence                INTEGER NOT NULL DEFAULT 0,
+        discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms                 INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX media_sessions_owner
+        ON media_sessions(owner_node_id, state, lease_expires_at_ms);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1591,7 +1639,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 24,
+            version, 25,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2201,6 +2249,60 @@ mod tests {
             .expect("source trigger"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn v25_adds_media_session_routing_without_losing_v24_state() {
+        use crate::store::SettingsStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(24) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.session.proof', 'survives-v24')",
+                [],
+            )
+            .expect("seed v24 row");
+            conn.pragma_update(None, "user_version", 24)
+                .expect("version");
+        }
+
+        let store = SqliteStore::open(&db).expect("migrate v24 to v25");
+        assert_eq!(
+            store
+                .get_setting("migration.session.proof")
+                .await
+                .expect("read v24 proof")
+                .as_deref(),
+            Some("survives-v24")
+        );
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        for (table, columns) in [
+            ("media_session_requests", 9),
+            ("media_playback_pointers", 4),
+            ("media_sessions", 17),
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}')"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or_else(|error| panic!("inspect {table}: {error}")),
+                columns,
+                "{table} schema"
+            );
+        }
     }
 
     /// v13 adds a column to `items`, which is the migration shape with a

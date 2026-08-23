@@ -698,6 +698,77 @@ pub struct PretranscodeJob {
     pub updated_at_ms: i64,
 }
 
+/// Durable owner route for one capability-authenticated HLS session.
+///
+/// The public `session_id` is random and never reused. `incarnation_id` is the
+/// coordination identity minted before placement; playback ids group a
+/// viewer's successive sessions but are never used as fences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MediaSessionRoute {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
+    pub state: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_origin_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Result of atomically claiming a user-scoped session-creation request id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSessionRequestClaim {
+    Acquired {
+        incarnation_id: String,
+    },
+    InFlight {
+        incarnation_id: String,
+        owner_node_id: Option<String>,
+        claim_expires_at_ms: i64,
+    },
+    Resolved(MediaSessionRoute),
+    Conflict,
+    Overloaded,
+}
+
+/// Inputs committed when a selected worker has created the local session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivation {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub request_id: Option<String>,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivationOutcome {
+    pub route: MediaSessionRoute,
+    pub predecessor: Option<MediaSessionRoute>,
+}
+
+/// One exact owner/epoch tuple in the two-second session liveness batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionRenewal {
+    pub incarnation_id: String,
+    pub owner_epoch: i64,
+}
+
 /// Versioned, bounded filter attached to a queue row.
 ///
 /// This describes an output contract, not the candidate generator's own
