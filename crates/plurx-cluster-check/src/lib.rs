@@ -578,6 +578,17 @@ async fn run_singleton_takeover_case() -> Result<()> {
     wait_singleton_outcome(&mut cluster, *successor_node, &["published"]).await?;
     require_singleton_value(&mut cluster, leader, "successor", false).await?;
 
+    // Keep the no-election invariant scoped to the takeover itself. A voter
+    // resumed after being stopped longer than an election timeout can
+    // legitimately increment the term before it receives a fresh heartbeat.
+    // Applied indexes are global log positions, so the post-baseline budget
+    // below can still include the resumed stale-token rejection even when that
+    // scheduling race elects a new leader.
+    let (takeover_term, _) = raft_term_and_index(&mut cluster, leader).await?;
+    if takeover_term != stable_term || cluster.leader().await? != leader {
+        bail!("singleton takeover changed leader/term before the paused voter resumed");
+    }
+
     paused.resume()?;
     wait_singleton_outcome(&mut cluster, old_owner, &["lease_lost"]).await?;
     provider.release_old_owner();
@@ -610,10 +621,8 @@ async fn run_singleton_takeover_case() -> Result<()> {
             provider.call_count()
         );
     }
-    let (final_term, applied_after) = raft_term_and_index(&mut cluster, leader).await?;
-    if final_term != stable_term || cluster.leader().await? != leader {
-        bail!("singleton proof changed leader/term during its measured interval");
-    }
+    let final_leader = cluster.leader().await?;
+    let (_, applied_after) = raft_term_and_index(&mut cluster, final_leader).await?;
     let delta = applied_after.saturating_sub(applied_before);
     if delta > SINGLETON_POST_BASELINE_COMMIT_BUDGET {
         bail!(
