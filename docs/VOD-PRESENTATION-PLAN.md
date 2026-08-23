@@ -1,8 +1,9 @@
 # VOD presentation — every title is a film, not a broadcast
 
 **Status:** M0 RUN, M1 BLOCKED — P0's fidelity proof failed clause (b) and
-§2.2 needs a review decision before any product code; results and the
-consequences are in §12 ·
+§2.2 needs a review decision before any product code; results are in §12 and
+the decision is requested in
+[VOD-PRESENTATION-M0-REVIEW-BRIEF.md](VOD-PRESENTATION-M0-REVIEW-BRIEF.md) ·
 **Review:** [VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)
 · **Response:**
 [VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md](VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md)
