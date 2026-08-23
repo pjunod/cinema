@@ -491,6 +491,14 @@ lag. Metrics retain an invalid prior value for diagnosis, expose fixed
 `source="watermark"` validity, age, and error series, and never render either
 node identity.
 
+A distinct serving process is a separate authority-only case: it owns no local
+Raft replica, so it renews the same bounded quorum proof without polling or
+inventing a local applied index. Its proof exposes no apply-lag value and may
+gate media readiness only. It is categorically ineligible for `BoundedReplica`;
+that class still requires the locally bound term, leader, epoch, and applied
+index above. A failed remote renewal retains the preceding proof only until its
+original pre-request monotonic deadline, after which serving self-fences.
+
 **P2e snapshot hooks:** the vendored SQLite state-machine builder and installer
 start an RAII timer at their real operation boundary and publish exactly one
 fixed `build|install` and `ok|error` outcome on every exit, including an early

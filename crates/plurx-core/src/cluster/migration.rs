@@ -3945,8 +3945,6 @@ pub mod status {
 
     const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
     const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
-    const REMOTE_METRICS_REFRESH: Duration = Duration::from_millis(500);
-    const REMOTE_METRICS_TIMEOUT: Duration = Duration::from_millis(750);
     const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
     const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
     const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
@@ -4044,6 +4042,10 @@ pub mod status {
         pub errors: u64,
         pub leader_changes: u64,
         pub watermark_source: bool,
+        /// `true` only when this proof is bound to this process's local Raft
+        /// term, leader observation, epoch, and applied index. A remote
+        /// authority-only proof must never be used for a bounded replica read.
+        pub watermark_requires_local_binding: bool,
         pub watermark: Option<QuorumWatermarkSample>,
         pub watermark_age_millis: Option<u64>,
         pub watermark_valid: bool,
@@ -4086,20 +4088,32 @@ pub mod status {
         started_at: Instant,
         local_source: bool,
         watermark_source: bool,
+        watermark_requires_local_binding: bool,
         snapshot_metrics: Option<LocalDbSnapshotMetrics>,
     }
 
     impl PassiveRaftMetrics {
         fn new(local_source: bool) -> Self {
-            Self::new_with_sources(local_source, local_source)
-        }
-
-        fn new_with_sources(local_source: bool, watermark_source: bool) -> Self {
             Self {
                 inner: Arc::new(PassiveRaftMetricsAtomics::default()),
                 started_at: Instant::now(),
                 local_source,
-                watermark_source,
+                watermark_source: local_source,
+                watermark_requires_local_binding: local_source,
+                snapshot_metrics: None,
+            }
+        }
+
+        /// A distinct serving process has no local replica to bind or lag to.
+        /// Its readiness may use only the short quorum authority lease; this
+        /// mode deliberately exposes no local source and no apply-lag value.
+        fn remote_authority() -> Self {
+            Self {
+                inner: Arc::new(PassiveRaftMetricsAtomics::default()),
+                started_at: Instant::now(),
+                local_source: false,
+                watermark_source: true,
+                watermark_requires_local_binding: false,
                 snapshot_metrics: None,
             }
         }
@@ -4166,19 +4180,23 @@ pub mod status {
                         age_seconds.is_some_and(|age| age <= PASSIVE_METRICS_FRESHNESS_SECS);
                     let watermark_age_nanos = watermark_published
                         .then(|| elapsed_nanos.saturating_sub(watermark_started_nanos));
+                    let local_binding_valid = !self.watermark_requires_local_binding
+                        || (published
+                            && local_valid
+                            && last_applied_present
+                            && leader_known
+                            && current_leader_present
+                            && current_term == watermark_term
+                            && current_leader == watermark_leader
+                            && local_observation_epoch == watermark_local_epoch);
                     let watermark_valid = self.watermark_source
                         && watermark_age_nanos
                             .is_some_and(|age| age < duration_nanos(QUORUM_WATERMARK_LEASE))
                         && !watermark_invalidated
-                        && published
-                        && local_valid
-                        && last_applied_present
-                        && leader_known
-                        && current_leader_present
-                        && current_term == watermark_term
-                        && current_leader == watermark_leader
-                        && local_observation_epoch == watermark_local_epoch;
-                    let apply_lag_entries = (watermark_valid && last_applied_present)
+                        && local_binding_valid;
+                    let apply_lag_entries = (watermark_valid
+                        && self.watermark_requires_local_binding
+                        && last_applied_present)
                         .then(|| watermark_committed_index.saturating_sub(last_applied_index));
                     return PassiveRaftMetricsView {
                         local_source: self.local_source,
@@ -4193,6 +4211,7 @@ pub mod status {
                         errors,
                         leader_changes,
                         watermark_source: self.watermark_source,
+                        watermark_requires_local_binding: self.watermark_requires_local_binding,
                         watermark: watermark_published.then_some(QuorumWatermarkSample {
                             committed_index: watermark_committed_index,
                             apply_lag_entries,
@@ -4323,11 +4342,12 @@ pub mod status {
             let sequence = self.begin_write();
             let expired = elapsed_nanos.saturating_sub(started_nanos)
                 >= duration_nanos(QUORUM_WATERMARK_LEASE);
-            let local_matches = self.inner.published.load(Ordering::Relaxed)
-                && self.inner.leader_known.load(Ordering::Relaxed)
-                && self.inner.current_leader_present.load(Ordering::Relaxed)
-                && self.inner.current_term.load(Ordering::Relaxed) == source.term
-                && self.inner.current_leader.load(Ordering::Relaxed) == source.leader_id;
+            let local_matches = !self.watermark_requires_local_binding
+                || (self.inner.published.load(Ordering::Relaxed)
+                    && self.inner.leader_known.load(Ordering::Relaxed)
+                    && self.inner.current_leader_present.load(Ordering::Relaxed)
+                    && self.inner.current_term.load(Ordering::Relaxed) == source.term
+                    && self.inner.current_leader.load(Ordering::Relaxed) == source.leader_id);
             let prior_published = self.inner.watermark_published.load(Ordering::Relaxed);
             let regressed = prior_published
                 && (source.term < self.inner.watermark_term.load(Ordering::Relaxed)
@@ -4536,56 +4556,6 @@ pub mod status {
         }
     }
 
-    async fn run_remote_metrics_loop<F>(
-        client: Client,
-        metrics: PassiveRaftMetrics,
-        shutdown: F,
-        refresh_period: Duration,
-        request_timeout: Duration,
-    ) where
-        F: Future<Output = ()> + Send,
-    {
-        let mut refresh = tokio::time::interval(refresh_period);
-        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => return,
-                _ = refresh.tick() => {}
-            }
-            let result = tokio::select! {
-                biased;
-                _ = &mut shutdown => return,
-                result = tokio::time::timeout(request_timeout, client.metrics_db()) => result,
-            };
-            match result {
-                Ok(Ok(source)) => {
-                    let sample = LocalDbRaftSnapshot {
-                        running: source.running_state.is_ok(),
-                        node_id: source.id,
-                        current_term: source.current_term,
-                        current_leader: source.current_leader,
-                        last_applied_term: source
-                            .last_applied
-                            .as_ref()
-                            .map(|log| log.leader_id.term),
-                        last_applied_index: source.last_applied.as_ref().map(|log| log.index),
-                    };
-                    let _ = metrics.publish(&sample);
-                }
-                Ok(Err(error)) => {
-                    metrics.record_error();
-                    tracing::debug!(error = %error, "remote Raft metrics sample failed");
-                }
-                Err(_) => {
-                    metrics.record_error();
-                    tracing::debug!("remote Raft metrics sample timed out");
-                }
-            }
-        }
-    }
-
     /// Live status reader kept beside the selected store in daemon state.
     #[derive(Clone)]
     pub struct ReplicationMonitor {
@@ -4593,7 +4563,6 @@ pub mod status {
         client: Option<Client>,
         local_metrics: Option<LocalDbRaftMetrics>,
         passive_metrics: PassiveRaftMetrics,
-        remote_metrics: bool,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -4606,7 +4575,6 @@ pub mod status {
                 client: None,
                 local_metrics: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
-                remote_metrics: false,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -4623,23 +4591,22 @@ pub mod status {
                 client: Some(client),
                 local_metrics,
                 passive_metrics,
-                remote_metrics: false,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
 
         /// Monitor a distinct serving process through a remote Hiqlite
-        /// client. Unlike the daemon's embedded-voter path this performs
-        /// bounded network sampling, but publishes the same atomics-only
-        /// quorum watermark consumed by [`PassiveRaftMetrics`].
+        /// client. Unlike the daemon's embedded-voter path this publishes only
+        /// a bounded quorum authority lease. It has no local applied-index
+        /// source, cannot claim apply lag, and is ineligible for bounded local
+        /// replica reads.
         #[must_use]
         pub fn replicated_remote(client: Client) -> Self {
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
                 local_metrics: None,
-                passive_metrics: PassiveRaftMetrics::new_with_sources(false, true),
-                remote_metrics: true,
+                passive_metrics: PassiveRaftMetrics::remote_authority(),
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -4674,10 +4641,8 @@ pub mod status {
                 .map_or(0, |watch| watch.snapshot().node_id.saturating_sub(1) % 5);
             let node_stagger = Duration::from_millis(stagger_slot.saturating_mul(75));
             let local_metrics = self.local_metrics.clone();
-            let remote_metrics = self.remote_metrics;
             let local_passive = self.passive_metrics.clone();
             let watermark_passive = self.passive_metrics;
-            let metrics_client = client.clone();
             let local_loop = async move {
                 if let Some(watch) = local_metrics {
                     run_passive_metrics_loop(
@@ -4687,15 +4652,8 @@ pub mod status {
                         PASSIVE_METRICS_REFRESH,
                     )
                     .await;
-                } else if remote_metrics {
-                    run_remote_metrics_loop(
-                        metrics_client,
-                        local_passive,
-                        std::future::pending(),
-                        REMOTE_METRICS_REFRESH,
-                        REMOTE_METRICS_TIMEOUT,
-                    )
-                    .await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
             };
             let watermark_loop = run_quorum_watermark_loop(
@@ -5118,6 +5076,100 @@ pub mod status {
             assert!(!expired.watermark_valid);
             assert_eq!(expired.watermark.expect("retained").committed_index, 45);
             assert_eq!(expired.watermark_errors, 2);
+        }
+
+        #[test]
+        fn remote_authority_never_invents_a_local_replica_or_apply_lag() {
+            let metrics = PassiveRaftMetrics::remote_authority();
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            let current = metrics.snapshot_at_times(10, 10_200_000_000);
+            assert!(!current.local_source);
+            assert!(current.sample.is_none());
+            assert!(current.watermark_source);
+            assert!(!current.watermark_requires_local_binding);
+            assert!(current.watermark_valid);
+            assert_eq!(
+                current
+                    .watermark
+                    .expect("remote authority")
+                    .apply_lag_entries,
+                None
+            );
+
+            metrics.record_watermark_error();
+            let retained = metrics.snapshot_at_times(10, 10_999_999_999);
+            assert!(retained.watermark_valid);
+            assert_eq!(retained.watermark_errors, 1);
+
+            let expired = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!expired.watermark_valid);
+            assert_eq!(
+                expired
+                    .watermark
+                    .expect("retained remote authority")
+                    .apply_lag_entries,
+                None
+            );
+        }
+
+        #[test]
+        fn remote_authority_rejects_delayed_or_conflicting_generations() {
+            let metrics = PassiveRaftMetrics::remote_authority();
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_200_000_000,
+                10_300_000_000,
+            ));
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 47),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 3, 47),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+
+            let current = metrics.snapshot_at_times(10, 10_600_000_000);
+            assert!(current.watermark_valid);
+            let watermark = current.watermark.expect("latest remote authority");
+            assert_eq!(watermark.committed_index, 46);
+            assert_eq!(watermark.apply_lag_entries, None);
+            assert_eq!(current.watermark_errors, 2);
+        }
+
+        #[test]
+        fn remote_authority_sampler_never_polls_replica_management_metrics() {
+            let source = include_str!("migration.rs");
+            let constructor = source
+                .split_once("pub fn replicated_remote")
+                .expect("remote monitor constructor")
+                .1
+                .split_once("pub fn metrics_handle")
+                .expect("end remote monitor constructor")
+                .0;
+            let sampler = source
+                .split_once("pub async fn passive_metrics_loop")
+                .expect("passive sampler")
+                .1
+                .split_once("pub async fn status")
+                .expect("end passive sampler")
+                .0;
+
+            assert!(constructor.contains("PassiveRaftMetrics::remote_authority()"));
+            assert!(!constructor.contains("local_db_raft_metrics"));
+            assert!(!sampler.contains("metrics_db"));
         }
 
         #[test]

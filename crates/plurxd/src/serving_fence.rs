@@ -151,11 +151,15 @@ impl ServingFence {
 
     fn refresh(&self) {
         let snapshot = self.metrics.snapshot();
-        let desired = !self.quorum_managed
-            || (snapshot.watermark_valid
-                && snapshot
-                    .watermark
-                    .is_some_and(|watermark| watermark.apply_lag_entries == Some(0)));
+        let authority_is_current = snapshot.watermark_valid
+            && snapshot.watermark.is_some_and(|watermark| {
+                if snapshot.watermark_requires_local_binding {
+                    snapshot.local_source && watermark.apply_lag_entries == Some(0)
+                } else {
+                    !snapshot.local_source && watermark.apply_lag_entries.is_none()
+                }
+            });
+        let desired = !self.quorum_managed || authority_is_current;
         let previous = self.is_ready();
         self.publish(desired);
         if previous != desired {

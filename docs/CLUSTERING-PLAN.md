@@ -913,6 +913,12 @@ live child. The controller then commits a setting and reads it from every
 voter's local replica through the intact majority, restores the serving links,
 and requires readiness and capability recovery.
 
+That remote serving monitor is intentionally quorum-authority-only. It does
+not poll a voter-management metrics endpoint, claim a local replica, or emit an
+apply-lag value. The short proof can gate media readiness, but cannot authorize
+a bounded local catalogue read; that later optimization requires a fresh local
+term, leader, epoch, and applied-index binding on an embedded replica.
+
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
 Implement the exact §3.5/[PERF-PLAN.md](PERF-PLAN.md) §7.3 contract. Proxy

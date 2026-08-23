@@ -288,6 +288,11 @@ The proof compiles the daemon's `serving_fence.rs` directly. A harness-only
 boolean would show that the test can notice its own partition, not that the
 production readiness and teardown authority does.
 
+The distinct process has no local Raft replica. Its monitor therefore renews
+only the bounded quorum authority proof: it neither polls a remote management
+metrics endpoint nor fabricates an applied index or apply-lag value. This mode
+may gate serving readiness but is never eligible for bounded replica reads.
+
 ### A busy port is not an un-migrated store
 
 A voter's raft and API ports are chosen by binding port zero, reading the
