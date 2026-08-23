@@ -21,6 +21,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -583,6 +584,8 @@ async fn run_singleton_takeover_case() -> Result<()> {
         Response::Flag { value: false } => {}
         response => bail!("the pre-takeover lease published after takeover: {response:?}"),
     }
+    wait_singleton_cleanup(&mut cluster, *successor_node).await?;
+    wait_singleton_cleanup(&mut cluster, old_owner).await?;
 
     for node_id in 1..=3 {
         require_singleton_value(&mut cluster, node_id, "successor", true).await?;
@@ -679,10 +682,12 @@ async fn wait_singleton_outcome(
             .request(node_id, Request::SingletonProbeStatus)
             .await?
         {
-            Response::SingletonProbeStatus { outcome } if accepted.contains(&outcome.as_str()) => {
+            Response::SingletonProbeStatus { outcome, .. }
+                if accepted.contains(&outcome.as_str()) =>
+            {
                 return Ok(outcome);
             }
-            Response::SingletonProbeStatus { outcome }
+            Response::SingletonProbeStatus { outcome, .. }
                 if outcome == "provider_pending" || outcome == "publishing" =>
             {
                 if Instant::now() >= deadline {
@@ -692,6 +697,32 @@ async fn wait_singleton_outcome(
                 }
             }
             response => bail!("singleton probe reached an unexpected outcome: {response:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_singleton_cleanup(cluster: &mut ClusterProcesses, node_id: u64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match cluster
+            .request(node_id, Request::SingletonProbeStatus)
+            .await?
+        {
+            Response::SingletonProbeStatus {
+                cleanup_done: true, ..
+            } => return Ok(()),
+            Response::SingletonProbeStatus {
+                outcome,
+                cleanup_done: false,
+            } => {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "singleton probe cleanup on voter {node_id} timed out after outcome {outcome}"
+                    );
+                }
+            }
+            response => bail!("unexpected singleton cleanup response: {response:?}"),
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -3050,6 +3081,7 @@ pub enum Response {
     },
     SingletonProbeStatus {
         outcome: String,
+        cleanup_done: bool,
     },
     SingletonValue {
         value: Option<String>,
@@ -4191,6 +4223,7 @@ pub fn validate_known_dump(dump: &serde_json::Value) -> Result<()> {
 
 struct SingletonProbe {
     outcome: Arc<RwLock<String>>,
+    cleanup_done: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -4805,8 +4838,10 @@ async fn handle_request(
                         SINGLETON_HEARTBEAT,
                     )?;
                     let outcome = Arc::new(RwLock::new("provider_pending".to_owned()));
+                    let cleanup_done = Arc::new(AtomicBool::new(false));
                     *singleton_probe = Some(SingletonProbe {
                         outcome: Arc::clone(&outcome),
+                        cleanup_done: Arc::clone(&cleanup_done),
                     });
                     let probe_store = opened as Arc<dyn plurx_core::store::Store>;
                     let _probe_task = tokio::spawn(async move {
@@ -4849,11 +4884,12 @@ async fn handle_request(
                         *outcome
                             .write()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()) = terminal;
-                        // Publication/fencing is the proof's terminal result.
-                        // Lease retirement is best effort and may itself need
-                        // a quorum round trip, so never hide the result behind
-                        // cleanup that can outlive the observation deadline.
+                        // Publish the terminal verdict before cleanup so a
+                        // stuck retirement reports the exact completed phase.
+                        // The controller separately waits for cleanup before
+                        // sampling the bounded Raft-entry delta.
                         active.release().await;
+                        cleanup_done.store(true, AtomicOrdering::Release);
                     });
                     Ok(Response::SingletonProbeStart {
                         acquired: true,
@@ -4875,6 +4911,7 @@ async fn handle_request(
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone(),
+                cleanup_done: probe.cleanup_done.load(AtomicOrdering::Acquire),
             })
         }
         Request::ReplaySingletonLease {
