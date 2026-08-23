@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5fb1946d"]
+points = ["cluster.auth", "cluster.membership", "server.api", "playback.pipeline"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained cluster lifecycle first attempts to redeem a valid join credential with an HTTP origin already owned by the singleton, requires the serialized claim to fail while membership remains one voter, and then reuses that exact credential with a unique origin to admit the intended second voter; restoring the split redemption writes reserves or promotes an unusable node. The internal activity regressions require private no-store response headers, cap the merged candidate population before enrichment, and fill each live registry beyond the 512-entry wire limit while requiring the actual newest entries to survive. The transcode activity path clones only selected session Arcs under the registry lock and performs telemetry awaits after releasing it, so restoring arbitrary HashMap prefixes or the lock-across-await path fails the retained ordering and gate coverage."
