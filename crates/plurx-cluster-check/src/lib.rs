@@ -569,8 +569,8 @@ async fn run_singleton_takeover_case() -> Result<()> {
     require_singleton_value(&mut cluster, leader, "successor", false).await?;
 
     paused.resume()?;
+    wait_singleton_outcome(&mut cluster, old_owner, &["lease_lost"]).await?;
     provider.release_old_owner();
-    wait_singleton_outcome(&mut cluster, old_owner, &["fence_rejected", "lease_lost"]).await?;
     match cluster
         .request(
             old_owner,
