@@ -129,6 +129,9 @@ path = "tests/cluster/main.rs"
 version = "0.5.3"
 optional = true
 
+[dependencies.arc-swap]
+version = "1.9.2"
+
 [dependencies.axum]
 version = "0.8.1"
 features = [

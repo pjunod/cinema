@@ -13,13 +13,14 @@
 //! not by version (PERF-PLAN §5).
 
 mod encoder;
+pub mod manifest;
 mod pipeline;
 mod recipe;
 
 pub use encoder::{
-    detect_encoders, validate_quality_rate_control, validate_quality_rate_control_yielding,
-    EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, QualityRateControlValidation,
-    QualityRc, RateMode,
+    detect_encoders, detect_video_decoders, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe};

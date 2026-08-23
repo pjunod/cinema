@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1f6eb59a"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained SQLite and three-voter distributed-pretranscode contracts require enqueue to parse and select an eligible source, while the backend-neutral and migration contracts atomically reset mutable contract and application state before each case; the cluster gate therefore fails if either enqueue predicate is incomplete or reset SQL is paired with the wrong parameters."

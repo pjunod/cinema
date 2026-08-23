@@ -21,6 +21,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
 
 #[cfg(feature = "sqlite")]
+pub use crate::client::{DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+#[cfg(feature = "sqlite")]
+pub use crate::snapshot_metrics::{
+    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,
+    LocalDbSnapshotMetrics,
+};
+#[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::state_machine::Response;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};
@@ -71,6 +78,8 @@ mod dashboard;
 mod migration;
 #[cfg(feature = "sqlite")]
 mod query;
+#[cfg(feature = "sqlite")]
+mod snapshot_metrics;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod split_brain_check;
 

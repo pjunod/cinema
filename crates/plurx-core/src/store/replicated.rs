@@ -104,6 +104,7 @@ pub enum TransactionShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionMechanism {
     RawBeginBatch,
+    RusqliteImmediateTransaction,
     RusqliteTransaction,
 }
 
@@ -112,6 +113,7 @@ impl TransactionMechanism {
     fn source_marker(self) -> &'static str {
         match self {
             Self::RawBeginBatch => "BEGIN;",
+            Self::RusqliteImmediateTransaction => "Transaction::new_unchecked",
             Self::RusqliteTransaction => "unchecked_transaction",
         }
     }
@@ -184,6 +186,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "cache.rs",
+        method: "mark_cache_manifests_checked",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "cache.rs",
+        method: "invalidate_cache_entry",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "cache.rs",
         method: "forget_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -220,6 +236,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "offline.rs",
         method: "offline_package_for_lease",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "pretranscode.rs",
+        method: "claim_pretranscode_job",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteImmediateTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "pretranscode.rs",
+        method: "complete_pretranscode_job",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -359,6 +389,7 @@ mod tests {
         ("mod.rs", include_str!("sqlite/mod.rs")),
         ("offline.rs", include_str!("sqlite/offline.rs")),
         ("outbox.rs", include_str!("sqlite/outbox.rs")),
+        ("pretranscode.rs", include_str!("sqlite/pretranscode.rs")),
         ("publication.rs", include_str!("sqlite/publication.rs")),
         ("reading.rs", include_str!("sqlite/reading.rs")),
         ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
@@ -465,7 +496,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 14);
+        assert_eq!(methods.len(), 18);
     }
 
     #[test]
@@ -506,6 +537,14 @@ mod tests {
                         (*module, TransactionMechanism::RawBeginBatch),
                         source
                             .matches(TransactionMechanism::RawBeginBatch.source_marker())
+                            .count(),
+                    ),
+                    (
+                        (*module, TransactionMechanism::RusqliteImmediateTransaction),
+                        source
+                            .matches(
+                                TransactionMechanism::RusqliteImmediateTransaction.source_marker(),
+                            )
                             .count(),
                     ),
                 ]

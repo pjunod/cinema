@@ -33,18 +33,23 @@ mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_pretranscode;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_publication;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_reading;
 
 pub mod replicated;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[cfg(feature = "cluster-read-cost-validation")]
+pub use self::hiqlite::HiqliteOperationCounts;
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
-    ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
@@ -55,17 +60,64 @@ use async_trait::async_trait;
 
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    BookMetadataPatch, CachedTranscode, InProgressItem, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, Library, MediaFile, MediaShape, MetadataPatch, NetworkPrior, NetworkPriorObservation,
-    NewItem, NewLibrary, NewOfflinePackage, OfflineActivityPackage, OfflineCreateOutcome,
-    OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry,
-    OfflineRemovalReport, PlaybackEvent, PlaybackEventQuery, ProbeResult, ReadingState,
+    BookMetadataPatch, CacheManifestCheck, CachedTranscode, InProgressItem, Item, ItemEdit,
+    ItemKind, ItemPage, ItemSort, Library, MediaFile, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, PlaybackEvent,
+    PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities, ProbeResult, ReadingState,
     ReadingStateWrite, RecentItem, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
 use crate::mediafacts::MediaFacts;
 use crate::secrets::SealedSecret;
+
+/// Narrow catalogue projection used to reconcile node-local artwork bytes.
+/// Large overview and metadata fields never cross the local database boundary
+/// for a pass that needs only ownership and filenames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtworkInventoryItem {
+    pub id: i64,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+}
+
+/// One bounded aggregate read for Store-backed Prometheus gauges.
+///
+/// Keeping this as one Store primitive lets a replicated backend pay for one
+/// authority read per background sample instead of one read per metric family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrometheusStoreSnapshot {
+    pub libraries: i64,
+    pub users: i64,
+    pub offline: OfflinePackageStats,
+    pub watched_outbox: (i64, i64, i64),
+}
+
+#[async_trait]
+pub trait MetricsStore: Send + Sync + 'static {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+}
+
+/// Replicated owner/term/generation proof attached to every provider artwork
+/// mutation.
+/// A timeout may drop a submitted client future without cancelling its Raft
+/// command, so the database mutation itself must reject an obsolete claim.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtworkRepairFence {
+    pub item_id: i64,
+    pub owner_node_id: String,
+    pub leader_term: i64,
+    /// Monotonic per-item attempt generation. This distinguishes sequential
+    /// repairs by the same leader, so a timed-out command from an earlier
+    /// attempt cannot become valid during a later retry in the same term.
+    pub generation: i64,
+}
 
 /// The text a backend may write into a durable Trakt bearer column.
 ///
@@ -254,6 +306,9 @@ pub mod keys {
     /// made the trade backwards. Eviction is LRU, so what survives is what
     /// people actually come back to.
     pub const CACHE_MAX_GB: &str = "cache.max_gb";
+    /// Last user id inspected by the bounded speculative-candidate fan-out.
+    /// The singleton lease makes advancing this replicated cursor race-free.
+    pub const CACHE_PRETRANSCODE_USER_CURSOR: &str = "cache.pretranscode_user_cursor";
     /// Master kill switch for app-managed offline packages. Missing means on;
     /// an operator can stop new admission without invalidating local copies.
     pub const OFFLINE_ENABLED: &str = "offline.enabled";
@@ -283,7 +338,32 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read the complete settings table from one database snapshot.
+    ///
+    /// Administrative views render many independent settings at once. A
+    /// single snapshot keeps those values mutually consistent and, on a
+    /// replicated backend, avoids paying one linearizable read per field.
+    async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
+    /// Insert an immutable setting value. Returns false when the key already
+    /// exists and leaves the first committed value unchanged.
+    async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError>;
+    /// Insert an immutable setting only while the named provider-repair claim
+    /// is still current in the same replicated transaction.
+    async fn put_setting_if_absent_if_artwork_repair_current(
+        &self,
+        key: &str,
+        value: &str,
+        expected_item_id: i64,
+        fence: &ArtworkRepairFence,
+    ) -> Result<bool, StoreError>;
+    /// Remove immutable Curator origin records for one artwork generation,
+    /// but only when no catalogue row references that filename in the same
+    /// transaction. This bounds replicated history after orphan collection.
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError>;
     /// Atomically publish a related group of settings.
     ///
     /// Callers use this when one key activates the meaning of another. A
@@ -306,6 +386,10 @@ pub trait UserStore: Send + Sync + 'static {
     async fn get_user(&self, id: i64) -> Result<Option<User>, StoreError>;
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError>;
     async fn list_users(&self) -> Result<Vec<User>, StoreError>;
+    /// Deterministic bounded page for background fan-out. Interactive admin
+    /// lists keep using `list_users`; schedulers must not allocate every user
+    /// merely to inspect a small prediction rail.
+    async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError>;
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError>;
     async fn count_admins(&self) -> Result<i64, StoreError>;
     /// Replace a user's password hash. Callers should also revoke the user's
@@ -422,10 +506,23 @@ pub trait MediaStore: Send + Sync + 'static {
     ///
     /// Cluster voters use this as a reconciliation inventory: item rows are
     /// replicated, while the bytes named by `poster_path` and `backdrop_path`
-    /// remain node-local. Returning complete items keeps the owning item id
-    /// available for a provider/local-source repair when no peer still holds
-    /// the named file.
-    async fn items_with_artwork(&self) -> Result<Vec<Item>, StoreError>;
+    /// remain node-local. This intentionally returns a narrow local projection
+    /// so a periodic node-local pass does not rendezvous at the leader or move
+    /// complete catalogue rows.
+    async fn items_with_artwork(&self) -> Result<Vec<ArtworkInventoryItem>, StoreError>;
+    /// One deterministic, bounded reconciliation page after an item id.
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError>;
+    /// Exact authority check immediately before orphan quarantine/removal.
+    async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError>;
+    /// Bounded batch authority snapshot for orphan prefiltering.
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError>;
     /// One page of a library's grid, optionally narrowed to a single genre.
     ///
     /// The genre is matched against the item's stored list (migration v13),
@@ -464,6 +561,15 @@ pub trait MediaStore: Send + Sync + 'static {
 
     // --- metadata enrichment ---
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError>;
+    /// Apply provider metadata only while the replicated
+    /// owner/term/generation fence is still current. A stale submitted command
+    /// succeeds as a no-op.
+    async fn apply_metadata_if_artwork_repair_current(
+        &self,
+        item_id: i64,
+        patch: &MetadataPatch,
+        fence: &ArtworkRepairFence,
+    ) -> Result<bool, StoreError>;
     /// Apply first-class facts for one book with source precedence enforced by
     /// the backend. A Curator handoff outranks EPUB package metadata; title +
     /// author alone never creates a work relation.
@@ -472,6 +578,16 @@ pub trait MediaStore: Send + Sync + 'static {
         item_id: i64,
         patch: &BookMetadataPatch,
     ) -> Result<(), StoreError>;
+    /// Apply Curator facts only while every book field this operation may
+    /// overwrite is still the item snapshot the caller acted on. This is the
+    /// store-level fence between slow provider work and a concurrent re-pair
+    /// or edit on another voter.
+    async fn apply_book_metadata_if_current(
+        &self,
+        expected: &Item,
+        patch: &BookMetadataPatch,
+        repair_fence: Option<&ArtworkRepairFence>,
+    ) -> Result<bool, StoreError>;
     /// Book rows in one library, optionally narrowed to the exact ids a
     /// targeted scan placed. `Some(&[])` means no rows.
     async fn book_items(
@@ -686,6 +802,21 @@ pub enum ReconcileOutcome {
         requested: u64,
         limit: u64,
     },
+}
+
+/// Hard ceiling for one atomic library-reconcile payload. At 4,096 signed
+/// decimal i64 values, the JSON carried by the replicated backend stays below
+/// 90 KiB even at worst-case width.
+pub(crate) const MAX_RECONCILE_FILE_IDS: usize = 4_096;
+
+pub(crate) fn reconcile_payload_refusal(
+    gone_file_ids: &[i64],
+    prune_limit: u64,
+) -> Option<ReconcileOutcome> {
+    (gone_file_ids.len() > MAX_RECONCILE_FILE_IDS).then(|| ReconcileOutcome::RefusedPrune {
+        requested: gone_file_ids.len() as u64,
+        limit: prune_limit.min(MAX_RECONCILE_FILE_IDS as u64),
+    })
 }
 
 #[async_trait]
@@ -1012,6 +1143,24 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
 
+    /// Bounded set of manifest-fenced local generations for background
+    /// integrity scrubbing. Unlike the eviction view this includes pinned
+    /// offline locations: pinning protects valid bytes from LRU, not corrupt
+    /// bytes from invalidation.
+    async fn cache_manifest_candidates(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// Advance the scrub cursor only if the checked immutable publication is
+    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
+    /// scan without changing the playback LRU clock.
+    async fn mark_cache_manifests_checked(
+        &self,
+        checks: &[CacheManifestCheck],
+    ) -> Result<usize, StoreError>;
+
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.
     async fn stale_cache_claims(
@@ -1024,6 +1173,38 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     /// The filesystem orphan pass needs storage ownership facts; filtered LRU
     /// and stale-candidate queries are deliberately the wrong truth for it.
     async fn all_cache_rows(&self, node_id: &str) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// At most 10,000 local ownership rows plus an explicit completeness bit.
+    /// Orphan cleanup may delete only when this view is complete, including a
+    /// successful complete view containing zero rows.
+    async fn cache_ownership_inventory(
+        &self,
+        node_id: &str,
+    ) -> Result<crate::domain::CacheOwnershipInventory, StoreError>;
+
+    /// Exact ownership for one bounded orphan-deletion batch. This remains
+    /// complete even when a node has more rows than the broad inventory's
+    /// housekeeping ceiling, so a large healthy cache cannot permanently
+    /// disable reclamation.
+    async fn cache_candidate_owners(
+        &self,
+        node_id: &str,
+        relative_dirs: &[String],
+        incomplete_recipes: &[String],
+    ) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// Remove only the location whose immutable publication identity still
+    /// matches a failed integrity check and atomically fail ready offline
+    /// packages bound to it. A stale reader can neither erase a newer
+    /// replacement nor retire packages backed by that replacement.
+    async fn invalidate_cache_entry(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        storage_class: &str,
+        relative_dir: &str,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError>;
 
     /// Forget one storage copy. The recipe row goes too when its last copy
     /// does: a recipe nobody has is not a fact worth keeping on a single node,
@@ -1039,6 +1220,100 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     /// Offline-pinned recipes have their own admission budget and are excluded
     /// so a flight queue cannot evict the playback cache to make room.
     async fn cache_bytes(&self, node_id: &str) -> Result<i64, StoreError>;
+}
+
+/// Durable distributed work for speculative whole-title transcodes.
+///
+/// Candidate generation is a singleton, but execution is deliberately not:
+/// every compatible node competes for rows through this boundary. Ownership
+/// is a queue-row fence rather than a generic scheduler lease so a worker can
+/// renew, yield, and settle independently of the next candidate pass.
+#[async_trait]
+pub trait PretranscodeJobStore: Send + Sync + 'static {
+    /// Read one row for bounded diagnostics and lifecycle verification.
+    async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Insert one active generation unless an equivalent active/terminal job
+    /// or still-verifiable ready location already satisfies it. A ready row
+    /// whose last location was evicted is deliberately eligible again.
+    async fn enqueue_pretranscode_job(
+        &self,
+        job: &NewPretranscodeJob,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+
+    /// Claim the highest-priority compatible due row. Expired running rows are
+    /// eligible for takeover and advance their monotone fence.
+    async fn claim_pretranscode_job(
+        &self,
+        node_id: &str,
+        capabilities: &PretranscodeWorkerCapabilities,
+        // Bounded process-local refusals (for example, sources this node
+        // cannot mount). Other nodes remain eligible immediately.
+        excluded_job_ids: &[String],
+        now_unix_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Active queue rows whose resumable part directories belong to this
+    /// node. Housekeeping uses the ids as a fail-closed keep-list without
+    /// publishing an incomplete cache location.
+    async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
+
+    /// Complete bounded active-id universe for pruning node-local source
+    /// refusals. The queue schema caps active rows at 4,096.
+    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
+
+    async fn renew_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        now_unix_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Capacity/preemption is not a failed encode. Return the row to the due
+    /// queue without incrementing attempts.
+    async fn yield_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Record one stable failure code. The fifth failure is terminal; earlier
+    /// failures return to the queue at the caller's bounded backoff deadline.
+    async fn fail_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        error_code: &str,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Permanently cancel a claimed source generation that no longer exists
+    /// or no longer matches its snapshotted bytes.
+    async fn cancel_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        error_code: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Publish the node-local cache location and ready job state in one fenced
+    /// transaction after the filesystem generation has been renamed.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        recipe_hash: &str,
+        recipe_version: i64,
+        relative_dir: &str,
+        bytes: i64,
+        expected_previous_bytes: Option<i64>,
+        manifest_digest: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.
@@ -1136,6 +1411,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         package_id: &str,
         node_id: &str,
         phase: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Mark only the still-ready package bound to this corrupt recipe as
+    /// failed. Request-time integrity checks use a separate exact transition
+    /// so a late producer error cannot demote an unrelated ready package.
+    async fn invalidate_ready_offline_package(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        recipe_hash: &str,
         code: &str,
         message: &str,
     ) -> Result<bool, StoreError>;
@@ -1347,40 +1634,75 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
+    async fn put_setting_if_absent_fenced(
+        &self,
+        key: &str,
+        value: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn put_setting_if_absent_if_artwork_repair_current_fenced(
+        &self,
+        key: &str,
+        value: &str,
+        expected_item_id: i64,
+        repair_fence: &ArtworkRepairFence,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     async fn mark_library_scanned_fenced(
         &self,
         id: i64,
         refreshed: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
     async fn insert_item_fenced(
         &self,
         item: &NewItem,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError>;
     async fn apply_metadata_fenced(
         &self,
         item_id: i64,
         patch: &MetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_metadata_if_artwork_repair_current_fenced(
+        &self,
+        item_id: i64,
+        patch: &MetadataPatch,
+        repair_fence: &ArtworkRepairFence,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     async fn apply_book_metadata_fenced(
         &self,
         item_id: i64,
         patch: &BookMetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_book_metadata_if_current_fenced(
+        &self,
+        expected: &Item,
+        patch: &BookMetadataPatch,
+        repair_fence: Option<&ArtworkRepairFence>,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
     async fn set_nfo_seeded_fenced(
         &self,
         item_id: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn upsert_file_fenced(
@@ -1391,7 +1713,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         mtime: i64,
         probe: &ProbeResult,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn ensure_library_root_fingerprint_fenced(
@@ -1400,7 +1722,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<RootFingerprintStatus, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn reconcile_library_fenced(
@@ -1410,7 +1732,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         gone_file_ids: &[i64],
         prune_limit: u64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn claim_cache_entry_fenced(
@@ -1421,14 +1743,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         node_id: &str,
         relative_dir: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError>;
     async fn touch_cache_claim_fenced(
         &self,
         recipe_hash: &str,
         node_id: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn complete_cache_entry_fenced(
@@ -1438,7 +1760,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         relative_dir: &str,
         bytes: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
     async fn forget_cache_entry_fenced(
         &self,
@@ -1446,13 +1768,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         node_id: &str,
         storage_class: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError>;
 }
 
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + MetricsStore
     + UserStore
     + ApiKeyStore
     + LibraryStore
@@ -1462,6 +1785,7 @@ pub trait Store:
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
+    + PretranscodeJobStore
     + OfflinePackageStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
@@ -1475,6 +1799,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + MetricsStore
         + UserStore
         + ApiKeyStore
         + LibraryStore
@@ -1484,6 +1809,7 @@ impl<T> Store for T where
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore
+        + PretranscodeJobStore
         + OfflinePackageStore
         + PlaybackTelemetryStore
         + NetworkPriorStore

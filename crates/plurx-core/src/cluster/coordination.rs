@@ -14,14 +14,50 @@ pub const MIN_LEASE_TTL: Duration = Duration::from_secs(1);
 pub const MAX_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 pub(crate) const MAX_LEASE_RESOURCE_BYTES: usize = 256;
 pub(crate) const MAX_LEASE_OWNER_BYTES: usize = 128;
+const REMOVED_JOB_OWNER_PREFIX: &str = "internal.cluster_job_owner_removed.";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) fn removed_job_owner_key(node_id: &str) -> String {
+    format!("{REMOVED_JOB_OWNER_PREFIX}{node_id}")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Lease {
     pub resource: String,
     pub owner_node_id: String,
     pub fence: u64,
     pub revision: u64,
     pub expires_at_unix_ms: i64,
+}
+
+impl Lease {
+    /// Build the monotone token installed by an atomic fenced publication.
+    /// The successor never shortens an existing authority window, including
+    /// when the wall clock moves backward between heartbeat and publication.
+    /// Exhausting either durable counter self-fences the publisher instead of
+    /// constructing a token the signed 64-bit store schema cannot represent.
+    pub fn publication_successor(&self) -> Result<Self, StoreError> {
+        const PUBLICATION_TTL_MS: i64 = 90_000;
+        let exhausted = || StoreError::FenceRejected {
+            resource: self.resource.clone(),
+            owner_node_id: self.owner_node_id.clone(),
+            fence: self.fence,
+        };
+        if self.revision >= i64::MAX as u64 {
+            return Err(exhausted());
+        }
+        let now = unix_ms()?;
+        let minimum_expiry = self
+            .expires_at_unix_ms
+            .checked_add(1)
+            .ok_or_else(exhausted)?;
+        Ok(Self {
+            resource: self.resource.clone(),
+            owner_node_id: self.owner_node_id.clone(),
+            fence: self.fence,
+            revision: self.revision + 1,
+            expires_at_unix_ms: now.saturating_add(PUBLICATION_TTL_MS).max(minimum_expiry),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,5 +221,43 @@ mod tests {
             300_100
         );
         assert!(expiry_from(i64::MAX, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn publication_successor_self_fences_at_durable_counter_limits() {
+        let boundary = Lease {
+            resource: "scan".to_owned(),
+            owner_node_id: "node-a".to_owned(),
+            fence: 7,
+            revision: i64::MAX as u64 - 1,
+            expires_at_unix_ms: 20,
+        };
+        assert_eq!(
+            boundary
+                .publication_successor()
+                .expect("last representable successor")
+                .revision,
+            i64::MAX as u64
+        );
+
+        for exhausted in [
+            Lease {
+                revision: i64::MAX as u64,
+                ..boundary.clone()
+            },
+            Lease {
+                expires_at_unix_ms: i64::MAX,
+                ..boundary.clone()
+            },
+        ] {
+            assert!(matches!(
+                exhausted.publication_successor(),
+                Err(StoreError::FenceRejected {
+                    resource,
+                    owner_node_id,
+                    fence: 7,
+                }) if resource == "scan" && owner_node_id == "node-a"
+            ));
+        }
     }
 }

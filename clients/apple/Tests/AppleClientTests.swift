@@ -553,7 +553,11 @@ final class AppleClientTests: XCTestCase {
             itemId: 9,
             fileId: 90
         ))
-        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line",9,90);"#)
+        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line","9","90");"#)
+        XCTAssertEqual(
+            NativeReaderHandoff.startScript(token: "bearer", itemId: Int.max, fileId: Int.max),
+            "window.startNativeReader(\"bearer\",\"\(Int.max)\",\"\(Int.max)\");"
+        )
         XCTAssertNil(NativeReaderHandoff.startScript(token: "", itemId: 9, fileId: 90))
         XCTAssertNil(NativeReaderHandoff.shellURL(origin: "file:///tmp/cinema"))
         XCTAssertTrue(NativeReaderHandoff.permitsNavigation(
@@ -6093,17 +6097,27 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    func testTVPlaybackInfoUsesTenFootScaleAndPlainHealthLabels() {
-        XCTAssertGreaterThanOrEqual(
+    func testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale() {
+        XCTAssertLessThanOrEqual(
             TVPlaybackInfoPresentation.panelMaxWidth,
-            1_440,
-            "playback diagnostics must use the television canvas, not a phone-sized panel"
+            1_480,
+            "the standard panel must not reserve unused television width"
         )
-        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 40)
-        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 22)
-        XCTAssertGreaterThanOrEqual(
-            TVPlaybackInfoPresentation.cardMinimumHeight,
-            300
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 28)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 34)
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 18)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 20)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.cardMinimumHeight, 250)
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxWidth
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_920
+        )
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxHeight
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_080,
+            "debug diagnostics must remain inside the tvOS canvas"
         )
         XCTAssertEqual(
             TVPlaybackInfoPresentation.healthLabel(stalls: nil),
@@ -6120,6 +6134,13 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             TVPlaybackInfoPresentation.healthLabel(stalls: 3),
             "3 stalls"
+        )
+    }
+
+    func testPlaybackInfoUsesTheSharedThreeModeContract() {
+        XCTAssertEqual(
+            PlaybackStatsMode.allCases.map(\.label),
+            ["Mini", "Standard", "Debug"]
         )
     }
 

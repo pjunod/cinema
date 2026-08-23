@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c58ecf94"]
+points = ["cluster.auth"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained rolling-compatibility and workspace-build contracts require the reserved old-handler probe and quorum marker to cross Hiqlite's crate-private client boundary together while ordinary consistent-query traffic remains usable on the same stream."

@@ -2,12 +2,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Query, State};
+use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use plurx_core::auth;
+#[cfg(test)]
+use plurx_core::cluster::migration::status::DbSnapshotHistogram;
+use plurx_core::cluster::migration::status::{
+    DbSnapshotMetricsSnapshot, DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
+};
 use plurx_core::domain::{PlaybackEvent, PlaybackEventQuery};
 use plurx_core::metadata::genres::GenreBackfillReport;
 use plurx_core::store::{keys, Store};
@@ -16,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
-use crate::state::{AppState, ScanStatus};
+use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
 pub struct ServerInfo {
@@ -1176,46 +1181,33 @@ pub struct SettingsDto {
 }
 
 async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
-    let tmdb_api_key = state
-        .store
-        .get_setting(keys::TMDB_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let omdb_api_key = state
-        .store
-        .get_setting(keys::OMDB_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let monarr_url = state
-        .store
-        .get_setting(keys::MONARR_URL)
-        .await?
-        .unwrap_or_default();
-    let monarr_api_key = state
-        .store
-        .get_setting(keys::MONARR_API_KEY)
-        .await?
-        .unwrap_or_default();
-    let trakt_client_id = state
-        .store
-        .get_setting(keys::TRAKT_CLIENT_ID)
-        .await?
-        .unwrap_or_default();
-    let trakt_client_secret = state
-        .store
-        .get_setting(keys::TRAKT_CLIENT_SECRET)
-        .await?
-        .unwrap_or_default();
-    let prefs = state.transcode.lang_prefs().await;
-    let stream_readrate = state
-        .store
-        .get_setting(keys::STREAM_READRATE)
-        .await?
+    // This page renders the settings as one administrative snapshot. On the
+    // clustered backend, reading each field independently turns one response
+    // into dozens of leader barriers; it can also mix values from different
+    // commits. `cache_bytes` below is one additional authoritative aggregate
+    // for this node's cache ownership when a cache location is configured.
+    let settings = state.store.settings_snapshot().await?;
+    let setting = |key: &str| settings.get(key).cloned();
+    let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
+    let omdb_api_key = setting(keys::OMDB_API_KEY).unwrap_or_default();
+    let monarr_url = setting(keys::MONARR_URL).unwrap_or_default();
+    let monarr_api_key = setting(keys::MONARR_API_KEY).unwrap_or_default();
+    let trakt_client_id = setting(keys::TRAKT_CLIENT_ID).unwrap_or_default();
+    let trakt_client_secret = setting(keys::TRAKT_CLIENT_SECRET).unwrap_or_default();
+    let mut prefs = plurx_core::tracks::LangPrefs::default();
+    if let Some(value) = setting(keys::AUDIO_LANG).filter(|value| !value.trim().is_empty()) {
+        prefs.audio_lang = value.trim().to_owned();
+    }
+    if let Some(value) = setting(keys::SUB_LANG).filter(|value| !value.trim().is_empty()) {
+        prefs.sub_lang = value.trim().to_owned();
+    }
+    if let Some(value) = setting(keys::SUB_MODE) {
+        prefs.sub_mode = plurx_core::tracks::SubMode::parse(value.trim());
+    }
+    let stream_readrate = setting(keys::STREAM_READRATE)
         .unwrap_or_else(|| crate::http::stream::READRATE_DEFAULT.to_string());
-    let (transcode_rate_mode, transcode_quality) = state
-        .store
-        .get_setting_pair(keys::TRANSCODE_RATE_MODE, keys::TRANSCODE_QUALITY)
-        .await?;
+    let transcode_rate_mode = setting(keys::TRANSCODE_RATE_MODE);
+    let transcode_quality = setting(keys::TRANSCODE_QUALITY);
     let (transcode_rate_mode, transcode_quality, _) =
         crate::transcode::normalize_rate_control_request(
             transcode_rate_mode.as_deref(),
@@ -1228,23 +1220,23 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or_else(|| default.to_owned())
     };
     let hls_readrate = text(
-        state.store.get_setting(keys::HLS_READRATE).await?,
+        setting(keys::HLS_READRATE),
         &crate::transcode::HLS_READRATE_DEFAULT.to_string(),
     );
     let hls_burst_secs = text(
-        state.store.get_setting(keys::HLS_BURST_SECS).await?,
+        setting(keys::HLS_BURST_SECS),
         &crate::transcode::HLS_BURST_SECS_DEFAULT.to_string(),
     );
     let hls_ahead_max_secs = text(
-        state.store.get_setting(keys::HLS_AHEAD_MAX_SECS).await?,
+        setting(keys::HLS_AHEAD_MAX_SECS),
         &crate::transcode::HLS_AHEAD_MAX_SECS_DEFAULT.to_string(),
     );
     let hls_ahead_max_bytes = text(
-        state.store.get_setting(keys::HLS_AHEAD_MAX_BYTES).await?,
+        setting(keys::HLS_AHEAD_MAX_BYTES),
         &crate::transcode::HLS_AHEAD_MAX_BYTES_DEFAULT.to_string(),
     );
     let hls_scratch_max_bytes = text(
-        state.store.get_setting(keys::HLS_SCRATCH_MAX_BYTES).await?,
+        setting(keys::HLS_SCRATCH_MAX_BYTES),
         &crate::transcode::HLS_SCRATCH_MAX_BYTES_DEFAULT.to_string(),
     );
     let mins = |v: Option<String>| -> i64 {
@@ -1252,33 +1244,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(0)
             .max(0)
     };
-    let probe_retry_mins = mins(state.store.get_setting(keys::JOB_PROBE_RETRY_MINS).await?);
+    let probe_retry_mins = mins(setting(keys::JOB_PROBE_RETRY_MINS));
     // Absent means the default here, not 0 — the settings page must show the
     // interval that is actually in force, or an admin reading "0" would
     // reasonably conclude nothing is retrying their artwork.
-    let artwork_retry_mins = state
-        .store
-        .get_setting(keys::JOB_ARTWORK_RETRY_MINS)
-        .await?
+    let artwork_retry_mins = setting(keys::JOB_ARTWORK_RETRY_MINS)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(keys::ARTWORK_RETRY_DEFAULT_MINS)
         .max(0);
-    let transcode_cleanup_mins = mins(
-        state
-            .store
-            .get_setting(keys::JOB_TRANSCODE_CLEANUP_MINS)
-            .await?,
-    );
-    let cache_produce_mins = mins(
-        state
-            .store
-            .get_setting(keys::JOB_CACHE_PRODUCE_MINS)
-            .await?,
-    );
-    let cache_max_gb = state
-        .store
-        .get_setting(keys::CACHE_MAX_GB)
-        .await?
+    let transcode_cleanup_mins = mins(setting(keys::JOB_TRANSCODE_CLEANUP_MINS));
+    let cache_produce_mins = mins(setting(keys::JOB_CACHE_PRODUCE_MINS));
+    let cache_max_gb = setting(keys::CACHE_MAX_GB)
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(crate::cachekeep::DEFAULT_MAX_GB)
         .max(0);
@@ -1286,24 +1262,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
         None => 0,
     };
-    let telemetry_retain_days = state
-        .store
-        .get_setting(keys::TELEMETRY_RETAIN_DAYS)
-        .await?
+    let telemetry_retain_days = setting(keys::TELEMETRY_RETAIN_DAYS)
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)
         .max(0);
-    let playback_network_priors = state
-        .store
-        .get_setting(keys::PLAYBACK_NETWORK_PRIORS)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
+    let playback_network_priors =
+        setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let offline_enabled = !matches!(
-        state
-            .store
-            .get_setting(keys::OFFLINE_ENABLED)
-            .await?
-            .as_deref(),
+        setting(keys::OFFLINE_ENABLED).as_deref(),
         Some("0" | "false" | "off" | "no")
     );
     let offline_integer = |value: Option<String>, default: i64| {
@@ -1313,33 +1279,19 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .max(0)
     };
     let offline_max_gb = offline_integer(
-        state.store.get_setting(keys::OFFLINE_MAX_GB).await?,
+        setting(keys::OFFLINE_MAX_GB),
         super::offline::DEFAULT_GLOBAL_GB,
     );
     let offline_max_gb_per_user = offline_integer(
-        state
-            .store
-            .get_setting(keys::OFFLINE_MAX_GB_PER_USER)
-            .await?,
+        setting(keys::OFFLINE_MAX_GB_PER_USER),
         super::offline::DEFAULT_USER_GB,
     );
     let offline_max_rows_per_user = offline_integer(
-        state
-            .store
-            .get_setting(keys::OFFLINE_MAX_ROWS_PER_USER)
-            .await?,
+        setting(keys::OFFLINE_MAX_ROWS_PER_USER),
         super::offline::DEFAULT_USER_ROWS,
     );
-    let scan_on_startup = state
-        .store
-        .get_setting(keys::JOB_SCAN_ON_STARTUP)
-        .await?
-        .is_some_and(|v| v.trim() == "1");
-    let genre_backfill = state
-        .store
-        .get_setting(keys::GENRE_BACKFILL)
-        .await?
-        .is_some_and(|v| v.trim() == "1");
+    let scan_on_startup = setting(keys::JOB_SCAN_ON_STARTUP).is_some_and(|v| v.trim() == "1");
+    let genre_backfill = setting(keys::GENRE_BACKFILL).is_some_and(|v| v.trim() == "1");
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1348,12 +1300,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         monarr_configured: !monarr_url.is_empty() && !monarr_api_key.is_empty(),
         monarr_url,
         monarr_api_key,
-        monarr_watched_sync: state
-            .store
-            .get_setting(keys::MONARR_WATCHED_SYNC)
-            .await?
-            .unwrap_or_default()
-            == "1",
+        monarr_watched_sync: setting(keys::MONARR_WATCHED_SYNC).unwrap_or_default() == "1",
         trakt_configured: !trakt_client_id.is_empty() && !trakt_client_secret.is_empty(),
         trakt_client_id,
         trakt_client_secret,
@@ -1368,10 +1315,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_ahead_max_secs,
         hls_ahead_max_bytes,
         hls_scratch_max_bytes,
-        hls_typeless_sliding: state
-            .store
-            .get_setting(keys::HLS_TYPELESS_SLIDING)
-            .await?
+        hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         probe_retry_mins,
         artwork_retry_mins,
@@ -1819,34 +1763,26 @@ async fn offline_work(state: &AppState) -> Result<Vec<OfflineWork>, ApiError> {
         // now; this preserves the write bound without a false 40-second gap.
         .offline_activity_packages(&state.node_id, now, now.saturating_sub(65), 50)
         .await?;
-    let users: HashMap<i64, String> = state
-        .store
-        .list_users()
-        .await?
+    let rows: Vec<_> = rows
         .into_iter()
-        .map(|user| (user.id, user.username))
+        .filter_map(|row| {
+            let transfer_bytes = row
+                .lease_active
+                .then(|| state.offline.transfer_bytes(&row.package.id))
+                .flatten();
+            (row.package.state != "ready" || transfer_bytes.is_some())
+                .then_some((row, transfer_bytes))
+        })
         .collect();
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut work = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (row, transfer_bytes) in rows {
+        let item_id = row.item_id;
+        let title = row.title;
+        let user = row.user_name;
         let package = row.package;
-        let transfer_bytes = row
-            .lease_active
-            .then(|| state.offline.transfer_bytes(&package.id))
-            .flatten();
-        if package.state == "ready" && transfer_bytes.is_none() {
-            continue;
-        }
-        let file = state.store.get_file(package.file_id).await?;
-        let item_id = file.as_ref().map(|file| file.item_id);
-        let title = match item_id {
-            Some(item_id) => state
-                .store
-                .get_item(item_id)
-                .await?
-                .map(|item| item.title)
-                .unwrap_or_else(|| "Unavailable media".to_owned()),
-            None => "Unavailable media".to_owned(),
-        };
         work.push(OfflineWork {
             id: package.id.clone(),
             kind: if transfer_bytes.is_some() {
@@ -1854,10 +1790,7 @@ async fn offline_work(state: &AppState) -> Result<Vec<OfflineWork>, ApiError> {
             } else {
                 "prepare"
             },
-            user: users
-                .get(&package.user_id)
-                .cloned()
-                .unwrap_or_else(|| "Unknown profile".to_owned()),
+            user,
             file_id: package.file_id,
             item_id,
             title,
@@ -1892,13 +1825,6 @@ pub async fn activity(
 ) -> Result<Json<Vec<Activity>>, ApiError> {
     let mut activities = Vec::new();
 
-    let names: HashMap<i64, String> = state
-        .store
-        .list_libraries()
-        .await?
-        .into_iter()
-        .map(|l| (l.id, l.name))
-        .collect();
     let mut statuses: Vec<_> = state
         .jobs
         .all_statuses()
@@ -1907,6 +1833,17 @@ pub async fn activity(
         .filter(|(_, s)| s.running)
         .collect();
     statuses.sort_by_key(|(id, _)| *id);
+    let names: HashMap<i64, String> = if statuses.is_empty() {
+        HashMap::new()
+    } else {
+        state
+            .store
+            .list_libraries()
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l.name))
+            .collect()
+    };
     for (id, status) in statuses {
         let name = names.get(&id).cloned().unwrap_or_else(|| format!("#{id}"));
         let enriching = status.phase.as_deref() == Some("enriching");
@@ -2158,17 +2095,19 @@ pub async fn activity_detail(
     // were never listed at all.
     let (sessions, deliveries) = deliveries(&state).await;
     let offline = offline_work(&state).await?;
-    let names: HashMap<i64, String> = state
-        .store
-        .list_libraries()
-        .await?
-        .into_iter()
-        .map(|l| (l.id, l.name))
-        .collect();
-    let scans: Vec<serde_json::Value> = state
-        .jobs
-        .all_statuses()
-        .await
+    let statuses = state.jobs.all_statuses().await;
+    let names: HashMap<i64, String> = if statuses.is_empty() {
+        HashMap::new()
+    } else {
+        state
+            .store
+            .list_libraries()
+            .await?
+            .into_iter()
+            .map(|l| (l.id, l.name))
+            .collect()
+    };
+    let scans: Vec<serde_json::Value> = statuses
         .into_iter()
         .map(|(id, st)| {
             serde_json::json!({
@@ -2265,25 +2204,191 @@ pub async fn stop_offline_package(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// GET /metrics — Prometheus text exposition (unauthenticated; counts only).
-pub async fn metrics(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    let uptime = state.started_at.elapsed().as_secs();
-    let sessions = state.transcode.active_sessions().await;
-    let libraries = state
-        .store
-        .list_libraries()
-        .await
-        .map(|l| l.len())
-        .unwrap_or(0);
-    let users = state.store.count_users().await.unwrap_or(0);
-    let active_cache_entries = state.transcode.active_cache_entries();
-    let offline = state
-        .store
-        .offline_package_stats(&state.node_id, now_unix())
-        .await
-        .unwrap_or_default();
-    let offline_metrics = format!(
-        "# HELP plurx_offline_packages Durable offline packages by state.\n\
+/// Store-free substate available to the unauthenticated Prometheus handler.
+/// Its fields expose only process-local counters and the background sample;
+/// the handler cannot reach `AppState::store` through this type.
+#[derive(Clone)]
+pub(crate) struct MetricsState {
+    started_at: Instant,
+    transcode: crate::transcode::TranscodeMetrics,
+    integration: Arc<IntegrationMetrics>,
+    offline: Arc<crate::offline::OfflineMetrics>,
+    store_metrics: StoreMetricsCache,
+    passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
+}
+
+impl FromRef<AppState> for MetricsState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            started_at: state.started_at,
+            transcode: state.transcode.metrics_handle(),
+            integration: state.jobs.metrics_handle(),
+            offline: state.offline.metrics_handle(),
+            store_metrics: state.store_metrics.clone(),
+            passive_raft: state.replication.metrics_handle(),
+        }
+    }
+}
+
+fn render_passive_raft_metrics(
+    view: plurx_core::cluster::migration::status::PassiveRaftMetricsView,
+) -> String {
+    let mut out = format!(
+        "# HELP plurx_raft_metric_sample_valid Whether the named Raft sample is present and fresh.\n\
+         # TYPE plurx_raft_metric_sample_valid gauge\n\
+         plurx_raft_metric_sample_valid{{source=\"local\"}} {}\n\
+         plurx_raft_metric_sample_valid{{source=\"watermark\"}} {}\n\
+         # HELP plurx_raft_metric_sample_errors_total Rejected or closed samples from the named Raft source.\n\
+         # TYPE plurx_raft_metric_sample_errors_total counter\n\
+         plurx_raft_metric_sample_errors_total{{source=\"local\"}} {}\n\
+         plurx_raft_metric_sample_errors_total{{source=\"watermark\"}} {}\n\
+         # HELP plurx_raft_leader_changes_total Distinct known-leader changes observed by this process.\n\
+         # TYPE plurx_raft_leader_changes_total counter\n\
+         plurx_raft_leader_changes_total {}\n",
+        u8::from(view.valid),
+        u8::from(view.watermark_valid),
+        view.errors,
+        view.watermark_errors,
+        view.leader_changes,
+    );
+    if view.age_seconds.is_some() || view.watermark_age_millis.is_some() {
+        out.push_str(
+            "# HELP plurx_raft_metric_sample_age_seconds Age of the last successful sample from the named Raft source.\n\
+             # TYPE plurx_raft_metric_sample_age_seconds gauge\n",
+        );
+        if let Some(age) = view.age_seconds {
+            out.push_str(&format!(
+                "plurx_raft_metric_sample_age_seconds{{source=\"local\"}} {age}\n"
+            ));
+        }
+        if let Some(age_millis) = view.watermark_age_millis {
+            out.push_str(&format!(
+                "plurx_raft_metric_sample_age_seconds{{source=\"watermark\"}} {}.{:03}\n",
+                age_millis / 1_000,
+                age_millis % 1_000,
+            ));
+        }
+    }
+    if let Some(sample) = view.sample {
+        out.push_str(&format!(
+            "# HELP plurx_raft_current_term Current term observed from the local Raft watch.\n\
+             # TYPE plurx_raft_current_term gauge\n\
+             plurx_raft_current_term {}\n\
+             # HELP plurx_raft_leader_known Whether the local Raft watch currently identifies a leader.\n\
+             # TYPE plurx_raft_leader_known gauge\n\
+             plurx_raft_leader_known {}\n\
+             # HELP plurx_raft_is_leader Whether this process is the leader in the observed term.\n\
+             # TYPE plurx_raft_is_leader gauge\n\
+             plurx_raft_is_leader {}\n",
+            sample.current_term,
+            u8::from(sample.leader_known),
+            u8::from(sample.is_leader),
+        ));
+        if let Some(index) = sample.last_applied_index {
+            out.push_str(&format!(
+                "# HELP plurx_raft_applied_index Last log index applied by this local state machine.\n\
+                 # TYPE plurx_raft_applied_index gauge\n\
+                 plurx_raft_applied_index {index}\n"
+            ));
+        }
+    }
+    if let Some(watermark) = view.watermark {
+        out.push_str(&format!(
+            "# HELP plurx_raft_commit_index Most recent quorum-confirmed database commit watermark.\n\
+             # TYPE plurx_raft_commit_index gauge\n\
+             plurx_raft_commit_index {}\n",
+            watermark.committed_index,
+        ));
+        if let Some(lag) = watermark.apply_lag_entries {
+            out.push_str(&format!(
+                "# HELP plurx_raft_apply_lag_entries Quorum watermark minus the local applied index.\n\
+                 # TYPE plurx_raft_apply_lag_entries gauge\n\
+                 plurx_raft_apply_lag_entries {lag}\n"
+            ));
+        }
+    }
+    if let Some(snapshot) = view.snapshot_metrics {
+        render_snapshot_metrics(&mut out, snapshot);
+    }
+    out
+}
+
+fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
+    out.push_str(
+        "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
+         # TYPE plurx_raft_snapshot_seconds histogram\n",
+    );
+    for (operation, outcome, histogram) in [
+        ("build", "ok", snapshot.build_ok),
+        ("build", "error", snapshot.build_error),
+        ("install", "ok", snapshot.install_ok),
+        ("install", "error", snapshot.install_error),
+    ] {
+        for (bound_nanos, count) in DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS
+            .iter()
+            .zip(histogram.cumulative_buckets)
+        {
+            let label = prometheus_seconds_label(*bound_nanos);
+            out.push_str(&format!(
+                "plurx_raft_snapshot_seconds_bucket{{operation=\"{operation}\",outcome=\"{outcome}\",le=\"{label}\"}} {count}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "plurx_raft_snapshot_seconds_bucket{{operation=\"{operation}\",outcome=\"{outcome}\",le=\"+Inf\"}} {}\n\
+             plurx_raft_snapshot_seconds_sum{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}.{:09}\n\
+             plurx_raft_snapshot_seconds_count{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}\n",
+            histogram.count,
+            histogram.sum_nanos / 1_000_000_000,
+            histogram.sum_nanos % 1_000_000_000,
+            histogram.count,
+        ));
+    }
+}
+
+fn prometheus_seconds_label(nanos: u64) -> String {
+    let whole = nanos / 1_000_000_000;
+    let remainder = nanos % 1_000_000_000;
+    if remainder == 0 {
+        return whole.to_string();
+    }
+    let mut fraction = format!("{remainder:09}");
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    format!("{whole}.{fraction}")
+}
+
+fn render_store_metrics(view: StoreMetricsView) -> String {
+    let mut out = format!(
+        "# HELP plurx_store_metrics_sample_valid Whether the Store-backed gauge sample is present and fresh.\n\
+         # TYPE plurx_store_metrics_sample_valid gauge\n\
+         plurx_store_metrics_sample_valid {}\n\
+         # HELP plurx_store_metrics_sample_errors_total Failed Store-backed gauge samples.\n\
+         # TYPE plurx_store_metrics_sample_errors_total counter\n\
+         plurx_store_metrics_sample_errors_total {}\n",
+        u8::from(view.valid),
+        view.errors,
+    );
+    if let Some(age) = view.age_seconds {
+        out.push_str(&format!(
+            "# HELP plurx_store_metrics_sample_age_seconds Age of the last complete Store-backed gauge sample.\n\
+             # TYPE plurx_store_metrics_sample_age_seconds gauge\n\
+             plurx_store_metrics_sample_age_seconds {age}\n"
+        ));
+    }
+    let Some(sample) = view.sample else {
+        return out;
+    };
+    let offline = sample.offline;
+    let (pending, ok, failed) = sample.watched_outbox;
+    out.push_str(&format!(
+        "# HELP plurx_libraries_total Configured libraries.\n\
+         # TYPE plurx_libraries_total gauge\n\
+         plurx_libraries_total {}\n\
+         # HELP plurx_users_total Registered users.\n\
+         # TYPE plurx_users_total gauge\n\
+         plurx_users_total {}\n\
+         # HELP plurx_offline_packages Durable offline packages by state.\n\
          # TYPE plurx_offline_packages gauge\n\
          plurx_offline_packages{{state=\"queued\"}} {}\n\
          plurx_offline_packages{{state=\"preparing\"}} {}\n\
@@ -2301,9 +2406,13 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
          # HELP plurx_cache_pinned_bytes Completed cache bytes protected by offline packages.\n\
          # TYPE plurx_cache_pinned_bytes gauge\n\
          plurx_cache_pinned_bytes{{reason=\"offline\"}} {}\n\
-         # HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
-         # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {}\n{}",
+         # HELP plurx_watched_outbox Watched notifications queued for monarr, by state.\n\
+         # TYPE plurx_watched_outbox gauge\n\
+         plurx_watched_outbox{{status=\"pending\"}} {pending}\n\
+         plurx_watched_outbox{{status=\"ok\"}} {ok}\n\
+         plurx_watched_outbox{{status=\"failed\"}} {failed}\n",
+        sample.libraries,
+        sample.users,
         offline.queued,
         offline.preparing,
         offline.ready,
@@ -2314,15 +2423,31 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
         offline.failed_bytes,
         offline.active_leases,
         offline.pinned_bytes,
-        active_cache_entries,
+    ));
+    out
+}
+
+/// GET /metrics — Prometheus text exposition (unauthenticated; counts only).
+pub(crate) async fn metrics(
+    State(state): State<MetricsState>,
+) -> impl axum::response::IntoResponse {
+    let uptime = state.started_at.elapsed().as_secs();
+    let (sessions, active_cache_entries) = state.transcode.snapshot();
+    let store_metrics = render_store_metrics(state.store_metrics.snapshot());
+    let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
+    let process_metrics = format!(
+        "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
+         # TYPE plurx_cache_protected_entries gauge\n\
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}",
         state.offline.prometheus(),
+        plurx_core::store::prometheus_store_operations(),
     );
 
     // Integration counters (plan P6). Scans by what asked for them, and how
     // many times another application has called in at all — the pair that
     // answers "is the fast path actually being used, or is the scheduled
     // sweep quietly carrying everything?".
-    let (by_trigger, notifications) = state.jobs.metrics().snapshot();
+    let (by_trigger, notifications) = state.integration.snapshot();
     let mut scans = String::from(
         "# HELP plurx_scan_total Library scans started, by what asked for one.\n\
          # TYPE plurx_scan_total counter\n",
@@ -2332,18 +2457,6 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
             "plurx_scan_total{{trigger=\"{trigger}\"}} {count}\n"
         ));
     }
-    let (pending, ok, failed) = state
-        .store
-        .watched_outbox_counts()
-        .await
-        .unwrap_or((0, 0, 0));
-    scans.push_str(&format!(
-        "# HELP plurx_watched_outbox Watched notifications queued for monarr, by state.\n\
-         # TYPE plurx_watched_outbox gauge\n\
-         plurx_watched_outbox{{status=\"pending\"}} {pending}\n\
-         plurx_watched_outbox{{status=\"ok\"}} {ok}\n\
-         plurx_watched_outbox{{status=\"failed\"}} {failed}\n"
-    ));
     scans.push_str(&format!(
         "# HELP plurx_notify_received_total Scan requests received from other applications.\n\
          # TYPE plurx_notify_received_total counter\n\
@@ -2360,13 +2473,7 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         # HELP plurx_libraries_total Configured libraries.\n\
-         # TYPE plurx_libraries_total gauge\n\
-         plurx_libraries_total {libraries}\n\
-         # HELP plurx_users_total Registered users.\n\
-         # TYPE plurx_users_total gauge\n\
-         plurx_users_total {users}\n\
-         {scans}{offline_metrics}{playback_metrics}",
+         {scans}{store_metrics}{raft_metrics}{process_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         playback_metrics = crate::telemetry::prometheus(),
@@ -2384,6 +2491,206 @@ pub async fn metrics(State(state): State<AppState>) -> impl axum::response::Into
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
+        let labels = DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.map(prometheus_seconds_label);
+        assert_eq!(
+            labels,
+            [
+                "0.001", "0.0025", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1",
+                "5", "10", "30", "60", "120", "300",
+            ]
+        );
+    }
+
+    #[test]
+    fn prometheus_scrape_has_no_store_operation() {
+        let source = include_str!("system.rs");
+        let handler = source
+            .split_once("pub(crate) async fn metrics")
+            .expect("metrics handler")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("metrics test module")
+            .0;
+        let compact = handler
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(compact.starts_with("(State(state):State<MetricsState>"));
+        assert!(!compact.contains("AppState"));
+        assert!(!compact.contains(".store."));
+        assert!(!compact.contains("Store>"));
+        assert!(!compact.contains("Client"));
+        assert!(!compact.contains("ReplicationMonitor"));
+        assert!(!compact.contains("LocalDbRaft"));
+
+        let substate = source
+            .split_once("pub(crate) struct MetricsState")
+            .expect("metrics substate")
+            .1
+            .split_once("impl FromRef<AppState> for MetricsState")
+            .expect("metrics substate conversion")
+            .0;
+        assert!(!substate.contains("Manager"));
+        assert!(!substate.contains("Arc<dyn Store>"));
+        assert!(!substate.contains("Client"));
+        assert!(!substate.contains("ReplicationMonitor"));
+        assert!(!substate.contains("LocalDbRaft"));
+    }
+
+    #[test]
+    fn absent_and_stale_store_samples_are_explicit_in_exposition() {
+        let absent = render_store_metrics(StoreMetricsView {
+            sample: None,
+            age_seconds: None,
+            valid: false,
+            errors: 2,
+        });
+        assert!(absent.contains("plurx_store_metrics_sample_valid 0"));
+        assert!(absent.contains("plurx_store_metrics_sample_errors_total 2"));
+        assert!(!absent.contains("plurx_store_metrics_sample_age_seconds "));
+        assert!(!absent.contains("plurx_libraries_total"));
+
+        let stale = render_store_metrics(StoreMetricsView {
+            sample: Some(plurx_core::store::PrometheusStoreSnapshot {
+                libraries: 3,
+                users: 4,
+                ..Default::default()
+            }),
+            age_seconds: Some(121),
+            valid: false,
+            errors: 3,
+        });
+        assert!(stale.contains("plurx_store_metrics_sample_valid 0"));
+        assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
+        assert!(stale.contains("plurx_libraries_total 3"));
+        assert!(stale.contains("plurx_users_total 4"));
+    }
+
+    #[test]
+    fn raft_exposition_is_fixed_and_privacy_safe() {
+        use plurx_core::cluster::migration::status::{
+            PassiveRaftMetricsView, PassiveRaftSample, QuorumWatermarkSample,
+        };
+        let zero_snapshot_histogram = DbSnapshotHistogram {
+            count: 0,
+            sum_nanos: 0,
+            cumulative_buckets: [0; 16],
+        };
+
+        let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
+            local_source: true,
+            sample: Some(PassiveRaftSample {
+                current_term: 7,
+                last_applied_index: Some(42),
+                leader_known: true,
+                is_leader: true,
+            }),
+            age_seconds: Some(2),
+            valid: true,
+            errors: 3,
+            leader_changes: 4,
+            watermark_source: true,
+            watermark: Some(QuorumWatermarkSample {
+                committed_index: 45,
+                apply_lag_entries: Some(3),
+            }),
+            watermark_age_millis: Some(250),
+            watermark_valid: true,
+            watermark_errors: 5,
+            snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
+                build_ok: DbSnapshotHistogram {
+                    count: 2,
+                    sum_nanos: 1_250_000_000,
+                    cumulative_buckets: [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2],
+                },
+                build_error: zero_snapshot_histogram,
+                install_ok: zero_snapshot_histogram,
+                install_error: zero_snapshot_histogram,
+            }),
+        });
+
+        assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"local\"} 1"));
+        assert!(rendered.contains("plurx_raft_metric_sample_age_seconds{source=\"local\"} 2"));
+        assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"local\"} 3"));
+        assert!(rendered.contains("plurx_raft_current_term 7"));
+        assert!(rendered.contains("plurx_raft_applied_index 42"));
+        assert!(rendered.contains("plurx_raft_leader_known 1"));
+        assert!(rendered.contains("plurx_raft_is_leader 1"));
+        assert!(rendered.contains("plurx_raft_leader_changes_total 4"));
+        assert!(rendered.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 1"));
+        assert!(
+            rendered.contains("plurx_raft_metric_sample_age_seconds{source=\"watermark\"} 0.250")
+        );
+        assert!(rendered.contains("plurx_raft_metric_sample_errors_total{source=\"watermark\"} 5"));
+        assert!(rendered.contains("plurx_raft_commit_index 45"));
+        assert!(rendered.contains("plurx_raft_apply_lag_entries 3"));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"0.1\"} 1"
+        ));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_bucket{operation=\"build\",outcome=\"ok\",le=\"+Inf\"} 2"
+        ));
+        assert!(rendered.contains(
+            "plurx_raft_snapshot_seconds_sum{operation=\"build\",outcome=\"ok\"} 1.250000000"
+        ));
+        assert!(!rendered.contains("node_id"));
+        assert!(!rendered.contains("leader_id"));
+
+        let stale = render_passive_raft_metrics(PassiveRaftMetricsView {
+            watermark_valid: false,
+            watermark_age_millis: Some(1_001),
+            watermark: Some(QuorumWatermarkSample {
+                committed_index: 45,
+                apply_lag_entries: None,
+            }),
+            ..PassiveRaftMetricsView {
+                local_source: true,
+                sample: Some(PassiveRaftSample {
+                    current_term: 7,
+                    last_applied_index: Some(42),
+                    leader_known: true,
+                    is_leader: false,
+                }),
+                age_seconds: Some(1),
+                valid: true,
+                errors: 0,
+                leader_changes: 0,
+                watermark_source: true,
+                watermark: None,
+                watermark_age_millis: None,
+                watermark_valid: false,
+                watermark_errors: 1,
+                snapshot_metrics: None,
+            }
+        });
+        assert!(stale.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
+        assert!(stale.contains("plurx_raft_commit_index 45"));
+        assert!(!stale.contains("plurx_raft_apply_lag_entries"));
+
+        let absent = render_passive_raft_metrics(PassiveRaftMetricsView {
+            local_source: false,
+            sample: None,
+            age_seconds: None,
+            valid: false,
+            errors: 0,
+            leader_changes: 0,
+            watermark_source: false,
+            watermark: None,
+            watermark_age_millis: None,
+            watermark_valid: false,
+            watermark_errors: 0,
+            snapshot_metrics: None,
+        });
+        assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!absent.contains("plurx_raft_metric_sample_age_seconds"));
+        assert!(!absent.contains("plurx_raft_applied_index"));
+        assert!(absent.contains("plurx_raft_metric_sample_valid{source=\"watermark\"} 0"));
+        assert!(!absent.contains("plurx_raft_commit_index"));
+        assert!(!absent.contains("plurx_raft_apply_lag_entries"));
+    }
 
     fn beacon(event: &str, ms: i64) -> ClientLog {
         ClientLog {

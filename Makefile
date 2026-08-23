@@ -81,17 +81,24 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 
 .PHONY: cluster-check
 cluster-check: ## Run WAL recovery plus M1b-M2 durable-state, import, growth, and failure contracts
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  metadata::tests::interrupted_metadata_replacement_keeps_the_previous_record_readable \
 	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  writer::tests::single_file_snapshot_tail_restores_its_missing_purge_boundary \
 	  -- --exact
-	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	$(CARGO) test --locked -p plurx-core --features cluster-read-cost-validation \
 	  --test store_contract -- --test-threads=1
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  topology::tests::topology_artifact -- --nocapture
 	$(CARGO) run --locked -p plurx-cluster-check -- check
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  topology target/validation/cluster-topology-semantic.json 3,4
 
 .PHONY: cluster-growth
 cluster-growth: ## Measure and gate post-coalescer one-voter compacted growth
@@ -239,6 +246,7 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
 	@node tests/web/reader.test.js
+	@node tests/web/page-read-budget.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \

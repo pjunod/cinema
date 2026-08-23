@@ -211,6 +211,13 @@ jobs:
       - name: Run separate-process replica and failure contracts
         if: needs.scope.outputs.cluster_auth == 'true'
         run: make cluster-check
+      - name: Retain deterministic topology evidence
+        if: always() && needs.scope.outputs.cluster_auth == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-topology-semantic
+          path: target/validation/cluster-topology-semantic.json
+          if-no-files-found: error
       - name: Lint the isolated semantic harness
         if: needs.scope.outputs.hiqlite_spike == 'true'
         run: cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings

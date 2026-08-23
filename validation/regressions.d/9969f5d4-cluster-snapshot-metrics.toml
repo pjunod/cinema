@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["9969f5d4", "212824a9", "30b97ab1", "83fb28d8", "cd5138de", "a7079d58", "9d7bac8e", "2b05b68c", "e9db0c5a", "8de4a3fa", "dc3581bf", "c9afefbf", "4e12a5fe", "3280d93e", "af92317f", "cc5a3a84", "b2db9307", "312e9a81", "d31abc44", "0d372021", "d1430fdc", "27fac0cd"]
+points = [
+  "cluster.auth",
+  "cluster.page-reads",
+  "core.media",
+  "persistence.upgrades",
+  "server.api",
+  "validation.framework",
+]
+checks = [
+  "api-wire",
+  "catalog-contract",
+  "cluster-auth",
+  "database-upgrades",
+  "history-regressions",
+  "operations-contract",
+  "resource-bounds",
+  "rust-gate",
+  "user-journey",
+]
+reason = "The retained vendor tests exercise real SQLite snapshot build/install success and rejected-candidate exits, cancellation classification, concurrent immutable metrics publications, exact-pointer reads before and after forced auto-heal, cleanup when process memory lags a deliberately older durable pointer, read-only generation inspection, live-metadata fallback after a failed legacy build, pointer-less recovery by greatest applied Raft index rather than UUID order, and durable pending-generation completion after a cancelled caller plus path-scoped post-restore pointer failure; that handoff refuses a replacement receiver while unresolved and preserves its new bytes after recovery. The one-voter compaction growth gate proves real build deltas. The three-voter target compiles the integration surface, while API/rendering tests prove the local-only wait-free scrape boundary, exact fixed Prometheus labels derived from the exported bounds, and the absence of storage calls or dynamic identifiers."

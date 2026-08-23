@@ -25,11 +25,14 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
+use plurx_core::cluster::coordination::{Lease, LeaseClaim};
 use plurx_core::cluster::membership::{
     join_token_digest, ArtworkPeerAuth, ClusterAvailability, ClusterPeer, FinalizeJoinRequest,
-    IssuedJoinToken, JoinSecrets, MembershipManager, MembershipStatus, RedeemJoinRequest,
+    IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager, MembershipStatus,
+    RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -37,16 +40,17 @@ use plurx_core::cluster::migration::status::{
 use plurx_core::cluster::migration::{ActivationMarker, HIQLITE_WAL_SIZE_BYTES};
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
-    ItemKind, ItemSort, LibraryKind, MetadataPatch, NewItem, NewLibrary, NewOfflinePackage,
-    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, ProbeResult,
-    TraktAuth,
+    BookMetadataPatch, BookMetadataSource, ItemKind, ItemSort, LibraryKind, MetadataPatch, NewItem,
+    NewLibrary, NewOfflinePackage, OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent,
+    PlaybackEventQuery, ProbeResult, TraktAuth,
 };
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    ApiKeyStore, ClusterCompatibility, HiqliteAuthStore, LibraryStore, MediaStore,
-    OfflinePackageStore, PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus,
-    SettingsStore, TraktStore, TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore,
-    AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+    ApiKeyStore, ArtworkRepairFence, ClusterCompatibility, CoordinationStore,
+    FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
+    PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
+    TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
+    AUTH_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -61,8 +65,17 @@ use tokio::time::Instant as TokioInstant;
 mod production_progress;
 use production_progress::ProgressCoalescer;
 
+mod topology;
+pub use topology::{
+    percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
+    NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
+    TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
+};
+
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
+const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
+const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -179,6 +192,13 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("membership") => run_membership_lifecycle_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("topology") => {
+            let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from("target/validation/cluster-topology-semantic.json")
+            });
+            let order = topology::parse_topology_order(args.get(3).map(String::as_str))?;
+            run_topology_comparison(&output, order).await
+        }
         Some("node") => {
             let launch: NodeLaunch =
                 serde_json::from_str(args.get(2).context("node mode requires its launch JSON")?)?;
@@ -236,12 +256,72 @@ async fn run_growth_subprocess() -> Result<()> {
 async fn controller() -> Result<()> {
     println!("cluster-check: membership lifecycle 1 -> 3 -> 2");
     run_membership_lifecycle_case().await?;
+    println!("cluster-check: current-leader self-leave");
+    run_leader_self_leave_case().await?;
+    println!("cluster-check: four-voter leader self-leave with one survivor down");
+    run_degraded_four_voter_leader_self_leave_case().await?;
+    println!("cluster-check: rolling quorum-watermark stream compatibility");
+    run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
     println!("cluster-check: all M1b/M1c/M1d/M3a failure contracts passed");
     Ok(())
+}
+
+/// Prove a new follower can talk to a leader that predates the watermark
+/// marker. The old handler receives the real serialized consistent-query
+/// request, returns SQLite's harmless syntax error, and then serves an
+/// ordinary consistent query on that exact WebSocket connection.
+async fn run_quorum_watermark_rolling_compatibility_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("watermark rolling-compatibility data root")?;
+    let mut cluster = with_port_retry(|attempt| {
+        let reservation = allocate_nodes(3);
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        let executable = executable.clone();
+        async move {
+            ClusterProcesses::start_with_old_watermark_handler(
+                &executable,
+                &attempt_root,
+                reservation?,
+                1,
+            )
+            .await
+        }
+    })
+    .await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    if cluster.leader().await? != 1 {
+        cluster
+            .request(1, Request::TriggerElection)
+            .await?
+            .require_ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if cluster.leader().await? == 1 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("old-handler voter 1 did not become compatibility leader");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    cluster
+        .request(2, Request::ProveOldWatermarkStreamCompatibility)
+        .await?
+        .require_ok()?;
+    cluster.shutdown_all().await
 }
 
 async fn run_membership_lifecycle_case() -> Result<()> {
@@ -265,6 +345,10 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     })
     .await?;
+    cluster
+        .request(1, Request::SeedLegacyArtworkUrls)
+        .await?
+        .require_ok()?;
     cluster.request(1, Request::Bootstrap).await?.require_ok()?;
 
     let initial_dump = match cluster.request(1, Request::Dump).await? {
@@ -317,6 +401,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     node_id,
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
+                    emulate_old_watermark_handler: false,
                 },
             )
             .await?;
@@ -470,6 +555,18 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         bail!("public node records exposed token or listener-port material");
     }
+    require_membership_error_message(
+        cluster
+            .request(
+                2,
+                Request::RejectDuplicateArtworkUrl {
+                    public_http_url: "http://127.0.0.1:33001".to_owned(),
+                },
+            )
+            .await?,
+        "membership_internal",
+        "already published by another cluster node",
+    )?;
     for node_id in 1..=3 {
         let urls = match cluster.request(node_id, Request::ArtworkPeerUrls).await? {
             Response::ArtworkPeerUrls { urls } => urls,
@@ -484,7 +581,421 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         }
     }
 
-    let target = leader;
+    let before_heartbeats = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("heartbeat budget missing initial applied index")?
+        }
+        response => bail!("unexpected pre-heartbeat metrics: {response:?}"),
+    };
+    cluster
+        .request(leader, Request::Heartbeat)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(leader, Request::Heartbeat)
+        .await?
+        .require_ok()?;
+    let after_heartbeats = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("heartbeat budget missing final applied index")?
+        }
+        response => bail!("unexpected post-heartbeat metrics: {response:?}"),
+    };
+    if after_heartbeats.saturating_sub(before_heartbeats) != 2 {
+        bail!(
+            "two liveness heartbeats consumed {} Raft entries instead of two",
+            after_heartbeats.saturating_sub(before_heartbeats)
+        );
+    }
+
+    // Four reconciliation loops must not turn one persistent miss into one
+    // Raft write per node. Only the current leader submits the claim; after a
+    // live election, its successor waits a receiver-local monotonic lease and
+    // then fences the old term without consulting either host's wall clock.
+    // Process scheduling plus consistent reads can exceed hundreds of
+    // milliseconds on a loaded CI host. Keep the active-lease proof far from
+    // its deadline; the explicit sleeps below are the only expiry trigger.
+    let repair_lease_ms = 5_000_u64;
+    let repair_item = match cluster
+        .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 1 })
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("unexpected artwork fence fixture response: {response:?}"),
+    };
+    let wrong_target_item = match cluster
+        .request(leader, Request::SeedArtworkRepairFenceItem { ordinal: 2 })
+        .await?
+    {
+        Response::ItemId { item_id } => item_id,
+        response => bail!("unexpected cross-item fence fixture response: {response:?}"),
+    };
+    let before_repair = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("repair budget missing initial applied index")?
+        }
+        response => bail!("unexpected pre-repair metrics: {response:?}"),
+    };
+    let mut first_winners = Vec::new();
+    let mut initial_fence = None;
+    for node_id in 1..=3 {
+        if node_id == leader {
+            match cluster
+                .request(
+                    node_id,
+                    Request::ClaimArtworkRepairFence {
+                        item_id: repair_item,
+                        lease_ms: repair_lease_ms,
+                    },
+                )
+                .await?
+            {
+                Response::ArtworkRepairFence { fence: Some(fence) } => {
+                    first_winners.push(node_id);
+                    initial_fence = Some(fence);
+                }
+                Response::ArtworkRepairFence { fence: None } => {}
+                response => bail!("unexpected initial artwork fence response: {response:?}"),
+            }
+        } else {
+            match cluster
+                .request(
+                    node_id,
+                    Request::ClaimArtworkRepair {
+                        item_id: repair_item,
+                        lease_ms: repair_lease_ms,
+                    },
+                )
+                .await?
+            {
+                Response::Flag { value: true } => first_winners.push(node_id),
+                Response::Flag { value: false } => {}
+                response => bail!("unexpected artwork repair claim response: {response:?}"),
+            }
+        }
+    }
+    if first_winners != [leader] {
+        bail!("artwork repair authority was not exactly leader {leader}: {first_winners:?}");
+    }
+    let after_repair = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("repair budget missing final applied index")?
+        }
+        response => bail!("unexpected post-repair metrics: {response:?}"),
+    };
+    if after_repair.saturating_sub(before_repair) != 1 {
+        bail!(
+            "one artwork repair contention round consumed {} Raft entries instead of one",
+            after_repair.saturating_sub(before_repair)
+        );
+    }
+    let held_index = after_repair;
+    for node_id in 1..=3 {
+        match cluster
+            .request(
+                node_id,
+                Request::ClaimArtworkRepair {
+                    item_id: repair_item,
+                    lease_ms: repair_lease_ms,
+                },
+            )
+            .await?
+        {
+            Response::Flag { value: false } => {}
+            response => bail!("an active repair lease was reclaimed: {response:?}"),
+        }
+    }
+    let held_after = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("held repair lease missing applied index")?
+        }
+        response => bail!("unexpected held-lease metrics: {response:?}"),
+    };
+    if held_after != held_index {
+        bail!("failed repair retries wrote inside the active lease");
+    }
+    tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
+    let old_fence = match cluster
+        .request(
+            leader,
+            Request::ClaimArtworkRepairFence {
+                item_id: repair_item,
+                lease_ms: repair_lease_ms,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkRepairFence { fence: Some(fence) } => fence,
+        response => bail!("stable-term artwork re-repair stayed fenced: {response:?}"),
+    };
+    let same_term_after = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics { applied_index, .. } => {
+            applied_index.context("stable-term repair reuse missing applied index")?
+        }
+        response => bail!("unexpected stable-term repair metrics: {response:?}"),
+    };
+    if same_term_after.saturating_sub(held_index) != 1 {
+        bail!(
+            "stable-term artwork re-repair consumed {} Raft entries instead of one fenced generation",
+            same_term_after.saturating_sub(held_index)
+        );
+    }
+    match cluster
+        .request(
+            leader,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: initial_fence.context("initial leader did not return its repair fence")?,
+                title: "stale same-term write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: false,
+            metadata: false,
+            book: false,
+        } => {}
+        response => bail!("an old same-term artwork generation remained valid: {response:?}"),
+    }
+    match cluster
+        .request(
+            leader,
+            Request::ClaimArtworkRepairAfterPause {
+                item_id: repair_item + 1,
+                lease_ms: 100,
+                pause_ms: 150,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("expired post-CAS artwork claim could begin work: {response:?}"),
+    }
+    let election_target = (1..=3)
+        .find(|node_id| *node_id != leader)
+        .context("choose artwork leadership successor")?;
+    cluster
+        .request(election_target, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let handoff_deadline = Instant::now() + Duration::from_secs(10);
+    let handoff = loop {
+        let current = cluster.leader().await?;
+        if current != leader {
+            break current;
+        }
+        if Instant::now() >= handoff_deadline {
+            bail!("artwork repair leadership did not move from voter {leader}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    loop {
+        match cluster.request(handoff, Request::Metrics).await? {
+            Response::Metrics {
+                quorum_acknowledged: true,
+                ..
+            } => break,
+            Response::Metrics { .. } => {}
+            response => bail!("unexpected successor metrics response: {response:?}"),
+        }
+        if Instant::now() >= handoff_deadline {
+            bail!("artwork repair successor never established a quorum lease");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    match cluster
+        .request(
+            handoff,
+            Request::ClaimArtworkRepair {
+                item_id: repair_item,
+                lease_ms: repair_lease_ms,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("successor ignored the monotonic repair fence: {response:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
+    let mut handoff_winners = Vec::new();
+    let mut new_fence = None;
+    for node_id in 1..=3 {
+        if node_id == handoff {
+            match cluster
+                .request(
+                    node_id,
+                    Request::ClaimArtworkRepairFence {
+                        item_id: repair_item,
+                        lease_ms: repair_lease_ms,
+                    },
+                )
+                .await?
+            {
+                Response::ArtworkRepairFence { fence: Some(fence) } => {
+                    handoff_winners.push(node_id);
+                    new_fence = Some(fence);
+                }
+                Response::ArtworkRepairFence { fence: None } => {}
+                response => bail!("unexpected handoff repair fence response: {response:?}"),
+            }
+        } else {
+            match cluster
+                .request(
+                    node_id,
+                    Request::ClaimArtworkRepair {
+                        item_id: repair_item,
+                        lease_ms: repair_lease_ms,
+                    },
+                )
+                .await?
+            {
+                Response::Flag { value: true } => handoff_winners.push(node_id),
+                Response::Flag { value: false } => {}
+                response => bail!("unexpected handoff repair claim response: {response:?}"),
+            }
+        }
+    }
+    if handoff_winners != [handoff] {
+        bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
+    }
+    let new_fence = new_fence.context("new leader did not return its artwork repair fence")?;
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: wrong_target_item,
+                fence: new_fence.clone(),
+                title: "wrong-item write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: false,
+            metadata: false,
+            book: false,
+        } => {}
+        response => bail!("an artwork fence authorized a different item: {response:?}"),
+    }
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: old_fence,
+                title: "stale old-term write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: false,
+            metadata: false,
+            book: false,
+        } => {}
+        response => bail!("an old-term artwork mutation was not fenced: {response:?}"),
+    }
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: new_fence.clone(),
+                title: "stale-job-lease write".to_owned(),
+                stale_job_lease: true,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: false,
+            metadata: false,
+            book: false,
+        } => {}
+        response => bail!("a stale singleton-job lease authorized artwork writes: {response:?}"),
+    }
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: new_fence.clone(),
+                title: "stale-book-snapshot write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: true,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: true,
+            metadata: true,
+            book: false,
+        } => {}
+        response => bail!("a stale book snapshot overwrote newer fields: {response:?}"),
+    }
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: new_fence.clone(),
+                title: "current-term write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: true,
+            metadata: true,
+            book: true,
+        } => {}
+        response => bail!("the current artwork repair fence was refused: {response:?}"),
+    }
+    cluster
+        .request(
+            handoff,
+            Request::ReleaseArtworkRepair {
+                fence: new_fence.clone(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    match cluster
+        .request(
+            handoff,
+            Request::ApplyArtworkRepairFence {
+                target_item_id: repair_item,
+                fence: new_fence,
+                title: "retired-generation write".to_owned(),
+                stale_job_lease: false,
+                stale_book_snapshot: false,
+            },
+        )
+        .await?
+    {
+        Response::ArtworkFenceApply {
+            setting: false,
+            metadata: false,
+            book: false,
+        } => {}
+        response => bail!("a retired artwork generation remained valid: {response:?}"),
+    }
+
+    let post_handoff_leader = cluster.leader().await?;
+    let target = (2..=3)
+        .find(|node_id| *node_id != post_handoff_leader)
+        .context("choose a removable follower")?;
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
@@ -531,6 +1042,33 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // own process so the fixture's source files exist where its packages say
     // they do.
     let target_node = format!("node-{target}");
+    let departing_job_resource = format!("cluster-check:departing-job:{target_node}");
+    let departing_job_lease = match cluster
+        .request(
+            observer,
+            Request::AcquireJobLease {
+                resource: departing_job_resource.clone(),
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
+        Response::JobLease { lease: Some(lease) } => lease,
+        response => bail!("could not seed the departing node's job lease: {response:?}"),
+    };
+    let exhausted_job_lease = match cluster
+        .request(
+            observer,
+            Request::SeedExhaustedJobLease {
+                resource: format!("{departing_job_resource}:exhausted"),
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
+        Response::JobLease { lease: Some(lease) } => lease,
+        response => bail!("could not seed the exhausted departing-node lease: {response:?}"),
+    };
     let media_dir = root.path().join(format!("media-{target_node}"));
     let offline_user = match cluster
         .request(
@@ -550,7 +1088,15 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // resolve: a download that is in flight right now. Lifting the blanket
     // refusal must not turn removal into "always succeeds".
     let transfer_package = format!("{TRANSFER_PACKAGE}-{target_node}");
-    match cluster.request(target, Request::LeaveVoter).await? {
+    match cluster
+        .request(
+            observer,
+            Request::RemoveVoter {
+                node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
         Response::MembershipError { code, message } if code == "node_owns_offline_work" => {
             if !message.contains("transferring") {
                 bail!("in-flight transfer refusal gave the operator no reason: {message}");
@@ -593,7 +1139,12 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .require_ok()?;
 
     cluster
-        .request(target, Request::LeaveVoter)
+        .request(
+            observer,
+            Request::RemoveVoter {
+                node_id: target_node.clone(),
+            },
+        )
         .await?
         .require_ok()?;
     match cluster
@@ -609,6 +1160,115 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::Flag { value: false } => {}
         response => bail!("a removed voter retained artwork access: {response:?}"),
     }
+    match cluster
+        .request(
+            observer,
+            Request::ApplyJobLease {
+                key: format!("cluster-check.removed-job.{target_node}"),
+                lease: departing_job_lease,
+                observed_at_ms: None,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("a removed voter's existing job lease still published: {response:?}"),
+    }
+    match cluster
+        .request(
+            observer,
+            Request::ApplyJobLease {
+                key: format!("cluster-check.removed-exhausted-job.{target_node}"),
+                observed_at_ms: Some(exhausted_job_lease.expires_at_unix_ms - 1),
+                lease: exhausted_job_lease,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!(
+            "a removed voter's exhausted, already-expired token published from a delayed command: {response:?}"
+        ),
+    }
+    match cluster
+        .request(
+            observer,
+            Request::AcquireJobLease {
+                resource: departing_job_resource,
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
+        Response::JobLease { lease: None } => {}
+        response => bail!("a removed voter reacquired singleton work: {response:?}"),
+    }
+    match cluster
+        .request(
+            observer,
+            Request::AcquireJobLeaseLegacy {
+                resource: format!("cluster-check:legacy-reacquire:{target_node}"),
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("legacy lease SQL bypassed a removed-owner fence: {response:?}"),
+    }
+    cluster
+        .request(
+            observer,
+            Request::ClearJobOwnerFence {
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            observer,
+            Request::RemoveVoter {
+                node_id: target_node.clone(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    match cluster
+        .request(
+            observer,
+            Request::AcquireJobLeaseLegacy {
+                resource: format!("cluster-check:legacy-backfill:{target_node}"),
+                owner_node_id: target_node.clone(),
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: false } => {}
+        response => bail!("idempotent removal did not backfill its job-owner fence: {response:?}"),
+    }
+    cluster
+        .request(
+            observer,
+            Request::ReuseRemovedArtworkUrl {
+                removed_node_id: target_node.clone(),
+                public_http_url: format!("http://127.0.0.1:{}", 33_000 + target),
+            },
+        )
+        .await?
+        .require_ok()?;
+    require_membership_error(
+        cluster
+            .request(
+                target,
+                Request::ClaimArtworkRepair {
+                    item_id: 9_003,
+                    lease_ms: 100,
+                },
+            )
+            .await?,
+        "local_node_not_active",
+    )?;
 
     // Either §6.7 outcome closes it — moved to a survivor, or failed with its
     // reservation released. The outcome this exists to catch is the third one:
@@ -812,7 +1472,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     require_membership_error(
         cluster
             .request(
-                observer,
+                leader,
                 Request::RemoveVoter {
                     node_id: format!("node-{quorum_target}"),
                 },
@@ -835,6 +1495,134 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         || no_quorum_status.replication.health != ReplicationHealth::Degraded
     {
         bail!("quorum-loss roster did not explain the outage: {no_quorum_status:?}");
+    }
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// Prove the self-leave path that a remote removal deliberately refuses: the
+/// current leader hands leadership to a survivor before it excludes itself.
+/// This is a separate cluster because the membership lifecycle above must keep
+/// exercising ordinary remote follower removal and its offline-work policy.
+async fn run_leader_self_leave_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("leader self-leave data root")?;
+    let (mut cluster, _) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+
+    let departed = cluster.leader().await?;
+    let local_follower = (1..=3)
+        .find(|node_id| *node_id != departed)
+        .context("choose local follower removal refusal")?;
+    require_membership_error(
+        cluster
+            .request(
+                local_follower,
+                Request::RemoveVoter {
+                    node_id: format!("node-{local_follower}"),
+                },
+            )
+            .await?,
+        "self_removal_requires_leave",
+    )?;
+    cluster
+        .request(departed, Request::LeaveVoter)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            departed,
+            Request::HeartbeatPreservesTombstone {
+                node_id: format!("node-{departed}"),
+            },
+        )
+        .await?
+        .require_ok()?;
+    require_membership_error(
+        cluster
+            .request(
+                departed,
+                Request::ClaimArtworkRepair {
+                    item_id: 9_002,
+                    lease_ms: 100,
+                },
+            )
+            .await?,
+        "local_node_not_active",
+    )?;
+    let remaining = (1..=3)
+        .filter(|node_id| *node_id != departed)
+        .collect::<Vec<_>>();
+    cluster.wait_for_voters(&remaining).await?;
+
+    let successor = cluster.leader().await?;
+    if successor == departed || !remaining.contains(&successor) {
+        bail!(
+            "leader self-leave did not converge on a surviving successor: departed={departed}, successor={successor}, remaining={remaining:?}"
+        );
+    }
+    let observer = remaining[0];
+    let status = match cluster.request(observer, Request::MembershipStatus).await? {
+        Response::MembershipStatus { status } => status,
+        response => bail!("unexpected post-leave membership status: {response:?}"),
+    };
+    if status.nodes.len() != 2
+        || status.nodes.iter().any(|node| node.raft_id == departed)
+        || status.nodes.iter().filter(|node| node.is_leader).count() != 1
+        || !status
+            .nodes
+            .iter()
+            .any(|node| node.raft_id == successor && node.is_leader)
+    {
+        bail!("leader self-leave did not publish the converged survivor roster: {status:?}");
+    }
+
+    cluster.shutdown_all().await?;
+    Ok(())
+}
+
+/// Four voters still have a three-vote quorum with one nondeparting voter
+/// down. The leader must skip that dead handoff candidate, accept two stable
+/// survivor confirmations, and commit the safer odd 4→3 membership.
+async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("degraded four-voter leave data root")?;
+    let (mut cluster, _) = start_cluster_with_port_retry(&executable, root.path(), 4).await?;
+
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=4 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3, 4]).await?;
+
+    let departed = cluster.leader().await?;
+    let remaining = (1..=4)
+        .filter(|node_id| *node_id != departed)
+        .collect::<Vec<_>>();
+    let unavailable = remaining[0];
+    cluster.kill(unavailable).await?;
+    cluster
+        .request(departed, Request::LeaveVoter)
+        .await?
+        .require_ok()?;
+    cluster.wait_for_voters(&remaining).await?;
+
+    let successor = cluster.leader().await?;
+    if successor == departed || successor == unavailable || !remaining.contains(&successor) {
+        bail!(
+            "degraded four-voter leave did not elect a live successor: departed={departed}, unavailable={unavailable}, successor={successor}, remaining={remaining:?}"
+        );
     }
     cluster.shutdown_all().await?;
     Ok(())
@@ -864,6 +1652,23 @@ fn require_membership_error(response: Response, expected: &str) -> Result<()> {
     }
 }
 
+fn require_membership_error_message(
+    response: Response,
+    expected_code: &str,
+    expected_message: &str,
+) -> Result<()> {
+    match response {
+        Response::MembershipError { code, message }
+            if code == expected_code && message.contains(expected_message) =>
+        {
+            Ok(())
+        }
+        response => bail!(
+            "expected membership error {expected_code} containing {expected_message:?}, got {response:?}"
+        ),
+    }
+}
+
 async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     println!("cluster-check: post-coalescer compacted growth");
     install_crypto_provider();
@@ -886,6 +1691,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         node_id: 1,
         root,
         nodes: specs,
+        emulate_old_watermark_handler: false,
     };
     // This voter runs hiqlite in-process rather than behind the stdin/stdout
     // protocol, so a lost port would otherwise surface as a growth verdict.
@@ -903,6 +1709,10 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         .await
         .context("compacted-growth voter health timed out")?;
     let metrics_client = client.clone();
+    let snapshot_metrics = metrics_client
+        .local_db_snapshot_metrics()
+        .context("obtain local snapshot instrumentation")?;
+    let snapshot_metrics_before = snapshot_metrics.snapshot();
     let telemetry_path = launch.root.join("node-1").join("telemetry-growth.db");
     let store = Arc::new(
         HiqliteAuthStore::bootstrap(client, "compacted-growth-check", &telemetry_path)
@@ -1042,6 +1852,39 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         "raw settle",
     )
     .await?;
+    let snapshot_metrics_after = snapshot_metrics.snapshot();
+    let build_ok_delta = snapshot_metrics_after
+        .build_ok
+        .count
+        .saturating_sub(snapshot_metrics_before.build_ok.count);
+    if build_ok_delta < 6 {
+        bail!(
+            "six observed real compactions produced only {build_ok_delta} successful snapshot build metrics"
+        );
+    }
+    for (name, before, after) in [
+        (
+            "build error",
+            snapshot_metrics_before.build_error.count,
+            snapshot_metrics_after.build_error.count,
+        ),
+        (
+            "install success",
+            snapshot_metrics_before.install_ok.count,
+            snapshot_metrics_after.install_ok.count,
+        ),
+        (
+            "install error",
+            snapshot_metrics_before.install_error.count,
+            snapshot_metrics_after.install_error.count,
+        ),
+    ] {
+        if after != before {
+            bail!(
+                "compacted-growth build-only flow unexpectedly changed {name} snapshot metrics from {before} to {after}"
+            );
+        }
+    }
     let raw_after_bytes = stable_directory_bytes(&data_dir).await?;
     let raw_report = CompactedGrowthReport {
         incoming_beats: GROWTH_INCOMING_BEATS,
@@ -1069,7 +1912,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
          bytes_per_beat={:.6} budget_bytes_per_beat={} \
          raw_control_physical_commits={} raw_control_applied_index_delta={} \
          raw_control_growth_bytes={} raw_control_bytes_per_beat={:.6} \
-         raw_control_rejected={}",
+         snapshot_build_ok_delta={} raw_control_rejected={}",
         report.incoming_beats,
         report.active_streams,
         GROWTH_BEAT_INTERVAL_SECS,
@@ -1086,6 +1929,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         raw_report.applied_index_delta,
         raw_report.compacted_growth_bytes,
         raw_report.compacted_growth_bytes as f64 / raw_report.incoming_beats as f64,
+        build_ok_delta,
         raw_rejection,
     );
     Ok(())
@@ -1267,6 +2111,7 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
             bail!("voter {node_id} in-sync status omitted its convergence point: {status:?}");
         }
     }
+    prove_passive_raft_observer(&mut cluster).await?;
     prove_local_telemetry_sidecars(&mut cluster).await?;
 
     // Every voter exercises an immediate cache read after its acknowledged
@@ -1420,18 +2265,89 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
         }
     }
 
-    // One more loss removes quorum. The remaining embedded process is alive,
-    // but its Store ping must fail rather than advertise readiness.
+    // Retain the actual current leader for the quorum-loss proof. Its latest
+    // commit watermark must be current and locally applied before the second
+    // process loss; this rules out a test that merely starts with stale data.
+    let quorum_loss_survivor = cluster.leader().await?;
+    let watermark_deadline = Instant::now() + Duration::from_secs(5);
+    let before_quorum_loss = loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.valid
+            && sample.watermark_valid
+            && sample.watermark_age_millis.is_some_and(|age| age < 1_000)
+            && sample.committed_index == Some(sample.applied_index)
+            && sample.apply_lag_entries == Some(0)
+        {
+            break sample;
+        }
+        if Instant::now() >= watermark_deadline {
+            bail!(
+                "current leader {quorum_loss_survivor} never published a fully applied pre-loss watermark: {sample:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let direct_before_loss =
+        quorum_watermark_observation(&mut cluster, quorum_loss_survivor).await?;
+    if direct_before_loss.leader_id != quorum_loss_survivor
+        || direct_before_loss.term != before_quorum_loss.current_term
+        || direct_before_loss.committed_index < before_quorum_loss.applied_index
+    {
+        bail!(
+            "direct pre-loss watermark did not describe retained leader {quorum_loss_survivor}: passive={before_quorum_loss:?}, direct={direct_before_loss:?}"
+        );
+    }
+
+    // One more loss removes quorum. The former leader remains alive and its
+    // local applied state remains fresh, but it must be unable to renew the
+    // original one-second proof. At and beyond that proof's exact deadline,
+    // the retained commit stays diagnostic-only and lag disappears.
     let second_loss = (1..=3)
-        .find(|node_id| *node_id != target_id && *node_id != survivor)
+        .find(|node_id| *node_id != target_id && *node_id != quorum_loss_survivor)
         .context("choose second loss")?;
     cluster.kill(second_loss).await?;
+    let expiry_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.watermark_age_millis.is_some_and(|age| age >= 1_000) {
+            if !sample.valid
+                || sample.watermark_valid
+                || sample.applied_index != before_quorum_loss.applied_index
+                || sample.committed_index != before_quorum_loss.committed_index
+                || sample.apply_lag_entries.is_some()
+            {
+                bail!(
+                    "former leader renewed or misreported an expired quorum proof: before={before_quorum_loss:?}, after={sample:?}"
+                );
+            }
+            break;
+        }
+        if Instant::now() >= expiry_deadline {
+            bail!(
+                "former leader {quorum_loss_survivor} did not expose the original watermark expiry"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    loop {
+        let sample = passive_raft_observation(&mut cluster, quorum_loss_survivor).await?;
+        if sample.watermark_errors > before_quorum_loss.watermark_errors {
+            break;
+        }
+        if Instant::now() >= expiry_deadline {
+            bail!(
+                "former leader {quorum_loss_survivor} expired its proof but did not report a failed renewal"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     for request in [
+        Request::QuorumWatermark,
         Request::Ping,
         Request::ReadWithoutQuorum,
         Request::WriteWithoutQuorum,
     ] {
-        let response = cluster.request(survivor, request).await?;
+        let response = cluster.request(quorum_loss_survivor, request).await?;
         require_quorum_error(response)?;
     }
     cluster.assert_running().await?;
@@ -1452,6 +2368,8 @@ pub struct NodeLaunch {
     pub node_id: u64,
     pub root: PathBuf,
     pub nodes: Vec<NodeSpec>,
+    #[serde(default)]
+    pub emulate_old_watermark_handler: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1462,6 +2380,10 @@ pub struct Preflight {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Recreate the origin/main M3 table shape and its former shared join-URL
+    /// rows before MembershipManager starts, proving the rolling upgrade path
+    /// rather than only the schema a fresh binary would create.
+    SeedLegacyArtworkUrls,
     Bootstrap,
     RejectIdentityDrift,
     Open,
@@ -1484,6 +2406,13 @@ pub enum Request {
     },
     ActivityPeers,
     ArtworkPeerUrls,
+    RejectDuplicateArtworkUrl {
+        public_http_url: String,
+    },
+    ReuseRemovedArtworkUrl {
+        removed_node_id: String,
+        public_http_url: String,
+    },
     ArtworkPeerAuth {
         filename: String,
     },
@@ -1497,6 +2426,54 @@ pub enum Request {
     HeartbeatPreservesTombstone {
         node_id: String,
     },
+    Heartbeat,
+    ClaimArtworkRepair {
+        item_id: i64,
+        lease_ms: u64,
+    },
+    ClaimArtworkRepairAfterPause {
+        item_id: i64,
+        lease_ms: u64,
+        pause_ms: u64,
+    },
+    SeedArtworkRepairFenceItem {
+        ordinal: u64,
+    },
+    ClaimArtworkRepairFence {
+        item_id: i64,
+        lease_ms: u64,
+    },
+    ApplyArtworkRepairFence {
+        target_item_id: i64,
+        fence: ArtworkRepairFence,
+        title: String,
+        stale_job_lease: bool,
+        stale_book_snapshot: bool,
+    },
+    AcquireJobLease {
+        resource: String,
+        owner_node_id: String,
+    },
+    SeedExhaustedJobLease {
+        resource: String,
+        owner_node_id: String,
+    },
+    AcquireJobLeaseLegacy {
+        resource: String,
+        owner_node_id: String,
+    },
+    ClearJobOwnerFence {
+        owner_node_id: String,
+    },
+    ApplyJobLease {
+        key: String,
+        lease: Lease,
+        observed_at_ms: Option<i64>,
+    },
+    ReleaseArtworkRepair {
+        fence: ArtworkRepairFence,
+    },
+    TriggerElection,
     RemoveVoter {
         node_id: String,
     },
@@ -1541,6 +2518,10 @@ pub enum Request {
     Exercise {
         ordinal: u64,
     },
+    TopologyWrite {
+        ordinal: u64,
+        value: String,
+    },
     PostLossWrite {
         target: String,
         position_ms: i64,
@@ -1550,6 +2531,9 @@ pub enum Request {
     CatalogView,
     RebuildSearch,
     Metrics,
+    PassiveRaftMetrics,
+    QuorumWatermark,
+    ProveOldWatermarkStreamCompatibility,
     ReplicationStatus,
     Ping,
     ReadWithoutQuorum,
@@ -1599,7 +2583,30 @@ pub enum Response {
     },
     Metrics {
         leader: Option<u64>,
+        current_term: u64,
         voters: Vec<u64>,
+        applied_index: Option<u64>,
+        quorum_acknowledged: bool,
+    },
+    PassiveRaftMetrics {
+        valid: bool,
+        age_seconds: Option<u64>,
+        errors: u64,
+        leader_changes: u64,
+        current_term: Option<u64>,
+        applied_index: Option<u64>,
+        leader_known: Option<bool>,
+        is_leader: Option<bool>,
+        watermark_valid: bool,
+        watermark_age_millis: Option<u64>,
+        watermark_errors: u64,
+        committed_index: Option<u64>,
+        apply_lag_entries: Option<u64>,
+    },
+    QuorumWatermark {
+        term: u64,
+        leader_id: u64,
+        committed_index: u64,
     },
     ReplicationStatus {
         status: ReplicationStatus,
@@ -1615,6 +2622,20 @@ pub enum Response {
     },
     ArtworkPeerAuth {
         auth: ArtworkPeerAuth,
+    },
+    ItemId {
+        item_id: i64,
+    },
+    ArtworkRepairFence {
+        fence: Option<ArtworkRepairFence>,
+    },
+    JobLease {
+        lease: Option<Lease>,
+    },
+    ArtworkFenceApply {
+        setting: bool,
+        metadata: bool,
+        book: bool,
     },
     MembershipError {
         code: String,
@@ -1663,6 +2684,303 @@ pub async fn prove_local_telemetry_sidecars(cluster: &mut ClusterProcesses) -> R
         Response::TelemetryCount { count: 1 } => Ok(()),
         response => bail!("voter-1 telemetry did not survive reopen: {response:?}"),
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PassiveRaftObservation {
+    valid: bool,
+    age_seconds: Option<u64>,
+    errors: u64,
+    leader_changes: u64,
+    current_term: u64,
+    applied_index: u64,
+    leader_known: bool,
+    is_leader: bool,
+    watermark_valid: bool,
+    watermark_age_millis: Option<u64>,
+    watermark_errors: u64,
+    committed_index: Option<u64>,
+    apply_lag_entries: Option<u64>,
+}
+
+async fn passive_raft_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<PassiveRaftObservation> {
+    match cluster
+        .request(node_id, Request::PassiveRaftMetrics)
+        .await?
+    {
+        Response::PassiveRaftMetrics {
+            valid,
+            age_seconds,
+            errors,
+            leader_changes,
+            current_term: Some(current_term),
+            applied_index: Some(applied_index),
+            leader_known: Some(leader_known),
+            is_leader: Some(is_leader),
+            watermark_valid,
+            watermark_age_millis,
+            watermark_errors,
+            committed_index,
+            apply_lag_entries,
+        } => Ok(PassiveRaftObservation {
+            valid,
+            age_seconds,
+            errors,
+            leader_changes,
+            current_term,
+            applied_index,
+            leader_known,
+            is_leader,
+            watermark_valid,
+            watermark_age_millis,
+            watermark_errors,
+            committed_index,
+            apply_lag_entries,
+        }),
+        response => bail!("voter {node_id} passive Raft sample was absent: {response:?}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuorumWatermarkObservation {
+    term: u64,
+    leader_id: u64,
+    committed_index: u64,
+}
+
+async fn quorum_watermark_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<QuorumWatermarkObservation> {
+    match cluster.request(node_id, Request::QuorumWatermark).await? {
+        Response::QuorumWatermark {
+            term,
+            leader_id,
+            committed_index,
+        } => Ok(QuorumWatermarkObservation {
+            term,
+            leader_id,
+            committed_index,
+        }),
+        response => bail!("voter {node_id} quorum watermark was absent: {response:?}"),
+    }
+}
+
+/// Prove the production passive observer follows real three-voter apply and
+/// election events without a Store or management request on its sample path.
+async fn prove_passive_raft_observer(cluster: &mut ClusterProcesses) -> Result<()> {
+    let initial_deadline = Instant::now() + Duration::from_secs(10);
+    let initial = loop {
+        let mut samples = Vec::new();
+        let mut ready = true;
+        for node_id in 1..=3 {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            ready &= sample.valid
+                && sample.leader_known
+                && sample.errors == 0
+                && sample.watermark_valid
+                && sample.watermark_age_millis.is_some()
+                && sample.committed_index.is_some()
+                && sample.apply_lag_entries.is_some();
+            samples.push(sample);
+        }
+        if ready {
+            break samples;
+        }
+        if Instant::now() >= initial_deadline {
+            bail!("passive Raft observers did not publish fresh initial samples: {samples:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let leader = cluster.leader().await?;
+    cluster
+        .request(
+            leader,
+            Request::TopologyWrite {
+                ordinal: 9_001,
+                value: "passive-observer-proof".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let apply_deadline = Instant::now() + Duration::from_secs(10);
+    for node_id in 1..=3 {
+        let baseline = initial[(node_id - 1) as usize].applied_index;
+        loop {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            if sample.valid && sample.applied_index > baseline {
+                break;
+            }
+            if Instant::now() >= apply_deadline {
+                bail!(
+                    "voter {node_id} passive applied index did not advance beyond {baseline}: {sample:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    let mut proofs = Vec::new();
+    for node_id in 1..=3 {
+        let proof = quorum_watermark_observation(cluster, node_id).await?;
+        let local = passive_raft_observation(cluster, node_id).await?;
+        if proof.committed_index < local.applied_index {
+            bail!(
+                "voter {node_id} quorum watermark {} did not cover local applied {}",
+                proof.committed_index,
+                local.applied_index
+            );
+        }
+        proofs.push(proof);
+    }
+    if proofs
+        .iter()
+        .any(|proof| proof.term != proofs[0].term || proof.leader_id != proofs[0].leader_id)
+    {
+        bail!("three voters disagreed on the quorum proof: {proofs:?}");
+    }
+    if proofs[0].leader_id != leader {
+        bail!(
+            "quorum proof named leader {} but cluster leader is {leader}",
+            proofs[0].leader_id
+        );
+    }
+
+    let before_renewal = [
+        passive_raft_observation(cluster, 1).await?.applied_index,
+        passive_raft_observation(cluster, 2).await?.applied_index,
+        passive_raft_observation(cluster, 3).await?.applied_index,
+    ];
+    let before_watermark_errors = [
+        initial[0].watermark_errors,
+        initial[1].watermark_errors,
+        initial[2].watermark_errors,
+    ];
+    for _ in 0..3 {
+        for node_id in 1..=3 {
+            let renewed = quorum_watermark_observation(cluster, node_id).await?;
+            if renewed.term != proofs[0].term
+                || renewed.leader_id != proofs[0].leader_id
+                || renewed.committed_index != proofs[0].committed_index
+            {
+                bail!("stable-term quorum renewal changed the proof: {renewed:?}");
+            }
+        }
+    }
+    for node_id in 1..=3 {
+        let after = passive_raft_observation(cluster, node_id).await?;
+        let before = before_renewal[(node_id - 1) as usize];
+        if after.applied_index != before {
+            bail!(
+                "quorum watermark renewals consumed Raft entries on voter {node_id}: {before} -> {}",
+                after.applied_index
+            );
+        }
+        if after.watermark_errors < before_watermark_errors[(node_id - 1) as usize] {
+            bail!("voter {node_id} quorum watermark error counter regressed");
+        }
+    }
+
+    let before_election = [
+        passive_raft_observation(cluster, 1).await?,
+        passive_raft_observation(cluster, 2).await?,
+        passive_raft_observation(cluster, 3).await?,
+    ];
+    let election_target = (1..=3)
+        .find(|node_id| *node_id != leader)
+        .context("choose passive-observer election target")?;
+    cluster
+        .request(election_target, Request::TriggerElection)
+        .await?
+        .require_ok()?;
+    let election_deadline = Instant::now() + Duration::from_secs(10);
+    let new_leader = loop {
+        let candidate = cluster.leader().await?;
+        if candidate != leader {
+            break candidate;
+        }
+        if Instant::now() >= election_deadline {
+            bail!("passive-observer election did not replace leader {leader}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    let mut observed_local_leaders = 0;
+    let observation_deadline = Instant::now() + Duration::from_secs(10);
+    for node_id in 1..=3 {
+        let before = before_election[(node_id - 1) as usize];
+        loop {
+            let sample = passive_raft_observation(cluster, node_id).await?;
+            if sample.valid
+                && sample.leader_known
+                && sample.current_term > before.current_term
+                && sample.leader_changes > before.leader_changes
+            {
+                if sample.is_leader {
+                    observed_local_leaders += 1;
+                    if node_id != new_leader {
+                        bail!("voter {node_id} claimed leadership but leader is {new_leader}");
+                    }
+                }
+                if sample.age_seconds.is_none() || sample.errors != 0 {
+                    bail!("voter {node_id} published an invalid passive sample: {sample:?}");
+                }
+                break;
+            }
+            if Instant::now() >= observation_deadline {
+                bail!("voter {node_id} passive observer missed the live election: {sample:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    if observed_local_leaders != 1 {
+        bail!("passive observer reported {observed_local_leaders} local leaders after election");
+    }
+
+    let watermark_recovery_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut recovered = Vec::new();
+        for node_id in 1..=3 {
+            recovered.push(passive_raft_observation(cluster, node_id).await?);
+        }
+        if recovered.iter().all(|sample| {
+            sample.watermark_valid
+                && sample.current_term > proofs[0].term
+                && sample.watermark_age_millis.is_some()
+                && sample.committed_index.is_some()
+                && sample.apply_lag_entries.is_some()
+        }) {
+            break;
+        }
+        if Instant::now() >= watermark_recovery_deadline {
+            bail!("background quorum samplers did not recover after idle election: {recovered:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mut successor_proofs = Vec::new();
+    for node_id in 1..=3 {
+        let successor = quorum_watermark_observation(cluster, node_id).await?;
+        if successor.term <= proofs[0].term || successor.leader_id != new_leader {
+            bail!(
+                "voter {node_id} did not replace quorum generation {:?}: {successor:?}",
+                proofs[0]
+            );
+        }
+        successor_proofs.push(successor);
+    }
+    if successor_proofs.iter().any(|proof| {
+        proof.term != successor_proofs[0].term
+            || proof.leader_id != successor_proofs[0].leader_id
+            || proof.committed_index != successor_proofs[0].committed_index
+    }) {
+        bail!("voters disagreed after idle election: {successor_proofs:?}");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1731,6 +3049,9 @@ impl NodeProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+        if launch.emulate_old_watermark_handler {
+            command.env(OLD_WATERMARK_HANDLER_ENV, "1");
+        }
         let mut child = command.spawn().context("spawn cluster voter")?;
         let input = child.stdin.take().context("voter stdin")?;
         let output = BufReader::new(child.stdout.take().context("voter stdout")?);
@@ -1833,6 +3154,24 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
     ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, None).await
+    }
+
+    async fn start_with_old_watermark_handler(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        old_handler_node: u64,
+    ) -> Result<Self> {
+        Self::start_inner(executable, root, reservation, Some(old_handler_node)).await
+    }
+
+    async fn start_inner(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        old_handler_node: Option<u64>,
+    ) -> Result<Self> {
         let (_listeners, specs) = reservation.into_inner();
         // Listeners are dropped here: the child process must bind the same
         // ports, so we cannot hold them across the spawn. The window between
@@ -1845,6 +3184,7 @@ impl ClusterProcesses {
                 node_id,
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
+                emulate_old_watermark_handler: old_handler_node == Some(node_id),
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
         }
@@ -1986,9 +3326,15 @@ impl ClusterProcesses {
     /// original leader, which is commonly voter 1; a removed process is not
     /// required to learn entries committed after its removal.
     pub async fn wait_for_voters(&mut self, expected: &[u64]) -> Result<()> {
-        let observer = *expected
-            .first()
-            .context("cannot observe an empty voter membership")?;
+        let observer = expected
+            .iter()
+            .copied()
+            .find(|node_id| {
+                self.nodes
+                    .get((*node_id - 1) as usize)
+                    .is_some_and(Option::is_some)
+            })
+            .context("cannot observe membership without a running expected voter")?;
         let deadline = Instant::now() + self.convergence_timeout;
         loop {
             if let Ok(Response::Metrics { voters, .. }) =
@@ -2361,6 +3707,10 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         return Err(error);
     }
     let replication = ReplicationMonitor::replicated(client.clone());
+    let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
+    tokio::spawn(replication.clone().passive_metrics_loop(async move {
+        let _ = passive_shutdown_signal.await;
+    }));
 
     write_response(&Response::Ready {
         node_id: launch.node_id,
@@ -2401,6 +3751,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
             }
         }
     }
+    let _ = passive_shutdown.send(());
     Ok(())
 }
 
@@ -2414,6 +3765,29 @@ async fn handle_request(
     membership: &mut Option<MembershipManager>,
 ) -> Result<Response> {
     match request {
+        Request::SeedLegacyArtworkUrls => {
+            client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS cluster_node_http (\
+                       node_id TEXT PRIMARY KEY, \
+                       public_http_url TEXT NOT NULL) STRICT",
+                    hiqlite::macros::params!(),
+                )
+                .await?;
+            for node_id in 1..=3 {
+                client
+                    .execute(
+                        "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                         VALUES ($1, $2)",
+                        hiqlite::macros::params!(
+                            format!("node-{node_id}"),
+                            "https://shared-join-lb.invalid"
+                        ),
+                    )
+                    .await?;
+            }
+            Ok(Response::Ok)
+        }
         Request::Bootstrap => {
             let opened = Arc::new(
                 HiqliteAuthStore::bootstrap(client.clone(), INSTANCE_ID, telemetry_path).await?,
@@ -2483,6 +3857,63 @@ async fn handle_request(
             .await
             .map(|urls| Response::ArtworkPeerUrls { urls })
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::RejectDuplicateArtworkUrl { public_http_url } => {
+            membership_manager_with_artwork_url(
+                client,
+                store
+                    .as_ref()
+                    .cloned()
+                    .context("auth store has not been opened")?,
+                launch,
+                public_http_url,
+            )
+            .await
+            .map(|_| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error)))
+        }
+        Request::ReuseRemovedArtworkUrl {
+            removed_node_id,
+            public_http_url,
+        } => {
+            let rejoined_node_id = format!("rejoined-{removed_node_id}");
+            let rejoined_raft_id = launch
+                .nodes
+                .iter()
+                .map(|node| node.id)
+                .max()
+                .unwrap_or_default()
+                .saturating_add(100);
+            match membership_manager_with_identity_artwork_url(
+                client,
+                store
+                    .as_ref()
+                    .cloned()
+                    .context("auth store has not been opened")?,
+                launch,
+                rejoined_node_id.clone(),
+                rejoined_raft_id,
+                public_http_url,
+            )
+            .await
+            {
+                Ok(_) => {
+                    for statement in [
+                        "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
+                        "DELETE FROM cluster_node_http WHERE node_id = $1",
+                        "DELETE FROM cluster_nodes WHERE node_id = $1",
+                    ] {
+                        client
+                            .execute(
+                                statement,
+                                hiqlite::macros::params!(rejoined_node_id.as_str()),
+                            )
+                            .await?;
+                    }
+                    Ok(Response::Ok)
+                }
+                Err(error) => Ok(membership_error_response(error)),
+            }
+        }
         Request::ArtworkPeerAuth { ref filename } => membership_ref(membership)?
             .artwork_peer_auth(filename)
             .map(|auth| Response::ArtworkPeerAuth { auth })
@@ -2536,13 +3967,339 @@ async fn handle_request(
             membership_ref(membership)?.heartbeat().await?;
             let rows = client
                 .query_consistent_map::<MembershipTombstoneRow, _>(
-                    "SELECT removed_at FROM cluster_nodes WHERE node_id = $1",
+                    "SELECT COALESCE(removed_at, (SELECT started_at \
+                       FROM cluster_node_removals WHERE node_id = $1)) AS removed_at \
+                     FROM cluster_nodes WHERE node_id = $1",
                     hiqlite::macros::params!(node_id),
                 )
                 .await?;
             if rows.first().and_then(|row| row.removed_at).is_none() {
                 bail!("removed node heartbeat cleared its durable tombstone");
             }
+            Ok(Response::Ok)
+        }
+        Request::Heartbeat => {
+            membership_ref(membership)?.heartbeat().await?;
+            Ok(Response::Ok)
+        }
+        Request::ClaimArtworkRepair { item_id, lease_ms } => membership_ref(membership)?
+            .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+            .await
+            .map(|claim| Response::Flag {
+                value: claim.is_some(),
+            })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ClaimArtworkRepairAfterPause {
+            item_id,
+            lease_ms,
+            pause_ms,
+        } => {
+            let claim = membership_ref(membership)?
+                .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+                .await?;
+            tokio::time::sleep(Duration::from_millis(pause_ms)).await;
+            Ok(Response::Flag {
+                value: claim.is_some_and(|claim| claim.deadline() > Instant::now()),
+            })
+        }
+        Request::SeedArtworkRepairFenceItem { ordinal } => {
+            let store = store_ref(store)?;
+            let library = store
+                .create_library(&NewLibrary {
+                    name: format!("Artwork fence {}-{ordinal}", unix_now()?),
+                    kind: LibraryKind::Books,
+                    paths: vec![PathBuf::from("/cluster-artwork-fence")],
+                    anime: false,
+                })
+                .await?;
+            let item_id = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Book,
+                    parent_id: None,
+                    title: "Original artwork fence title".to_owned(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await?;
+            Ok(Response::ItemId { item_id })
+        }
+        Request::ClaimArtworkRepairFence { item_id, lease_ms } => membership_ref(membership)?
+            .claim_artwork_source_repair(item_id, Duration::from_millis(lease_ms))
+            .await
+            .map(|claim| Response::ArtworkRepairFence {
+                fence: claim.map(|claim| claim.fence().clone()),
+            })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ApplyArtworkRepairFence {
+            target_item_id,
+            ref fence,
+            ref title,
+            stale_job_lease,
+            stale_book_snapshot,
+        } => {
+            let store = store_ref(store)?;
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("cluster-check clock precedes unix epoch")?
+                    .as_millis(),
+            )
+            .context("cluster-check unix millisecond clock overflowed")?;
+            let resource = format!("cluster-check:artwork-fence:{target_item_id}:{title}");
+            let mut lease = match store
+                .acquire_lease(&resource, "cluster-check-artwork", now_ms, now_ms + 10_000)
+                .await?
+            {
+                LeaseClaim::Acquired(lease) => lease,
+                held => bail!("cluster-check artwork publication lease was held: {held:?}"),
+            };
+            if stale_job_lease {
+                store
+                    .renew_lease(&lease, now_ms + 1, now_ms + 20_000)
+                    .await?
+                    .context("cluster-check artwork publication lease was not renewable")?;
+            }
+            let replacement = lease.publication_successor()?;
+            let setting = match store
+                .put_setting_if_absent_if_artwork_repair_current_fenced(
+                    &format!("cluster-check.artwork-fence.{target_item_id}.{title}"),
+                    title,
+                    target_item_id,
+                    fence,
+                    &lease,
+                    &replacement,
+                )
+                .await
+            {
+                Ok(setting) => {
+                    lease = replacement;
+                    setting
+                }
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
+                Err(error) => return Err(error.into()),
+            };
+            let replacement = lease.publication_successor()?;
+            let metadata = match store
+                .apply_metadata_if_artwork_repair_current_fenced(
+                    target_item_id,
+                    &MetadataPatch {
+                        title: Some(title.clone()),
+                        ..Default::default()
+                    },
+                    fence,
+                    &lease,
+                    &replacement,
+                )
+                .await
+            {
+                Ok(metadata) => {
+                    lease = replacement;
+                    metadata
+                }
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
+                Err(error) => return Err(error.into()),
+            };
+            let expected = store
+                .get_item(target_item_id)
+                .await?
+                .context("cluster-check artwork fence target disappeared")?;
+            if stale_book_snapshot {
+                let replacement = lease.publication_successor()?;
+                store
+                    .apply_metadata_fenced(
+                        target_item_id,
+                        &MetadataPatch {
+                            title: Some(format!("{title} successor")),
+                            ..Default::default()
+                        },
+                        &lease,
+                        &replacement,
+                    )
+                    .await?;
+                lease = replacement;
+            }
+            let replacement = lease.publication_successor()?;
+            let book = match store
+                .apply_book_metadata_if_current_fenced(
+                    &expected,
+                    &BookMetadataPatch {
+                        title: None,
+                        author: Some(format!("{title} author")),
+                        work_id: Some(format!("{title} work")),
+                        edition_id: Some(format!("{title} edition")),
+                        poster_path: None,
+                        source: BookMetadataSource::Curator,
+                        required_origin: None,
+                    },
+                    Some(fence),
+                    &lease,
+                    &replacement,
+                )
+                .await
+            {
+                Ok(book) => book,
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => false,
+                Err(error) => return Err(error.into()),
+            };
+            Ok(Response::ArtworkFenceApply {
+                setting,
+                metadata,
+                book,
+            })
+        }
+        Request::AcquireJobLease {
+            ref resource,
+            ref owner_node_id,
+        } => {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("cluster-check clock precedes unix epoch")?
+                    .as_millis(),
+            )
+            .context("cluster-check unix millisecond clock overflowed")?;
+            match store_ref(store)?
+                .acquire_lease(resource, owner_node_id, now_ms, now_ms + 600_000)
+                .await
+            {
+                Ok(LeaseClaim::Acquired(lease)) => Ok(Response::JobLease { lease: Some(lease) }),
+                Ok(LeaseClaim::Held { .. }) => Ok(Response::JobLease { lease: None }),
+                Err(plurx_core::error::StoreError::Task(message))
+                    if message.contains("has been removed") =>
+                {
+                    Ok(Response::JobLease { lease: None })
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        Request::SeedExhaustedJobLease {
+            ref resource,
+            ref owner_node_id,
+        } => {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("cluster-check clock precedes unix epoch")?
+                    .as_millis(),
+            )
+            .context("cluster-check unix millisecond clock overflowed")?;
+            let expires_at_unix_ms = now_ms - 100;
+            client
+                .execute(
+                    "INSERT INTO job_leases \
+                       (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms) \
+                     VALUES ($1, $2, 1, 9223372036854775807, $3, $4)",
+                    params!(resource, owner_node_id, expires_at_unix_ms, now_ms),
+                )
+                .await?;
+            Ok(Response::JobLease {
+                lease: Some(Lease {
+                    resource: resource.clone(),
+                    owner_node_id: owner_node_id.clone(),
+                    fence: 1,
+                    revision: i64::MAX as u64,
+                    expires_at_unix_ms,
+                }),
+            })
+        }
+        Request::AcquireJobLeaseLegacy {
+            ref resource,
+            ref owner_node_id,
+        } => {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("cluster-check clock precedes unix epoch")?
+                    .as_millis(),
+            )
+            .context("cluster-check unix millisecond clock overflowed")?;
+            let legacy_sql = "INSERT INTO job_leases \
+                (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms) \
+                VALUES ($1, $2, 1, 1, $3, $4) \
+                ON CONFLICT(resource) DO UPDATE SET \
+                    owner_node_id = excluded.owner_node_id, \
+                    fence = job_leases.fence + 1, \
+                    revision = job_leases.revision + 1, \
+                    expires_at_ms = excluded.expires_at_ms, \
+                    updated_at_ms = excluded.updated_at_ms \
+                WHERE job_leases.expires_at_ms <= $4 \
+                  AND job_leases.fence < 9223372036854775807 \
+                  AND job_leases.revision < 9223372036854775807";
+            match client
+                .execute(
+                    legacy_sql,
+                    params!(resource, owner_node_id, now_ms + 600_000, now_ms),
+                )
+                .await
+            {
+                Ok(changed) => Ok(Response::Flag {
+                    value: changed == 1,
+                }),
+                Err(error) if error.to_string().contains("owner has been removed") => {
+                    Ok(Response::Flag { value: false })
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        Request::ClearJobOwnerFence { ref owner_node_id } => {
+            client
+                .execute(
+                    "DELETE FROM settings \
+                     WHERE key = 'internal.cluster_job_owner_removed.' || $1",
+                    params!(owner_node_id),
+                )
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::ApplyJobLease {
+            ref key,
+            ref lease,
+            observed_at_ms,
+        } => {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("cluster-check clock precedes unix epoch")?
+                    .as_millis(),
+            )
+            .context("cluster-check unix millisecond clock overflowed")?;
+            let observed_at_ms = observed_at_ms.unwrap_or(now_ms);
+            if observed_at_ms >= lease.expires_at_unix_ms {
+                return Ok(Response::Flag { value: false });
+            }
+            let replacement = match lease.publication_successor() {
+                Ok(replacement) => replacement,
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => {
+                    return Ok(Response::Flag { value: false });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match store_ref(store)?
+                .put_setting_fenced(key, "removed-owner-write", lease, &replacement)
+                .await
+            {
+                Ok(()) => Ok(Response::Flag { value: true }),
+                Err(plurx_core::error::StoreError::FenceRejected { .. }) => {
+                    Ok(Response::Flag { value: false })
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        Request::ReleaseArtworkRepair { ref fence } => membership_ref(membership)?
+            .retire_artwork_source_repair(fence)
+            .await
+            .and_then(|retired| {
+                retired.then_some(Response::Ok).ok_or_else(|| {
+                    MembershipError::Internal(
+                        "current artwork repair generation was not retired".to_owned(),
+                    )
+                })
+            })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::TriggerElection => {
+            membership_ref(membership)?.trigger_local_election().await?;
             Ok(Response::Ok)
         }
         Request::RemoveVoter { node_id } => membership_ref(membership)?
@@ -2656,6 +4413,12 @@ async fn handle_request(
             exercise(store_ref(store)?, ordinal).await?;
             Ok(Response::Ok)
         }
+        Request::TopologyWrite { ordinal, ref value } => {
+            store_ref(store)?
+                .put_setting(&format!("cluster.topology.write.{ordinal:04}"), value)
+                .await?;
+            Ok(Response::Ok)
+        }
         Request::PostLossWrite {
             target,
             position_ms,
@@ -2716,8 +4479,60 @@ async fn handle_request(
             voters.sort_unstable();
             Ok(Response::Metrics {
                 leader: metrics.current_leader,
+                current_term: metrics.current_term,
                 voters,
+                applied_index: metrics.last_applied.as_ref().map(|log| log.index),
+                quorum_acknowledged: metrics
+                    .millis_since_quorum_ack
+                    .is_some_and(|age| age <= 1_000),
             })
+        }
+        Request::PassiveRaftMetrics => {
+            let view = replication.metrics_handle().snapshot();
+            Ok(Response::PassiveRaftMetrics {
+                valid: view.valid,
+                age_seconds: view.age_seconds,
+                errors: view.errors,
+                leader_changes: view.leader_changes,
+                current_term: view.sample.map(|sample| sample.current_term),
+                applied_index: view.sample.and_then(|sample| sample.last_applied_index),
+                leader_known: view.sample.map(|sample| sample.leader_known),
+                is_leader: view.sample.map(|sample| sample.is_leader),
+                watermark_valid: view.watermark_valid,
+                watermark_age_millis: view.watermark_age_millis,
+                watermark_errors: view.watermark_errors,
+                committed_index: view.watermark.map(|sample| sample.committed_index),
+                apply_lag_entries: view.watermark.and_then(|sample| sample.apply_lag_entries),
+            })
+        }
+        Request::QuorumWatermark => {
+            let watermark = client.db_quorum_watermark().await?;
+            Ok(Response::QuorumWatermark {
+                term: watermark.term,
+                leader_id: watermark.leader_id,
+                committed_index: watermark.committed_index,
+            })
+        }
+        Request::ProveOldWatermarkStreamCompatibility => {
+            let error = client
+                .db_quorum_watermark()
+                .await
+                .expect_err("old handler must reject the reserved marker as SQL");
+            if !error.to_string().to_ascii_lowercase().contains("syntax") {
+                bail!("old handler rejected the watermark marker unexpectedly: {error}");
+            }
+            let mut rows = client
+                .query_consistent(WATERMARK_STREAM_COMPAT_PROBE, params!())
+                .await?;
+            if rows.len() != 1
+                || rows
+                    .swap_remove(0)
+                    .get::<i64>("hiqlite_watermark_stream_compat_v1")
+                    != 1
+            {
+                bail!("ordinary consistent query returned the wrong rolling-compatibility proof");
+            }
+            Ok(Response::Ok)
         }
         Request::ReplicationStatus => Ok(Response::ReplicationStatus {
             status: replication.status().await,
@@ -2773,25 +4588,66 @@ async fn membership_manager(
     store: Arc<HiqliteAuthStore>,
     launch: &NodeLaunch,
 ) -> Result<MembershipManager> {
+    membership_manager_with_artwork_url(
+        client,
+        store,
+        launch,
+        format!("http://127.0.0.1:{}", 33_000 + launch.node_id),
+    )
+    .await
+    .map_err(Into::into)
+}
+
+async fn membership_manager_with_artwork_url(
+    client: &Client,
+    store: Arc<HiqliteAuthStore>,
+    launch: &NodeLaunch,
+    artwork_http: String,
+) -> std::result::Result<MembershipManager, plurx_core::cluster::membership::MembershipError> {
+    membership_manager_with_identity_artwork_url(
+        client,
+        store,
+        launch,
+        format!("node-{}", launch.node_id),
+        launch.node_id,
+        artwork_http,
+    )
+    .await
+}
+
+async fn membership_manager_with_identity_artwork_url(
+    client: &Client,
+    store: Arc<HiqliteAuthStore>,
+    launch: &NodeLaunch,
+    node_id: String,
+    raft_id: u64,
+    artwork_http: String,
+) -> std::result::Result<MembershipManager, plurx_core::cluster::membership::MembershipError> {
     let local = launch
         .nodes
         .iter()
         .find(|node| node.id == launch.node_id)
-        .with_context(|| format!("voter {} has no local node spec", launch.node_id))?;
+        .ok_or_else(|| {
+            plurx_core::cluster::membership::MembershipError::Internal(format!(
+                "voter {} has no local node spec",
+                launch.node_id
+            ))
+        })?;
     MembershipManager::replicated(
         client.clone(),
         store,
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
-            node_id: format!("node-{}", launch.node_id),
-            raft_id: launch.node_id,
+            node_id,
+            raft_id,
         },
         ClusterPeer {
             raft_id: local.id,
             raft_address: local.raft.clone(),
             api_address: local.api.clone(),
         },
-        format!("http://127.0.0.1:{}", 33_000 + launch.node_id),
+        "https://shared-join-lb.invalid".to_owned(),
+        artwork_http,
         JoinSecrets {
             raft: RAFT_SECRET.to_owned(),
             api: API_SECRET.to_owned(),
@@ -2808,7 +4664,6 @@ async fn membership_manager(
         },
     )
     .await
-    .map_err(Into::into)
 }
 
 /// Package ids the removal scenario asserts on. Each names the §6.7 outcome
@@ -4319,6 +6174,7 @@ mod tests {
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
+            emulate_old_watermark_handler: false,
         };
 
         let config = node_config(&launch).expect("build the voter config");

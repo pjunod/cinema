@@ -291,7 +291,13 @@ impl OfflinePackageStore for SqliteStore {
                   AND l.last_access_at >= ?3
             )";
             let mut stmt = conn.prepare(&format!(
-                "SELECT {prefixed}, {active_lease} FROM offline_packages p
+                "SELECT {prefixed}, {active_lease}, f.item_id,
+                        COALESCE(i.title, 'Unavailable media'),
+                        COALESCE(u.username, 'Unknown profile')
+                 FROM offline_packages p
+                 LEFT JOIN files f ON f.id = p.file_id
+                 LEFT JOIN items i ON i.id = f.item_id
+                 LEFT JOIN users u ON u.id = p.user_id
                  WHERE p.node_id = ?1
                    AND (p.state IN ('queued', 'preparing') OR {active_lease})
                  ORDER BY CASE p.state
@@ -307,6 +313,9 @@ impl OfflinePackageStore for SqliteStore {
                     Ok(OfflineActivityPackage {
                         package: package_from_row(row)?,
                         lease_active: row.get(PACKAGE_COL_COUNT)?,
+                        item_id: row.get(PACKAGE_COL_COUNT + 1)?,
+                        title: row.get(PACKAGE_COL_COUNT + 2)?,
+                        user_name: row.get(PACKAGE_COL_COUNT + 3)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -502,6 +511,32 @@ impl OfflinePackageStore for SqliteStore {
                  WHERE id = ?1 AND node_id = ?2 AND state IN ('queued', 'preparing')",
                 params![id, node, phase, code, message],
             )? > 0)
+        })
+        .await
+    }
+
+    async fn invalidate_ready_offline_package(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        recipe_hash: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, node, recipe, code, message) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            recipe_hash.to_owned(),
+            code.to_owned(),
+            message.to_owned(),
+        );
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE offline_packages SET state = 'failed', phase = 'integrity',
+                    error_code = ?4, error_message = ?5, updated_at = unixepoch()
+                  WHERE id = ?1 AND node_id = ?2 AND recipe_hash = ?3 AND state = 'ready'",
+                params![id, node, recipe, code, message],
+            )? == 1)
         })
         .await
     }
@@ -1199,6 +1234,9 @@ mod tests {
         assert_eq!(activity.len(), 2, "failed packages are not live work");
         assert_eq!(activity[0].package.id, preparing.id);
         assert!(!activity[0].lease_active);
+        assert_eq!(activity[0].item_id, None);
+        assert_eq!(activity[0].title, "Unavailable media");
+        assert_eq!(activity[0].user_name, "paul");
         assert_eq!(activity[1].package.id, ready.id);
         assert!(activity[1].lease_active);
 

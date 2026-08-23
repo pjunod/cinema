@@ -1804,6 +1804,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn repeated_metrics_scrapes_do_not_record_store_operations() {
+        let (app, _) = test_state();
+        let before = plurx_core::store::prometheus_store_operations();
+        for _ in 0..3 {
+            let (status, body) = call_text(&app, get("/metrics", None)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        }
+        assert_eq!(plurx_core::store::prometheus_store_operations(), before);
+    }
+
     /// The seam between "another app told us the id" and "go and enrich it".
     ///
     /// These two features can each be right and still combine into an item
@@ -2601,11 +2613,27 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
 
-        let (status, _) = call(&app, post("/api/v1/cluster/leave", None, Value::Null)).await;
+        let leave_body = json!({ "node_id": "test-node" });
+        let (status, _) = call(
+            &app,
+            post("/api/v1/cluster/leave", None, leave_body.clone()),
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, body) = call(
             &app,
-            post("/api/v1/cluster/leave", Some(&admin), Value::Null),
+            post(
+                "/api/v1/cluster/leave",
+                Some(&admin),
+                json!({ "node_id": "another-node" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "leave_node_mismatch");
+        let (status, body) = call(
+            &app,
+            post("/api/v1/cluster/leave", Some(&admin), leave_body),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -2748,7 +2776,7 @@ mod tests {
             .jobs
             .set_producing(Some(crate::state::ProducingNow {
                 title: "Willow".into(),
-                reason: crate::produce::REASON_IN_PROGRESS,
+                reason: crate::produce::REASON_IN_PROGRESS.to_owned(),
                 index: 2,
                 total: 12,
             }))
@@ -3099,9 +3127,14 @@ mod tests {
             .await
             .expect("replacement user");
         assert_eq!(replacement.id, original.id, "numeric id must be reused");
-        assert_eq!(
-            replacement.created_at, original.created_at,
-            "the regression must cover same-second replacement"
+        let same_second_replacement_generation = plurx_core::domain::CredentialGeneration::derive(
+            replacement.id,
+            original.created_at,
+            &replacement.password_hash,
+        );
+        assert_ne!(
+            same_second_replacement_generation, original_generation,
+            "the generation must distinguish replacement credentials even at the same second"
         );
         let replacement_generation = plurx_core::domain::CredentialGeneration::derive(
             replacement.id,
@@ -4065,11 +4098,20 @@ mod tests {
                 row["kind"] == "offline_prepare" && row["label"] == "Preparing offline · Flight"
             })));
 
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (status_code, metrics) = call_text(&app, get("/metrics", None)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
         assert!(metrics.contains("plurx_offline_requests_total{height=\"720\"} 2"));
         assert!(metrics.contains("plurx_cache_protected_entries{reason=\"active_playback\"} 0"));
+        assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(metrics
+            .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
+        assert!(metrics.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!metrics.contains("plurx_raft_commit_index"));
         assert!(
             !metrics.contains("Flight"),
             "titles must never become labels"
@@ -4210,6 +4252,10 @@ mod tests {
             .await
             .expect("package lookup")
             .is_none());
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (_, metrics) = call_text(&app, get("/metrics", None)).await;
         assert!(metrics.contains("plurx_offline_packages{state=\"ready\"} 0"));
         assert!(metrics.contains("plurx_offline_cancellations_total 1"));

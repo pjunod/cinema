@@ -314,10 +314,11 @@ paths = [
   "Cargo.lock",
   "Cargo.toml",
   "crates/plurx-core/Cargo.toml",
-  "crates/plurx-core/src/{cluster,config,domain,error,lib,testfixtures}.rs",
+  "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,lib,testfixtures}.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/replicated.rs",
-  "crates/plurx-core/src/store/sqlite/cache.rs",
+  "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",
+  "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/reading.rs",
   "crates/plurx-core/src/store/sqlite/telemetry.rs",
   "crates/plurx-core/src/store/telemetry.rs",
@@ -343,8 +344,9 @@ depends_on = ["core.media"]
 [[points]]
 id = "cluster.auth"
 title = "Replicated durable state"
-contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
+contract = "The shared Store suite passes on SQLite and three voters; backend-neutral cluster leases have one fenced winner, monotone revisions, exact stale-token rejection, and expiry takeover across both stores; singleton scan, repair, provider, genre, and candidate passes admit one owner across simultaneous scheduler ticks, renew or self-fence, and validate every durable scan/metadata publication in the mutation transaction; separate compatible clients claim distinct whole-title queue rows, bounded keyset pages pass incompatible work, takeover advances a row-local fence and staging owner, stale workers cannot publish, and ready state plus a node-local cache location and authoritative manifest digest commit atomically; queue history has hard active/total bounds and prunes evicted ready generations plus old terminal tombstones; exact v8-to-v9 migration and populated current imports cover queue/cache parity; manifest scrub cursor batches consume one transaction/consensus entry, exact location invalidation rejects stale identity, offline integrity transitions only the exact ready recipe, and unsafe generation paths cannot name filesystem deletion targets; populated v14 and current SQLite backups reach exact imported-table parity; replicated path metadata retains its named owner while bytes and playback telemetry stay node-local; local FTS rebuilds from replicated items; identity/state guards survive follower and leader loss; quorum loss fails readiness; incompatible candidates are refused; the production progress coalescer's deterministic five-second/ten-second load stays within 64 physical commits per stream and 512 compacted bytes per incoming beat after production-threshold compaction, while an uncoalesced control violates both budgets."
 paths = [
+  "benchmarks/cluster-topology.schema.json",
   "crates/plurx-cluster-check/**",
   "crates/plurx-core/src/cluster/coordination.rs",
   "crates/plurx-core/src/metadata/**",
@@ -356,12 +358,15 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
+  "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/sqlite/coordination.rs",
   "crates/plurx-core/src/store/sqlite/publication.rs",
+  "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/publication.rs",
+  "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/store_contract.rs",
-  "crates/plurxd/src/{cachekeep,main,state,transcode}.rs",
+  "crates/plurxd/src/{cachekeep,main,manifest_cache,state,transcode}.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
@@ -384,6 +389,24 @@ paths = [
 ]
 checks = ["rust-gate", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
+
+[[points]]
+id = "cluster.page-reads"
+title = "Clustered page-read primitives"
+contract = "The settings_snapshot and cache_bytes Store primitives consumed by GET /settings keep authoritative semantics while using one replicated settings snapshot plus one cache aggregate when configured; the offline_activity_packages primitive joins Activity display fields in one store query whose call count is independent of package cardinality; Home preserves the established ordering of its two progress-derived reads while overlapping independent recently-added work. The three-voter gate measures the Settings and Activity Store primitives as attempted Hiqlite client-call families, not complete HTTP pages or network RTTs, and its counters compile out of production builds. Browser request concurrency, failure isolation, and overlapping-timer behavior are separate web-static contracts."
+paths = [
+  "crates/plurx-core/Cargo.toml",
+  "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/hiqlite.rs",
+  "crates/plurx-core/src/store/hiqlite_durable.rs",
+  "crates/plurx-core/src/store/sqlite/mod.rs",
+  "crates/plurx-core/src/store/sqlite/offline.rs",
+  "crates/plurx-core/tests/store_contract.rs",
+  "crates/plurxd/src/http/browse.rs",
+  "crates/plurxd/src/http/system.rs",
+]
+checks = ["rust-gate", "cluster-auth"]
+depends_on = ["cluster.auth"]
 
 [[points]]
 id = "server.api"
@@ -469,6 +492,7 @@ paths = [
   "crates/plurx-pgs/**",
   "fuzz/**",
   "crates/plurxd/src/{admission,copyseg,delivery,ffmpeg,meter,pgs_overlay,pipeprobe,playstart,produce,progressive,subtitles,transcode}.rs",
+  "crates/plurxd/src/manifest_cache.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/web/playback-policy.js",
   "docs/PLAYBACK*.md",

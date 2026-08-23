@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b8b393ab"]
+points = ["cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Rust gate compiles every target with warnings denied, proving the Store-free metrics projections remain the only production accessors and that the atomic publication sequence is lint-clean; the cluster-auth check continues to exercise the three-voter aggregate contract after that integration cleanup."
