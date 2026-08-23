@@ -546,13 +546,13 @@ impl MediaSessionStore for HiqliteAuthStore {
             (
                 "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = $1,
                         updated_at_ms = $1
-                  WHERE $7 != '' AND incarnation_id = $7
-                    AND incarnation_id = (SELECT current_incarnation_id
+                  WHERE incarnation_id = (SELECT current_incarnation_id
                       FROM media_playback_pointers WHERE user_id = $2 AND playback_id = $3)
                     AND incarnation_id != $4 AND state != 'ended'
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $4 AND session_id = $5
-                        AND owner_node_id = $6 AND state = 'active')",
+                        AND owner_node_id = $6 AND state = 'active')
+                    AND $7 != '' AND incarnation_id = $7",
                 params!(
                     activation.now_ms,
                     activation.user_id,
