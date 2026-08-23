@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6d66ce02"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained anonymous-memory-file regression creates, writes, seals or no-ops, rewinds, and reads the snapshot, while the authenticated-segment regression requires the same handle to flush and seek successfully on macOS; restoring the false FreeBSD-only SHM_ANON path reproduces EFAULT before either contract can complete."
