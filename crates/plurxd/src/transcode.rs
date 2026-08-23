@@ -5677,6 +5677,18 @@ impl TranscodeManager {
             if let Some(shared) = self.shared_cache.as_ref() {
                 shared.report_io_failure(reason).await;
             }
+            // A read failure is evidence about this node's admitted mount,
+            // not proof that every voter lost the portable generation. Keep
+            // the replicated pointer and its reader pins intact so healthy
+            // members may continue serving it; fenced GC owns global
+            // retirement.
+            tracing::warn!(
+                recipe = %location.recipe_hash,
+                storage = %location.node_id,
+                reason,
+                "shared cache read failed; disabled this member without retiring the generation"
+            );
+            return false;
         }
         Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
     }
@@ -5872,12 +5884,14 @@ impl TranscodeManager {
         let Some(dir) =
             crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
         else {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "unsafe_relative_path",
-            )
-            .await;
+            if identity.storage_class != "shared" {
+                let _ = Self::invalidate_cache_location_with_store(
+                    store.as_ref(),
+                    &identity,
+                    "unsafe_relative_path",
+                )
+                .await;
+            }
             return false;
         };
         let manifest = match crate::manifest_cache::load(
@@ -5895,12 +5909,14 @@ impl TranscodeManager {
         {
             Ok(manifest) => manifest,
             Err(_) => {
-                let _ = Self::invalidate_cache_location_with_store(
-                    store.as_ref(),
-                    &identity,
-                    "manifest_invalid",
-                )
-                .await;
+                if identity.storage_class != "shared" {
+                    let _ = Self::invalidate_cache_location_with_store(
+                        store.as_ref(),
+                        &identity,
+                        "manifest_invalid",
+                    )
+                    .await;
+                }
                 return false;
             }
         };
@@ -5914,12 +5930,14 @@ impl TranscodeManager {
             .and_then(validated_vod_part)
             .is_some();
         if !playlist_valid {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "playlist_invalid_vod",
-            )
-            .await;
+            if identity.storage_class != "shared" {
+                let _ = Self::invalidate_cache_location_with_store(
+                    store.as_ref(),
+                    &identity,
+                    "playlist_invalid_vod",
+                )
+                .await;
+            }
         }
         playlist_valid
     }

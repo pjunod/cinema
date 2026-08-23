@@ -818,6 +818,20 @@ async fn invalidate_package_location(
 ) {
     forget_offline_generation(cache_root, location_node_id, cached);
     let recipe = package.recipe_hash.as_deref().unwrap_or_default();
+    if cached.storage_class == "shared" {
+        // This request can prove only that this node's admitted mount stopped
+        // serving the named bytes. Retiring the replicated generation here
+        // would incorrectly evict healthy peers and discard their live pins.
+        state.shared_cache.report_io_failure(reason).await;
+        tracing::warn!(
+            package = %package.id,
+            recipe,
+            storage = location_node_id,
+            reason,
+            "shared offline read failed; disabled this member without retiring the generation"
+        );
+        return;
+    }
     let invalidated = state
         .store
         .invalidate_cache_entry(
@@ -838,9 +852,6 @@ async fn invalidate_package_location(
             );
             false
         });
-    if cached.storage_class == "shared" {
-        state.shared_cache.report_io_failure(reason).await;
-    }
     // Exact location invalidation atomically settles every ready offline
     // package bound to that generation. A failed CAS means a newer location
     // won the race and no replacement-backed package was touched.
@@ -2744,6 +2755,13 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"portable-video");
         assert!(!shared.is_verified());
         assert!(shared.root().await.is_none());
+        assert!(fixture
+            .state
+            .store
+            .shared_cache_hit(&recipe, shared.storage_id().expect("shared storage id"))
+            .await
+            .expect("shared pointer after member mount loss")
+            .is_some());
     }
 
     #[tokio::test]
