@@ -374,8 +374,7 @@ impl MediaSessionCoordinator {
         .await
         .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??
         .filter(authorizing_route);
-        self.cache_route_result(session_id, route.clone()).await;
-        Ok(route)
+        Ok(self.cache_queried_route_result(session_id, route).await)
     }
 
     pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
@@ -402,23 +401,31 @@ impl MediaSessionCoordinator {
     async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
-        routes.retain(|_, cached| cached.expires_at > now);
-        if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
-            if let Some(oldest) = routes
-                .iter()
-                .min_by_key(|(_, cached)| cached.expires_at)
-                .map(|(session_id, _)| session_id.clone())
-            {
-                routes.remove(&oldest);
-            }
+        routes.retain(|_, cached| {
+            cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
+        });
+        insert_cached_route(&mut routes, session_id, route, now);
+    }
+
+    /// Publish a Store lookup only if no activation or terminal transition
+    /// produced a newer authoritative cache entry while the read was in
+    /// flight. This closes the miss-before-activation race without making
+    /// activation wait behind a potentially slow consensus lookup.
+    async fn cache_queried_route_result(
+        &self,
+        session_id: &str,
+        route: Option<MediaSessionRoute>,
+    ) -> Option<MediaSessionRoute> {
+        let now = tokio::time::Instant::now();
+        let mut routes = self.routes.lock().await;
+        routes.retain(|_, cached| {
+            cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
+        });
+        if let Some(cached) = routes.get(session_id) {
+            return cached.route.clone();
         }
-        routes.insert(
-            session_id.to_owned(),
-            CachedRoute {
-                route,
-                expires_at: now + ROUTE_CACHE_TTL,
-            },
-        );
+        insert_cached_route(&mut routes, session_id, route.clone(), now);
+        route
     }
 
     pub(crate) async fn invalidate_route(&self, session_id: &str) {
@@ -542,6 +549,30 @@ impl MediaSessionCoordinator {
             .await?;
         relay_response(response)
     }
+}
+
+fn insert_cached_route(
+    routes: &mut HashMap<String, CachedRoute>,
+    session_id: &str,
+    route: Option<MediaSessionRoute>,
+    now: tokio::time::Instant,
+) {
+    if routes.len() >= MAX_ROUTE_CACHE_ENTRIES && !routes.contains_key(session_id) {
+        if let Some(oldest) = routes
+            .iter()
+            .min_by_key(|(_, cached)| cached.expires_at)
+            .map(|(session_id, _)| session_id.clone())
+        {
+            routes.remove(&oldest);
+        }
+    }
+    routes.insert(
+        session_id.to_owned(),
+        CachedRoute {
+            route,
+            expires_at: now + ROUTE_CACHE_TTL,
+        },
+    );
 }
 
 fn authorizing_route(route: &MediaSessionRoute) -> bool {
@@ -1096,6 +1127,14 @@ mod tests {
             updated_at_ms: unix_ms(),
         };
         coordinator.cache_route(route.clone()).await;
+        assert_eq!(
+            coordinator
+                .cache_queried_route_result(session_id, None)
+                .await
+                .map(|route| route.incarnation_id),
+            Some("00000000-0000-4000-8000-0000000000c2".to_owned()),
+            "a stale in-flight miss must not overwrite a concurrent activation"
+        );
         assert_eq!(
             coordinator
                 .route(session_id)
