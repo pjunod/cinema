@@ -49,7 +49,9 @@ impl PublicationFence {
     ) -> Result<bool, StoreError> {
         let mut state = self.state.write().await;
         if self.revoked.load(Ordering::Acquire) {
-            *state = None;
+            // No backend request has been dispatched yet. Preserve the
+            // current token so graceful release can retire it; the deadline
+            // path invalidates it explicitly after draining this future.
             return Ok(false);
         }
         let Some(current) = state.clone() else {
