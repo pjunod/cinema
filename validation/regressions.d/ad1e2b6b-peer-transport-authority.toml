@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ad1e2b6b"]
+points = ["cluster.auth", "cluster.membership", "security-boundaries"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained three-voter lifecycle proves that a removed node's private key cannot impersonate a surviving activity or artwork peer, while migration coverage preserves path-prefixed join coordinators and keeps peer URLs origin-only. Daemon regressions enforce the exact escaped-JSON byte budget, reject an oversized chunked body, prove redirect refusal, bound a ninth peer to the common deadline, and cap registry work before Store lookups. Reverting the correction restores shared-secret impersonation, upgrade refusal, or unbounded peer transport work."
