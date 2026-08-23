@@ -9,6 +9,7 @@
     "schema_version",
     "evidence_scope",
     "build_sha",
+    "runner_image_digest",
     "workload",
     "workload_sha256",
     "topology_order",
@@ -20,6 +21,12 @@
     "schema_version": { "const": 1 },
     "evidence_scope": { "enum": ["semantic_ci", "named_runner"] },
     "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "runner_image_digest": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      ]
+    },
     "workload": { "$ref": "#/$defs/workload" },
     "workload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "topology_order": {
@@ -45,6 +52,7 @@
       },
       "then": {
         "properties": {
+          "runner_image_digest": { "type": "null" },
           "runs": {
             "items": {
               "properties": {
@@ -74,6 +82,7 @@
       },
       "then": {
         "properties": {
+          "runner_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
           "runs": {
             "items": {
               "properties": {

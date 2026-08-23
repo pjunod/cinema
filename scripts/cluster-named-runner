@@ -1,0 +1,100 @@
+#!/bin/sh
+set -eu
+
+die() {
+  echo "cluster-named-runner: $*" >&2
+  exit 2
+}
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+hosts=${PLURX_NAMED_HOSTS:-}
+
+clean_head() {
+  current=$(git -C "$repo" rev-parse HEAD)
+  status=$(git -C "$repo" status --porcelain=v1 --untracked-files=normal)
+  [ -z "$status" ] || die "controller source clone must be clean, including untracked files"
+  printf '%s\n' "$current"
+}
+
+case "${1:-}" in
+  image)
+    [ -n "$hosts" ] || die "image requires PLURX_NAMED_HOSTS with the four private SSH aliases"
+    sha=${2:-}
+    set -- $hosts
+    [ "$#" -eq 4 ] || die "PLURX_NAMED_HOSTS must contain exactly four SSH aliases"
+    [ ${#sha} -eq 40 ] || die "image requires a full 40-character build SHA"
+    case "$sha" in *[!0-9a-f]*) die "build SHA must be lowercase hexadecimal" ;; esac
+    current=$(clean_head)
+    [ "$current" = "$sha" ] || die "requested image SHA is not the clone's current HEAD"
+    image="plurx-cluster-check:${sha}"
+    architecture=
+    for host do
+      case "$host" in
+        [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*|*[!A-Za-z0-9]) die "unsafe SSH alias: $host" ;;
+      esac
+      remote_architecture=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- "$host" uname -m)
+      case "$remote_architecture" in
+        x86_64|amd64) remote_architecture=amd64 ;;
+        aarch64|arm64) remote_architecture=arm64 ;;
+        *) die "$host has unsupported native architecture $remote_architecture" ;;
+      esac
+      if [ -z "$architecture" ]; then
+        architecture=$remote_architecture
+      else
+        [ "$architecture" = "$remote_architecture" ] || die "all voters must have one native architecture"
+      fi
+    done
+    git -C "$repo" archive "$sha" | docker build \
+      --platform "linux/$architecture" \
+      --file benchmarks/cluster-named-runner.Dockerfile \
+      --tag "$image" \
+      -
+    for host do
+      echo "cluster-named-runner: loading $image on $host"
+      docker save "$image" | ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- "$host" docker load
+      remote_id=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- "$host" \
+        docker image inspect --format '{{.Id}}' "$image")
+      local_id=$(docker image inspect --format '{{.Id}}' "$image")
+      [ "$remote_id" = "$local_id" ] || die "$host loaded a different image digest"
+    done
+    ;;
+  collect)
+    config=${2:-}
+    output=${3:-}
+    [ -n "$config" ] || die "collect requires a runner config JSON"
+    [ -n "$output" ] || die "collect requires an output directory"
+    source_sha=$(clean_head)
+    owner=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    [ ${#owner} -eq 64 ] || die "could not generate a 256-bit output owner"
+    case "$owner" in *[!0-9a-f]*) die "output owner was not lowercase hexadecimal" ;; esac
+    cargo run --locked --manifest-path "$repo/Cargo.toml" \
+      -p plurx-cluster-check -- topology-claim "$output" "$owner"
+    manifest="$output/.active-cleanup.json"
+    cleanup_on_exit() {
+      result=$?
+      trap - EXIT HUP INT TERM
+      if [ -f "$manifest" ]; then
+        if ! cargo run --locked --manifest-path "$repo/Cargo.toml" \
+          -p plurx-cluster-check -- topology-cleanup "$manifest"; then
+          echo "cluster-named-runner: cleanup failed; recovery manifest retained at $manifest" >&2
+          [ "$result" -ne 0 ] || result=1
+        fi
+      fi
+      exit "$result"
+    }
+    trap cleanup_on_exit EXIT HUP INT TERM
+    cargo run --locked --manifest-path "$repo/Cargo.toml" \
+      -p plurx-cluster-check -- topology-named "$config" "$output" "$repo" "$owner"
+    final_sha=$(clean_head)
+    [ "$final_sha" = "$source_sha" ] || die "controller source HEAD changed during collection"
+    ;;
+  cleanup)
+    manifest=${2:-}
+    [ -n "$manifest" ] || die "cleanup requires an active cleanup manifest"
+    cargo run --locked --manifest-path "$repo/Cargo.toml" \
+      -p plurx-cluster-check -- topology-cleanup "$manifest"
+    ;;
+  *)
+    die "usage: scripts/cluster-named-runner image <build-sha> | collect <config.json> <output-dir> | cleanup <manifest.json>"
+    ;;
+esac

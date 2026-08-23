@@ -402,6 +402,85 @@ budgets plus Home settled. Each delayed cohort enforces first content and every
 sample must prove both a 250 ms response time for its named optional endpoint
 and a 250 ms settled-minus-content gap before its settled bound is relaxed.
 
+### Run the named four-machine topology campaign
+
+The P0c runner uses four private Linux hosts for voters and a fifth, external
+controller for load generation. It never joins, removes, pauses, or reuses a
+live plurx voter. Each measured topology gets fresh containers, ports in the
+IANA dynamic/private range (`49152--65535`), and a new
+`/var/tmp/plurx-cluster-named.*` data root on local durable storage. A
+controller-generated 256-bit nonce makes every root a single, predeclared
+basename. Successful and failed runs remove only the exact container names and
+nonce paths they recorded before remote creation.
+
+Build from the isolated clone and keep private hostnames and addresses in an
+ignored config under `target/`:
+
+```bash
+cp benchmarks/cluster-named-runner.example.json \
+  target/cluster-named-runner.json
+$EDITOR target/cluster-named-runner.json
+
+sha=$(git rev-parse HEAD)
+export PLURX_NAMED_HOSTS='private-ssh-alias-1 private-ssh-alias-2 private-ssh-alias-3 private-ssh-alias-4'
+scripts/cluster-named-runner image "$sha"
+scripts/cluster-named-runner collect \
+  target/cluster-named-runner.json \
+  target/cluster-topology-named
+```
+
+The image command refuses a dirty or untracked clone and sends `git archive` of
+the exact full source SHA to Docker, so ignored credentials and controller-only
+files cannot enter the build context. It builds for the common native
+architecture reported by the four voters and requires that SHA as the image
+tag. Collection independently requires a clean controller tree with the same
+HEAD at its opening and closing boundaries. It rechecks the image digest,
+native Linux architecture, four distinct salted machine identities, and an
+external controller identity before and after measurement; every measured and
+cleanup container executes that verified digest with pulls disabled, never the
+mutable tag. Runtime SSH names, private addresses, and raw machine ids are
+transport-only; committed artifacts use opaque node labels and build-salted
+fingerprints. Before collection, confirm the configured ports are free, the
+controller and voters have no concurrent build, scan, backup, or benchmark
+work, and every `/var/tmp` root is the declared local durable device rather
+than tmpfs or a network mount.
+
+Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
+every raw `pair-NN.json`. After at least three pairs it computes the paired
+four-voter ÷ three-voter ratios for write p99, CPU seconds, storage-write bytes,
+and network-transmit bytes. Resource counters are captured concurrently on all
+voters at the stable pre-write barrier and again after convergence; the
+artifact retains monotone workload-window deltas, while Linux `VmHWM` is reset
+at the opening barrier. It may stop only when all two-sided 95% Student-t
+intervals have at most 5% multiplicative half-width, or after seven pairs with
+an `inconclusive` result. `campaign.json` records the medians, intervals,
+stopping verdict, isolated load-generator declaration, and reviewed budgets.
+Validate retained bytes and every cross-file hash with:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- \
+  topology-campaign-validate path/to/campaign.json
+```
+
+The output directory must not exist. `collect` generates a per-invocation
+256-bit owner and must win one atomic directory claim before it arms its cleanup
+trap, reserves ports, or creates remote state. A losing controller never owns a
+manifest and therefore cannot clean the winner. Pair files and `campaign.json`
+are published with same-directory, no-replace hard links, so a competing writer
+cannot overwrite earlier evidence. During an active topology,
+`.active-cleanup.json` is bound to that owner and atomically created with mode
+`0600` because it contains private transport details. The helper traps
+interruption and replays only its manifest through time-bounded SSH cleanup. It
+does not automatically clean a stale manifest from another invocation. If the
+controller itself is killed, recover the retained manifest explicitly before
+reusing the runner hosts. Preserve that directory as evidence and choose a
+fresh output directory for the next campaign:
+
+```bash
+scripts/cluster-named-runner cleanup \
+  target/cluster-topology-named/.active-cleanup.json
+```
+
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
 settings ship, `storage.data_dir` remains the compatibility root. On a fresh
 install, child mounts can isolate their workloads:
