@@ -1056,6 +1056,21 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         Response::Flag { value: true } => {}
         response => bail!("a live voter's artwork proof was refused: {response:?}"),
     }
+    let legacy_artwork_proof =
+        shared_secret_artwork_proof(&format!("node-{target}"), "poster.jpg", activity_now)?;
+    match cluster
+        .request(
+            observer,
+            Request::VerifyArtworkPeer {
+                filename: "poster.jpg".to_owned(),
+                auth: legacy_artwork_proof,
+            },
+        )
+        .await?
+    {
+        Response::Flag { value: true } => {}
+        response => bail!("the established v4 artwork HMAC wire was refused: {response:?}"),
+    }
     match cluster
         .request(
             observer,
@@ -4687,6 +4702,24 @@ fn shared_secret_activity_proof(
     Ok(ActivityPeerAuth {
         node_id: claimed_node_id.to_owned(),
         target_node_id: target_node_id.to_owned(),
+        timestamp_ms,
+        signature: hex::encode(mac.finalize().into_bytes()),
+    })
+}
+
+/// Build an artwork proof without the production signer so this fixture
+/// remains a golden compatibility check for the established v4 HMAC wire.
+fn shared_secret_artwork_proof(
+    node_id: &str,
+    filename: &str,
+    timestamp_ms: i64,
+) -> Result<ArtworkPeerAuth> {
+    let message = format!("plurx-artwork-v1\n{node_id}\n{timestamp_ms}\n{filename}");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(API_SECRET.as_bytes())
+        .map_err(|error| anyhow!("construct legacy artwork proof: {error}"))?;
+    mac.update(message.as_bytes());
+    Ok(ArtworkPeerAuth {
+        node_id: node_id.to_owned(),
         timestamp_ms,
         signature: hex::encode(mac.finalize().into_bytes()),
     })

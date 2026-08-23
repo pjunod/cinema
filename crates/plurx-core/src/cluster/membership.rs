@@ -130,6 +130,7 @@ const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
+const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
@@ -480,6 +481,7 @@ struct ReplicatedMembership {
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
+    activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
     /// First local observation of an older-term claim. `Instant` deliberately
@@ -491,6 +493,20 @@ struct ReplicatedMembership {
 struct ActivityAuthAdmission {
     window_started: Instant,
     checks: u8,
+}
+
+impl ActivityAuthAdmission {
+    fn admit(&mut self, now: Instant, maximum: u8) -> bool {
+        if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
+            self.window_started = now;
+            self.checks = 0;
+        }
+        if self.checks >= maximum {
+            return false;
+        }
+        self.checks += 1;
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -573,6 +589,10 @@ impl MembershipManager {
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
+                activity_key_lookup_admission: Mutex::new(ActivityAuthAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
                 activation_marker,
                 replication,
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
@@ -929,11 +949,11 @@ impl MembershipManager {
                 "SELECT key.node_id, key.public_key \
                  FROM cluster_node_activity_keys key \
                  JOIN cluster_nodes node ON node.node_id = key.node_id \
-                 WHERE node.removed_at IS NULL \
+                 WHERE node.removed_at IS NULL AND node.node_id != $2 \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
                      WHERE removal.node_id = node.node_id) \
                  ORDER BY node.raft_id LIMIT $1",
-                params!(MAX_ACTIVITY_PEERS as i64),
+                params!(MAX_ACTIVITY_PEERS as i64, inner.identity.node_id.as_str()),
             )
             .await?;
         let keys = rows
@@ -1363,7 +1383,9 @@ impl MembershipManager {
             Err(_) => return Ok(false),
         };
         let message = activity_auth_message(&auth.node_id, &auth.target_node_id, auth.timestamp_ms);
-        if !self.activity_signature_is_known(&auth.node_id, &message, &signature)?
+        if !self
+            .activity_signature_is_valid(&auth.node_id, &message, &signature)
+            .await?
             || !self.admit_activity_authority_check(&auth.node_id)?
         {
             return Ok(false);
@@ -1372,14 +1394,14 @@ impl MembershipManager {
             .await
     }
 
-    fn activity_signature_is_known(
+    async fn activity_signature_is_valid(
         &self,
         node_id: &str,
         message: &[u8],
         signature: &[u8],
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        let public_key = inner
+        let cached = inner
             .activity_public_keys
             .lock()
             .map_err(|_| {
@@ -1387,12 +1409,76 @@ impl MembershipManager {
             })?
             .get(node_id)
             .cloned();
-        let Some(public_key) = public_key else {
+        if let Some(public_key) = cached {
+            return Ok(UnparsedPublicKey::new(&ED25519, public_key)
+                .verify(message, signature)
+                .is_ok());
+        }
+        if !self.admit_activity_key_lookup()? {
+            return Ok(false);
+        }
+        let rows = inner
+            .client
+            .query_map::<ActivityPublicKeyRow, _>(
+                "SELECT key.node_id, key.public_key \
+                 FROM cluster_node_activity_keys key \
+                 JOIN cluster_nodes node ON node.node_id = key.node_id \
+                 WHERE key.node_id = $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) LIMIT 1",
+                params!(node_id),
+            )
+            .await?;
+        let Some((node_id, public_key)) = rows.into_iter().next().and_then(|row| {
+            let public_key = hex::decode(row.public_key).ok()?;
+            (public_key.len() == 32).then_some((row.node_id, public_key))
+        }) else {
             return Ok(false);
         };
-        Ok(UnparsedPublicKey::new(&ED25519, public_key)
+        if UnparsedPublicKey::new(&ED25519, &public_key)
             .verify(message, signature)
-            .is_ok())
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        let evicted = {
+            let mut keys = inner.activity_public_keys.lock().map_err(|_| {
+                MembershipError::Internal("activity public-key lock was poisoned".to_owned())
+            })?;
+            let evicted = (keys.len() >= MAX_ACTIVITY_PEERS)
+                .then(|| keys.keys().next().cloned())
+                .flatten();
+            if let Some(evicted) = evicted.as_deref() {
+                keys.remove(evicted);
+            }
+            keys.insert(node_id, public_key);
+            evicted
+        };
+        if let Some(evicted) = evicted {
+            inner
+                .activity_auth_admission
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("activity admission lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
+        }
+        Ok(true)
+    }
+
+    fn admit_activity_key_lookup(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        Ok(inner
+            .activity_key_lookup_admission
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal(
+                    "activity key-lookup admission lock was poisoned".to_owned(),
+                )
+            })?
+            .admit(now, MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND))
     }
 
     fn admit_activity_authority_check(&self, node_id: &str) -> Result<bool, MembershipError> {
@@ -1407,15 +1493,7 @@ impl MembershipManager {
                 window_started: now,
                 checks: 0,
             });
-        if now.saturating_duration_since(state.window_started) >= Duration::from_secs(1) {
-            state.window_started = now;
-            state.checks = 0;
-        }
-        if state.checks >= MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND {
-            return Ok(false);
-        }
-        state.checks += 1;
-        Ok(true)
+        Ok(state.admit(now, MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND))
     }
 
     async fn verify_live_activity_authority(

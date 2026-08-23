@@ -552,7 +552,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn ninth_peer_cannot_extend_the_common_deadline() {
         let peers = (0..9)
             .map(|index| ActivityPeer {
@@ -581,14 +581,13 @@ mod tests {
             .all(|(_, outcome)| *outcome == PeerActivityOutcome::TimedOut));
         let ninth_started_ms = ninth_started_ms.load(Ordering::SeqCst);
         let completed_ms = started.elapsed().as_millis() as u64;
-        assert!(
-            ninth_started_ms >= 80,
-            "the ninth peer started before the first concurrency window expired"
+        assert_eq!(
+            ninth_started_ms, 100,
+            "the ninth peer did not start at the shared deadline"
         );
-        assert!(
-            completed_ms.saturating_sub(ninth_started_ms) < 50,
-            "the ninth peer received a fresh deadline: started at {ninth_started_ms}ms, \
-             completed at {completed_ms}ms"
+        assert_eq!(
+            completed_ms, 100,
+            "the ninth peer received time beyond the shared deadline"
         );
     }
 }
