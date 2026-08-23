@@ -6071,7 +6071,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 193, "review the Store method count");
+    assert_eq!(declared.len(), 194, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
