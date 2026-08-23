@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["e24c9b57", "09879b4d", "5761a27f", "d6a20e41", "b594d76d"]
+commits = ["e24c9b57", "09879b4d", "5761a27f", "d6a20e41", "b594d76d", "c5c5322a"]
 points = ["core.media", "cluster.auth", "server.api", "playback.pipeline", "validation.framework"]
 checks = ["rust-gate", "cluster-auth", "resource-bounds", "playback-recovery", "history-regressions"]
 reason = "The retained backend-neutral Store contract runs request claim, conflict, failed-attempt reacquisition, owner assignment, activation, supersession, exact-expiry renewal refusal, route lookup, inventory, and release through both SQLite and three-voter Hiqlite. Runtime tests require strict fenced start DTOs, capability-bound responses, path-safe relay resources, an explicit response-header allowlist, streaming without body accumulation, rejection of household bearer credentials at peer-only routes, and a typed node-removal barrier while a live route is owned. Replicated activation uses a pointer compare-and-swap so concurrent successors cannot both replace one playback, admits a same-playback replacement at the per-user limit, and cleans rejected fresh leases. The removal attempt and its media-owner check share the transaction that creates the owner fence, so activation and removal are mutually exclusive. The production path ranks every eligible offer, retries lower-ranked workers before committing ownership, pins stall reopens until fenced takeover exists, caches only positive durable routes for one second without extending lease expiry, streams HLS bodies with backpressure, and makes unconfirmed or expired workers self-fence."
