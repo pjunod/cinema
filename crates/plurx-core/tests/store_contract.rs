@@ -4112,14 +4112,45 @@ struct ContractCluster {
 }
 
 #[cfg(feature = "hiqlite-store")]
+#[derive(Debug)]
+enum ContractStartError {
+    PortCollision,
+    Failed(String),
+}
+
+#[cfg(feature = "hiqlite-store")]
+struct ContractStartupEvent {
+    node_id: u64,
+    result: Result<(), ContractStartError>,
+    output: ChildStdout,
+}
+
+#[cfg(feature = "hiqlite-store")]
 impl ContractCluster {
     fn start() -> Self {
+        const ATTEMPTS: usize = 5;
         install_contract_crypto_provider();
+        for attempt in 1..=ATTEMPTS {
+            match Self::try_start() {
+                Ok(cluster) => return cluster,
+                Err(ContractStartError::PortCollision) if attempt < ATTEMPTS => continue,
+                Err(ContractStartError::PortCollision) => {
+                    panic!("three-voter contract exhausted {ATTEMPTS} port-bind attempts")
+                }
+                Err(ContractStartError::Failed(error)) => {
+                    panic!("three-voter contract startup failed: {error}")
+                }
+            }
+        }
+        unreachable!("contract startup loop returns or panics")
+    }
+
+    fn try_start() -> Result<Self, ContractStartError> {
         let root = tempfile::tempdir().expect("three-voter contract root");
-        // Keep every ephemeral listener open until the whole six-port set has
-        // been selected. Asking the kernel for one port at a time and dropping
-        // its listener immediately lets it hand the same port back to a later
-        // voter in this cluster before any child has bound it.
+        // Select the complete six-port set while all probe listeners coexist,
+        // so one call cannot contain duplicate port numbers. The listeners
+        // must be released before Hiqlite can bind; try_start reports that
+        // remaining cross-process race and start() reallocates the whole set.
         let mut ports = contract_free_ports(6).into_iter();
         let specs = (1..=3)
             .map(|id| ContractNodeSpec {
@@ -4136,6 +4167,7 @@ impl ContractCluster {
             .collect::<Vec<_>>();
         let executable = std::env::current_exe().expect("contract test executable");
         let mut starting = Vec::new();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
         for node_id in 1..=3 {
             let launch = ContractNodeLaunch {
                 node_id,
@@ -4158,35 +4190,88 @@ impl ContractCluster {
                 .expect("spawn contract voter");
             let input = child.stdin.take().expect("contract voter stdin");
             let output = child.stdout.take().expect("contract voter stdout");
-            starting.push((node_id, child, input, output));
+            let event_tx = event_tx.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(output);
+                let result = loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            break Err(ContractStartError::Failed(format!(
+                                "contract voter {node_id} exited before ready"
+                            )))
+                        }
+                        Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
+                            break Ok(())
+                        }
+                        Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
+                            break Err(ContractStartError::PortCollision)
+                        }
+                        Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
+                            break Err(ContractStartError::Failed(line.trim().to_owned()))
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            break Err(ContractStartError::Failed(format!(
+                                "read contract voter {node_id} startup: {error}"
+                            )))
+                        }
+                    }
+                };
+                let _ = event_tx.send(ContractStartupEvent {
+                    node_id,
+                    result,
+                    output: reader.into_inner(),
+                });
+            });
+            starting.push((node_id, child, Some(input)));
+        }
+        drop(event_tx);
+
+        let mut outputs = std::collections::BTreeMap::new();
+        for _ in 0..starting.len() {
+            let event = match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => event,
+                Err(error) => {
+                    stop_contract_starting(&mut starting);
+                    return Err(ContractStartError::Failed(format!(
+                        "contract startup readiness timeout: {error}"
+                    )));
+                }
+            };
+            if let Err(error) = event.result {
+                stop_contract_starting(&mut starting);
+                return Err(error);
+            }
+            outputs.insert(event.node_id, event.output);
         }
 
         let mut nodes = Vec::new();
-        for (node_id, child, input, mut output) in starting {
-            let mut reader = BufReader::new(output);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let bytes = reader
-                    .read_line(&mut line)
-                    .expect("read contract voter startup");
-                assert!(bytes > 0, "contract voter {node_id} exited before ready");
-                if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") {
-                    break;
-                }
-            }
-            output = reader.into_inner();
+        for (node_id, child, input) in starting {
             nodes.push(ContractNodeProcess {
                 _child: child,
-                _input: Some(input),
-                _output: output,
+                _input: input,
+                _output: outputs
+                    .remove(&node_id)
+                    .expect("ready contract voter output"),
             });
         }
-        Self {
+        Ok(Self {
             addresses: specs.into_iter().map(|node| node.api).collect(),
             _root: root,
             _nodes: nodes,
-        }
+        })
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn stop_contract_starting(starting: &mut [(u64, Child, Option<ChildStdin>)]) {
+    for (_, child, input) in starting.iter_mut() {
+        drop(input.take());
+        let _ = child.kill();
+    }
+    for (_, child, _) in starting.iter_mut() {
+        let _ = child.wait();
     }
 }
 
@@ -4217,7 +4302,7 @@ async fn hiqlite_contract_node_process() {
     let _ = ServerTlsConfig::server_config_self_signed("127.0.0.1").await;
     let data_dir = launch.root.join(format!("node-{}", launch.node_id));
     std::fs::create_dir_all(&data_dir).expect("contract node data directory");
-    let client = hiqlite::start_node(NodeConfig {
+    let client = match hiqlite::start_node(NodeConfig {
         node_id: launch.node_id,
         nodes: launch
             .nodes
@@ -4242,10 +4327,39 @@ async fn hiqlite_contract_node_process() {
         ..Default::default()
     })
     .await
-    .expect("start contract voter");
-    tokio::time::timeout(Duration::from_secs(45), client.wait_until_healthy_db())
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let message = error.to_string();
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("address already in use")
+                || lower.contains("addrinuse")
+                || lower.contains("os error 48")
+                || lower.contains("os error 98")
+            {
+                println!("PLURX_CONTRACT_NODE_PORT_COLLISION {}", launch.node_id);
+            } else {
+                println!(
+                    "PLURX_CONTRACT_NODE_START_FAILED {} {}",
+                    launch.node_id,
+                    message.replace(['\r', '\n'], " ")
+                );
+            }
+            std::io::stdout().flush().expect("flush contract failure");
+            return;
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(45), client.wait_until_healthy_db())
         .await
-        .expect("contract voter health timeout");
+        .is_err()
+    {
+        println!(
+            "PLURX_CONTRACT_NODE_START_FAILED {} health timeout",
+            launch.node_id
+        );
+        std::io::stdout().flush().expect("flush contract failure");
+        return;
+    }
     println!("PLURX_CONTRACT_NODE_READY {}", launch.node_id);
     std::io::stdout().flush().expect("flush contract readiness");
     let mut sink = Vec::new();

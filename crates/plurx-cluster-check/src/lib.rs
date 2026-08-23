@@ -468,7 +468,10 @@ async fn run_singleton_takeover_case() -> Result<()> {
     let peers = (1..=3)
         .filter(|node_id| *node_id != old_owner)
         .collect::<Vec<_>>();
-    let (stable_term, _) = raft_term_and_index(&mut cluster, leader).await?;
+    let (stable_leader, stable_term, _) = raft_position(&mut cluster, leader).await?;
+    if stable_leader != Some(leader) {
+        bail!("singleton proof leader changed before its initial boundary sample");
+    }
     let mut provider = ProviderFixture::start().await?;
 
     let initial = start_singleton_probe(&mut cluster, old_owner, &provider.url).await?;
@@ -513,8 +516,9 @@ async fn run_singleton_takeover_case() -> Result<()> {
         );
     }
     wait_until_lease_expired(&mut cluster, leader, &authoritative_old).await?;
-    let (baseline_term, applied_before) = raft_term_and_index(&mut cluster, leader).await?;
-    if baseline_term != stable_term || cluster.leader().await? != leader {
+    let (baseline_leader, baseline_term, applied_before) =
+        raft_position(&mut cluster, leader).await?;
+    if baseline_term != stable_term || baseline_leader != Some(leader) {
         bail!("pausing a follower changed leader/term before singleton takeover");
     }
 
@@ -584,8 +588,8 @@ async fn run_singleton_takeover_case() -> Result<()> {
     // Applied indexes are global log positions, so the post-baseline budget
     // below can still include the resumed stale-token rejection even when that
     // scheduling race elects a new leader.
-    let (takeover_term, _) = raft_term_and_index(&mut cluster, leader).await?;
-    if takeover_term != stable_term || cluster.leader().await? != leader {
+    let (takeover_leader, takeover_term, _) = raft_position(&mut cluster, leader).await?;
+    if takeover_term != stable_term || takeover_leader != Some(leader) {
         bail!("singleton takeover changed leader/term before the paused voter resumed");
     }
 
@@ -621,9 +625,17 @@ async fn run_singleton_takeover_case() -> Result<()> {
             provider.call_count()
         );
     }
-    let final_leader = cluster.leader().await?;
-    let (_, applied_after) = raft_term_and_index(&mut cluster, final_leader).await?;
-    let delta = applied_after.saturating_sub(applied_before);
+    // Take the maximum applied position across all live voters. Sampling a
+    // separately discovered leader can undercount just after an election: it
+    // may contain the committed stale-token entry without having applied it
+    // yet, while the former leader already did. A backward maximum is an
+    // invalid proof, not a zero-entry interval.
+    let applied_after = max_applied_index(&mut cluster, &[1, 2, 3]).await?;
+    let delta = applied_after.checked_sub(applied_before).ok_or_else(|| {
+        anyhow::anyhow!(
+            "singleton applied index moved backward: before={applied_before} after={applied_after}"
+        )
+    })?;
     if delta > SINGLETON_POST_BASELINE_COMMIT_BUDGET {
         bail!(
             "singleton takeover consumed {delta} post-baseline Raft entries (budget {}): old={authoritative_old:?} successor={successor:?}",
@@ -783,15 +795,28 @@ async fn require_singleton_value(
     }
 }
 
-async fn raft_term_and_index(cluster: &mut ClusterProcesses, node_id: u64) -> Result<(u64, u64)> {
+async fn raft_position(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<(Option<u64>, u64, u64)> {
     match cluster.request(node_id, Request::Metrics).await? {
         Response::Metrics {
+            leader,
             current_term,
             applied_index: Some(applied_index),
             ..
-        } => Ok((current_term, applied_index)),
+        } => Ok((leader, current_term, applied_index)),
         response => bail!("singleton proof could not sample Raft position: {response:?}"),
     }
+}
+
+async fn max_applied_index(cluster: &mut ClusterProcesses, nodes: &[u64]) -> Result<u64> {
+    let mut maximum = None;
+    for node_id in nodes {
+        let (_, _, applied) = raft_position(cluster, *node_id).await?;
+        maximum = Some(maximum.map_or(applied, |current: u64| current.max(applied)));
+    }
+    maximum.context("singleton proof had no live voter applied-index samples")
 }
 
 fn unix_time_ms() -> Result<i64> {
