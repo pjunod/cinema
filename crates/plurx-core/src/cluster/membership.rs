@@ -991,7 +991,7 @@ impl MembershipManager {
         if record.raft_id != request.raft_id as i64 {
             return Err(MembershipError::InvalidToken);
         }
-        match record.state.as_str() {
+        let resume_legacy_partial = match record.state.as_str() {
             "redeemed" => return Err(MembershipError::ReusedToken),
             "redeeming" if record.node_id.as_deref() != Some(&request.node_id) => {
                 return Err(MembershipError::ReservedToken)
@@ -1001,29 +1001,29 @@ impl MembershipManager {
             // still refuses an unused token below, and a different node id is
             // refused above, so this does not restore bearer authority.
             "redeeming" => {
-                if let Some(http_base) = http_base.as_deref() {
-                    let rows = inner
-                        .client
-                        .query_consistent_map::<HttpUrlRow, _>(
-                            "SELECT public_http_url FROM cluster_node_http WHERE node_id = $1",
-                            params!(request.node_id.as_str()),
+                match self.redeeming_node_matches(request).await? {
+                    Some(false) => return Err(MembershipError::NodeIdentityInUse),
+                    Some(true) => {
+                        if let Some(http_base) = http_base.as_deref() {
+                            self.claim_redeeming_http_origin(request, http_base).await?;
+                        }
+                        self.upsert_hostname(
+                            &request.node_id,
+                            &membership_hostname(&request.hostname, &request.api_address),
                         )
                         .await?;
-                    if rows.first().map(|row| row.public_http_url.as_str()) != Some(http_base) {
-                        return Err(MembershipError::HttpEndpointInUse);
+                        return Ok(());
                     }
+                    // The previous rolling version reserved the token before
+                    // its node-publication transaction. Repair that crash
+                    // shape below under the exact reservation.
+                    None => true,
                 }
-                self.upsert_hostname(
-                    &request.node_id,
-                    &membership_hostname(&request.hostname, &request.api_address),
-                )
-                .await?;
-                return Ok(());
             }
             "issued" if record.expires_at <= now => return Err(MembershipError::ExpiredToken),
-            "issued" => {}
+            "issued" => false,
             _ => return Err(MembershipError::InvalidToken),
-        }
+        };
 
         // Claiming the origin, reserving the token, installing the rolling-
         // upgrade guards, and publishing the staged node are one Raft
@@ -1038,7 +1038,8 @@ impl MembershipManager {
                  SELECT $1, $2 WHERE EXISTS (\
                    SELECT 1 FROM cluster_join_tokens token \
                    WHERE token.token_hash = $3 AND token.raft_id = $4 \
-                     AND token.state = 'issued' AND token.expires_at > $5) \
+                     AND ((token.state = 'issued' AND token.expires_at > $5) \
+                       OR (token.state = 'redeeming' AND token.node_id = $1))) \
                  AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  AND NOT EXISTS (\
                    SELECT 1 FROM cluster_node_http owner_http \
@@ -1058,19 +1059,38 @@ impl MembershipManager {
                     now
                 ),
             ));
+            if resume_legacy_partial {
+                0
+            } else {
+                statements.push((
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                     WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                     RETURNING node_id"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(request.token_digest.clone()),
+                        Param::Integer(now),
+                    ],
+                ));
+                1
+            }
+        } else if resume_legacy_partial {
             statements.push((
-                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
-                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                "UPDATE cluster_join_tokens SET node_id = node_id \
+                 WHERE token_hash = $2 AND raft_id = $3 AND state = 'redeeming' \
+                   AND node_id = $1 \
                    AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                  RETURNING node_id"
                     .to_owned(),
-                vec![
-                    Param::StmtOutputNamed(0, "node_id".into()),
-                    Param::Text(request.token_digest.clone()),
-                    Param::Integer(now),
-                ],
+                params!(
+                    request.node_id.as_str(),
+                    request.token_digest.as_str(),
+                    request.raft_id as i64
+                ),
             ));
-            1
+            0
         } else {
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
@@ -1141,12 +1161,34 @@ impl MembershipManager {
             }
             Err(error) if error.to_string().contains("StmtIndex(") => {
                 let latest = self.token_record(&request.token_digest).await?;
+                if latest.state == "redeemed" {
+                    return Err(MembershipError::ReusedToken);
+                }
+                if latest.state == "redeeming" {
+                    if latest.node_id.as_deref() != Some(&request.node_id) {
+                        return Err(MembershipError::ReservedToken);
+                    }
+                    return match self.redeeming_node_matches(request).await? {
+                        Some(false) => Err(MembershipError::NodeIdentityInUse),
+                        Some(true) => {
+                            if let Some(http_base) = http_base.as_deref() {
+                                self.claim_redeeming_http_origin(request, http_base).await?;
+                            }
+                            self.upsert_hostname(
+                                &request.node_id,
+                                &membership_hostname(&request.hostname, &request.api_address),
+                            )
+                            .await?;
+                            Ok(())
+                        }
+                        None if http_base.is_some() => Err(MembershipError::HttpEndpointInUse),
+                        None => Err(MembershipError::Internal(
+                            "legacy join reservation could not publish its node row".to_owned(),
+                        )),
+                    };
+                }
                 return if latest.expires_at <= now {
                     Err(MembershipError::ExpiredToken)
-                } else if latest.state == "redeemed" {
-                    Err(MembershipError::ReusedToken)
-                } else if latest.state == "redeeming" {
-                    Err(MembershipError::ReservedToken)
                 } else if self.node_identity_exists(&request.node_id).await? {
                     Err(MembershipError::NodeIdentityInUse)
                 } else if http_base.is_some() {
@@ -1235,6 +1277,95 @@ impl MembershipManager {
             )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count == 1))
+    }
+
+    /// Classify a same-node reservation left by an interrupted redemption.
+    /// `None` is the legacy crash shape; `Some(true)` is an already-published
+    /// retry; `Some(false)` is an identity collision and must never be upserted.
+    async fn redeeming_node_matches(
+        &self,
+        request: &RedeemJoinRequest,
+    ) -> Result<Option<bool>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<RedeemingNodeRow, _>(
+                "SELECT node.raft_id, node.raft_address, node.api_address, node.removed_at, \
+                   EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) AS removal_pending \
+                 FROM cluster_nodes node WHERE node.node_id = $1",
+                params!(request.node_id.as_str()),
+            )
+            .await?;
+        Ok(rows.first().map(|row| {
+            row.raft_id == request.raft_id as i64
+                && row.raft_address == request.raft_address
+                && row.api_address == request.api_address
+                && row.removed_at.is_none()
+                && !row.removal_pending
+        }))
+    }
+
+    /// Upgrade a previously published legacy redemption with its exact HTTP
+    /// origin. The serialized statement revalidates both token reservation
+    /// and node identity so removal or finalization cannot race the repair.
+    async fn claim_redeeming_http_origin(
+        &self,
+        request: &RedeemJoinRequest,
+        http_base: &str,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let changed = inner
+            .client
+            .execute(
+                "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                 SELECT $1, $2 WHERE EXISTS (\
+                   SELECT 1 FROM cluster_join_tokens token \
+                   WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                     AND token.state = 'redeeming' AND token.node_id = $1) \
+                 AND EXISTS (\
+                   SELECT 1 FROM cluster_nodes node \
+                   WHERE node.node_id = $1 AND node.raft_id = $4 \
+                     AND node.raft_address = $5 AND node.api_address = $6 \
+                     AND node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                       WHERE removal.node_id = node.node_id)) \
+                 AND NOT EXISTS (\
+                   SELECT 1 FROM cluster_node_http owner_http \
+                   JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                   WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                     AND owner_node.removed_at IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                       WHERE removing.node_id = owner_node.node_id)) \
+                 ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url \
+                 WHERE cluster_node_http.public_http_url = excluded.public_http_url \
+                    OR EXISTS (SELECT 1 FROM cluster_node_http legacy_peer \
+                      WHERE legacy_peer.node_id != $1 \
+                        AND legacy_peer.public_http_url = cluster_node_http.public_http_url)",
+                params!(
+                    request.node_id.as_str(),
+                    http_base,
+                    request.token_digest.as_str(),
+                    request.raft_id as i64,
+                    request.raft_address.as_str(),
+                    request.api_address.as_str()
+                ),
+            )
+            .await?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let latest = self.token_record(&request.token_digest).await?;
+        if latest.state == "redeemed" {
+            return Err(MembershipError::ReusedToken);
+        }
+        if latest.node_id.as_deref() != Some(&request.node_id) {
+            return Err(MembershipError::ReservedToken);
+        }
+        match self.redeeming_node_matches(request).await? {
+            Some(false) => Err(MembershipError::NodeIdentityInUse),
+            _ => Err(MembershipError::HttpEndpointInUse),
+        }
     }
 
     pub async fn heartbeat(&self) -> Result<(), MembershipError> {
@@ -3161,6 +3292,26 @@ impl From<&mut Row<'_>> for JoinTokenRow {
             expires_at: row.get("expires_at"),
             state: row.get("state"),
             node_id: row.get("node_id"),
+        }
+    }
+}
+
+struct RedeemingNodeRow {
+    raft_id: i64,
+    raft_address: String,
+    api_address: String,
+    removed_at: Option<i64>,
+    removal_pending: bool,
+}
+
+impl From<&mut Row<'_>> for RedeemingNodeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            raft_id: row.get("raft_id"),
+            raft_address: row.get("raft_address"),
+            api_address: row.get("api_address"),
+            removed_at: row.get("removed_at"),
+            removal_pending: row.get("removal_pending"),
         }
     }
 }

@@ -945,6 +945,16 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         bail!("duplicate origin changed singleton membership: {after_duplicate:?}");
     }
+    cluster
+        .request(
+            1,
+            Request::SeedLegacyPartialRedemption {
+                token_digest: join_token_digest(&first_issued.token),
+                node_id: "node-2".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
 
     let mut first_issued = Some(first_issued);
     let mut first_redeemed = None;
@@ -3172,6 +3182,12 @@ pub enum Request {
     /// rows before MembershipManager starts, proving the rolling upgrade path
     /// rather than only the schema a fresh binary would create.
     SeedLegacyArtworkUrls,
+    /// Recreate the previous rolling binary's crash window: its first write
+    /// reserved the token, while the node/staging transaction never ran.
+    SeedLegacyPartialRedemption {
+        token_digest: String,
+        node_id: String,
+    },
     Bootstrap,
     RejectIdentityDrift,
     Open,
@@ -4764,6 +4780,28 @@ async fn handle_request(
                     )
                     .await?;
             }
+            Ok(Response::Ok)
+        }
+        Request::SeedLegacyPartialRedemption {
+            token_digest,
+            node_id,
+        } => {
+            let changed = client
+                .execute(
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                     WHERE token_hash = $2 AND state = 'issued'",
+                    hiqlite::macros::params!(node_id.as_str(), token_digest.as_str()),
+                )
+                .await?;
+            if changed != 1 {
+                bail!("could not seed the legacy partial redemption");
+            }
+            client
+                .execute(
+                    "DELETE FROM cluster_node_http WHERE node_id = $1",
+                    hiqlite::macros::params!(node_id),
+                )
+                .await?;
             Ok(Response::Ok)
         }
         Request::Bootstrap => {
