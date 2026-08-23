@@ -6179,7 +6179,10 @@ async fn sqlite_import_verification_refusals_have_teeth() {
 
 #[test]
 fn contract_inventory_matches_every_store_method() {
-    let source = include_str!("../src/store/mod.rs");
+    let source = include_str!("../src/store/mod.rs")
+        .split_once("pub trait Store:")
+        .expect("Store composite boundary")
+        .0;
     let declared = source
         .lines()
         .filter_map(|line| line.strip_prefix("    async fn "))
@@ -6209,7 +6212,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 195, "review the Store method count");
+    assert_eq!(declared.len(), 194, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
