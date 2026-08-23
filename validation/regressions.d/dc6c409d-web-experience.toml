@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dc6c409d"]
+points = ["web.experience"]
+checks = ["web-membership", "web-layout"]
+reason = "The shipped cluster-row regression rejects applying the flex row class directly to a table cell, while the reviewed browser structural sweep retains the inner action row across every registered layout and desktop/mobile viewport."

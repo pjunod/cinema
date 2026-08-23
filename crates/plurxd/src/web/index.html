@@ -544,6 +544,11 @@
      which left the sticky header narrower than the body. minmax(0,…) lets the
      track shrink so the table scrolls inside its card instead. */
   .adminwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;max-width:960px}
+  /* Keep action cells in the table formatting context. Applying `.row`
+     directly to a <td> changes it to display:flex, so its height and bottom
+     rule stop following a taller multi-line row. The flex row belongs inside
+     the cell: the table owns alignment, while the child owns button layout. */
+  .adminwrap td.rowactions{vertical-align:middle}
   /* No-key warning banner (e.g. TMDB not configured → no artwork). */
   .setwarn{background:color-mix(in srgb,#e8a33d 15%,var(--panel));border:1px solid color-mix(in srgb,#e8a33d 45%,var(--line));
     border-radius:10px;padding:11px 14px;margin:0 0 16px;font-size:13.5px;line-height:1.55}
@@ -566,7 +571,8 @@
     .adminwrap td{padding:3px 0;border:0}
     .adminwrap td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
     .adminwrap td.libname{font-size:16px;font-weight:700;padding-bottom:3px}
-    .adminwrap td.rowactions{justify-content:flex-start;padding-top:9px}
+    .adminwrap td.rowactions{padding-top:9px}
+    .adminwrap td.rowactions>.row{justify-content:flex-start!important}
   }
   /* Settings tab bar — one group visible at a time (persisted per browser). */
   .settabs{display:flex;gap:2px;flex-wrap:wrap;margin:0 0 20px;border-bottom:1px solid var(--line)}
@@ -9483,11 +9489,11 @@ function libRow(l,status){
   return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
       <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id])}</div>${schedRow(l)}</td>
-      <td class="row rowactions" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
+      <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
         <button class="ghost sm" onclick="editLib(${l.id})">Edit</button>
-        <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></td></tr>`;
+        <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></div></td></tr>`;
 }
 function librariesPanel(libs,status,settings){
   const rows=libs.map(l=>libRow(l,status)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
@@ -9945,7 +9951,7 @@ function clusterNodeRow(n,localNodeId){
     <td data-label="Role">${role}</td>
     <td data-label="Reachable">${reach}</td>
     <td data-label="Last seen" class="muted">${seen}</td>
-    <td class="row rowactions" style="justify-content:flex-end">${action}</td></tr>`;
+    <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
 }
 function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
@@ -10424,7 +10430,7 @@ function userRow(u){
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
   return `<tr><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
-    <td class="row rowactions" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</td></tr>`;
+    <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>`;
 }
 async function addUser(){
   const username=un.value.trim(), password=up.value, is_admin=ua.checked;

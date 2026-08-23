@@ -443,6 +443,17 @@ test("the current leader is labeled beside its hostname", () => {
   assert.equal(follower.includes(">Leader<"), false);
 });
 
+test("the action flex row stays inside its table cell", () => {
+  const ui = sandbox();
+  const row = ui.clusterNodeRow(node("node-a", 1, "voter"));
+  assert.match(row, /<td class="rowactions"><div class="row"/);
+  assert.equal(
+    /<td[^>]*class="[^"]*\brow\b/.test(row),
+    false,
+    `a table cell was changed into a flex row: ${row}`,
+  );
+});
+
 test("an unreachable node says so rather than showing a blank", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(node("node-c", 3, "voter", { reachable: false }));

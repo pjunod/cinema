@@ -47,6 +47,7 @@ pub mod replicated;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::HiqliteOperationCounts;
@@ -2085,6 +2086,337 @@ impl<T> Store for T where
         + Sync
         + 'static
 {
+}
+
+/// The only application-facing boundary for catalogue consistency choices.
+///
+/// Ordinary [`Store`] methods remain Authority. This wrapper may run one
+/// explicitly eligible Hiqlite catalogue operation locally, but only while a
+/// fresh quorum watermark, matching local Raft generation, negotiated read
+/// protocol, and configured apply-lag budget all remain valid. It revalidates
+/// after the complete operation and discards the result before falling back to
+/// Authority when the proof changes in flight.
+#[derive(Clone)]
+pub struct CatalogueReader {
+    authority: Arc<dyn Store>,
+    #[cfg(feature = "hiqlite-store")]
+    bounded: Option<BoundedCatalogueReader>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone)]
+struct BoundedCatalogueReader {
+    store: Arc<HiqliteAuthStore>,
+    metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+    enabled: bool,
+    max_apply_lag_entries: u64,
+    #[cfg(feature = "cluster-read-cost-validation")]
+    revoke_after_next_local: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CatalogueReader {
+    /// Preserve the existing Authority behavior for SQLite, recovery boots,
+    /// tests, and callers that have not opted into bounded replica reads.
+    #[must_use]
+    pub fn authority(store: Arc<dyn Store>) -> Self {
+        Self {
+            authority: store,
+            #[cfg(feature = "hiqlite-store")]
+            bounded: None,
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        enabled: bool,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self {
+            authority,
+            bounded: Some(BoundedCatalogueReader {
+                store,
+                metrics,
+                enabled,
+                max_apply_lag_entries,
+                #[cfg(feature = "cluster-read-cost-validation")]
+                revoke_after_next_local: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        }
+    }
+
+    /// Construct the production bounded reader for real seeded-store
+    /// contracts outside this module.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn validation_replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self::replicated(authority, store, metrics, true, max_apply_lag_entries)
+    }
+
+    /// Revoke the proof after exactly the next local query and before its
+    /// post-query validation, forcing result discard and Authority fallback.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    pub fn validation_revoke_after_next_local(&self) {
+        if let Some(bounded) = &self.bounded {
+            bounded
+                .revoke_after_next_local
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded<T, F, Fut>(&self, local_read: F) -> Option<T>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        let bounded = self.bounded.as_ref()?;
+        if !bounded.enabled {
+            return None;
+        }
+        let store = Arc::clone(&bounded.store);
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let revoke_after_local = Arc::clone(&bounded.revoke_after_next_local);
+        let metrics = bounded.metrics.clone();
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let post_query_metrics = metrics.clone();
+        // A bounded read is an optimization, never a new application-visible
+        // failure mode. Proof loss is represented by `None`; treat a local
+        // SQL/row-mapping failure the same way and retry the existing Authority
+        // path below. The Authority result remains the caller's result.
+        metrics
+            .run_bounded_replica(bounded.max_apply_lag_entries, move || async move {
+                let result = local_read(store).await;
+                #[cfg(feature = "cluster-read-cost-validation")]
+                if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    post_query_metrics.validation_revoke_bounded_proof();
+                }
+                result
+            })
+            .await?
+            .ok()
+    }
+
+    pub async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_library(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_library(id).await
+    }
+
+    pub async fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_list_libraries().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.list_libraries().await
+    }
+
+    pub async fn get_item(&self, id: i64) -> Result<Option<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item(id).await
+    }
+
+    pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item_children(parent_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item_children(parent_id).await
+    }
+
+    pub async fn list_top_items_in_genre(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        // Both the existing Authority implementation and this local variant
+        // read the page and count in separate statements. The bounded permit
+        // covers that whole operation but deliberately does not promise a
+        // stronger cross-statement SQLite snapshot than Authority did.
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let genre = genre.map(str::to_owned);
+            if let Some(result) = self
+                .bounded(move |store| async move {
+                    store
+                        .local_list_top_items_in_genre(
+                            library_id,
+                            sort,
+                            offset,
+                            limit,
+                            genre.as_deref(),
+                        )
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority
+            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .await
+    }
+
+    pub async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_home_preview_pages(limit_per_library).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.home_preview_pages(limit_per_library).await
+    }
+
+    pub async fn recently_added(
+        &self,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_recently_added(library_id, limit).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.recently_added(library_id, limit).await
+    }
+
+    pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file(id).await
+    }
+
+    pub async fn files_for_item(&self, item_id: i64) -> Result<Vec<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_files_for_item(item_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.files_for_item(item_id).await
+    }
+
+    pub async fn child_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_child_counts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.child_counts(ids).await
+    }
+
+    pub async fn item_max_heights(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_max_heights(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_max_heights(ids).await
+    }
+
+    pub async fn item_media_facts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, MediaFacts>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_media_facts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_media_facts(ids).await
+    }
+
+    pub async fn media_shape(&self) -> Result<MediaShape, StoreError> {
+        // Preserve the existing Authority method's multi-statement aggregate
+        // semantics. The permit prevents an expired/stale replica result; it
+        // is not a new transaction spanning these independent aggregates.
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_media_shape().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.media_shape().await
+    }
+
+    pub async fn get_file_probe_json(&self, file_id: i64) -> Result<Option<String>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file_probe_json(file_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file_probe_json(file_id).await
+    }
 }
 
 // Compile-time proof that the composed trait remains object-safe and that the

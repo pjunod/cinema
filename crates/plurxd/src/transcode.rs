@@ -15488,7 +15488,7 @@ mod tests {
                 .expect("suspend row");
             assert_eq!(
                 suspend.session_id.as_deref(),
-                Some(info.session_id.as_str())
+                Some(session_log_id(&info.session_id).as_str())
             );
             assert_eq!(suspend.hold_reason.as_deref(), Some("time"));
             assert_eq!(suspend.readrate, Some(1.0));

@@ -8,10 +8,12 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 hiqlite = { workspace = true }
 hex = { workspace = true }
+jsonschema = { workspace = true }
 libc = { workspace = true }
-plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+plurx-core = { path = "../plurx-core", features = ["cluster-read-cost-validation"] }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -26,7 +28,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 # The included production coalescer's tests use a paused Tokio clock.
-jsonschema = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

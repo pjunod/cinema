@@ -416,6 +416,33 @@ fn one_returning_library(
     )
 }
 
+impl HiqliteAuthStore {
+    pub(super) async fn local_get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
+        one_library(
+            self.client()
+                .query_map::<LibraryRow, _>(
+                    format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
+                    params!(id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_list_libraries(&self) -> Result<Vec<Library>, StoreError> {
+        self.client()
+            .query_map::<LibraryRow, _>(
+                format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
+                params!(),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
+    }
+}
+
 #[async_trait]
 impl LibraryStore for HiqliteAuthStore {
     async fn create_library(&self, library: &NewLibrary) -> Result<Library, StoreError> {

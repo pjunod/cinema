@@ -31,6 +31,7 @@ pub struct ClusterTopologyArtifact {
     pub schema_version: u32,
     pub evidence_scope: String,
     pub build_sha: String,
+    pub runner_image_digest: Option<String>,
     pub workload: TopologyWorkload,
     pub workload_sha256: String,
     pub topology_order: Vec<u64>,
@@ -79,6 +80,12 @@ pub struct TopologyRun {
     pub max_apply_lag_entries: u64,
     pub controller_host: String,
     pub load_generator_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_generator_isolation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_machine_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voter_machine_fingerprints: Option<Vec<String>>,
     pub resources: Vec<ResourceSample>,
 }
 
@@ -115,7 +122,7 @@ pub struct ResourceSample {
 }
 
 impl TopologyWorkload {
-    fn semantic() -> Self {
+    pub(super) fn semantic() -> Self {
         Self {
             id: "settings-put-v1".to_owned(),
             operation: "quorum_acknowledged_put_setting".to_owned(),
@@ -128,7 +135,7 @@ impl TopologyWorkload {
         }
     }
 
-    fn sha256(&self) -> Result<String> {
+    pub(super) fn sha256(&self) -> Result<String> {
         Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
     }
 }
@@ -167,6 +174,7 @@ pub async fn run_topology_comparison(output: &Path, order: [u64; 2]) -> Result<(
         schema_version: TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
         evidence_scope: SEMANTIC_EVIDENCE_SCOPE.to_owned(),
         build_sha: resolve_build_sha()?,
+        runner_image_digest: None,
         workload,
         workload_sha256,
         topology_order: order.to_vec(),
@@ -197,7 +205,14 @@ async fn run_one_topology(
     let topology_root = root.join(format!("voters-{voter_count}"));
     let (mut cluster, _) =
         start_cluster_with_port_retry(executable, &topology_root, voter_count).await?;
-    let result = exercise_topology(&mut cluster, voter_count, workload, workload_sha256).await;
+    let result = exercise_topology(
+        &mut cluster,
+        voter_count,
+        workload,
+        workload_sha256,
+        RunEvidence::semantic(),
+    )
+    .await;
     match result {
         Ok(run) => {
             cluster.shutdown_all().await?;
@@ -210,11 +225,45 @@ async fn run_one_topology(
     }
 }
 
-async fn exercise_topology(
+pub(super) struct ResourceIdentity {
+    pub node_id: u64,
+    pub hardware: String,
+    pub storage_device: String,
+    pub network_path: String,
+}
+
+pub(super) struct RunEvidence<'a> {
+    pub controller_host: &'a str,
+    pub load_generator_host: &'a str,
+    pub load_generator_isolation: Option<&'a str>,
+    pub controller_machine_fingerprint: Option<&'a str>,
+    pub voter_machine_fingerprints: Option<&'a [String]>,
+    pub resources: Option<&'a [ResourceIdentity]>,
+}
+
+impl RunEvidence<'static> {
+    fn semantic() -> Self {
+        Self {
+            controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                "github-hosted-ephemeral"
+            } else {
+                "local-semantic-run"
+            },
+            load_generator_host: "controller-process",
+            load_generator_isolation: None,
+            controller_machine_fingerprint: None,
+            voter_machine_fingerprints: None,
+            resources: None,
+        }
+    }
+}
+
+pub(super) async fn exercise_topology(
     cluster: &mut ClusterProcesses,
     voter_count: u64,
     workload: &TopologyWorkload,
     workload_sha256: &str,
+    evidence: RunEvidence<'_>,
 ) -> Result<TopologyRun> {
     cluster.request(1, Request::Bootstrap).await?.require_ok()?;
     for node_id in 2..=voter_count {
@@ -234,6 +283,15 @@ async fn exercise_topology(
     let leader = cluster.leader().await?;
     let leader_term = confirmed_leader_term(cluster, leader).await?;
     let applied_index_before = metric_index(cluster, leader).await?;
+    let resource_baseline = if let Some(identities) = evidence.resources {
+        Some(
+            collect_named_resources(cluster, &voters, identities, true)
+                .await
+                .context("capture stable pre-workload resource baseline")?,
+        )
+    } else {
+        None
+    };
     let started_at_unix_ms = unix_ms()?;
     let expected_corpus = expected_corpus(workload)?;
     let expected_corpus_sha256 = corpus_sha256(&expected_corpus)?;
@@ -262,20 +320,35 @@ async fn exercise_topology(
     }
     let applied_index_after = metric_index(cluster, leader).await?;
     let applied_indexes = wait_for_applied(cluster, &voters, applied_index_after).await?;
-    let corpus_observations = observe_corpus(cluster, &voters).await?;
     let final_leader_term = confirmed_leader_term(cluster, leader).await?;
     if final_leader_term != leader_term {
         bail!(
             "topology workload crossed a leader term boundary: voter {leader} moved from term {leader_term} to {final_leader_term}"
         );
     }
+    let resources = if let Some(identities) = evidence.resources {
+        let after = collect_named_resources(cluster, &voters, identities, false)
+            .await
+            .context("capture post-workload resources")?;
+        resource_deltas(
+            resource_baseline
+                .as_deref()
+                .context("named resource baseline was not captured")?,
+            &after,
+        )?
+    } else {
+        semantic_resource_placeholders(&voters)
+    };
+    // This is the registered end of the measured workload window. Corpus
+    // verification below proves correctness but must not contaminate CPU,
+    // storage, network, or wall measurements.
+    let finished_at_unix_ms = unix_ms()?;
+    let corpus_observations = observe_corpus(cluster, &voters).await?;
     let max_apply_lag_entries = applied_indexes
         .iter()
         .map(|sample| applied_index_after.saturating_sub(sample.applied_index))
         .max()
         .unwrap_or_default();
-    let finished_at_unix_ms = unix_ms()?;
-
     Ok(TopologyRun {
         voter_count,
         quorum: voter_count / 2 + 1,
@@ -308,29 +381,140 @@ async fn exercise_topology(
         corpus_observations,
         applied_indexes,
         max_apply_lag_entries,
-        controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
-            "github-hosted-ephemeral".to_owned()
-        } else {
-            "local-semantic-run".to_owned()
-        },
-        load_generator_host: "controller-process".to_owned(),
-        resources: voters
-            .into_iter()
-            .map(|node_id| ResourceSample {
-                node_id,
-                hardware: "not-collected-semantic-ci".to_owned(),
-                storage_device: "not-collected-semantic-ci".to_owned(),
-                network_path: "loopback-semantic-ci".to_owned(),
-                cpu_seconds: None,
-                wall_seconds: None,
-                max_rss_bytes: None,
-                storage_read_bytes: None,
-                storage_write_bytes: None,
-                network_receive_bytes: None,
-                network_transmit_bytes: None,
-            })
-            .collect(),
+        controller_host: evidence.controller_host.to_owned(),
+        load_generator_host: evidence.load_generator_host.to_owned(),
+        load_generator_isolation: evidence.load_generator_isolation.map(str::to_owned),
+        controller_machine_fingerprint: evidence.controller_machine_fingerprint.map(str::to_owned),
+        voter_machine_fingerprints: evidence.voter_machine_fingerprints.map(<[_]>::to_vec),
+        resources,
     })
+}
+
+async fn collect_named_resources(
+    cluster: &mut ClusterProcesses,
+    voters: &[u64],
+    identities: &[ResourceIdentity],
+    reset_max_rss: bool,
+) -> Result<Vec<ResourceSample>> {
+    let mut requests = Vec::with_capacity(voters.len());
+    for node_id in voters {
+        let identity = identities
+            .iter()
+            .find(|identity| identity.node_id == *node_id)
+            .with_context(|| {
+                format!("named runner omitted resource identity for voter {node_id}")
+            })?;
+        requests.push(Request::TopologyResources {
+            hardware: identity.hardware.clone(),
+            storage_device: identity.storage_device.clone(),
+            network_path: identity.network_path.clone(),
+            reset_max_rss,
+        });
+    }
+    let responses = cluster.request_all_concurrently(requests).await?;
+    let mut samples = Vec::with_capacity(responses.len());
+    for (node_id, response) in responses {
+        match response {
+            Response::TopologyResources { sample } if sample.node_id == node_id => {
+                samples.push(sample)
+            }
+            response => bail!("voter {node_id} omitted its resource sample: {response:?}"),
+        }
+    }
+    Ok(samples)
+}
+
+fn resource_deltas(
+    before: &[ResourceSample],
+    after: &[ResourceSample],
+) -> Result<Vec<ResourceSample>> {
+    if before.len() != after.len() {
+        bail!("named resource baseline and final sample counts differ");
+    }
+    before
+        .iter()
+        .zip(after)
+        .map(|(before, after)| {
+            if before.node_id != after.node_id
+                || before.hardware != after.hardware
+                || before.storage_device != after.storage_device
+                || before.network_path != after.network_path
+            {
+                bail!("named resource identity changed across the workload window");
+            }
+            Ok(ResourceSample {
+                node_id: after.node_id,
+                hardware: after.hardware.clone(),
+                storage_device: after.storage_device.clone(),
+                network_path: after.network_path.clone(),
+                cpu_seconds: subtract_f64("CPU", before.cpu_seconds, after.cpu_seconds)?,
+                wall_seconds: subtract_f64("wall", before.wall_seconds, after.wall_seconds)?,
+                // The baseline request resets VmHWM, so the final value is the
+                // workload-window peak rather than a cumulative counter.
+                max_rss_bytes: after.max_rss_bytes,
+                storage_read_bytes: subtract_u64(
+                    "storage read",
+                    before.storage_read_bytes,
+                    after.storage_read_bytes,
+                )?,
+                storage_write_bytes: subtract_u64(
+                    "storage write",
+                    before.storage_write_bytes,
+                    after.storage_write_bytes,
+                )?,
+                network_receive_bytes: subtract_u64(
+                    "network receive",
+                    before.network_receive_bytes,
+                    after.network_receive_bytes,
+                )?,
+                network_transmit_bytes: subtract_u64(
+                    "network transmit",
+                    before.network_transmit_bytes,
+                    after.network_transmit_bytes,
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn subtract_f64(name: &str, before: Option<f64>, after: Option<f64>) -> Result<Option<f64>> {
+    match (before, after) {
+        (Some(before), Some(after)) if after >= before => Ok(Some(after - before)),
+        (Some(_), Some(_)) => bail!("named {name} counter moved backwards"),
+        (None, None) => Ok(None),
+        _ => bail!("named {name} counter availability changed"),
+    }
+}
+
+fn subtract_u64(name: &str, before: Option<u64>, after: Option<u64>) -> Result<Option<u64>> {
+    match (before, after) {
+        (Some(before), Some(after)) => after
+            .checked_sub(before)
+            .map(Some)
+            .with_context(|| format!("named {name} counter moved backwards")),
+        (None, None) => Ok(None),
+        _ => bail!("named {name} counter availability changed"),
+    }
+}
+
+fn semantic_resource_placeholders(voters: &[u64]) -> Vec<ResourceSample> {
+    voters
+        .iter()
+        .copied()
+        .map(|node_id| ResourceSample {
+            node_id,
+            hardware: "not-collected-semantic-ci".to_owned(),
+            storage_device: "not-collected-semantic-ci".to_owned(),
+            network_path: "loopback-semantic-ci".to_owned(),
+            cpu_seconds: None,
+            wall_seconds: None,
+            max_rss_bytes: None,
+            storage_read_bytes: None,
+            storage_write_bytes: None,
+            network_receive_bytes: None,
+            network_transmit_bytes: None,
+        })
+        .collect()
 }
 
 async fn confirmed_leader_term(cluster: &mut ClusterProcesses, node_id: u64) -> Result<u64> {
@@ -475,6 +659,19 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             artifact.evidence_scope
         );
     }
+    match (
+        artifact.evidence_scope.as_str(),
+        artifact.runner_image_digest.as_deref(),
+    ) {
+        (SEMANTIC_EVIDENCE_SCOPE, None) => {}
+        (NAMED_RUNNER_EVIDENCE_SCOPE, Some(digest))
+            if digest.len() == 71
+                && digest.starts_with("sha256:")
+                && digest[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+        _ => bail!("topology image digest contradicts its evidence scope"),
+    }
     if artifact.build_sha.len() != 40
         || !artifact
             .build_sha
@@ -529,6 +726,41 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
         }
         if run.errors != 0 {
             bail!("topology run recorded {} write errors", run.errors);
+        }
+        match artifact.evidence_scope.as_str() {
+            SEMANTIC_EVIDENCE_SCOPE
+                if run.load_generator_isolation.is_none()
+                    && run.controller_machine_fingerprint.is_none()
+                    && run.voter_machine_fingerprints.is_none() => {}
+            NAMED_RUNNER_EVIDENCE_SCOPE => {
+                let isolation = run
+                    .load_generator_isolation
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .context("named topology run omitted load-generator isolation")?;
+                let controller = run
+                    .controller_machine_fingerprint
+                    .as_deref()
+                    .context("named topology run omitted controller fingerprint")?;
+                let voters = run
+                    .voter_machine_fingerprints
+                    .as_deref()
+                    .context("named topology run omitted voter fingerprints")?;
+                if isolation.len() > 256
+                    || !is_sha256_hex(controller)
+                    || voters.len() != usize::try_from(run.voter_count)?
+                    || voters.iter().any(|value| !is_sha256_hex(value))
+                    || voters
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != voters.len()
+                    || voters.iter().any(|value| value == controller)
+                {
+                    bail!("named topology run machine-placement proof is invalid");
+                }
+            }
+            _ => bail!("topology run evidence fields contradict its scope"),
         }
         if u64::try_from(run.raw_acknowledged_write_round_trip_us.len())?
             != artifact.workload.operations
@@ -646,11 +878,18 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
     Ok(())
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn duration_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-fn unix_ms() -> Result<i64> {
+pub(super) fn unix_ms() -> Result<i64> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -660,7 +899,7 @@ fn unix_ms() -> Result<i64> {
     .context("topology comparison Unix millisecond clock overflowed")
 }
 
-fn resolve_build_sha() -> Result<String> {
+pub(super) fn resolve_build_sha() -> Result<String> {
     if let Ok(value) = std::env::var("GITHUB_SHA") {
         let value = value.trim().to_ascii_lowercase();
         if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -744,6 +983,9 @@ mod tests {
             max_apply_lag_entries: 0,
             controller_host: "semantic-controller".to_owned(),
             load_generator_host: "controller-process".to_owned(),
+            load_generator_isolation: None,
+            controller_machine_fingerprint: None,
+            voter_machine_fingerprints: None,
             resources: (1..=voter_count)
                 .map(|node_id| ResourceSample {
                     node_id,
@@ -802,8 +1044,20 @@ mod tests {
             required.len(),
             "schema required list contains a duplicate",
         );
-        assert_eq!(properties, required);
-        assert_eq!(properties, serialized);
+        let optional = match definition {
+            None => BTreeSet::from(["runner_image_digest".to_owned()]),
+            Some("run") => BTreeSet::from([
+                "load_generator_isolation".to_owned(),
+                "controller_machine_fingerprint".to_owned(),
+                "voter_machine_fingerprints".to_owned(),
+            ]),
+            _ => BTreeSet::new(),
+        };
+        assert_eq!(properties, serialized.union(&optional).cloned().collect());
+        assert_eq!(
+            required,
+            properties.difference(&optional).cloned().collect()
+        );
     }
 
     fn fixture() -> ClusterTopologyArtifact {
@@ -813,6 +1067,7 @@ mod tests {
             schema_version: TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
             evidence_scope: SEMANTIC_EVIDENCE_SCOPE.to_owned(),
             build_sha: "a".repeat(40),
+            runner_image_digest: None,
             workload,
             workload_sha256: workload_sha256.clone(),
             topology_order: vec![3, 4],
@@ -981,9 +1236,22 @@ mod tests {
         assert!(!schema_validator.is_valid(&semantic_with_resources));
         assert!(validate_json_artifact(&semantic_with_resources).is_err());
 
+        let mut semantic_with_named_placement = artifact.clone();
+        semantic_with_named_placement["runs"][0]["controller_machine_fingerprint"] =
+            serde_json::json!("d".repeat(64));
+        assert!(!schema_validator.is_valid(&semantic_with_named_placement));
+        assert!(validate_json_artifact(&semantic_with_named_placement).is_err());
+
         let mut named = artifact.clone();
         named["evidence_scope"] = serde_json::json!(NAMED_RUNNER_EVIDENCE_SCOPE);
+        named["runner_image_digest"] = serde_json::json!(format!("sha256:{}", "c".repeat(64)));
         for run in named["runs"].as_array_mut().expect("topology runs") {
+            run["load_generator_isolation"] = serde_json::json!("dedicated load generator");
+            run["controller_machine_fingerprint"] = serde_json::json!("d".repeat(64));
+            let voter_count = run["voter_count"].as_u64().expect("voter count");
+            run["voter_machine_fingerprints"] = serde_json::json!((1..=voter_count)
+                .map(|id| format!("{id:064x}"))
+                .collect::<Vec<_>>());
             for resource in run["resources"].as_array_mut().expect("resource samples") {
                 resource["cpu_seconds"] = serde_json::json!(0.1);
                 resource["wall_seconds"] = serde_json::json!(0.2);
@@ -996,6 +1264,16 @@ mod tests {
         }
         assert!(schema_validator.is_valid(&named));
         validate_json_artifact(&named).expect("valid named-runner artifact");
+
+        let mut legacy_semantic =
+            serde_json::to_value(fixture()).expect("serialize legacy fixture");
+        legacy_semantic
+            .as_object_mut()
+            .expect("legacy artifact object")
+            .remove("runner_image_digest");
+        assert!(schema_validator.is_valid(&legacy_semantic));
+        validate_json_artifact(&legacy_semantic)
+            .expect("schema v1 semantic artifact without digest");
 
         let mut cross_field_hash_mismatch = artifact;
         cross_field_hash_mismatch["runs"][0]["corpus_observations"][0]["corpus_sha256"] =
