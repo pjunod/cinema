@@ -1148,7 +1148,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
                      AND fence = $7 AND revision = $8 AND expires_at_ms = $9)
                  ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
                    relative_dir = excluded.relative_dir,
-                   last_seen_at = excluded.last_seen_at
+                   last_seen_at = MAX(transcode_cache_locations.last_seen_at,
+                                      excluded.last_seen_at)
                  WHERE transcode_cache_locations.complete = 0"
                             .to_owned(),
                         params!(
@@ -1181,7 +1182,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
             lease,
             replacement,
             vec![(
-                "UPDATE transcode_cache_locations SET last_seen_at = $1
+                "UPDATE transcode_cache_locations SET last_seen_at = MAX(last_seen_at, $1)
                  WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0 AND EXISTS (
                    SELECT 1 FROM job_leases WHERE resource = $4 AND owner_node_id = $5
                      AND fence = $6 AND revision = $7 AND expires_at_ms = $8)"
@@ -1218,7 +1219,8 @@ impl FencedPublicationStore for HiqliteAuthStore {
             vec![(
                 "UPDATE transcode_cache_locations
                  SET relative_dir = $1, complete = 1, bytes = $2,
-                     last_used_at = $3, last_seen_at = $3
+                     last_used_at = MAX(last_used_at, $3),
+                     last_seen_at = MAX(last_seen_at, $3)
                  WHERE recipe_hash = $4 AND node_id = $5 AND storage_class = 'local'
                    AND EXISTS (SELECT 1 FROM job_leases
                      WHERE resource = $6 AND owner_node_id = $7

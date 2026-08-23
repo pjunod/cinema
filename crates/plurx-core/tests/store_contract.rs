@@ -84,6 +84,23 @@ impl From<&mut Row<'_>> for I64Value {
     }
 }
 
+#[cfg(feature = "hiqlite-store")]
+#[derive(Debug, PartialEq, Eq)]
+struct CacheTouchTimes {
+    last_used_at: i64,
+    last_seen_at: i64,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl From<&mut Row<'_>> for CacheTouchTimes {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            last_used_at: row.get("last_used_at"),
+            last_seen_at: row.get("last_seen_at"),
+        }
+    }
+}
+
 const SETTINGS_METHODS: &[&str] = &[
     "ping",
     "get_setting",
@@ -2460,34 +2477,20 @@ async fn contract_applied_index(client: &Client) -> u64 {
 struct ContractLeaderPoint {
     leader_id: u64,
     term: u64,
-    applied_index: u64,
+    committed_index: u64,
 }
 
 #[cfg(feature = "hiqlite-store")]
 async fn contract_leader_point(client: &Client) -> ContractLeaderPoint {
-    let mut last_observation = "no metrics sample".to_owned();
-    for _ in 0..100 {
-        match client.metrics_db().await {
-            Ok(metrics) => {
-                last_observation = format!(
-                    "endpoint={}, leader={:?}, term={}, applied={:?}",
-                    metrics.id, metrics.current_leader, metrics.current_term, metrics.last_applied
-                );
-                if metrics.current_leader == Some(metrics.id) {
-                    if let Some(applied) = metrics.last_applied {
-                        return ContractLeaderPoint {
-                            leader_id: metrics.id,
-                            term: metrics.current_term,
-                            applied_index: applied.index,
-                        };
-                    }
-                }
-            }
-            Err(error) => last_observation = error.to_string(),
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let watermark = client
+        .db_quorum_watermark()
+        .await
+        .expect("obtain a leader-issued quorum commit watermark");
+    ContractLeaderPoint {
+        leader_id: watermark.leader_id,
+        term: watermark.term,
+        committed_index: watermark.committed_index,
     }
-    panic!("remote measurement client did not resolve the applied leader: {last_observation}");
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2495,9 +2498,27 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
     assert_eq!(
         (after.leader_id, after.term),
         (before.leader_id, before.term),
-        "auth activity entry accounting requires one stable leader and term"
+        "replicated-write entry accounting requires one stable leader and term"
     );
-    after.applied_index.saturating_sub(before.applied_index)
+    after.committed_index.saturating_sub(before.committed_index)
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn contract_cache_touch_times(
+    client: &Client,
+    recipe_hash: &str,
+    node_id: &str,
+) -> CacheTouchTimes {
+    let mut rows = client
+        .query_consistent_map::<CacheTouchTimes, _>(
+            "SELECT last_used_at, last_seen_at FROM transcode_cache_locations \
+             WHERE recipe_hash = $1 AND node_id = $2 AND storage_class = 'local'",
+            hiqlite::params!(recipe_hash, node_id),
+        )
+        .await
+        .expect("read cache touch timestamps");
+    assert_eq!(rows.len(), 1, "cache timestamp fixture must be unique");
+    rows.pop().expect("cache timestamp row")
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2643,7 +2664,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     )
     .await
     .expect("connect manifest cursor observer");
-    let before = contract_applied_index(&observer).await;
+    let before = contract_leader_point(&observer).await;
     assert_eq!(
         store
             .mark_cache_manifests_checked(&checks)
@@ -2652,9 +2673,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
         2
     );
     assert_eq!(
-        contract_applied_index(&observer)
-            .await
-            .saturating_sub(before),
+        contract_stable_leader_delta(before, contract_leader_point(&observer).await),
         1,
         "one scrub page must be one consensus transaction"
     );
@@ -3096,6 +3115,189 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
         .expect("read cache rows after concurrent takeover");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].relative_dir, "ca/cache-takeover-recipe-f2");
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fenced_cache_publication_never_regresses_activity_timestamps() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect fenced cache clock observer");
+    let telemetry = cluster._root.path().join("fenced-cache-clock-telemetry.db");
+    let store = Arc::new(
+        HiqliteAuthStore::validation_bootstrap_at(
+            client.clone(),
+            CONTRACT_INSTANCE_ID,
+            &telemetry,
+            1_000,
+        )
+        .await
+        .expect("bootstrap fixed-clock fenced cache store"),
+    );
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset fenced cache clock state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let (_, file_id) = seed_file(&dynamic, "fenced-cache-clock").await;
+    let mut lease = acquired(
+        store
+            .acquire_lease("candidate:fenced-cache-clock", "clock-node", 1_000, 100_000)
+            .await
+            .expect("acquire fenced cache clock lease"),
+        "hiqlite fenced cache clock",
+    );
+    let replacement = publication_successor(&lease);
+    assert!(store
+        .claim_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            file_id,
+            1,
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("seed fenced cache clock claim"));
+    lease = replacement;
+    client
+        .execute(
+            "UPDATE transcode_cache_locations SET last_used_at = $1, last_seen_at = $1 \
+             WHERE recipe_hash = $2 AND node_id = $3",
+            hiqlite::params!(9_000_i64, "fenced-cache-clock-recipe", "clock-node"),
+        )
+        .await
+        .expect("advance cache timestamps ahead of the store clock");
+
+    let replacement = publication_successor(&lease);
+    assert!(store
+        .claim_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            file_id,
+            1,
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("repeat fenced cache claim after clock rollback"));
+    lease = replacement;
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "fenced claim publication must retain newer activity timestamps"
+    );
+
+    let replacement = publication_successor(&lease);
+    store
+        .touch_cache_claim_fenced(
+            "fenced-cache-clock-recipe",
+            "clock-node",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("touch fenced cache claim after clock rollback");
+    lease = replacement;
+    let replacement = publication_successor(&lease);
+    store
+        .complete_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            4_096,
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("complete fenced cache entry after clock rollback");
+    lease = replacement;
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "fenced touch and completion must retain newer activity timestamps"
+    );
+
+    let requirements = serde_json::to_string(&PretranscodeRequirements {
+        version: PretranscodeRequirements::VERSION,
+        decoder: "h264".to_owned(),
+        acceptable_encoder_families: vec!["software".to_owned()],
+        output_contract: "hls-v1".to_owned(),
+        tone_map: false,
+        output_grade: "sdr".to_owned(),
+        scratch_bytes: 1,
+    })
+    .expect("fenced cache clock requirements");
+    let job = NewPretranscodeJob {
+        id: "00000000-0000-4000-8000-000000000599".to_owned(),
+        dedupe_key: "fenced-cache-clock-job".to_owned(),
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        target_height: 720,
+        policy_generation: "clock-v1".to_owned(),
+        requirements_json: requirements,
+        reason: "recent".to_owned(),
+        priority: 100,
+        not_before_ms: 1_000,
+        created_at_ms: 1_000,
+    };
+    assert!(enqueue_with_successor(store.as_ref(), &job, &mut lease)
+        .await
+        .expect("enqueue fixed-clock pretranscode publication"));
+    let capabilities = PretranscodeWorkerCapabilities {
+        version: PretranscodeRequirements::VERSION,
+        decoders: vec!["h264".to_owned()],
+        encoder_families: vec!["software".to_owned()],
+        max_target_height: 2_160,
+        output_contracts: vec!["hls-v1".to_owned()],
+        tone_map: false,
+        output_grades: vec!["sdr".to_owned()],
+        scratch_bytes: 2,
+    };
+    let claimed = store
+        .claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
+        .await
+        .expect("claim fixed-clock pretranscode publication")
+        .expect("fixed-clock pretranscode job");
+    assert!(store
+        .complete_pretranscode_job(
+            &claimed,
+            "fenced-cache-clock-recipe",
+            1,
+            "fc/fenced-cache-clock-recipe",
+            4_096,
+            None,
+            &"c".repeat(64),
+            1_000,
+        )
+        .await
+        .expect("complete fixed-clock pretranscode publication"));
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "pretranscode completion must retain newer activity timestamps"
+    );
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -6930,6 +7132,124 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
     let counts = store.validation_operation_counts();
     assert_eq!(counts.non_consistent_query_calls, 0);
     assert_eq!(counts.consistent_query_calls, 1);
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replaceable_cache_touch_burst_has_one_physical_write_budget() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let observer = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect replaceable-touch consensus observer");
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replaceable-touch state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let (_, file_id) = seed_file(&dynamic, "replaceable-touch").await;
+    assert!(store
+        .claim_cache_entry(
+            "replaceable-touch-recipe",
+            file_id,
+            1,
+            "cache-node",
+            "re/replaceable-touch-recipe",
+        )
+        .await
+        .expect("seed replaceable cache claim"));
+
+    store.validation_reset_operation_counts();
+    let before_burst = contract_leader_point(&observer).await;
+    let start = Arc::new(tokio::sync::Barrier::new(81));
+    let mut touches = tokio::task::JoinSet::new();
+    for _ in 0..80 {
+        let store = Arc::clone(&store);
+        let start = Arc::clone(&start);
+        touches.spawn(async move {
+            start.wait().await;
+            store
+                .touch_cache_claim("replaceable-touch-recipe", "cache-node")
+                .await
+        });
+    }
+    start.wait().await;
+    while let Some(result) = touches.join_next().await {
+        result
+            .expect("cache touch task")
+            .expect("cache touch result");
+    }
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "80 equal cache touches must submit one physical write"
+    );
+    let after_burst = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(before_burst, after_burst),
+        1,
+        "80 equal cache touches must commit one Raft entry"
+    );
+
+    store.validation_reset_operation_counts();
+    store
+        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096)
+        .await
+        .expect("terminal cache completion");
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "terminal completion must bypass the replaceable gate"
+    );
+    let after_completion = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(after_burst, after_completion),
+        1,
+        "terminal completion must commit its own Raft entry"
+    );
+
+    store.validation_reset_operation_counts();
+    for index in 0..8 {
+        store
+            .touch_cache_entry(&format!("uncoalesced-control-{index}"), "cache-node")
+            .await
+            .expect("distinct control touch");
+    }
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        8,
+        "distinct identities are the uncoalesced load control"
+    );
+    let after_control = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(after_completion, after_control),
+        8,
+        "the distinct-identity control must physically exceed the burst budget"
+    );
+
+    store.validation_reset_operation_counts();
+    store
+        .forget_cache_entry("replaceable-touch-recipe", "cache-node", "local")
+        .await
+        .expect("terminal cache removal");
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "terminal removal must bypass the replaceable gate"
+    );
+    assert_eq!(
+        contract_stable_leader_delta(after_control, contract_leader_point(&observer).await),
+        1,
+        "terminal removal must commit its own Raft entry"
+    );
 }
 
 #[tokio::test]

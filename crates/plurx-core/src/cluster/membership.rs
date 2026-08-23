@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::CStr;
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,6 +41,9 @@ const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
 /// heartbeats makes the old leader ineligible before a new term can exist.
 const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// Collapse only duplicate/concurrent submissions. The ordinary ten-second
+/// cadence and thirty-second reachability contract remain unchanged.
+const HEARTBEAT_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 /// How long a removal waits for survivors to answer a source probe before
 /// treating silence as "cannot prove it". Long enough for a healthy node's
 /// poll plus a `stat` on a sleeping NAS; short enough that an operator gets an
@@ -741,10 +745,44 @@ struct ReplicatedMembership {
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
+    heartbeat_writes: HeartbeatWriteGate,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
+}
+
+#[derive(Default)]
+struct HeartbeatWriteGate {
+    last_committed: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl HeartbeatWriteGate {
+    /// Equal heartbeat callers serialize through the first durable result.
+    /// Failed writes do not reserve the window, so a waiter retries instead
+    /// of observing an optimistic success.
+    async fn run<F>(&self, operation: F) -> Result<bool, MembershipError>
+    where
+        F: Future<Output = Result<(), MembershipError>>,
+    {
+        let mut last_committed = self.last_committed.lock().await;
+        if last_committed.is_some_and(|committed| {
+            tokio::time::Instant::now().duration_since(committed) < HEARTBEAT_COALESCE_WINDOW
+        }) {
+            return Ok(false);
+        }
+        operation.await?;
+        *last_committed = Some(tokio::time::Instant::now());
+        Ok(true)
+    }
+}
+
+fn reachable_after(now: i64) -> i64 {
+    now.saturating_sub(NODE_REACHABLE_WINDOW_MS)
+}
+
+fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
+    now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
 }
 
 struct ActivityAuthAdmission {
@@ -907,6 +945,7 @@ impl MembershipManager {
                 }),
                 activation_marker,
                 replication,
+                heartbeat_writes: HeartbeatWriteGate::default(),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
@@ -1484,6 +1523,23 @@ impl MembershipManager {
 
     pub async fn heartbeat(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        inner
+            .heartbeat_writes
+            .run(self.commit_heartbeat(inner))
+            .await
+            .map(|_| ())
+    }
+
+    /// Submit a heartbeat without the duplicate gate so the separate-process
+    /// fault harness can prove tombstone SQL is actually exercised.
+    #[cfg(feature = "cluster-validation")]
+    #[doc(hidden)]
+    pub async fn validation_force_heartbeat(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.commit_heartbeat(inner).await
+    }
+
+    async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
         let now = unix_ms()?;
         inner
             .client
@@ -1969,7 +2025,7 @@ impl MembershipManager {
         let Some(inner) = self.inner.as_ref() else {
             return Ok(Vec::new());
         };
-        let reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(unix_ms()?);
         let rows = inner
             .client
             .query_map::<HttpUrlRow, _>(
@@ -2026,7 +2082,7 @@ impl MembershipManager {
         if mac.verify_slice(&signature).is_err() {
             return Ok(false);
         }
-        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(now);
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
@@ -2075,7 +2131,7 @@ impl MembershipManager {
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
-                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
+                reachable: node_is_reachable(now, row.last_seen_at),
             })
             .collect())
     }
@@ -2373,7 +2429,7 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(now);
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
@@ -2455,7 +2511,7 @@ impl MembershipManager {
                     NodeRole::Learner
                 },
                 is_leader: metrics.current_leader == Some(row.raft_id as u64),
-                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
+                reachable: node_is_reachable(now, row.last_seen_at),
                 last_seen_at: row.last_seen_at,
                 removal_pending: row.removal_pending,
             })
@@ -4082,6 +4138,77 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_gate_pins_commit_window_and_retries_failures() {
+        let gate = HeartbeatWriteGate::default();
+        let commits = std::sync::atomic::AtomicUsize::new(0);
+
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("leading heartbeat"));
+        tokio::time::advance(HEARTBEAT_COALESCE_WINDOW - Duration::from_millis(1)).await;
+        assert!(!gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("inside-window heartbeat"));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("boundary heartbeat"));
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        tokio::time::advance(HEARTBEAT_COALESCE_WINDOW).await;
+        let failed = gate
+            .run(async {
+                Err(MembershipError::Internal(
+                    "injected heartbeat failure".to_owned(),
+                ))
+            })
+            .await;
+        assert!(failed.is_err());
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("heartbeat retry"));
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn reachability_expires_immediately_after_the_allowed_missed_beats() {
+        assert_eq!(
+            NODE_REACHABLE_WINDOW_MS as u128,
+            HEARTBEAT_INTERVAL.as_millis() * 3,
+            "reachability must remain explicitly coupled to heartbeat cadence"
+        );
+        let last_seen_at = 1_000_000;
+        assert!(node_is_reachable(
+            last_seen_at + NODE_REACHABLE_WINDOW_MS,
+            last_seen_at
+        ));
+        assert!(!node_is_reachable(
+            last_seen_at + NODE_REACHABLE_WINDOW_MS + 1,
+            last_seen_at
+        ));
+        assert_eq!(
+            reachable_after(last_seen_at + NODE_REACHABLE_WINDOW_MS + 1),
+            last_seen_at + 1
+        );
+    }
 
     #[test]
     fn activity_key_cache_replaces_one_peer_without_exceeding_its_bound() {

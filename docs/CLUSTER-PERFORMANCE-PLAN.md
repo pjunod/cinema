@@ -574,6 +574,25 @@ cannot remain reachable after its allowed missed beats.
 terminal exception. A load control bypassing the coalescer must violate the
 physical-commit budget, matching the existing progress-growth gate pattern.
 
+The retained recurring-write inventory is:
+
+| Traffic | Class | Durable boundary |
+|---|---|---|
+| Token/API-key activity | Replaceable activity | P1 keeps the Authority lookup and admits one successful touch per credential window |
+| Unfenced cache claim `last_seen_at` | Replaceable activity | one successful quorum write per process-local recipe/node/claim identity per five seconds; active fenced producer renewals stay synchronous because they also advance the lease |
+| Cache use `last_used_at` | Replaceable activity | one successful quorum write per recipe/node/use identity per five seconds; timestamps advance monotonically |
+| Cache manifest scrub cursor | Bounded maintenance progress | at most 128 location observations share one quorum transaction; observation time is monotone while the per-manifest cursor advances synchronously with that batch |
+| Membership node heartbeat | Replaceable liveness | concurrent/duplicate submissions inside 250 ms share the first successful quorum result; the ordinary 10 s cadence is unchanged |
+| Playback progress | Replaceable intermediate progress | the existing progress coalescer retains its leading/trailing flush and shutdown drain contract |
+| Join, removal, cache completion/invalidation/removal, watch terminal state | Terminal fact | synchronous and never admitted to a replaceable-write gate |
+| Job/pre-transcode/offline leases and ownership | Authority/fence | synchronous renewal or settlement; never coalesced because losing one changes who may act |
+
+Unfenced cache-touch and heartbeat waiters observe the first write's result before they
+may report suppression. A failed first write releases the identity for an
+immediate retry. Cache identity accounting is bounded; exceeding the bound
+degrades to an ordinary durable touch rather than merging unrelated identities
+or growing process memory without limit.
+
 ### 6.6 P5 — separate storage pressure and tune only proven limits
 
 **Change:** Add distinct configuration for durable Hiqlite state, persistent

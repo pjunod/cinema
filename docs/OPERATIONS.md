@@ -402,6 +402,37 @@ budgets plus Home settled. Each delayed cohort enforces first content and every
 sample must prove both a 250 ms response time for its named optional endpoint
 and a 250 ms settled-minus-content gap before its settled bound is relaxed.
 
+### Replaceable cluster writes
+
+Replicated cache activity is deliberately less chatty than cache ownership.
+Repeated unfenced claim or use touches for one recipe and node within one
+serving process share one successful quorum write for five seconds. Active
+producer claim renewals use the fenced publication path: they remain
+synchronous because the same transaction advances the producer lease. The
+durable activity timestamp can therefore trail the newest in-process unfenced
+activity by less than five seconds; no cache publication path moves it backward.
+Completion, integrity invalidation, forgetting a cache location, and every
+offline/job ownership transition remain synchronous quorum mutations and do
+not use this gate.
+
+Manifest integrity scrubbing is separately bounded rather than time-coalesced:
+up to 128 location observations and their cursors share one quorum transaction.
+Its observation timestamp is monotone even if two completed batches arrive out
+of order; the cursor stays coupled to the batch that performed the checks.
+
+Membership keeps its existing one-heartbeat-per-node, ten-second cadence and
+thirty-second reachable window. Only concurrent or duplicate submissions
+inside 250 ms are collapsed. A caller waits for the first durable result before
+suppression is reported, and a failed first write reserves no window, allowing
+the next waiter to retry. A node is reachable through exactly 30 seconds after
+its last committed heartbeat and leaves rotation immediately after that
+boundary.
+
+There is no configuration or schema migration for these coalescers. Rolling
+downgrade is safe: an older process resumes the prior higher write rate. If
+diagnosing cache age, compare timestamps with the five-second durability
+boundary rather than treating every request as a promised database update.
+
 ### Run the named four-machine topology campaign
 
 The P0c runner uses four private Linux hosts for voters and a fifth, external

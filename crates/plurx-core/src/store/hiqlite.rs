@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -161,6 +162,114 @@ pub struct HiqliteAuthStore {
     clock: Arc<dyn Clock>,
     telemetry: NodeLocalTelemetry,
     activity_refreshes: Arc<ActivityRefreshGate>,
+    cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
+}
+
+/// Cache activity is advisory recency, not ownership or completion. One
+/// successful quorum write therefore covers repeated touches of the same
+/// location for this bounded interval. Completion, invalidation, and removal
+/// never enter this gate and remain synchronous durable mutations.
+pub(super) const CACHE_TOUCH_COMMIT_WINDOW: Duration = Duration::from_secs(5);
+const REPLACEABLE_WRITE_GATE_MAX_KEYS: usize = 4_096;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CacheTouchKey {
+    Claim {
+        recipe_hash: String,
+        node_id: String,
+    },
+    Use {
+        recipe_hash: String,
+        node_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplaceableWriteOutcome {
+    Submitted,
+    Suppressed,
+}
+
+struct ReplaceableWriteGate<K> {
+    keys: Mutex<HashMap<K, Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>>>,
+}
+
+impl<K> Default for ReplaceableWriteGate<K> {
+    fn default() -> Self {
+        Self {
+            keys: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K> ReplaceableWriteGate<K>
+where
+    K: Clone + Eq + Hash,
+{
+    fn key_state(
+        &self,
+        key: K,
+        window: Duration,
+    ) -> Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>> {
+        let now = tokio::time::Instant::now();
+        let mut keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = keys.get(&key) {
+            // A hot existing identity stays O(1), including at the cap. Full
+            // scans are paid only by a caller attempting to admit a new key.
+            return Arc::clone(state);
+        }
+        if keys.len() >= REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            keys.retain(|_, state| {
+                if Arc::strong_count(state) > 1 {
+                    return true;
+                }
+                state.try_lock().map_or(true, |last| {
+                    last.is_some_and(|committed| now.duration_since(committed) < window)
+                })
+            });
+        }
+        if keys.len() >= REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            // Cardinality pressure may reduce coalescing efficiency, but must
+            // never turn untrusted recipe identities into unbounded process
+            // memory or suppress one identity using another identity's state.
+            return Arc::new(tokio::sync::Mutex::new(None));
+        }
+        Arc::clone(
+            keys.entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+        )
+    }
+
+    /// Serialize only equal identities. A waiter observes the first write's
+    /// result before it may report suppression; failures leave no reservation
+    /// and the next waiter retries instead of receiving an optimistic success.
+    async fn run<F>(
+        &self,
+        key: K,
+        window: Duration,
+        operation: F,
+    ) -> Result<ReplaceableWriteOutcome, StoreError>
+    where
+        F: Future<Output = Result<(), StoreError>>,
+    {
+        let state = self.key_state(key, window);
+        let mut last_committed = state.lock().await;
+        if last_committed
+            .is_some_and(|committed| tokio::time::Instant::now().duration_since(committed) < window)
+        {
+            return Ok(ReplaceableWriteOutcome::Suppressed);
+        }
+        // Anchor the durability window before dispatch. A slow quorum write
+        // must consume its own latency budget instead of extending a nominal
+        // five-second cache window to five seconds after acknowledgement.
+        let admitted_at = tokio::time::Instant::now();
+        operation.await?;
+        *last_committed = Some(admitted_at);
+        Ok(ReplaceableWriteOutcome::Submitted)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1266,7 +1375,22 @@ impl HiqliteAuthStore {
             clock,
             telemetry,
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
+            cache_touches: Arc::new(ReplaceableWriteGate::default()),
         }
+    }
+
+    pub(super) async fn coalesce_cache_touch<F>(
+        &self,
+        key: CacheTouchKey,
+        operation: F,
+    ) -> Result<(), StoreError>
+    where
+        F: Future<Output = Result<(), StoreError>>,
+    {
+        self.cache_touches
+            .run(key, CACHE_TOUCH_COMMIT_WINDOW, operation)
+            .await
+            .map(|_| ())
     }
 
     pub(super) fn now(&self) -> Result<i64, StoreError> {
@@ -2406,6 +2530,277 @@ mod tests {
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
+
+    #[tokio::test(start_paused = true)]
+    async fn replaceable_write_gate_pins_window_failure_retry_and_terminal_bypass() {
+        let gate = ReplaceableWriteGate::<String>::default();
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = |submitted: Arc<std::sync::atomic::AtomicUsize>| async move {
+            submitted.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, StoreError>(())
+        };
+
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("leading touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        tokio::time::advance(CACHE_TOUCH_COMMIT_WINDOW - Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("inside-window touch"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("boundary touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        assert_eq!(submitted.load(Ordering::Relaxed), 2);
+
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                async {
+                    submitted.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::advance(Duration::from_secs(4)).await;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("slow leading touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("slow touch inside dispatch-anchored window"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("slow touch at dispatch-anchored boundary"),
+            ReplaceableWriteOutcome::Submitted
+        );
+
+        let failure = gate
+            .run("failure".to_owned(), CACHE_TOUCH_COMMIT_WINDOW, async {
+                Err(StoreError::Task("injected touch failure".to_owned()))
+            })
+            .await;
+        assert!(failure.is_err());
+        assert_eq!(
+            gate.run(
+                "failure".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("failed touch must retry"),
+            ReplaceableWriteOutcome::Submitted
+        );
+
+        // Completion/removal never enter the replaceable gate. This models a
+        // terminal mutation at the same instant as a suppressed activity fact.
+        let terminal_commits = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            gate.run(
+                "terminal-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("leading activity before terminal mutation"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        assert_eq!(
+            gate.run(
+                "terminal-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("duplicate activity touch"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        terminal_commits.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(terminal_commits.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_equal_replaceable_writes_share_one_durable_result() {
+        let gate = Arc::new(ReplaceableWriteGate::<String>::default());
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(81));
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..80 {
+            let gate = Arc::clone(&gate);
+            let submitted = Arc::clone(&submitted);
+            let barrier = Arc::clone(&barrier);
+            requests.spawn(async move {
+                barrier.wait().await;
+                gate.run(
+                    "same-location".to_owned(),
+                    Duration::from_secs(1),
+                    async move {
+                        submitted.fetch_add(1, Ordering::Relaxed);
+                        tokio::task::yield_now().await;
+                        Ok(())
+                    },
+                )
+                .await
+            });
+        }
+        barrier.wait().await;
+        let mut admitted = 0;
+        while let Some(result) = requests.join_next().await {
+            if result.expect("touch task").expect("touch result")
+                == ReplaceableWriteOutcome::Submitted
+            {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 1);
+        assert_eq!(submitted.load(Ordering::Relaxed), 1);
+
+        let bypass_commits = (0..80).count();
+        assert!(
+            bypass_commits > admitted,
+            "the uncoalesced load control must violate the one-commit burst budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replaceable_write_gate_caps_hot_keys_and_reclaims_expired_identities() {
+        let gate = ReplaceableWriteGate::<String>::default();
+        for ordinal in 0..REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            let state = gate.key_state(format!("recent-{ordinal}"), CACHE_TOUCH_COMMIT_WINDOW);
+            *state.lock().await = Some(tokio::time::Instant::now());
+        }
+        assert_eq!(
+            gate.keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            REPLACEABLE_WRITE_GATE_MAX_KEYS
+        );
+
+        let active = gate.key_state("recent-0".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        let same = gate.key_state("recent-0".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        assert!(Arc::ptr_eq(&active, &same));
+        drop(same);
+
+        let overflow = gate.key_state("overflow".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        assert!(
+            !gate
+                .keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key("overflow"),
+            "a 4,097th recent identity must degrade without growing the map"
+        );
+        drop(overflow);
+
+        tokio::time::advance(CACHE_TOUCH_COMMIT_WINDOW).await;
+        let reclaimed = gate.key_state("reclaimed".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        {
+            let keys = gate
+                .keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(
+                keys.len(),
+                2,
+                "expired idle identities must be reclaimed while an active key stays mapped"
+            );
+            assert!(keys.contains_key("recent-0"));
+            assert!(keys.contains_key("reclaimed"));
+        }
+        drop(active);
+        drop(reclaimed);
+
+        for ordinal in 0..(REPLACEABLE_WRITE_GATE_MAX_KEYS - 2) {
+            drop(gate.key_state(format!("refill-{ordinal}"), CACHE_TOUCH_COMMIT_WINDOW));
+        }
+        let final_key = gate.key_state("final".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        let keys = gate
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            keys.len(),
+            1,
+            "an expired key must become reclaimable after its active caller releases it"
+        );
+        assert!(keys.contains_key("final"));
+        drop(keys);
+        drop(final_key);
+    }
+
+    #[test]
+    fn cache_terminal_mutations_cannot_enter_the_replaceable_touch_gate() {
+        let source = include_str!("hiqlite_durable.rs");
+        let method = |start: &str, end: &str| {
+            source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing {end}"))
+                .0
+        };
+        assert!(method(
+            "async fn touch_cache_claim",
+            "async fn complete_cache_entry"
+        )
+        .contains("coalesce_cache_touch"));
+        assert!(
+            method("async fn touch_cache_entry", "async fn cache_by_age")
+                .contains("coalesce_cache_touch")
+        );
+        for terminal in [
+            method(
+                "async fn complete_cache_entry",
+                "async fn touch_cache_entry",
+            ),
+            method(
+                "async fn invalidate_cache_entry",
+                "async fn forget_cache_entry",
+            ),
+            method("async fn forget_cache_entry", "async fn cache_bytes"),
+        ] {
+            assert!(!terminal.contains("coalesce_cache_touch"));
+            assert!(terminal.contains("self.execute") || terminal.contains(".txn("));
+        }
+    }
 
     #[tokio::test]
     async fn store_operation_timer_classifies_completion_error_and_cancellation() {
