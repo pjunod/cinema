@@ -4189,6 +4189,13 @@ struct SingletonProbe {
     outcome: Arc<RwLock<String>>,
 }
 
+#[derive(Default)]
+struct NodeMutableState {
+    store: Option<Arc<HiqliteAuthStore>>,
+    membership: Option<MembershipManager>,
+    singleton_probe: Option<SingletonProbe>,
+}
+
 /// Run one embedded voter: start hiqlite, announce readiness, then serve the
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
@@ -4234,9 +4241,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
         .root
         .join(format!("node-{}", launch.node_id))
         .join("telemetry.db");
-    let mut store: Option<Arc<HiqliteAuthStore>> = None;
-    let mut membership: Option<MembershipManager> = None;
-    let mut singleton_probe: Option<SingletonProbe> = None;
+    let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
     while let Some(line) = input.next_line().await? {
@@ -4248,9 +4253,7 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
                     &replication,
                     &launch,
                     &telemetry_path,
-                    &mut store,
-                    &mut membership,
-                    &mut singleton_probe,
+                    &mut state,
                 )
                 .await
             }
@@ -4276,10 +4279,13 @@ async fn handle_request(
     replication: &ReplicationMonitor,
     launch: &NodeLaunch,
     telemetry_path: &Path,
-    store: &mut Option<Arc<HiqliteAuthStore>>,
-    membership: &mut Option<MembershipManager>,
-    singleton_probe: &mut Option<SingletonProbe>,
+    state: &mut NodeMutableState,
 ) -> Result<Response> {
+    let NodeMutableState {
+        store,
+        membership,
+        singleton_probe,
+    } = state;
     match request {
         Request::SeedLegacyArtworkUrls => {
             client
