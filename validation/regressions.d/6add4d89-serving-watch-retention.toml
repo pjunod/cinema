@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6add4d89"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained serving-fence unit regression publishes a complete loss and recovery before the first watch subscriber and requires the recovered state plus monotonic loss generation to remain visible. The separate-process cluster proof then admits and retains media before exercising two proxy partition/recovery cycles, so reverting retained watch publication restores the deterministic stale initial fence."
