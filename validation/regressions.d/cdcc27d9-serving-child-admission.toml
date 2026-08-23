@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["cdcc27d9", "68d5c032"]
+commits = ["cdcc27d9"]
 points = ["cluster.auth"]
 checks = ["cluster-auth"]
 reason = "The retained separate-process serving partition proof binds each stand-in media child to both the serving loss generation and a unique admission ID. The forced delayed-teardown regression proves an old owner and a duplicate kill cannot take, hide, or terminate a recovered replacement, while the live partition proof retries admission across legitimate initial watermark changes and observes the exact current child before isolation."
