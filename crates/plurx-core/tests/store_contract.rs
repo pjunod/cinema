@@ -6323,6 +6323,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX transcode_cache_storage_generation;
              DROP TABLE cache_consumer_pins;
              DROP TABLE cache_storage_members;
+             DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
              DROP TRIGGER library_roots_paths_au;
