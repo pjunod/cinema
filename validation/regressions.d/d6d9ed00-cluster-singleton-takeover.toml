@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d6d9ed00", "209407bd"]
+points = ["cluster.auth", "validation.framework"]
+checks = ["cluster-auth", "history-regressions", "rust-gate"]
+reason = "The retained three-process contract compiles the daemon's production lease lifecycle, blocks one follower inside a validated physical provider request, pauses it past the authoritative lease deadline, makes both surviving voters contest takeover, admits one exact next-generation winner while the loser observes that fence, rejects the resumed token inside its former TTL, and bounds both physical calls and post-baseline Raft entries without a term change."
