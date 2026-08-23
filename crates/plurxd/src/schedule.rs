@@ -35,6 +35,9 @@ pub enum DueJob {
     PruneTelemetry,
     /// Pre-transcode what somebody is likely to play next (PERF-PLAN §6.2).
     ProduceCache,
+    /// Build fragment indexes for files that have none
+    /// (VOD-PRESENTATION-PLAN §2.2). Off by default.
+    BuildFragmentIndexes,
 }
 
 /// Server-wide job intervals and their last-run stamps, in minutes and unix
@@ -52,6 +55,8 @@ pub struct GlobalSchedule {
     pub last_telemetry_prune: Option<i64>,
     pub cache_produce_mins: i64,
     pub last_cache_produce: Option<i64>,
+    pub vod_index_mins: i64,
+    pub last_vod_index: Option<i64>,
 }
 
 /// Is a job with this interval due, given when it last ran?
@@ -109,6 +114,12 @@ pub fn due_jobs(now: i64, libraries: &[Library], global: GlobalSchedule) -> Vec<
     // everything else a due moment asked for.
     if due(now, global.last_cache_produce, global.cache_produce_mins) {
         jobs.push(DueJob::ProduceCache);
+    }
+    // Behind even that. Indexing reads whole files off the same disks a
+    // playback is reading, buys nothing a viewer can see today, and is the one
+    // job whose cost has not been measured on real hardware yet.
+    if due(now, global.last_vod_index, global.vod_index_mins) {
+        jobs.push(DueJob::BuildFragmentIndexes);
     }
     jobs
 }
@@ -222,6 +233,34 @@ mod tests {
     /// tick has other work it goes behind that work. It is also off by default
     /// like every other job — an upgraded server must not start encoding
     /// overnight because somebody installed a new build.
+    #[test]
+    fn indexing_is_off_by_default_and_goes_behind_even_the_producer() {
+        // Off by default until M0-P1 prices a full read of a library over NFS.
+        assert!(
+            !due_jobs(HOUR, &[], GlobalSchedule::default()).contains(&DueJob::BuildFragmentIndexes)
+        );
+
+        let both = GlobalSchedule {
+            cache_produce_mins: 30,
+            vod_index_mins: 30,
+            ..GlobalSchedule::default()
+        };
+        let jobs = due_jobs(HOUR, &[], both);
+        let producer = jobs
+            .iter()
+            .position(|job| *job == DueJob::ProduceCache)
+            .expect("the producer is due");
+        let indexer = jobs
+            .iter()
+            .position(|job| *job == DueJob::BuildFragmentIndexes)
+            .expect("indexing is due");
+        assert!(
+            indexer > producer,
+            "indexing reads whole files off the disks a playback reads from and \
+             buys a viewer nothing today, so it goes behind everything"
+        );
+    }
+
     #[test]
     fn the_producer_is_off_by_default_and_goes_last_when_it_is_not() {
         assert!(

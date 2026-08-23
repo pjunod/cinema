@@ -294,6 +294,15 @@ pub mod keys {
     /// response instead of changing from EVENT only after retention begins.
     /// Off by default until the physical-iPad control run is conclusive.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
+    /// How often, in minutes, to build fragment indexes for files that have
+    /// none. `0` is off, and off is the default until M0-P1's nynuc numbers
+    /// say what a full read of a library costs over NFS — the whole point of
+    /// that probe is to size this job, and turning it on before the numbers
+    /// return would be guessing with the operator's disks.
+    ///
+    /// Nothing reads an index yet; a file without one keeps today's
+    /// presentation, so this job is invisible to every client either way.
+    pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not
@@ -335,6 +344,9 @@ pub mod keys {
     /// upgraded server must not start encoding overnight on its own.
     pub const JOB_CACHE_PRODUCE_MINS: &str = "jobs.cache_produce_mins";
     pub const JOB_LAST_CACHE_PRODUCE: &str = "jobs.last_cache_produce";
+    /// Node-local, like the transcode-cleanup stamp: an index lives on the
+    /// node that built it, so when it last ran is a fact about that node.
+    pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
 }
 
 #[async_trait]
