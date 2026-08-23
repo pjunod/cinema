@@ -4,6 +4,7 @@ mod copyseg;
 mod delivery;
 mod ffmpeg;
 mod http;
+mod job_lease;
 mod logbuf;
 mod meter;
 mod offline;
@@ -45,7 +46,8 @@ use plurx_core::store::{keys, Store};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
-use crate::state::{acquire_cluster_job, AppState, SystemInfo};
+use crate::job_lease::acquire_cluster_job;
+use crate::state::{AppState, SystemInfo};
 
 #[derive(Parser)]
 // `--version` carries the build stamp too: "0.1.0 (v0.1.0-14-gc0ffee)". The

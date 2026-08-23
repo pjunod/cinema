@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+#[cfg(test)]
+use plurx_core::cluster::coordination::LeaseClaim;
+use plurx_core::cluster::coordination::StoreCoordinator;
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
@@ -27,6 +29,7 @@ use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use crate::job_lease::{acquire_cluster_job, ActiveJobLease};
 use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
@@ -936,175 +939,6 @@ const MAX_REQUESTS: usize = 256;
 /// node owns its scan. Bound retained waiter state independently of the
 /// request-history ring; overflow is terminal and visible to the caller.
 const MAX_PENDING_PER_LIBRARY: usize = 256;
-
-const JOB_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
-const JOB_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
-
-pub(crate) struct ActiveJobLease {
-    coordinator: StoreCoordinator,
-    fence: PublicationFence,
-    cancel: tokio_util::sync::CancellationToken,
-    lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl ActiveJobLease {
-    fn start(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-    ) -> Self {
-        Self::start_with_policy(coordinator, lease, JOB_LEASE_TTL, JOB_LEASE_HEARTBEAT)
-    }
-
-    fn start_with_policy(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-        ttl: std::time::Duration,
-        heartbeat_every: std::time::Duration,
-    ) -> Self {
-        let fence = PublicationFence::new(lease);
-        let heartbeat_fence = fence.clone();
-        let heartbeat_coordinator = coordinator.clone();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let heartbeat_cancel = cancel.clone();
-        let lost = tokio_util::sync::CancellationToken::new();
-        let heartbeat_lost = lost.clone();
-        let heartbeat = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(heartbeat_every);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            ticker.tick().await;
-            loop {
-                tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = ticker.tick() => {}
-                }
-                let Some(current) = heartbeat_fence.snapshot().await else {
-                    break;
-                };
-                let renewal = heartbeat_fence.renew(&heartbeat_coordinator, ttl);
-                tokio::pin!(renewal);
-                let expiry = tokio::time::sleep(lease_time_remaining(current.expires_at_unix_ms));
-                tokio::pin!(expiry);
-                let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
-                    _ = &mut expiry => {
-                        let _ = heartbeat_fence.invalidate(&current).await;
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            "cluster job renewal exceeded its lease deadline and self-fenced"
-                        );
-                        break;
-                    }
-                    result = &mut renewal => result,
-                };
-                match renewed {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            "cluster job lost its lease and self-fenced"
-                        );
-                        break;
-                    }
-                    Err(error) => {
-                        heartbeat_lost.cancel();
-                        tracing::warn!(
-                            resource = current.resource,
-                            fence = current.fence,
-                            error = %error,
-                            "cluster job lease renewal failed and self-fenced"
-                        );
-                        break;
-                    }
-                }
-            }
-        });
-        Self {
-            coordinator,
-            fence,
-            cancel,
-            lost,
-            heartbeat: Some(heartbeat),
-        }
-    }
-
-    pub(crate) fn publisher<'a>(&self, store: &'a dyn Store) -> PublicationStore<'a> {
-        PublicationStore::fenced(store, self.fence.clone())
-    }
-
-    pub(crate) fn loss_token(&self) -> tokio_util::sync::CancellationToken {
-        self.lost.clone()
-    }
-
-    fn publication_fence(&self) -> PublicationFence {
-        self.fence.clone()
-    }
-
-    pub(crate) async fn release(mut self) {
-        self.cancel.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(error = %error, "cluster job heartbeat task failed during release");
-            }
-        }
-        let token = self.fence.snapshot().await;
-        if let Some(token) = token {
-            if let Err(error) = self.coordinator.release(&token).await {
-                tracing::warn!(
-                    resource = token.resource,
-                    fence = token.fence,
-                    error = %error,
-                    "cluster job lease release failed; TTL will recover it"
-                );
-            }
-        }
-    }
-}
-
-fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
-    let now_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(i64::MAX);
-    std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
-}
-
-impl Drop for ActiveJobLease {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.lost.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-    }
-}
-
-pub(crate) async fn acquire_cluster_job(
-    coordinator: &StoreCoordinator,
-    resource: String,
-) -> Result<Option<ActiveJobLease>, StoreError> {
-    match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
-        LeaseClaim::Acquired(lease) => Ok(Some(ActiveJobLease::start(coordinator.clone(), lease))),
-        LeaseClaim::Held {
-            owner_node_id,
-            fence,
-            expires_at_unix_ms,
-        } => {
-            tracing::debug!(
-                resource,
-                owner = owner_node_id,
-                fence,
-                expires_at_unix_ms,
-                "cluster job lease is held; skipping local duplicate"
-            );
-            Ok(None)
-        }
-    }
-}
 
 impl JobManager {
     #[cfg(test)]
@@ -3254,7 +3088,8 @@ mod tests {
             lease,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_millis(50),
-        );
+        )
+        .expect("valid test lease policy");
         let owner = tokio::spawn(async move {
             let active = active;
             std::future::pending::<()>().await;
