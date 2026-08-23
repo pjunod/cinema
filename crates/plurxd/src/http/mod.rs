@@ -156,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/hubs", get(browse::hubs))
+        .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
         // Watch
         .route("/items/{id}/photo", get(photos::serve))
@@ -3320,6 +3321,164 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let seeded = seed_content(&state).await;
+        let home = seed_home(&state).await;
+        let empty = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Empty Preview Library".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![std::path::PathBuf::from("/empty-preview")],
+                anime: false,
+            })
+            .await
+            .expect("empty library");
+        let mut preview_movies = Vec::new();
+        for index in 0..30 {
+            let item = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: seeded.lib,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Preview Movie {index:02}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("preview movie");
+            preview_movies.push(item);
+        }
+        let watched_movie = *preview_movies.last().expect("preview movie id");
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{watched_movie}/progress"),
+                Some(&admin),
+                json!({ "position_ms": 1_000, "duration_ms": 10_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, admin_body) =
+            call(&app, get("/api/v1/home/previews?limit=1", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{admin_body}");
+        let libraries = admin_body["libraries"].as_array().expect("libraries");
+        let empty_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == empty.id)
+            .expect("empty library remains visible");
+        assert_eq!(empty_page["total"], 0);
+        assert_eq!(empty_page["items"], json!([]));
+
+        let movie_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("movie preview");
+        assert_eq!(movie_page["items"].as_array().map(Vec::len), Some(24));
+        assert_eq!(movie_page["total"], 32);
+        let (_, ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(movie_page["items"], ordinary["items"]);
+        assert_eq!(movie_page["total"], ordinary["total"]);
+        let admin_movie = movie_page["items"]
+            .as_array()
+            .expect("movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("seeded movie");
+        assert!(admin_movie.get("watch").is_some());
+
+        let home_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == home.lib)
+            .expect("home-video preview");
+        let folder = home_page["items"]
+            .as_array()
+            .expect("home-video items")
+            .iter()
+            .find(|item| item["id"] == home.folder)
+            .expect("root folder");
+        assert_eq!(folder["child_count"], 2);
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token").to_owned();
+        let (status, viewer_body) = call(&app, get("/api/v1/home/previews", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK);
+        let viewer_movie_page = viewer_body["libraries"]
+            .as_array()
+            .expect("viewer libraries")
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("viewer movie preview");
+        let (_, viewer_ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&viewer),
+            ),
+        )
+        .await;
+        assert_eq!(viewer_movie_page["items"], viewer_ordinary["items"]);
+        let viewer_movie = viewer_movie_page["items"]
+            .as_array()
+            .expect("viewer movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("viewer seeded movie");
+        assert!(viewer_movie.get("watch").is_none());
+
+        assert_eq!(
+            call(&app, post("/api/v1/auth/logout", Some(&viewer), json!({})),)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", Some(&viewer)),)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "token revocation must apply to the next preview request"
+        );
     }
 
     // ---- seeded integration surface -----------------------------------------

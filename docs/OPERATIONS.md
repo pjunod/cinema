@@ -348,6 +348,60 @@ and evidence-scope resource fields; `validate_topology_artifact` remains the
 canonical check for cross-field hashes, recomputed percentiles, timestamps,
 applied lag, and leader/term semantics that JSON Schema cannot express.
 
+### Measuring page-route latency
+
+Use the page-latency runner against an already-running deployment. It does not
+start, stop, join, or reconfigure voters. First create an authenticated
+Playwright storage-state file for an administrator and make it owner-only;
+then record a run with safe, stable labels for the runner and target:
+
+```bash
+chmod 600 target/validation/page-storage-state.json
+scripts/cluster-page-latency \
+  --base-url https://plurx.example.test \
+  --storage-state target/validation/page-storage-state.json \
+  --output target/validation/cluster-page-latency.json \
+  --build-sha "$DEPLOYED_BUILD_SHA" \
+  --scenario healthy \
+  --target-role follower \
+  --voter-count 3 \
+  --hardware-label m6-pro \
+  --storage-label nvme \
+  --network-label lan-ethernet
+```
+
+The storage-state file must be a non-symlinked regular file with mode `0600`.
+The runner parses it through a no-follow file descriptor and passes the parsed
+object to Playwright, so the credential path is not reopened after validation;
+the state is never copied into the result, and there is deliberately no
+bearer-token argument. The output contains the full expected Git SHA, the
+server's matching build stamp, a bounded scenario, safe runner labels, raw
+phase times, normalized API route templates, statuses, and bounded failure
+codes. It rejects cookies, authorization fields, token-shaped values, URLs,
+IP addresses, UUIDs, media paths, and dynamic error text. A server reporting
+`unknown`, a dirty or fabricated stamp, a release tag that does not resolve to
+the supplied SHA in the runner checkout, or a different commit stops the run.
+The runner also requires the repository's Playwright `1.62.0` pin. It brackets
+every sample with checks for the target's actual role, voter count, membership,
+reachability scenario, Raft term, and leader-change count, and rechecks the
+build at the end without retaining node identity.
+
+For each route, `shell_us`, `content_us`, and `settled_us` measure from the nav
+click to the route's generation-fenced DOM milestones. The summary recomputes
+type-7 p50 and p95 values and the maximum from successful raw samples; failures
+are counted separately and never receive invented times. Compare named runs
+only when their role, voter count, hardware, storage, network path, and fault
+condition match. GitHub CI checks the schema and state machine, but its shared
+runner timing is not an absolute wall-clock performance gate. Choose `healthy`,
+`voter_unavailable`, `delayed_home_optional`, or `delayed_system_optional` for
+`--scenario`; never combine their artifacts. The result is written even when
+a named-runner budget fails: exit `1` means a p95, failure-count, or 30-sample
+requirement failed, while exit `2` means the run or artifact itself was
+invalid. Healthy and voter-unavailable runs enforce the reviewed first-content
+budgets plus Home settled. Each delayed cohort enforces first content and every
+sample must prove both a 250 ms response time for its named optional endpoint
+and a 250 ms settled-minus-content gap before its settled bound is relaxed.
+
 **Keep consensus storage separate from heavy local I/O.** Until dedicated path
 settings ship, `storage.data_dir` remains the compatibility root. On a fresh
 install, child mounts can isolate their workloads:

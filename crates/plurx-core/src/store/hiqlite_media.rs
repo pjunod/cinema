@@ -10,12 +10,12 @@ use hiqlite::Row;
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient};
 use super::{
     ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
-    WatchStore,
+    WatchStore, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::{
-    sort_title_for, ArtworkAttempt, BookMetadataPatch, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
-    WatchRollup, WatchState,
+    sort_title_for, ArtworkAttempt, BookMetadataPatch, HomePreviewPage, InProgressItem, Item,
+    ItemEdit, ItemKind, ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem,
+    ProbeResult, RecentItem, WatchRollup, WatchState,
 };
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
@@ -185,6 +185,20 @@ struct RecentItemRow {
     item: ItemRow,
     show_title: Option<String>,
     season_poster: Option<String>,
+}
+
+struct HomePreviewRow {
+    item: ItemRow,
+    library_total: i64,
+}
+
+impl From<&mut Row<'_>> for HomePreviewRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            item: ItemRow::from(&mut *row),
+            library_total: row.get("library_total"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for RecentItemRow {
@@ -1015,8 +1029,6 @@ impl MediaStore for HiqliteAuthStore {
             }
             ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
         };
-        const TOP: &str = "(kind IN ('movie','show','book','audiobook') OR \
-             (kind IN ('folder','video','photo') AND parent_id IS NULL))";
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
         let count = self
@@ -1024,7 +1036,7 @@ impl MediaStore for HiqliteAuthStore {
             .query_consistent_map::<CountRow, _>(
                 format!(
                     "SELECT COUNT(*) AS count FROM items \
-                     WHERE library_id = $1 AND {TOP} AND {GENRE}"
+                     WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
                 ),
                 params!(library_id, genre),
             )
@@ -1035,7 +1047,8 @@ impl MediaStore for HiqliteAuthStore {
             .ok_or_else(|| StoreError::Database("item count returned no row".to_owned()))?
             .count;
         let page_sql = format!(
-            "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 AND {TOP} AND {GENRE} \
+            "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
+             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
              ORDER BY {order} LIMIT $3 OFFSET $4"
         );
         validate_sql(&page_sql)?;
@@ -1049,6 +1062,53 @@ impl MediaStore for HiqliteAuthStore {
                 .map_err(database_error)?,
         )?;
         Ok(ItemPage { items: page, total })
+    }
+
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        let limit_per_library = limit_per_library.clamp(1, 24);
+        let sql = format!(
+            "WITH ranked AS (
+                 SELECT id, library_id,
+                        COUNT(*) OVER (PARTITION BY library_id) AS library_total,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY library_id
+                            ORDER BY added_at DESC, id DESC
+                        ) AS preview_rank
+                   FROM items
+                  WHERE {TOP_LEVEL_ITEM_PREDICATE}
+             ), selected AS (
+                 SELECT id, library_id, library_total, preview_rank
+                   FROM ranked
+                  WHERE preview_rank <= $1
+             )
+             SELECT {}, selected.library_total
+               FROM selected
+               JOIN items i ON i.id = selected.id
+              ORDER BY selected.library_id, selected.preview_rank",
+            item_cols("i")
+        );
+        validate_sql(&sql)?;
+        let rows = self
+            .client()
+            .query_consistent_map::<HomePreviewRow, _>(sql, params!(limit_per_library))
+            .await
+            .map_err(database_error)?;
+        let mut pages: Vec<HomePreviewPage> = Vec::new();
+        for row in rows {
+            let item: Item = row.item.try_into()?;
+            match pages.last_mut() {
+                Some(page) if page.library_id == item.library_id => page.items.push(item),
+                _ => pages.push(HomePreviewPage {
+                    library_id: item.library_id,
+                    items: vec![item],
+                    total: row.library_total,
+                }),
+            }
+        }
+        Ok(pages)
     }
 
     async fn recently_added(

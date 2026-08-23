@@ -416,7 +416,7 @@ than displaying cached protected data as current.
 | Order | Deliverable | Depends on | Rollback |
 |---:|---|---|---|
 | OP-0 | Preserve evidence and remove the damaged fourth voter through the supported API. | Explicit operator approval. | Before membership commit, restart the unchanged voter; after commit, the old identity is permanently tombstoned. |
-| PR-A | Page-latency measurement artifact and deterministic phase tests, extending P0b/P2f evidence conventions. | Merged topology artifact contract; no runtime dependency. | Remove the browser runner; no runtime behavior changes. |
+| PR-A | Page-latency measurement artifact and deterministic phase tests, extending P0b/P2f evidence conventions. | Merged topology artifact contract; no runtime dependency. | Remove the browser runner and embedded phase markers; no application data or API contract changes. |
 | PR-B1 | Read-only WAL forensic inspector and synthetic invariant fixtures. | Preserved copy or synthetic layouts. | Remove the command; it never changes a WAL. |
 | EV-B | Run PR-B1 against the preserved copy and record only its privacy-safe verdict. | Operator access to the stopped forensic copy. | Evidence-only; the copy remains byte-for-byte preserved. |
 | PR-B2 | Deterministic crash reproducer and the smallest repair matching EV-B. | EV-B identifies the crash window, or an equivalent deterministic synthetic reproducer does. | Revert code only if the on-disk format remains unchanged; never restore the damaged live directory into membership. |
@@ -546,10 +546,16 @@ joins, stops, or reconfigures voters. Map its audited files to the existing
 `cluster.page-reads` functionality point rather than creating a competing
 cluster-performance point.
 
-The runner accepts a base URL, an owner-only browser storage-state file,
-sample count, and output path. It never accepts a bearer token on the command
-line and never writes cookies, authorization headers, response bodies, media
-paths, node UUIDs, or raw IPs into the artifact.
+The runner accepts a credential-free base origin, a non-symlinked owner-only
+browser storage-state file, scenario, sample count, and output path. It parses
+the state through a no-follow descriptor, passes the object to the repository's
+pinned Playwright runtime, and refuses an output path that aliases it. It never
+accepts a bearer token on the command line and never writes cookies,
+authorization headers, response bodies, media paths, node UUIDs, or raw IPs
+into the artifact. It brackets every sample with checks for the local
+leader/follower role, admitted voter membership, scenario-compatible
+reachability, Raft term, and leader-change count, and verifies the server build
+again at the end without retaining node identity.
 
 Each raw sample records:
 
@@ -558,13 +564,19 @@ Each raw sample records:
 | route | `home` · `activity` · `settings:<tab>` |
 | target role | `leader` · `follower` |
 | voter count | positive integer |
+| scenario | `healthy` · `voter_unavailable` · `delayed_home_optional` · `delayed_system_optional` |
 | shell · content · settled | integer microseconds from click |
-| endpoint timings | normalized route template · start/end microseconds · status |
+| endpoint timings | every post-click API call except explicit global polling · normalized route template · browser start/body-complete microseconds · status |
 | failure | bounded code, never dynamic response text |
 | build | exact server build stamp |
 
-GitHub CI validates the artifact shape and browser state machine. Only the
-named LAN runner enforces the wall-clock budgets in §1.1.
+GitHub CI meta-validates and compiles the artifact schema and validates the
+browser state machine. Only the named LAN runner enforces the wall-clock
+budgets in §1.1: it writes failed evidence for inspection and exits nonzero on
+failed samples, a partial route set, the wrong 30-sample cardinality, or a
+scenario-specific p95 breach. Every sample in a delayed cohort must prove at
+least a 250 ms duration for its named optional endpoint and the corresponding
+settled-minus-content gap.
 
 **Acceptance:**
 

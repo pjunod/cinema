@@ -133,6 +133,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_item",
     "item_titles",
     "get_item_children",
+    "home_preview_pages",
     "list_top_items_in_genre",
     "list_top_items",
     "recently_added",
@@ -6351,10 +6352,125 @@ async fn clustered_page_read_primitives_have_bounded_client_calls() {
     assert_eq!(counts.non_consistent_query_calls, 0);
     assert_eq!(counts.write_calls, 0);
 
+    // Home's catalog primitive is one window query whether the roster has
+    // one library or fifty. Mixed Home rows keep every annotation primitive
+    // non-vacuous so this also gates the handler-equivalent Store sequence.
+    let dynamic_store: Arc<dyn Store> = Arc::new(store.clone());
+    let home_user = dynamic_store
+        .create_user("Page Home Viewer", "contract-hash", false)
+        .await
+        .expect("seed Home viewer");
+    let mut home_library_count = 0;
+    for target in [1, 10, 50] {
+        while home_library_count < target {
+            let index = home_library_count;
+            let library = dynamic_store
+                .create_library(&NewLibrary {
+                    name: format!("Page Home Library {index}"),
+                    kind: LibraryKind::Home,
+                    paths: vec![PathBuf::from(format!("/page-home/{index}"))],
+                    anime: false,
+                })
+                .await
+                .expect("seed Home library");
+            let folder = dynamic_store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Folder,
+                    parent_id: None,
+                    title: format!("Page Home Folder {index}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("seed Home folder");
+            for (parent_id, suffix) in [(None, "root"), (Some(folder), "nested")] {
+                dynamic_store
+                    .insert_item(&NewItem {
+                        library_id: library.id,
+                        kind: ItemKind::Video,
+                        parent_id,
+                        title: format!("Page Home Video {index} {suffix}"),
+                        year: None,
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("seed Home video");
+            }
+            home_library_count += 1;
+        }
+
+        store.validation_reset_operation_counts();
+        let pages = dynamic_store
+            .home_preview_pages(24)
+            .await
+            .expect("Home preview pages");
+        let counts = store.validation_operation_counts();
+        assert_eq!(pages.len(), target);
+        assert!(pages.iter().all(|page| page.items.len() == 2));
+        assert_eq!(
+            counts.consistent_query_calls, 1,
+            "Home preview authority reads grew with {target} libraries"
+        );
+        assert_eq!(counts.non_consistent_query_calls, 0);
+        assert_eq!(counts.write_calls, 0);
+
+        store.validation_reset_operation_counts();
+        let libraries = dynamic_store
+            .list_libraries()
+            .await
+            .expect("Home libraries");
+        let pages = dynamic_store
+            .home_preview_pages(24)
+            .await
+            .expect("Home preview pages");
+        let items = pages
+            .iter()
+            .flat_map(|page| page.items.iter())
+            .collect::<Vec<_>>();
+        let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let badged = items
+            .iter()
+            .filter(|item| matches!(item.kind, ItemKind::Movie | ItemKind::Video))
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let folders = items
+            .iter()
+            .filter(|item| item.kind == ItemKind::Folder)
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let containers = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    ItemKind::Show | ItemKind::Season | ItemKind::Folder
+                )
+            })
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let _ = tokio::try_join!(
+            dynamic_store.watch_map(home_user.id, &item_ids),
+            dynamic_store.item_max_heights(&badged),
+            dynamic_store.child_counts(&folders),
+            dynamic_store.watch_rollups(home_user.id, &containers),
+        )
+        .expect("Home page-wide annotations");
+        let counts = store.validation_operation_counts();
+        assert_eq!(libraries.len(), target);
+        assert_eq!(
+            counts.consistent_query_calls, 6,
+            "the complete Home Store sequence grew with {target} libraries"
+        );
+        assert_eq!(counts.non_consistent_query_calls, 0);
+        assert_eq!(counts.write_calls, 0);
+    }
+
     // Activity's offline row count must not affect its store-call count. The
     // joined query also carries the fields the HTTP DTO needs, so the handler
     // has no reason to issue per-package user, file, or item lookups.
-    let dynamic_store: Arc<dyn Store> = Arc::new(store.clone());
     let (user_id, file_id) = seed_file(&dynamic_store, "page-activity").await;
     for index in 0..25 {
         let request = offline_request(
@@ -7353,6 +7469,45 @@ async fn media_contract_runs_through_dyn_store() {
                 .total,
             2
         );
+        let previews = store
+            .home_preview_pages(24)
+            .await
+            .expect("home preview pages");
+        for library in [&movies, &shows, &home, &books] {
+            let preview = previews
+                .iter()
+                .find(|page| page.library_id == library.id)
+                .unwrap_or_else(|| panic!("missing preview for {} on {backend}", library.name));
+            let ordinary = store
+                .list_top_items(library.id, ItemSort::Added, 0, 24)
+                .await
+                .expect("ordinary added page");
+            assert_eq!(preview.total, ordinary.total, "backend {backend}");
+            assert_eq!(
+                preview.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                ordinary
+                    .items
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>(),
+                "Home membership/order drifted for {} on {backend}",
+                library.name
+            );
+        }
+        let bounded = store
+            .home_preview_pages(1)
+            .await
+            .expect("bounded home previews");
+        assert!(bounded.iter().all(|page| page.items.len() <= 1));
+        assert_eq!(
+            bounded
+                .iter()
+                .find(|page| page.library_id == movies.id)
+                .expect("movie preview")
+                .total,
+            2,
+            "the preview limit must not truncate the total"
+        );
         assert!(!store
             .recently_added(None, 20)
             .await
@@ -7478,6 +7633,188 @@ async fn media_contract_runs_through_dyn_store() {
                 .expect("movie remains")
                 .is_some(),
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn home_preview_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        assert!(
+            store
+                .home_preview_pages(24)
+                .await
+                .expect("empty Home previews")
+                .is_empty(),
+            "backend {backend}"
+        );
+
+        let empty = store
+            .create_library(&NewLibrary {
+                name: "Home Preview Empty".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/preview/empty")],
+                anime: false,
+            })
+            .await
+            .expect("empty preview library");
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Home Preview Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/preview/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movie preview library");
+        for index in 0..30 {
+            store
+                .insert_item(&NewItem {
+                    library_id: movies.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Preview Contract Movie {index:02}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("preview contract movie");
+        }
+
+        let home = store
+            .create_library(&NewLibrary {
+                name: "Home Preview Videos".into(),
+                kind: LibraryKind::Home,
+                paths: vec![PathBuf::from("/preview/home")],
+                anime: false,
+            })
+            .await
+            .expect("home preview library");
+        let insert_home = |kind, parent_id, title: &str| NewItem {
+            library_id: home.id,
+            kind,
+            parent_id,
+            title: title.into(),
+            year: None,
+            season_number: None,
+            episode_number: None,
+        };
+        let folder = store
+            .insert_item(&insert_home(ItemKind::Folder, None, "Root folder"))
+            .await
+            .expect("root folder");
+        let root_video = store
+            .insert_item(&insert_home(ItemKind::Video, None, "Root video"))
+            .await
+            .expect("root video");
+        let root_photo = store
+            .insert_item(&insert_home(ItemKind::Photo, None, "Root photo"))
+            .await
+            .expect("root photo");
+        let nested_video = store
+            .insert_item(&insert_home(ItemKind::Video, Some(folder), "Nested video"))
+            .await
+            .expect("nested video");
+        let nested_photo = store
+            .insert_item(&insert_home(ItemKind::Photo, Some(folder), "Nested photo"))
+            .await
+            .expect("nested photo");
+
+        let books = store
+            .create_library(&NewLibrary {
+                name: "Home Preview Books".into(),
+                kind: LibraryKind::Books,
+                paths: vec![PathBuf::from("/preview/books")],
+                anime: false,
+            })
+            .await
+            .expect("book preview library");
+        for (kind, title) in [
+            (ItemKind::Book, "Preview Book"),
+            (ItemKind::Audiobook, "Preview Audiobook"),
+        ] {
+            store
+                .insert_item(&NewItem {
+                    library_id: books.id,
+                    kind,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("preview book");
+        }
+
+        // A wider internal request is still pinned to Home's one public card
+        // budget. The HTTP layer composes the absent empty page from the
+        // separate authoritative library roster.
+        let previews = store
+            .home_preview_pages(99)
+            .await
+            .expect("populated Home previews");
+        assert!(
+            previews.iter().all(|page| page.library_id != empty.id),
+            "the Store result contains only populated pages on {backend}"
+        );
+        let movie_preview = previews
+            .iter()
+            .find(|page| page.library_id == movies.id)
+            .expect("movie preview");
+        let ordinary = store
+            .list_top_items(movies.id, ItemSort::Added, 0, 24)
+            .await
+            .expect("ordinary movie page");
+        assert_eq!(movie_preview.total, 30, "backend {backend}");
+        assert_eq!(movie_preview.items.len(), 24, "backend {backend}");
+        assert_eq!(
+            movie_preview
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            ordinary
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            "Added ordering drifted on {backend}"
+        );
+
+        let home_preview = previews
+            .iter()
+            .find(|page| page.library_id == home.id)
+            .expect("home-video preview");
+        assert_eq!(home_preview.total, 3, "backend {backend}");
+        let home_ids = home_preview
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            home_ids,
+            BTreeSet::from([folder, root_video, root_photo]),
+            "root predicate drifted on {backend}"
+        );
+        assert!(!home_ids.contains(&nested_video));
+        assert!(!home_ids.contains(&nested_photo));
+
+        let book_preview = previews
+            .iter()
+            .find(|page| page.library_id == books.id)
+            .expect("book preview");
+        assert_eq!(book_preview.total, 2, "backend {backend}");
+        assert_eq!(
+            book_preview
+                .items
+                .iter()
+                .map(|item| item.kind.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["book", "audiobook"]),
+            "book roots drifted on {backend}"
         );
     })
     .await;
