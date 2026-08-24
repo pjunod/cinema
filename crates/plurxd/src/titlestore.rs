@@ -26,6 +26,11 @@
 //! remux is about 62 GB against a 50 GB default cache, so this is the common
 //! case for exactly the titles the plan cares most about, not an edge.
 
+// M2 builds this bookkeeping before M3 wires it to the delivery and transcode
+// paths, so nothing outside the tests calls it yet. The allow is scoped to
+// this module and comes out when those callers arrive.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
 use plurx_core::segplan::{PlanEntryKind, SegmentPlan};
@@ -340,6 +345,7 @@ mod tests {
                 dts,
                 duration,
                 bytes,
+                video_bytes: bytes.saturating_sub(600),
                 class: CutClass::CleanIdr,
             });
             dts += duration;
@@ -351,13 +357,15 @@ mod tests {
             SourceIdentity::new(1, 1, "fingerprint"),
         );
         let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
-        let seconds = (fragments as i64 * 1_751) / 1;
+        // 1,751 ms a fragment: the 28,016/28,032-tick durations above at a
+        // 16 kHz timescale, which is what a 23.976 fps 42-frame GOP really is.
+        let ms = fragments as i64 * 1_751;
         plan_copy(
             &index,
             &policy,
             &TrackDurations {
-                video_ms: seconds,
-                audio_ms: seconds,
+                video_ms: ms,
+                audio_ms: ms,
                 audio_bits_per_second: 256_000,
             },
         )
