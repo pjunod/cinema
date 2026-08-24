@@ -406,7 +406,14 @@ impl NodeLocalTelemetry {
         // of failing every restart forever.
         if current < SIDECAR_SCHEMA_VERSION {
             let mut migration = String::from("BEGIN;\n");
-            let mut needs_prior_upgrade = current >= 2 || table_exists(&conn, "network_priors")?;
+            // Only a sidecar below v3 needs the prior table rebuilt. Written as
+            // an explicit ceiling rather than as "whatever is not current",
+            // because the v4 bump proved the other shape wrong: it let a v3
+            // sidecar into this branch, where `current >= 2` is true, and every
+            // voter's thirty days of network priors were dropped on the first
+            // start of the new build.
+            let mut needs_prior_upgrade =
+                current < 3 && (current >= 2 || table_exists(&conn, "network_priors")?);
             if !table_exists(&conn, "playback_events")? {
                 migration.push_str(PLAYBACK_EVENTS_SCHEMA);
                 migration.push('\n');
@@ -844,6 +851,48 @@ mod tests {
             .err()
             .expect("future sidecar schema must be refused");
         assert!(error.to_string().contains("only knows v4"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sidecar_v3_keeps_its_network_priors_across_the_v4_upgrade() {
+        // Every other upgrade test starts at v1, which is why the v4 bump could
+        // drop a v3 sidecar's priors without one of them noticing.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v3 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            observe_prior(
+                &conn,
+                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            )
+            .expect("record a prior the way a running voter would");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("stamp v3");
+        }
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v4");
+        let prior = upgraded
+            .prior(
+                "test-gen".to_owned(),
+                "safari".to_owned(),
+                "home".to_owned(),
+            )
+            .await
+            .expect("read the prior back");
+        assert!(
+            prior.is_some(),
+            "a v3 sidecar's network priors must survive the v4 upgrade: they are \
+             thirty days of per-voter history and nothing rebuilds them"
+        );
+
+        let conn = Connection::open(&path).expect("inspect");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SIDECAR_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "fragment_indexes").expect("table check"));
     }
 
     #[tokio::test]

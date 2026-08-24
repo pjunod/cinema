@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["889da28c"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The scheduler's priority order is asserted from both sides. `a_hole_nobody_is_waiting_on_does_not_pull_the_producer_backwards` puts an evicted segment inside a waiting reader's back window and requires the producer to serve the open request instead -- it returns the backwards reposition against the floor-driven model. `a_blocked_request_outranks_the_ahead_window` requires a blocked segment well past the ahead horizon to be produced anyway, and `the_lowest_owed_segment_wins_when_no_single_move_serves_everyone` pins which of two unreachable requests a reposition goes to. `a_request_for_a_segment_that_already_exists_is_not_demand` and `a_request_past_the_end_of_the_plan_is_not_the_producers_problem` bound the demand set itself, so a stale or out-of-range request cannot move the producer at all."
