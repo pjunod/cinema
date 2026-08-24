@@ -30,9 +30,12 @@ run: ## Run the server (http://localhost:32400)
 fmt: ## Auto-format all code
 	$(CARGO) fmt --all
 
+# `--no-fail-fast` because cargo otherwise abandons the run at the first red
+# target, so one broken crate hides every other crate's failures and the next
+# fix reveals a second one instead of the whole list.
 .PHONY: test
 test: ## Run the test suite
-	$(CARGO) test --workspace
+	$(CARGO) test --workspace --no-fail-fast
 
 ## ---- baseline gates ----------------------------------------------------
 
@@ -55,7 +58,17 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # Local development keeps `make rust-check`; this target exists for ci.yml.
 .PHONY: ci-rust-gate
 ci-rust-gate: fmt-check ## CI Rust gate: format + workspace tests minus the cluster member
-	$(CARGO) test --workspace --locked --exclude plurx-cluster-check
+	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+
+# The real mount-namespace regression for scratch/durable bind aliasing. It
+# calls `mount --bind`, so it needs CAP_SYS_ADMIN and is not part of `check`:
+# a developer without privileges would get a failing baseline for a machine
+# capability rather than for the code. The test itself returns immediately
+# unless PLURX_RUN_BIND_MOUNT_TEST is set, so it is inert everywhere else.
+# Run it on a privileged Linux host before shipping a change to fs_secure.
+.PHONY: bind-mount-check
+bind-mount-check: ## Privileged Linux: prove a durable bind source is refused as scratch
+	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core real_bind -- --nocapture
 
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
