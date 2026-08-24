@@ -91,10 +91,59 @@ pub enum Action {
     Idle,
     /// Keep producing forward from where it is.
     Produce { next: u32 },
-    /// Far enough ahead of every reader to stop until one catches up.
-    Suspend { produced_through: u32, horizon: u32 },
+    /// Stop until something changes. `reason` says which bound is holding it
+    /// and what would release it, because the two are cleared by entirely
+    /// different events and a log line saying only "suspended" cannot be acted
+    /// on.
+    Suspend { produced_through: u32, reason: Hold },
     /// A demanded segment is too far ahead to reach by reading forward.
     Reposition { to: u32 },
+    /// Over the working-set budget with a reader waiting. Free `wanted` bytes
+    /// before producing anything else.
+    ///
+    /// Distinct from [`Action::Suspend`] on purpose. Suspending here would
+    /// park the producer against a bound that only *it* can clear, with a
+    /// reader blocked on a segment behind it: eviction is what makes room, and
+    /// nothing else is going to run it.
+    ///
+    /// `wanted` clears the hold in one sweep. It is measured to the *release*
+    /// line, not to the line that was crossed — freeing back to the budget
+    /// leaves the producer exactly on it, and the next decision asks for the
+    /// other half anyway. One round trip, not two, and no chance of a
+    /// free-one-produce-one cycle that runs for the length of a film.
+    MakeRoom { wanted: u64 },
+}
+
+/// Why a producer is stopped, and what would start it again.
+///
+/// The reason is not decoration. The two holds are cleared by entirely
+/// different events — a reader advancing, or somebody else on the node
+/// releasing bytes — so a caller that waits on the wrong one waits forever,
+/// and a log line saying only "suspended" cannot be acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// Far enough ahead of every reader. Cleared by a reader advancing.
+    Ahead { horizon: u32 },
+    /// The node's working set is full and nobody here is waiting on a
+    /// segment, so there is nothing to make room *for*. Cleared by another
+    /// rendition releasing bytes, or by a reader arriving and turning this
+    /// into [`Action::MakeRoom`].
+    ///
+    /// `free_bytes` is an amount to free, in the same units and measured the
+    /// same way as [`Action::MakeRoom`]'s `wanted` — not a level to get under.
+    /// Two adjacent answers from one function handing a caller two different
+    /// meanings under names that both read as byte counts is how a caller
+    /// frees five gigabytes of a hundred and wonders why the hold stands.
+    WorkingSetFull { free_bytes: u64 },
+    /// Over the budget with a reader waiting and **nothing evictable** — every
+    /// remaining segment is either inside a reader's window or belongs to an
+    /// admitted rendition, which by rule never gives one up.
+    ///
+    /// A real stall, and the reason [`Action::MakeRoom`] is not simply
+    /// repeated: asking again with identical inputs gets the identical answer
+    /// while the blocked reader's deadline runs out. Only something outside
+    /// this rendition clears it, and somebody has to be told.
+    NoRoom { wanted: u64 },
 }
 
 /// Everything the decision needs that is not the manifest.
@@ -110,6 +159,53 @@ pub struct Position {
     /// 2 s, and a horizon expressed in segments would mean two different
     /// things on the two paths.
     pub seconds_per_segment: f64,
+    /// The node's working set, across every rendition — not this one's.
+    ///
+    /// A producer inside its ahead horizon can still be the one filling the
+    /// disk, and a bound only this rendition can see would let it. The same
+    /// reasoning `transcode`'s global scratch cap is built on.
+    pub working_set: WorkingSet,
+}
+
+/// The node-wide working-set budget, and where it currently stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkingSet {
+    pub used_bytes: u64,
+    pub budget_bytes: u64,
+    /// Whether the producer is already stopped for this bound.
+    ///
+    /// Load-bearing, and the reason this is not simply `used > budget`.
+    /// Entering at the budget and leaving at half of it is what stops a
+    /// producer sitting exactly on the line from suspending and resuming once
+    /// per segment for the length of a film — the same hysteresis
+    /// `transcode::ahead_hold` applies to the scratch caps, for the same
+    /// reason.
+    pub held: bool,
+}
+
+impl WorkingSet {
+    /// Bytes that must be freed to clear the hold, or `None` when there is
+    /// room.
+    ///
+    /// Two lines, not one. Whether the producer is *over* is judged against
+    /// the budget when it is running and against half the budget once it is
+    /// held — that hysteresis is what stops a producer sitting on the line
+    /// from suspending and resuming once per segment for the length of a film.
+    /// But the amount to free is always measured to the *release* line, so one
+    /// sweep clears the hold: freeing back to the budget lands exactly on it,
+    /// and the very next decision asks for the other half.
+    fn over_by(&self) -> Option<u64> {
+        if self.budget_bytes == 0 {
+            return None;
+        }
+        let release = self.budget_bytes / 2;
+        let enter = if self.held {
+            release
+        } else {
+            self.budget_bytes
+        };
+        (self.used_bytes > enter).then(|| self.used_bytes.saturating_sub(release))
+    }
 }
 
 impl Position {
@@ -153,7 +249,31 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
         .collect();
     owed.sort_unstable();
     owed.dedup();
+
+    // The working set is a disk, and a full one cannot be produced into for
+    // whoever is waiting. It outranks the blocked reader for that reason and
+    // no other — so it gates *work*, and only work. A producer with nothing to
+    // do is not the one holding the bytes, and holding its process open
+    // against a bound it cannot clear is the same mistake as suspending a
+    // producer with no readers.
+    let pressure = position.working_set.over_by();
+
     if !owed.is_empty() {
+        if let Some(wanted) = pressure {
+            // Somebody is blocked, so suspending parks the producer against a
+            // bound only it can clear while a reader waits on a segment behind
+            // it. Eviction is what makes room and nothing else will run it —
+            // unless there is nothing to evict, which is a stall and has to be
+            // said rather than spun on.
+            return if manifest.has_evictable(&owed) {
+                Action::MakeRoom { wanted }
+            } else {
+                Action::Suspend {
+                    produced_through: position.produced_through.unwrap_or(owed[0]),
+                    reason: Hold::NoRoom { wanted },
+                }
+            };
+        }
         return serve_blocked(manifest, &owed, position.produced_through, reposition);
     }
 
@@ -169,7 +289,9 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
     };
     let Some(gap) = manifest.next_gap(from) else {
         // Everything in front of every reader exists. Whether to stop depends
-        // on how far past the furthest demand the producer has already run.
+        // on how far past the furthest demand the producer has already run —
+        // and not at all on the working set, which this producer is not adding
+        // to.
         return stop(position.produced_through, furthest, horizon);
     };
 
@@ -178,6 +300,22 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
     // a reader who has watched four minutes.
     if gap > furthest.saturating_add(horizon) {
         return stop(position.produced_through, furthest, horizon);
+    }
+
+    // There is real ahead-fill to do and no room to do it in. Nobody is
+    // waiting, so the honest answer is to stop and let the bytes go to the
+    // renditions that have readers blocked on them.
+    if let Some(free_bytes) = pressure {
+        return match position.produced_through {
+            Some(through) => Action::Suspend {
+                produced_through: through,
+                reason: Hold::WorkingSetFull { free_bytes },
+            },
+            // Never produced anything, so there is no progress to report and
+            // nothing of this rendition's to give up. `stop` answers `Idle`
+            // for the same state and the same reason.
+            None => Action::Idle,
+        };
     }
 
     match position.produced_through {
@@ -254,7 +392,7 @@ fn stop(produced_through: Option<u32>, furthest: u32, horizon: u32) -> Action {
     match produced_through {
         Some(through) if through >= furthest.saturating_add(horizon) => Action::Suspend {
             produced_through: through,
-            horizon,
+            reason: Hold::Ahead { horizon },
         },
         _ => Action::Idle,
     }
@@ -306,6 +444,19 @@ mod tests {
         Position {
             produced_through: through,
             seconds_per_segment: 7.0,
+            working_set: WorkingSet::default(),
+        }
+    }
+
+    /// The same position, under a working set of `used` against `budget`.
+    fn under_pressure(through: Option<u32>, used: u64, budget: u64, held: bool) -> Position {
+        Position {
+            working_set: WorkingSet {
+                used_bytes: used,
+                budget_bytes: budget,
+                held,
+            },
+            ..position(through)
         }
     }
 
@@ -370,7 +521,7 @@ mod tests {
         match decide(&manifest, &[demand(2)], position(Some(40))) {
             Action::Suspend {
                 produced_through,
-                horizon,
+                reason: Hold::Ahead { horizon },
             } => {
                 assert_eq!(produced_through, 40);
                 assert_eq!(horizon, 26);
@@ -550,6 +701,122 @@ mod tests {
         );
     }
 
+    // ---- the working set -------------------------------------------------
+
+    #[test]
+    fn a_full_working_set_with_a_reader_waiting_makes_room_rather_than_stopping() {
+        // Suspending here parks the producer against a bound only it can
+        // clear, with a reader blocked on a segment behind it. Eviction is
+        // what makes room and nothing else is going to run it.
+        let mut manifest = manifest(80);
+        // Something to evict. Without it the honest answer is `NoRoom`, which
+        // the test below covers.
+        for index in 0..4 {
+            manifest.materialize(index, 1_000, i64::from(index));
+        }
+        let action = decide(
+            &manifest,
+            &[Demand::waiting_on(4)],
+            under_pressure(Some(3), 12_000, 10_000, false),
+        );
+        assert_eq!(
+            action,
+            Action::MakeRoom { wanted: 7_000 },
+            "measured to the release line, so one sweep clears the hold"
+        );
+    }
+
+    #[test]
+    fn a_full_working_set_with_nothing_evictable_is_a_stall_and_says_so() {
+        // Asking for room again with identical inputs gets the identical
+        // answer while the blocked reader's deadline runs out. Only something
+        // outside this rendition clears it, and somebody has to be told.
+        let manifest = manifest(80);
+        match decide(
+            &manifest,
+            &[Demand::waiting_on(4)],
+            under_pressure(Some(3), 12_000, 10_000, false),
+        ) {
+            Action::Suspend {
+                reason: Hold::NoRoom { wanted },
+                ..
+            } => assert_eq!(wanted, 7_000),
+            other => panic!("expected a stall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_producer_sitting_on_the_budget_line_does_not_thrash() {
+        // The whole reason `held` exists. Without hysteresis a producer at the
+        // line frees one segment, drops under, produces one, crosses again,
+        // and does that once per segment for the length of a film.
+        let mut manifest = manifest(80);
+        for index in 0..4 {
+            manifest.materialize(index, 1_000, i64::from(index));
+        }
+        let just_under_the_line = 9_999;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), just_under_the_line, 10_000, false),
+            ),
+            Action::Produce { next: 4 },
+            "under the budget and not held: serve the blocked reader"
+        );
+        // Now held. It must keep making room until it is under HALF, not
+        // until it is back under the line it just crossed.
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), just_under_the_line, 10_000, true),
+            ),
+            Action::MakeRoom { wanted: 4_999 },
+            "held and above half: free to the release line in one sweep"
+        );
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), 4_999, 10_000, true),
+            ),
+            Action::Produce { next: 4 },
+            "held and under half: released"
+        );
+    }
+
+    #[test]
+    fn an_unset_budget_never_holds_anything() {
+        // A zero budget is "not configured", not "no bytes allowed". Reading
+        // it the other way stops every producer on the node.
+        let mut manifest = manifest(80);
+        manifest.materialize(0, 1_000, 0);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), u64::MAX, 0, false),
+            ),
+            Action::Produce { next: 4 }
+        );
+    }
+
+    #[test]
+    fn nothing_attached_is_still_idle_however_full_the_disk_is() {
+        // A producer with no reader is reclaimed, not suspended: suspending
+        // holds the process open against a bound it is not going to clear.
+        let manifest = manifest(80);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[],
+                under_pressure(Some(3), 12_000, 10_000, false)
+            ),
+            Action::Idle
+        );
+    }
+
     #[test]
     fn the_horizons_are_segments_derived_from_seconds_not_a_segment_count() {
         // A transcode rendition's 2 s segments must give a horizon three and a
@@ -558,10 +825,12 @@ mod tests {
         let short = Position {
             produced_through: Some(0),
             seconds_per_segment: 2.0,
+            working_set: WorkingSet::default(),
         };
         let long = Position {
             produced_through: Some(0),
             seconds_per_segment: 7.0,
+            working_set: WorkingSet::default(),
         };
         assert_eq!(short.horizon_segments(AHEAD_HORIZON_SECONDS), 90);
         assert_eq!(long.horizon_segments(AHEAD_HORIZON_SECONDS), 26);
@@ -574,6 +843,7 @@ mod tests {
         let broken = Position {
             produced_through: Some(0),
             seconds_per_segment: 0.0,
+            working_set: WorkingSet::default(),
         };
         assert!(broken.horizon_segments(AHEAD_HORIZON_SECONDS) >= 1);
     }

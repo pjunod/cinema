@@ -330,6 +330,58 @@ impl SegmentPlan {
     pub fn duration_ticks(&self) -> u64 {
         self.entries.last().map(PlanEntry::end_ticks).unwrap_or(0)
     }
+
+    /// The whole rendition as one HLS playlist, complete from the first fetch.
+    ///
+    /// This is the artifact the rest of this module exists to produce, and the
+    /// difference between it and what the daemon serves today is the whole
+    /// point of the VOD presentation: a live playlist grows, so a client can
+    /// only ever see as far as the server has produced, and every seek past
+    /// that is a seek into a timeline the player does not believe exists.
+    /// This one lists every segment of the film before a single byte of media
+    /// has been made.
+    ///
+    /// Three tags carry that claim, and all three are load-bearing:
+    ///
+    /// - `EXT-X-PLAYLIST-TYPE:VOD`, not `EVENT`. `EVENT` promises only that
+    ///   segments are appended and never removed, which is what a growing
+    ///   playlist can honestly say; `VOD` promises the playlist is *final*,
+    ///   which is what makes the whole duration seekable.
+    /// - `EXT-X-ENDLIST`, for the same reason. Without it a player treats the
+    ///   end as provisional and keeps reloading.
+    /// - `EXT-X-TARGETDURATION` over **every** entry, audio tails included.
+    ///   M0's `audiotail-2397` fixture is why that is spelled out: its honest
+    ///   target duration is 15 s where a video-only plan emits 8, and an
+    ///   understated target duration is a spec violation players act on.
+    ///
+    /// Durations are the plan's own, in the plan's timescale — *nominal*, per
+    /// ledger D6. M0 measured hls.js ignoring declared `EXTINF` values in
+    /// favour of measured PTS, so a playlist that tried to be exact would be
+    /// spending precision nothing reads, on numbers the segmenter is not
+    /// obliged to reproduce to the microsecond.
+    ///
+    /// No `EXT-X-INDEPENDENT-SEGMENTS`, for [`crate::fmp4::playlist_header`]'s
+    /// reason: a ceiling cut makes the claim a lie, and a lie in a spec tag is
+    /// what this path exists to stop shipping.
+    pub fn playlist(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::with_capacity(64 + self.entries.len() * 32);
+        out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
+        let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", self.target_duration.max(1));
+        out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
+        out.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+        out.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n");
+        for entry in &self.entries {
+            let _ = writeln!(
+                out,
+                "#EXTINF:{:.6},\n{}",
+                entry.seconds(self.timescale),
+                crate::fmp4::segment_name(u64::from(entry.index))
+            );
+        }
+        out.push_str("#EXT-X-ENDLIST\n");
+        out
+    }
 }
 
 /// Per-track facts the probe already knows, needed for the audio tail and the
@@ -839,6 +891,98 @@ mod tests {
         let text = serde_json::to_string(&index).expect("serialize index");
         let back: FragmentIndex = serde_json::from_str(&text).expect("deserialize index");
         assert_eq!(index, back);
+    }
+
+    // ---- the playlist ---------------------------------------------------
+
+    #[test]
+    fn the_playlist_is_the_whole_film_before_a_byte_of_it_exists() {
+        let index = gop_index(20, CutClass::CleanIdr);
+        let plan = plan_copy(&index, &policy(), &tracks(35_000, 35_000));
+        let playlist = plan.playlist();
+
+        // VOD, not EVENT. EVENT promises only that segments are appended;
+        // VOD promises the playlist is final, and that is what makes the
+        // whole duration seekable on the first fetch.
+        assert!(
+            playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD\n"),
+            "{playlist}"
+        );
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{playlist}");
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
+        assert!(
+            !playlist.contains("EXT-X-INDEPENDENT-SEGMENTS"),
+            "a ceiling cut makes that claim a lie"
+        );
+
+        // Every entry, in order, named the way the segment on disk is.
+        let names: Vec<&str> = playlist
+            .lines()
+            .filter(|line| line.ends_with(".m4s"))
+            .collect();
+        assert_eq!(names.len(), plan.len(), "{playlist}");
+        for (position, name) in names.iter().enumerate() {
+            assert_eq!(*name, crate::fmp4::segment_name(position as u64));
+        }
+    }
+
+    #[test]
+    fn the_target_duration_counts_the_audio_tail_too() {
+        // M0's audiotail-2397 case: the honest target duration is 15 s where a
+        // video-only plan emits 8, and an understated one is a spec violation
+        // players act on.
+        let index = gop_index(17, CutClass::CleanIdr);
+        let plan = plan_copy(&index, &policy(), &tracks(30_000, 55_000));
+        let longest = plan
+            .entries
+            .iter()
+            .map(|entry| entry.seconds(plan.timescale).ceil() as u32)
+            .max()
+            .expect("entries");
+        let declared: u32 = plan
+            .playlist()
+            .lines()
+            .find_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"))
+            .expect("a target duration")
+            .parse()
+            .expect("a number");
+        assert!(
+            declared >= longest,
+            "declared {declared} is under the longest entry {longest}"
+        );
+    }
+
+    #[test]
+    fn every_extinf_is_the_entry_s_own_duration() {
+        let index = gop_index(20, CutClass::CleanIdr);
+        let plan = plan_copy(&index, &policy(), &tracks(35_000, 35_000));
+        let declared: Vec<f64> = plan
+            .playlist()
+            .lines()
+            .filter_map(|line| line.strip_prefix("#EXTINF:"))
+            .map(|line| {
+                line.trim_end_matches(',')
+                    .parse::<f64>()
+                    .expect("a duration")
+            })
+            .collect();
+        assert_eq!(declared.len(), plan.len());
+        for (entry, declared) in plan.entries.iter().zip(declared) {
+            assert!(
+                (entry.seconds(plan.timescale) - declared).abs() < 1e-6,
+                "entry {} declared {declared}",
+                entry.index
+            );
+        }
+    }
+
+    #[test]
+    fn the_playlist_is_the_same_bytes_every_time_it_is_rendered() {
+        // It is stored once and served for the life of the rendition. A
+        // renderer that varied would hand two clients different films.
+        let index = gop_index(20, CutClass::CleanIdr);
+        let plan = plan_copy(&index, &policy(), &tracks(35_000, 35_000));
+        assert_eq!(plan.playlist(), plan.playlist());
     }
 
     // ---- the landing matcher ------------------------------------------
