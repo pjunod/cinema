@@ -16,6 +16,7 @@ mod pgs_overlay;
 mod pipeprobe;
 mod playstart;
 mod prodexec;
+mod prodrun;
 mod prodsched;
 mod produce;
 mod progress;
