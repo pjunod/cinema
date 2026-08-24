@@ -263,6 +263,7 @@ final class AppleClientTests: XCTestCase {
     /// Only a transport failure can be answered by another node. A terminal
     /// answer — an ended session's 404, a refused credential — is the same on
     /// every ingress.
+    @MainActor
     func testOnlyATransportFailureMovesToAnotherNode() {
         XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
             error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),

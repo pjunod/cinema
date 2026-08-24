@@ -3655,14 +3655,22 @@ final class PlayerController: ObservableObject {
         player.play()
         // The overlay is per-item and was just torn down; `open()` rebuilds it
         // at this point and so must this, or a PGS-subtitled film loses its
-        // subtitles at the first failover and never gets them back.
-        refreshPGSOverlayWindow(at: resume, force: true)
+        // subtitles at the first failover and never gets them back. It wants
+        // SOURCE time — `resume` is deliberately item-local for a growing
+        // session, and passing it would load the window for the wrong part of
+        // the film whenever `baseMs` is nonzero.
+        refreshPGSOverlayWindow(at: currentMs, force: true)
         do { try await seekWhenReady(item, ms: resume) }
         catch {
             // The status observer will drive the next node or terminal
             // surface after this transition leaves its suppression window.
         }
-        guard !isSuperseded(generation), started else {
+        // A newer `open()` owns the transition now, and with it
+        // `isChangingStream` — clearing it here would un-suppress the status
+        // observer while that open is still configuring its item, which is
+        // the race this fence exists to prevent.
+        guard !isSuperseded(generation) else { return true }
+        guard started else {
             isChangingStream = false
             return true
         }
@@ -3672,7 +3680,8 @@ final class PlayerController: ObservableObject {
         // and selecting the source's text track on top of a burned-in one puts
         // two sets of subtitles on screen.
         await applyNativeSubtitleSelection(activeNativeSubtitle, to: item)
-        guard !isSuperseded(generation), started else {
+        guard !isSuperseded(generation) else { return true }
+        guard started else {
             isChangingStream = false
             return true
         }
@@ -3997,9 +4006,6 @@ final class PlayerController: ObservableObject {
         timeControlStatus == .waitingToPlayAtSpecifiedRate
     }
 
-    /// Only a media/container/decoder rejection may advance the compatibility
-    /// ladder. Timeouts, HTTP failures, and other transport errors must never
-    /// spend the HDR fallbacks merely because they happened before first frame.
     /// Failures a *different node* could plausibly answer differently.
     ///
     /// Deliberately an allowlist, because "not a codec failure" is a much
@@ -4035,12 +4041,11 @@ final class PlayerController: ObservableObject {
         }) {
             return true
         }
-        if chain.contains(where: {
-            $0.domain == AVFoundationErrorDomain
-                && AVError.Code(rawValue: $0.code) == .noLongerPlayable
-        }) {
-            return true
-        }
+        // Deliberately no `AVFoundationErrorDomain` case here. Every AVError
+        // that reaches this path is a verdict about the media, which the next
+        // node gives too; the transport failures AVFoundation sees arrive as
+        // the `NSURLErrorDomain` chain above or as an access-log status below.
+        //
         // An access-log event carries the HTTP status the media stack saw. A
         // 5xx is the node; a 4xx is the answer, and every node gives it.
         if eventDomain == NSURLErrorDomain, let status = eventStatus, (500..<600).contains(status) {
@@ -4049,6 +4054,9 @@ final class PlayerController: ObservableObject {
         return false
     }
 
+    /// Only a media/container/decoder rejection may advance the compatibility
+    /// ladder. Timeouts, HTTP failures, and other transport errors must never
+    /// spend the HDR fallbacks merely because they happened before first frame.
     static func isCompatibilityPlaybackFailure(
         error: NSError?,
         eventDomain: String?,
