@@ -91,10 +91,33 @@ pub enum Action {
     Idle,
     /// Keep producing forward from where it is.
     Produce { next: u32 },
-    /// Far enough ahead of every reader to stop until one catches up.
-    Suspend { produced_through: u32, horizon: u32 },
+    /// Stop until something changes. `reason` says which bound is holding it
+    /// and what would release it, because the two are cleared by entirely
+    /// different events and a log line saying only "suspended" cannot be acted
+    /// on.
+    Suspend { produced_through: u32, reason: Hold },
     /// A demanded segment is too far ahead to reach by reading forward.
     Reposition { to: u32 },
+    /// Over the working-set budget with a reader waiting. Free `wanted` bytes
+    /// before producing anything else.
+    ///
+    /// Distinct from [`Action::Suspend`] on purpose. Suspending here would
+    /// park the producer against a bound that only *it* can clear, with a
+    /// reader blocked on a segment behind it: eviction is what makes room, and
+    /// nothing else is going to run it.
+    MakeRoom { wanted: u64 },
+}
+
+/// Why a producer is stopped, and what would start it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// Far enough ahead of every reader. Cleared by a reader advancing.
+    Ahead { horizon: u32 },
+    /// The node's working set is full and nobody is waiting on a segment, so
+    /// there is nothing to make room *for*. Cleared by another rendition
+    /// releasing bytes, or by a reader arriving and turning this into
+    /// [`Action::MakeRoom`].
+    WorkingSetFull { release_bytes: u64 },
 }
 
 /// Everything the decision needs that is not the manifest.
@@ -110,6 +133,44 @@ pub struct Position {
     /// 2 s, and a horizon expressed in segments would mean two different
     /// things on the two paths.
     pub seconds_per_segment: f64,
+    /// The node's working set, across every rendition — not this one's.
+    ///
+    /// A producer inside its ahead horizon can still be the one filling the
+    /// disk, and a bound only this rendition can see would let it. The same
+    /// reasoning `transcode`'s global scratch cap is built on.
+    pub working_set: WorkingSet,
+}
+
+/// The node-wide working-set budget, and where it currently stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkingSet {
+    pub used_bytes: u64,
+    pub budget_bytes: u64,
+    /// Whether the producer is already stopped for this bound.
+    ///
+    /// Load-bearing, and the reason this is not simply `used > budget`.
+    /// Entering at the budget and leaving at half of it is what stops a
+    /// producer sitting exactly on the line from suspending and resuming once
+    /// per segment for the length of a film — the same hysteresis
+    /// `transcode::ahead_hold` applies to the scratch caps, for the same
+    /// reason.
+    pub held: bool,
+}
+
+impl WorkingSet {
+    /// Bytes that must be freed before producing again, or `None` when there
+    /// is room.
+    fn over_by(&self) -> Option<u64> {
+        if self.budget_bytes == 0 {
+            return None;
+        }
+        let line = if self.held {
+            self.budget_bytes / 2
+        } else {
+            self.budget_bytes
+        };
+        (self.used_bytes > line).then(|| self.used_bytes - line)
+    }
 }
 
 impl Position {
@@ -153,6 +214,29 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
         .collect();
     owed.sort_unstable();
     owed.dedup();
+
+    // The working set is a disk, and a full one cannot be produced into
+    // whoever is waiting. It outranks the blocked reader for that reason and
+    // no other — but the answer is different depending on whether anybody is
+    // waiting, because only one of the two answers can actually be carried
+    // out.
+    if let Some(over_by) = position.working_set.over_by() {
+        if owed.is_empty() {
+            // Nothing to make room *for*. Stop, and let the bytes go to the
+            // renditions that do have readers.
+            return Action::Suspend {
+                produced_through: position.produced_through.unwrap_or(furthest),
+                reason: Hold::WorkingSetFull {
+                    release_bytes: position.working_set.budget_bytes / 2,
+                },
+            };
+        }
+        // Somebody is blocked, so suspending parks the producer against a
+        // bound that only it can clear while a reader waits on a segment
+        // behind it. Eviction is what makes room and nothing else will run it.
+        return Action::MakeRoom { wanted: over_by };
+    }
+
     if !owed.is_empty() {
         return serve_blocked(manifest, &owed, position.produced_through, reposition);
     }
@@ -254,7 +338,7 @@ fn stop(produced_through: Option<u32>, furthest: u32, horizon: u32) -> Action {
     match produced_through {
         Some(through) if through >= furthest.saturating_add(horizon) => Action::Suspend {
             produced_through: through,
-            horizon,
+            reason: Hold::Ahead { horizon },
         },
         _ => Action::Idle,
     }
@@ -306,6 +390,19 @@ mod tests {
         Position {
             produced_through: through,
             seconds_per_segment: 7.0,
+            working_set: WorkingSet::default(),
+        }
+    }
+
+    /// The same position, under a working set of `used` against `budget`.
+    fn under_pressure(through: Option<u32>, used: u64, budget: u64, held: bool) -> Position {
+        Position {
+            working_set: WorkingSet {
+                used_bytes: used,
+                budget_bytes: budget,
+                held,
+            },
+            ..position(through)
         }
     }
 
@@ -370,7 +467,7 @@ mod tests {
         match decide(&manifest, &[demand(2)], position(Some(40))) {
             Action::Suspend {
                 produced_through,
-                horizon,
+                reason: Hold::Ahead { horizon },
             } => {
                 assert_eq!(produced_through, 40);
                 assert_eq!(horizon, 26);
@@ -550,6 +647,112 @@ mod tests {
         );
     }
 
+    // ---- the working set -------------------------------------------------
+
+    #[test]
+    fn a_full_working_set_with_a_reader_waiting_makes_room_rather_than_stopping() {
+        // Suspending here parks the producer against a bound only it can
+        // clear, with a reader blocked on a segment behind it. Eviction is
+        // what makes room and nothing else is going to run it.
+        let manifest = manifest(80);
+        let action = decide(
+            &manifest,
+            &[Demand::waiting_on(4)],
+            under_pressure(Some(3), 12_000, 10_000, false),
+        );
+        assert_eq!(action, Action::MakeRoom { wanted: 2_000 });
+    }
+
+    #[test]
+    fn a_full_working_set_with_nobody_waiting_stops_and_says_why() {
+        // Nothing to make room *for*. The bytes should go to renditions that
+        // have readers, and the log line has to name a bound another
+        // rendition clears, not this one.
+        let manifest = manifest(80);
+        match decide(
+            &manifest,
+            &[demand(3)],
+            under_pressure(Some(3), 12_000, 10_000, false),
+        ) {
+            Action::Suspend {
+                produced_through,
+                reason: Hold::WorkingSetFull { release_bytes },
+            } => {
+                assert_eq!(produced_through, 3);
+                assert_eq!(release_bytes, 5_000, "release at half, not at the line");
+            }
+            other => panic!("expected a working-set hold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_producer_sitting_on_the_budget_line_does_not_thrash() {
+        // The whole reason `held` exists. Without hysteresis a producer at the
+        // line frees one segment, drops under, produces one, crosses again,
+        // and does that once per segment for the length of a film.
+        let manifest = manifest(80);
+        let just_under_the_line = 9_999;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), just_under_the_line, 10_000, false),
+            ),
+            Action::Produce { next: 4 },
+            "under the budget and not held: serve the blocked reader"
+        );
+        // Now held. It must keep making room until it is under HALF, not
+        // until it is back under the line it just crossed.
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), just_under_the_line, 10_000, true),
+            ),
+            Action::MakeRoom { wanted: 4_999 },
+            "held and above half: keep making room"
+        );
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), 4_999, 10_000, true),
+            ),
+            Action::Produce { next: 4 },
+            "held and under half: released"
+        );
+    }
+
+    #[test]
+    fn an_unset_budget_never_holds_anything() {
+        // A zero budget is "not configured", not "no bytes allowed". Reading
+        // it the other way stops every producer on the node.
+        let manifest = manifest(80);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[Demand::waiting_on(4)],
+                under_pressure(Some(3), u64::MAX, 0, false),
+            ),
+            Action::Produce { next: 4 }
+        );
+    }
+
+    #[test]
+    fn nothing_attached_is_still_idle_however_full_the_disk_is() {
+        // A producer with no reader is reclaimed, not suspended: suspending
+        // holds the process open against a bound it is not going to clear.
+        let manifest = manifest(80);
+        assert_eq!(
+            decide(
+                &manifest,
+                &[],
+                under_pressure(Some(3), 12_000, 10_000, false)
+            ),
+            Action::Idle
+        );
+    }
+
     #[test]
     fn the_horizons_are_segments_derived_from_seconds_not_a_segment_count() {
         // A transcode rendition's 2 s segments must give a horizon three and a
@@ -558,10 +761,12 @@ mod tests {
         let short = Position {
             produced_through: Some(0),
             seconds_per_segment: 2.0,
+            working_set: WorkingSet::default(),
         };
         let long = Position {
             produced_through: Some(0),
             seconds_per_segment: 7.0,
+            working_set: WorkingSet::default(),
         };
         assert_eq!(short.horizon_segments(AHEAD_HORIZON_SECONDS), 90);
         assert_eq!(long.horizon_segments(AHEAD_HORIZON_SECONDS), 26);
@@ -574,6 +779,7 @@ mod tests {
         let broken = Position {
             produced_through: Some(0),
             seconds_per_segment: 0.0,
+            working_set: WorkingSet::default(),
         };
         assert!(broken.horizon_segments(AHEAD_HORIZON_SECONDS) >= 1);
     }
