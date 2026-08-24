@@ -4065,6 +4065,38 @@ mod tests {
         );
         assert!(!status.learner_protocol_active);
 
+        // An unactivated cluster still admits a joiner that predates the range
+        // fields entirely. This is the other half of "zero operator action":
+        // the coordinator was upgraded, and a not-yet-upgraded node can still
+        // join it. Any refusal here is addressing, never the protocol gate.
+        let unactivated_token = membership
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("issue a join token before activation");
+        let pre_range_joiner = RedeemJoinRequest {
+            token_digest: join_token_digest(&unactivated_token.token),
+            raft_id: unactivated_token.raft_id,
+            node_id: "pre-range-joiner".to_owned(),
+            hostname: "pre-range-joiner".to_owned(),
+            raft_address: "127.0.0.1:3".to_owned(),
+            api_address: "127.0.0.1:4".to_owned(),
+            http_base: String::new(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: 0,
+            protocol_max: 0,
+        };
+        assert_ne!(
+            membership
+                .redeem(&pre_range_joiner)
+                .await
+                .err()
+                .map(|error| error.code().to_owned())
+                .unwrap_or_default(),
+            "join_incompatible",
+            "an unactivated cluster must not refuse a joiner that predates the range"
+        );
+
         // 2. Activation is explicit, and only then does the range move.
         let activated = membership
             .activate_learner_protocol()

@@ -426,6 +426,62 @@ and evidence-scope resource fields; `validate_topology_artifact` remains the
 canonical check for cross-field hashes, recomputed percentiles, timestamps,
 applied lag, and leader/term semantics that JSON Schema cannot express.
 
+### The cluster protocol range and learner-protocol activation
+
+Every voter carries two protocol numbers: the range its binary implements, and
+the range the cluster is actively using. The cluster's range lives in
+`cluster_meta.protocol_min`/`protocol_max`. A node may boot, join, or rejoin
+only when its own range covers the cluster's whole active range — not when the
+two merely overlap, because the active range names protocols the cluster's
+features already depend on.
+
+Binaries from this release implement protocol **4 through 5**. Protocol 5 is
+the non-voting learner admission protocol. A cluster bootstrapped or upgraded
+onto this release stays on `4..=4`:
+
+- installing this binary requires no operator action and changes nothing;
+- a voter still running the previous release keeps booting and keeps joining;
+- `protocol_max` is never widened implicitly — nothing but the explicit
+  activation below moves the cluster's range.
+
+`GET /api/v1/cluster/nodes` reports the range under `protocol`
+(`active_min`, `active_max`, `binary_min`, `binary_max`,
+`learner_protocol_active`, and `learner_protocol_pending`), and each roster
+entry carries `learner_protocol_ready`. A node is ready only when the binary it
+is running *right now* has proven the learner protocol; the proof is written in
+the same replicated transaction as the node's heartbeat, so a node that was
+upgraded and then rolled back stops being ready on its next heartbeat rather
+than keeping a stale claim.
+
+Activate only after every voter reports ready:
+
+```
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://plurx.example.net/api/v1/cluster/protocol/learner/activate
+```
+
+The response is `{"changed": …, "protocol": …}`. `changed: false` with
+`learner_protocol_active: true` means the cluster was already activated — the
+operation is idempotent, so retrying after a timeout is safe. Refusals are
+distinct on purpose:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `learner_protocol_upgrade_required` | 409 | Named nodes are not running a binary that supports protocol 5. Upgrade each, wait one heartbeat interval, retry. |
+| `learner_protocol_in_use` | 409 | Deactivation would strand the named committed members, which hold no vote. |
+| `cluster_leader_unavailable` | 503 | There is no elected leader to commit the change. Retry after the election. |
+
+**After activation, a binary that only implements protocol 4 can no longer
+boot, join, or rejoin this cluster.** Its refusal names the required protocol
+and says the binary is too old. Upgrade every voter *before* activating.
+
+`POST /api/v1/cluster/protocol/learner/deactivate` narrows the range back to
+`4..=4` for a degraded rollback. It is refused while any committed member holds
+no vote, and it is idempotent. Rollback is only available while nothing depends
+on protocol 5; once learners exist and hold state, removing them is a
+prerequisite and in some orderings the forward fix — upgrading the lagging
+node — is the only route.
+
 ### Measuring page-route latency
 
 Use the page-latency runner against an already-running deployment. It does not

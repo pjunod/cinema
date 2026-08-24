@@ -750,6 +750,28 @@ traffic. Removal remains available during degraded rollback. Downgrade first
 removes every learner, proves voter-only membership from every voter, and
 deactivates the marker when the protocol permits it.
 
+**Delivered (first slice).** The binary range, the boot/join/preflight guard,
+the `learner_protocol_v5` heartbeat-coupled capability, the admin activate and
+deactivate operations, and the range-aware admission gates have landed.
+`cluster_meta` is seeded at `4..=4` and only the explicit activation narrows it,
+so installing the range-aware binary is a no-op for a running cluster. The
+capability precondition is embedded in the committing statement, not only in a
+read-only preflight, so a stale leader cannot commit an activation that an older
+binary's heartbeat has already invalidated.
+
+Two proofs are deliberately **not** in that slice. The deactivation refusal for
+a committed non-voter is checked against Raft metrics rather than replicated
+SQL, because a node's role is decided by Raft and no learner role column exists
+yet; when the learner slice adds one, that check moves into the activation
+statement's guard as a SQL `NOT EXISTS` and the metrics read becomes the
+preflight that names them. And the mixed-version "an old voter blocks
+activation" scenario is proven against a real replicated cluster in
+`crates/plurx-core/src/cluster/migration.rs` rather than as a separate-process
+`plurx-cluster-check` arm: that arm needs a `NodeLaunch` emulation flag for a
+binary that heartbeats without the capability, which is the same flag the
+learner slice needs to prove an old joiner cannot reinterpret v2 admission as a
+voter. Both belong to one scenario, built once.
+
 **Acceptance:** a real separate-process three-voter-plus-learner cluster
 preserves quorum size three, distributes only bounded reads to the learner,
 refuses learner leadership and singleton work, catches up after restart and
@@ -828,7 +850,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly, but a *set* `[storage]` field is not ignored by an older binary — see below | move one non-leader only after its reverse path is proven | move bytes back, then delete `storage.cache_dir` and `storage.transcode_dir` from every config file before installing an older binary |
-| P6 | v2 learner admission is refused until an active challenge proves every voter runs the `[4,5]` bridge; old endpoints/joiners reject rather than ignore the role, then activation commits `5..5` | upgrade all voters, prove capability, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; if activation is irreversible, rollback is a forward fix |
+| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; deactivation is refused while any committed member holds no vote; if activation is irreversible, rollback is a forward fix |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or
