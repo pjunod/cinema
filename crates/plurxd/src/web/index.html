@@ -10194,11 +10194,13 @@ function clusterStateView(cluster){
   const nodes=cluster.nodes||[];
   const voters=nodes.filter(n=>n.role==="voter").length;
   const learners=nodes.filter(n=>n.role==="learner").length;
-  // A learner is admitted but not yet voting, so it changes none of the
-  // arithmetic below. Saying so stops it reading as a voter that went missing.
-  const catching=learners?` ${learners===1?"One node is":`${learners} nodes are`} still catching up as `+
-    `${learners===1?"a learner":"learners"} and ${learners===1?"does":"do"} not vote yet; `+
-    `${learners===1?"it becomes a voter":"they become voters"} once caught up.`:"";
+  // A learner is a permanent non-voting role, not a stage of joining: it
+  // changes none of the arithmetic below and nothing promotes it later.
+  // Saying so stops it reading as a voter that went missing.
+  const catching=learners?` ${learners===1?"One node is":`${learners} nodes are`} `+
+    `${learners===1?"a learner":"learners"}: ${learners===1?"it receives":"they receive"} `+
+    `replication, ${learners===1?"holds":"hold"} no vote, and ${learners===1?"is":"are"} `+
+    `not counted toward quorum.`:"";
   if(cluster.availability==="degraded_reconfiguration")
     return {tone:"warn", title:"Reconfiguration in progress — not redundant",
       body:"Two voters is a waypoint while a node is being added or removed, never a redundant pair. "+
@@ -10267,7 +10269,7 @@ function clusterNodeRow(n,localNodeId){
   const voter=n.role==="voter";
   const role=voter
     ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
-    : `<span class="pill" title="Admitted and catching up. A learner does not vote and is not counted toward quorum.">learner</span>`;
+    : `<span class="pill" title="A permanent non-voting role. A learner receives replication, does not vote, and is not counted toward quorum.">learner</span>`;
   const heartbeat=n.reachable
     ? `<span style="color:var(--good)">fresh</span>`
     : `<span style="color:var(--bad)">stale</span>`;
