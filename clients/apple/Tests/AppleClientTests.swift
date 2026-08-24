@@ -270,15 +270,27 @@ final class AppleClientTests: XCTestCase {
             eventDomain: nil,
             eventStatus: nil
         ))
+        // An access-log event names `CoreMediaErrorDomain` and carries the
+        // transfer's HTTP status. Asserting the domain the media stack really
+        // reports is what makes this fixture constrain the field: keyed on
+        // `NSURLErrorDomain`, the branch passed here and was dead everywhere
+        // else.
         XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
             error: nil,
-            eventDomain: NSURLErrorDomain,
+            eventDomain: "CoreMediaErrorDomain",
             eventStatus: 503
         ))
         XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
             error: nil,
-            eventDomain: NSURLErrorDomain,
+            eventDomain: "CoreMediaErrorDomain",
             eventStatus: 404
+        ))
+        // A decoder verdict reaches the same parameter as a negative CoreMedia
+        // code, and must not be read as a node fault worth another ingress.
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: -12909
         ))
         XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
             error: NSError(domain: NSURLErrorDomain, code: NSURLErrorUserCancelledAuthentication),

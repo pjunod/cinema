@@ -3569,9 +3569,23 @@ final class PlayerController: ObservableObject {
             eventDomain: event?.errorDomain,
             eventStatus: event?.errorStatusCode
         )
-        if started, !isCompatibilityFailure, isTransportFailure,
-           await retryMediaOnNextNode(item) {
-            return
+        var reportedFailure = false
+        if started, !isCompatibilityFailure, isTransportFailure {
+            // The log goes out before the retry, not after it: a successful
+            // node failover replaces this item and returns, so reporting
+            // afterwards lost the telemetry for exactly the case the failover
+            // exists to handle. Moving to another node buys no compatibility
+            // rung, so the step names none — and `isCompatibilityFailure` is
+            // false here, which is the same fallback the block below computes.
+            reportPlaybackFailure(
+                item,
+                step: PlaybackCompatibilityLadderStep(
+                    cause: .itemFailure,
+                    fallback: PlaybackCompatibilityFallback.none
+                )
+            )
+            reportedFailure = true
+            if await retryMediaOnNextNode(item) { return }
         }
         // Evaluated before anything recovers, because the log has to go out
         // before the ladder's own reopen replaces this item. An established
@@ -3585,10 +3599,12 @@ final class PlayerController: ObservableObject {
             started && isCompatibilityFailure && !reconnectsEstablishedHDR
                 ? plannedCompatibilityFallback
                 : PlaybackCompatibilityFallback.none
-        reportPlaybackFailure(
-            item,
-            step: PlaybackCompatibilityLadderStep(cause: .itemFailure, fallback: fallback)
-        )
+        if !reportedFailure {
+            reportPlaybackFailure(
+                item,
+                step: PlaybackCompatibilityLadderStep(cause: .itemFailure, fallback: fallback)
+            )
+        }
         if started {
             // P2-6: this item is already dead, so its `currentTime()`
             // is 0 or invalid and a VOD/direct retry would silently
@@ -4048,7 +4064,16 @@ final class PlayerController: ObservableObject {
         //
         // An access-log event carries the HTTP status the media stack saw. A
         // 5xx is the node; a 4xx is the answer, and every node gives it.
-        if eventDomain == NSURLErrorDomain, let status = eventStatus, (500..<600).contains(status) {
+        //
+        // The status is read without regard to `eventDomain`, exactly as
+        // `isCompatibilityPlaybackFailure` reads its decoder codes below. An
+        // `AVPlayerItemErrorLogEvent` reports the transfer's HTTP status while
+        // naming `CoreMediaErrorDomain`, so requiring `NSURLErrorDomain` here
+        // made this branch unreachable outside its own fixture and a 5xx on a
+        // segment never moved off the failing node. HTTP statuses are positive
+        // and three-digit; the CoreMedia codes the sibling matches are
+        // negative, so the two ranges cannot collide.
+        if let status = eventStatus, (500..<600).contains(status) {
             return true
         }
         return false
