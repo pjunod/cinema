@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7c9b46c8"]
+points = ["web.experience"]
+checks = ["web-membership"]
+reason = "The correction and its evidence landed together, but the changed runtime file is `crates/plurxd/src/web/index.html`, which the Rust gate cannot read: the panel is `include_str!`-embedded markup and script, so a wrong sentence in it compiles. The check that owns this area is `web-membership` (`node tests/web/cluster-membership.test.js`), which runs the shipped `index.html` in a sandbox and asserts the words an operator reads. `a_learner_is_named_as_a_permanent_non_voting_role` landed in the same commit and asserts both directions — that the banner now says the role holds no vote and is not counted toward quorum, and that the two withdrawn promises, \"catching up\" and \"becomes a voter\", are absent — because the failure being corrected was a true sentence about Raft's intermediate join step reused as a description of P6's durable role."
