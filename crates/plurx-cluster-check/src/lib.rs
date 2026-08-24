@@ -10275,8 +10275,11 @@ async fn run_preflight(
     let expected = expected_exit.unwrap_or(0);
     if output.status.code() != Some(expected) {
         bail!(
-            "candidate voter {compatibility:?} exited {:?}, expected {expected}: {}",
+            "candidate voter exited {:?}, expected {expected} for schema {} protocol {}..={}: {}",
             output.status.code(),
+            compatibility.schema_version,
+            compatibility.protocol_min,
+            compatibility.protocol_max,
             String::from_utf8_lossy(&output.stderr)
         );
     }

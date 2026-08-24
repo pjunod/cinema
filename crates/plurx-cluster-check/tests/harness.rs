@@ -1173,7 +1173,7 @@ async fn a_candidate_that_does_not_exit_42_is_a_harness_failure() {
         .expect_err("a candidate that does not exit 42 must not count as a refusal")
     );
     assert!(
-        error.contains("incompatible voter exited Some(7)"),
+        error.contains("candidate voter exited Some(7), expected 42"),
         "the failure should name the unexpected exit status, got: {error}"
     );
 }
