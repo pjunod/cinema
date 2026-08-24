@@ -222,6 +222,18 @@ impl TrackFragment {
     pub fn duration(&self) -> u64 {
         self.samples().map(|s| s.duration as u64).sum()
     }
+
+    /// Summed sample sizes — this track's payload bytes in this fragment, with
+    /// no container overhead.
+    ///
+    /// The one quantity that survives a change of pipeline: video samples are
+    /// copied, so a generation carrying different audio, or none, emits byte
+    /// for byte the same ones. `crate::segplan`'s landing matcher is built on
+    /// exactly that, which is why the wire length will not do — see
+    /// [`crate::segplan::IndexRow::video_bytes`].
+    pub fn byte_len(&self) -> usize {
+        self.runs.iter().map(Run::byte_len).sum()
+    }
 }
 
 /// One `moof` + `mdat` pair: with `frag_keyframe`, exactly one GOP.
