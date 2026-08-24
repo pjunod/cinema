@@ -11,7 +11,7 @@
 //! Rows are stored packed rather than as JSON. A two-hour film with ~1.75 s
 //! GOPs is around 4,100 fragments; JSON of that is a quarter of a megabyte per
 //! title, and a library-sized sidecar of those is measured in gigabytes. The
-//! packed form is 20 bytes a row — under 90 KB for the same film — and it
+//! packed form is 24 bytes a row — under 100 KB for the same film — and it
 //! round-trips exactly, which a float-bearing text encoding would not.
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,12 +34,13 @@ CREATE TABLE fragment_indexes (
     built_at_ms       INTEGER NOT NULL
 ) STRICT;";
 
-/// Bytes per packed row: dts u64, duration u32, bytes u32, class u8, 3 pad.
+/// Bytes per packed row: dts u64, duration u32, wire bytes u32, video bytes
+/// u32, class u8, 3 pad.
 ///
-/// Padding rather than a 17-byte record because a fixed power-of-four stride
+/// Padding rather than a 21-byte record because a fixed four-aligned stride
 /// makes `rows_packed.len() / ROW_BYTES` an exact row count, which is the
 /// cheapest possible integrity check on a blob that came off a disk.
-const ROW_BYTES: usize = 20;
+const ROW_BYTES: usize = 24;
 
 fn pack(rows: &[IndexRow]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows.len() * ROW_BYTES);
@@ -51,6 +52,7 @@ fn pack(rows: &[IndexRow]) -> Vec<u8> {
                 .to_le_bytes(),
         );
         out.extend_from_slice(&row.bytes.to_le_bytes());
+        out.extend_from_slice(&row.video_bytes.to_le_bytes());
         out.push(class_code(row.class));
         out.extend_from_slice(&[0, 0, 0]);
     }
@@ -70,16 +72,18 @@ fn unpack(blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> {
         let dts = u64::from_le_bytes(chunk[0..8].try_into().expect("8 bytes"));
         let duration = u32::from_le_bytes(chunk[8..12].try_into().expect("4 bytes"));
         let bytes = u32::from_le_bytes(chunk[12..16].try_into().expect("4 bytes"));
-        let class = class_from_code(chunk[16]).ok_or_else(|| {
+        let video_bytes = u32::from_le_bytes(chunk[16..20].try_into().expect("4 bytes"));
+        let class = class_from_code(chunk[20]).ok_or_else(|| {
             StoreError::Migration(format!(
                 "a stored fragment index has cut class {}",
-                chunk[16]
+                chunk[20]
             ))
         })?;
         rows.push(IndexRow {
             dts,
             duration: u64::from(duration),
             bytes,
+            video_bytes,
             class,
         });
     }
@@ -215,18 +219,21 @@ mod tests {
                     dts: 0,
                     duration: 28_016,
                     bytes: 104_452,
+                    video_bytes: 103_836,
                     class: CutClass::CleanIdr,
                 },
                 IndexRow {
                     dts: 28_016,
                     duration: 28_032,
                     bytes: 110_038,
+                    video_bytes: 109_422,
                     class: CutClass::Dirty,
                 },
                 IndexRow {
                     dts: 56_048,
                     duration: 28_032,
                     bytes: 103_547,
+                    video_bytes: 102_931,
                     class: CutClass::CleanCra,
                 },
             ],
