@@ -3584,11 +3584,9 @@ mod tests {
             schema_version: AUTH_SCHEMA_VERSION - 1,
             ..ClusterCompatibility::CURRENT
         };
-        let error = verify_compatibility_rows(
-            vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)],
-            old_schema,
-        )
-        .expect_err("old schema must refuse");
+        let error =
+            verify_compatibility_rows(vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)], old_schema)
+                .expect_err("old schema must refuse");
         assert!(error.to_string().contains("incompatible"));
 
         let existing_v4_schema = CompatibilityRow {

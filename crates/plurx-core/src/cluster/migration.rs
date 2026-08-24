@@ -4002,6 +4002,302 @@ mod tests {
             "unexpected error: {error}"
         );
     }
+
+    /// The upgrade contract, on a real replicated voter.
+    ///
+    /// Everything here happens with no operator action beyond installing this
+    /// binary: the cluster must stay on the pre-P6 protocol, must keep
+    /// admitting the previous release, and must move only when activation is
+    /// asked for. The refusal that comes after activation is the point of the
+    /// whole guard, so it is asserted on the message an operator would read.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("protocol activation data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster on this binary");
+        let membership = selected.membership_manager();
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        // The binary that shipped before P6: it implements exactly protocol 4.
+        let previous_release = crate::store::ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_max: crate::store::AUTH_PROTOCOL_VERSION,
+        };
+
+        // 1. Installing this binary changed nothing.
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the active range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a bootstrapped cluster must not activate protocol 5 by itself"
+        );
+        HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect("the previous release must still be able to join this cluster");
+        HiqliteAuthStore::preflight_voter(&client, crate::store::ClusterCompatibility::CURRENT)
+            .await
+            .expect("and so must this one");
+
+        // The node's own heartbeat is the proof; nothing else writes it.
+        let status = membership
+            .protocol_status()
+            .await
+            .expect("read the protocol status");
+        assert!(
+            status.learner_protocol_pending.is_empty(),
+            "the running binary proved the learner protocol by heartbeating: {status:?}"
+        );
+        assert!(!status.learner_protocol_active);
+
+        // 2. Activation is explicit, and only then does the range move.
+        let activated = membership
+            .activate_learner_protocol()
+            .await
+            .expect("activate the learner protocol");
+        assert!(
+            activated.changed,
+            "the first activation commits: {activated:?}"
+        );
+        assert!(activated.protocol.learner_protocol_active);
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the activated range"),
+            (
+                crate::store::AUTH_PROTOCOL_MAX,
+                crate::store::AUTH_PROTOCOL_MAX
+            )
+        );
+
+        // 3. Idempotent: a retried request after a timeout is not an error and
+        //    is not a second write.
+        let again = membership
+            .activate_learner_protocol()
+            .await
+            .expect("activating an already-activated cluster succeeds");
+        assert!(!again.changed, "activation must not write twice: {again:?}");
+
+        // 4. The previous release can no longer boot here, and is told why.
+        let refusal = HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect_err("an activated cluster must refuse the previous release")
+            .to_string();
+        assert!(refusal.contains("protocol 5"), "{refusal}");
+        assert!(refusal.contains("too old"), "{refusal}");
+        HiqliteAuthStore::preflight_voter(&client, crate::store::ClusterCompatibility::CURRENT)
+            .await
+            .expect("this binary keeps working across activation");
+
+        // The admission gate agrees with the boot guard rather than comparing
+        // against a constant of its own.
+        let issued = membership
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("issue a join token for the activated cluster");
+        let old_joiner = RedeemJoinRequest {
+            token_digest: join_token_digest(&issued.token),
+            raft_id: issued.raft_id,
+            node_id: "old-binary-joiner".to_owned(),
+            hostname: "old-binary-joiner".to_owned(),
+            raft_address: "127.0.0.1:1".to_owned(),
+            api_address: "127.0.0.1:2".to_owned(),
+            http_base: String::new(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            // A joiner that predates the range sends no range fields.
+            protocol_min: 0,
+            protocol_max: 0,
+        };
+        assert_eq!(
+            membership
+                .redeem(&old_joiner)
+                .await
+                .expect_err("an activated cluster must refuse a protocol-4-only joiner")
+                .code(),
+            "join_incompatible"
+        );
+        let new_joiner = RedeemJoinRequest {
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            ..old_joiner
+        };
+        // This one clears the protocol gate; it fails later, on addressing,
+        // which is exactly what proves the protocol check let it through.
+        assert_ne!(
+            membership
+                .redeem(&new_joiner)
+                .await
+                .err()
+                .map(|error| error.code().to_owned())
+                .unwrap_or_default(),
+            "join_incompatible",
+            "a range-declaring joiner must clear the activated protocol gate"
+        );
+
+        // 5. The reversible rollback, and its idempotence.
+        let rolled_back = membership
+            .deactivate_learner_protocol()
+            .await
+            .expect("deactivate with no learner present");
+        assert!(rolled_back.changed);
+        assert!(!rolled_back.protocol.learner_protocol_active);
+        let noop = membership
+            .deactivate_learner_protocol()
+            .await
+            .expect("deactivating an unactivated cluster succeeds");
+        assert!(!noop.changed, "deactivation must not write twice: {noop:?}");
+        HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect("rollback restores the previous release's ability to boot");
+
+        selected.shutdown().await.expect("stop the voter");
+    }
+
+    /// Activation is decided on the binary each voter is running *now*.
+    ///
+    /// Both refusals below are constructed against a live replicated cluster:
+    /// one voter whose capability row was never written, and one whose row
+    /// survives from a build that was rolled back. The second is the case the
+    /// heartbeat coupling exists for — the row is present and looks like a
+    /// proof until it is compared with that node's current heartbeat.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("unproven voter data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster");
+        let membership = selected.membership_manager();
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        // A second node that has heartbeated but never proved the capability,
+        // standing in for a voter still running the previous release.
+        client
+            .execute(
+                "INSERT INTO cluster_nodes \
+                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
+                 VALUES ($1, $2, $3, $4, $5, NULL)",
+                hiqlite::params!(
+                    "unproven-voter",
+                    77_i64,
+                    "127.0.0.1:1",
+                    "127.0.0.1:2",
+                    1_000_i64
+                ),
+            )
+            .await
+            .expect("seed a voter running an older binary");
+        client
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3)",
+                hiqlite::params!(
+                    "unproven-voter",
+                    "membership_removal_attempt_refs_v1",
+                    1_000_i64
+                ),
+            )
+            .await
+            .expect("that binary does write the capability it knows about");
+
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::LearnerProtocolUpgradeRequired(
+                nodes,
+            )) => {
+                assert_eq!(nodes, vec!["unproven-voter".to_owned()]);
+            }
+            other => panic!("an unproven voter must block activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a refused activation must not move the range"
+        );
+
+        // Now the deliberate stale case: the node proves the capability, then
+        // heartbeats again on a binary that does not know about it. The row is
+        // still there; only its timestamp says it is no longer current.
+        client
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3)",
+                hiqlite::params!("unproven-voter", "learner_protocol_v5", 1_000_i64),
+            )
+            .await
+            .expect("the node proves the learner protocol once");
+        assert!(
+            membership
+                .protocol_status()
+                .await
+                .expect("status after the proof")
+                .learner_protocol_pending
+                .is_empty(),
+            "the cluster is briefly ready"
+        );
+        client
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = $1 WHERE node_id = $2",
+                hiqlite::params!(2_000_i64, "unproven-voter"),
+            )
+            .await
+            .expect("the rolled-back binary heartbeats");
+
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::LearnerProtocolUpgradeRequired(
+                nodes,
+            )) => {
+                assert_eq!(
+                    nodes,
+                    vec!["unproven-voter".to_owned()],
+                    "a capability older than its node's heartbeat is not a current proof"
+                );
+            }
+            other => panic!("a stale capability must block activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            )
+        );
+
+        selected.shutdown().await.expect("stop the voter");
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]

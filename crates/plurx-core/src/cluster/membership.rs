@@ -851,6 +851,20 @@ fn capability_unready_nodes_sql(capability: &str) -> String {
     )
 }
 
+/// Committed members that carry no vote, in a stable order.
+///
+/// Deliberately derived from the committed configuration rather than from
+/// replicated SQL: a node's *role* is decided by Raft, and reading it from a
+/// table would let a lagging row answer a question Raft has already answered.
+fn non_voting_members(voters: &BTreeSet<u64>, members: impl Iterator<Item = u64>) -> Vec<u64> {
+    let mut non_voters = members
+        .filter(|id| !voters.contains(id))
+        .collect::<Vec<_>>();
+    non_voters.sort_unstable();
+    non_voters.dedup();
+    non_voters
+}
+
 fn begin_removal_attempt_sql() -> String {
     let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
     format!(
@@ -870,7 +884,9 @@ fn begin_removal_attempt_sql() -> String {
 /// can be won and then invalidated by a heartbeat from an older binary before
 /// the write commits, exactly as with `begin_removal_attempt_sql`.
 fn narrow_protocol_range_sql(guard: Option<String>) -> String {
-    let guard = guard.map(|guard| format!(" AND {guard}")).unwrap_or_default();
+    let guard = guard
+        .map(|guard| format!(" AND {guard}"))
+        .unwrap_or_default();
     format!(
         "UPDATE cluster_meta SET protocol_min = $1, protocol_max = $1 \
          WHERE singleton = 1 AND protocol_min = $2 AND protocol_max = $2{guard}"
@@ -3565,7 +3581,10 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         Ok(inner
             .client
-            .query_consistent_map::<NodeIdRow, _>(capability_unready_nodes_sql(capability), params!())
+            .query_consistent_map::<NodeIdRow, _>(
+                capability_unready_nodes_sql(capability),
+                params!(),
+            )
             .await?
             .into_iter()
             .map(|row| row.node_id)
@@ -3576,16 +3595,13 @@ impl MembershipManager {
     async fn committed_non_voters(&self) -> Result<Vec<u64>, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
-        let voters = metrics
-            .membership_config
-            .voter_ids()
-            .collect::<BTreeSet<_>>();
-        Ok(metrics
-            .membership_config
-            .nodes()
-            .map(|(id, _)| *id)
-            .filter(|id| !voters.contains(id))
-            .collect())
+        Ok(non_voting_members(
+            &metrics
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>(),
+            metrics.membership_config.nodes().map(|(id, _)| *id),
+        ))
     }
 
     /// These operations commit one `cluster_meta` write. The Hiqlite client
@@ -5356,7 +5372,9 @@ mod tests {
 
     fn unready_nodes(connection: &rusqlite::Connection) -> Vec<String> {
         let sql = capability_unready_nodes_sql(LEARNER_PROTOCOL_CAPABILITY);
-        let mut statement = connection.prepare(&sql).expect("prepare the unready roster");
+        let mut statement = connection
+            .prepare(&sql)
+            .expect("prepare the unready roster");
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
             .expect("run the unready roster")
@@ -5437,9 +5455,16 @@ mod tests {
     #[test]
     fn a_capability_stranded_by_a_rollback_is_not_a_current_proof() {
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
-        assert_eq!(activate(&connection), 1, "the proven cluster would activate");
+        assert_eq!(
+            activate(&connection),
+            1,
+            "the proven cluster would activate"
+        );
         connection
-            .execute("UPDATE cluster_meta SET protocol_min = 4, protocol_max = 4", [])
+            .execute(
+                "UPDATE cluster_meta SET protocol_min = 4, protocol_max = 4",
+                [],
+            )
             .expect("rewind the fixture to the unactivated range");
 
         // The rolled-back binary heartbeats: cluster_nodes advances, the
@@ -5522,6 +5547,37 @@ mod tests {
         assert_eq!(activate(&connection), 1);
     }
 
+    /// Deactivation must refuse before it can strand a member that only exists
+    /// under the protocol being removed.
+    ///
+    /// No learner can exist yet — protocol 5 is what admits one — so this
+    /// proves the decision rather than a live learner-bearing configuration:
+    /// the roster comes from the committed Raft membership, a voter-only
+    /// cluster produces an empty roster, and a member without a vote produces
+    /// a refusal that names it. P6's second slice, which can actually create a
+    /// learner, owns the end-to-end version of this.
+    #[test]
+    fn deactivation_is_refused_for_any_committed_member_without_a_vote() {
+        let voters = BTreeSet::from([1_u64, 2, 3]);
+        assert!(
+            non_voting_members(&voters, [1_u64, 2, 3].into_iter()).is_empty(),
+            "a voter-only cluster strands nothing"
+        );
+        assert_eq!(
+            non_voting_members(&voters, [1_u64, 2, 3, 9, 7, 9].into_iter()),
+            vec![7, 9],
+            "every committed member without a vote is named, once, in order"
+        );
+        let refusal = MembershipError::LearnerProtocolInUse(vec!["7".to_owned(), "9".to_owned()]);
+        assert_eq!(refusal.code(), "learner_protocol_in_use");
+        assert!(refusal.to_string().contains("7, 9"), "{refusal}");
+        assert_ne!(
+            refusal.code(),
+            MembershipError::LearnerProtocolUpgradeRequired(Vec::new()).code(),
+            "an operator must be able to tell the two refusals apart"
+        );
+    }
+
     /// Making the capability predicate generic must not have changed the
     /// removal capability's meaning; this pins the removal predicate's text
     /// against the literal that shipped before the refactor.
@@ -5567,7 +5623,9 @@ mod tests {
             commit_heartbeat.contains(".txn(vec!["),
             "and inside the heartbeat's single Raft transaction"
         );
-        let writes = source.matches("LEARNER_PROTOCOL_CAPABILITY,\n                        now").count();
+        let writes = source
+            .matches("LEARNER_PROTOCOL_CAPABILITY,\n                        now")
+            .count();
         assert_eq!(
             writes, 1,
             "exactly one place may stamp this capability with a heartbeat time"

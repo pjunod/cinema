@@ -25,7 +25,9 @@ use plurx_cluster_check::{
     ClusterProcesses, CompactedGrowthReport, NodeLaunch, NodeProcess, NodeSpec, PortReservation,
     Preflight, Request, Response, GROWTH_BYTES_PER_BEAT_BUDGET, INSTANCE_ID,
 };
-use plurx_core::store::{ClusterCompatibility, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION};
+use plurx_core::store::{
+    ClusterCompatibility, AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -291,16 +293,40 @@ async fn a_one_voter_cluster_proves_the_whole_request_protocol() {
 
     // The same code path accepts a candidate that matches.
     assert_eq!(
+        preflight(&specs, ClusterCompatibility::CURRENT),
+        (Some(0), "compatible".to_owned()),
+        "a matching candidate must be admitted"
+    );
+
+    // And it accepts the binary that shipped before the protocol range, which
+    // is what makes installing this build a no-op for a running cluster: the
+    // bootstrapped range is still 4..=4, so a protocol-4-only voter is not
+    // locked out by the mere presence of a newer peer.
+    assert_eq!(
         preflight(
             &specs,
             ClusterCompatibility {
                 schema_version: AUTH_SCHEMA_VERSION,
-                protocol_version: AUTH_PROTOCOL_VERSION,
+                protocol_min: AUTH_PROTOCOL_VERSION,
+                protocol_max: AUTH_PROTOCOL_VERSION,
             },
         ),
         (Some(0), "compatible".to_owned()),
-        "a matching candidate must be admitted"
+        "an unactivated cluster must still admit the previous release"
     );
+
+    // A binary from the far side of the range — one that has dropped every
+    // protocol this cluster is on — is refused rather than admitted on overlap.
+    let (code, message) = preflight(
+        &specs,
+        ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min: AUTH_PROTOCOL_MAX + 1,
+            protocol_max: AUTH_PROTOCOL_MAX + 1,
+        },
+    );
+    assert_eq!(code, Some(42), "a dropped protocol must refuse: {message}");
+    assert!(message.contains("too new"), "{message}");
 
     // Stop the voter in an orderly way rather than killing it. Loss of a killed
     // voter is proved by `a_killed_voter_leaves_the_running_set` below; killing
