@@ -1042,6 +1042,58 @@ fn configured_dirs(storage: &StorageConfig) -> crate::state::Dirs {
     }
 }
 
+/// Warn when `storage.cache_dir` leaves the previous cache stranded.
+///
+/// Setting it switches wholesale from `<data_dir>/{artwork,cache/transcode,
+/// cache/subs}` to `<cache_dir>/{artwork,transcode,subs}`. Nothing migrates
+/// what is already there and nothing sweeps it afterwards, so the old bytes
+/// stop being read without becoming reclaimable — including completed offline
+/// packages, which this repo's own docs describe as user-visible downloads.
+/// This warns rather than refuses: the new root is the operator's explicit
+/// choice, and a warning is what tells them the old one still costs disk.
+fn warn_if_cache_dir_orphans_legacy_bytes(storage: &StorageConfig, dirs: &crate::state::Dirs) {
+    if storage.cache_dir.as_os_str().is_empty() {
+        return;
+    }
+    let active = [
+        dirs.artwork.as_path(),
+        dirs.cache.as_path(),
+        dirs.subs.as_path(),
+    ];
+    let legacy = [
+        ("artwork", storage.data_dir.join("artwork")),
+        (
+            "finished transcodes",
+            storage.data_dir.join("cache").join("transcode"),
+        ),
+        (
+            "extracted subtitles",
+            storage.data_dir.join("cache").join("subs"),
+        ),
+    ];
+    let stranded: Vec<String> = legacy
+        .iter()
+        .filter(|(_, path)| {
+            // A cache_dir pointed back inside data_dir can make a legacy path
+            // and its replacement the same directory; that is not orphaned.
+            !active.iter().any(|configured| configured == path)
+                && std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+        })
+        .map(|(label, path)| format!("{label} in {}", path.display()))
+        .collect();
+    if stranded.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        cache_dir = %storage.cache_dir.display(),
+        data_dir = %storage.data_dir.display(),
+        stranded = %stranded.join(", "),
+        "storage.cache_dir moved the node-local caches, but the previous cache under \
+         data_dir still holds entries. They are no longer read or swept, including any \
+         completed offline packages; move them under the new cache root or delete them"
+    );
+}
+
 #[cfg(test)]
 fn create_dirs_for_storage(storage: &StorageConfig) -> anyhow::Result<crate::state::Dirs> {
     create_dirs_for_storage_with_protected(storage, &[], &[])
@@ -1096,12 +1148,14 @@ fn create_dirs_for_storage_with_protected(
                 )
             })?;
     }
-    Ok(crate::state::Dirs {
+    let dirs = crate::state::Dirs {
         artwork,
         transcode,
         cache,
         subs,
-    })
+    };
+    warn_if_cache_dir_orphans_legacy_bytes(&normalized, &dirs);
+    Ok(dirs)
 }
 
 #[cfg(test)]
