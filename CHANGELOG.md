@@ -34,6 +34,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A rendition's segments on disk and the manifest that describes them can no
+  longer drift apart.** The bookkeeping was pure and testable and the bytes were
+  nowhere, which left the dangerous half unwritten: a manifest claiming a
+  segment that is not on disk is a cache *hit* that 404s a viewer mid-film,
+  which is worse than a miss in every case. Materializing now writes the bytes
+  before it records them, and evicting clears the record before it unlinks, so
+  whichever half a crash interrupts the residue is an unclaimed byte rather
+  than a phantom row. Adopting a directory this process did not write repairs
+  both directions and says what it found: a segment on disk nothing claimed is
+  adopted rather than deleted, because it cost a read of the source and is
+  exactly what the plan asked for, and a claim on bytes that are gone is
+  dropped even on a completed rendition, where refusing to notice would be
+  worst of all. Names and tmp-then-rename semantics are the copy segmenter's
+  exactly, so the serving layer and the GC need no changes.
+
 - **A rendition's plan is now kept, because it is a decision and not a
   measurement.** Segment boundaries are computed once and a producer cuts at
   them for the life of the file, but nothing was storing them — the plan was

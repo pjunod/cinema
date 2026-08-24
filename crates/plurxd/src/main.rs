@@ -20,6 +20,7 @@ mod produce;
 mod progress;
 mod progressive;
 mod reader_formats;
+mod renditiondir;
 mod schedule;
 mod serving_fence;
 mod shared_cache;

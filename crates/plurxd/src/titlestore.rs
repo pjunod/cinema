@@ -200,6 +200,31 @@ impl Manifest {
         true
     }
 
+    /// Stop claiming one segment's bytes, whatever this rendition's state.
+    ///
+    /// Distinct from [`Manifest::evict`] and deliberately not subject to its
+    /// refusal. Eviction is a *choice* — give up bytes to make room — and an
+    /// admitted rendition may not make it, because admission is the promise
+    /// that every member is present. This is the report of a fact: the bytes
+    /// are already gone. Refusing here would leave the manifest claiming a
+    /// segment that is not on disk, and that claim is served as a cache hit
+    /// and 404s a viewer mid-film.
+    ///
+    /// An admitted rendition that loses a member is a real event and the
+    /// caller is expected to say so out loud; see
+    /// [`crate::renditiondir::RenditionDir::reconcile`], which is the only
+    /// thing that calls this.
+    pub fn forget(&mut self, index: u32) -> bool {
+        let Some(slot) = self.states.get_mut(index as usize) else {
+            return false;
+        };
+        if !slot.is_materialized() {
+            return false;
+        }
+        *slot = SegState::Planned;
+        true
+    }
+
     /// May this rendition ever be published as a cache hit?
     pub fn admissible(&self, budgets: &Budgets) -> Result<(), Inadmissible> {
         if self.states.is_empty() {
