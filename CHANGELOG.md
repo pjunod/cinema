@@ -34,6 +34,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A producer that seeks now publishes on the film's timeline rather than on
+  ffmpeg's.** Reopening a file partway in with `-noaccurate_seek -ss` yields
+  decode times that are not film time — measured in every configuration tried,
+  `-copyts` included — so the segments a repositioned generation published
+  carried ffmpeg's clock into a playlist claiming to be the film's.
+  `Segmenter::resuming_at` takes the plan entry the producer landed on and
+  rebases the whole generation onto it: the shift is learned once from the
+  first fragment carrying video, converted into each track's own clock, and
+  added to what is already there, so nothing can move audio relative to
+  picture. The segment also gets its plan name instead of restarting the
+  numbering, and the first-segment duration floor, which exists to start a
+  session quickly, is not spent again on a segment that is nobody's first. Two
+  real generations of the same fixture are now required to publish one
+  continuous timeline under one set of indexes. Nothing calls this yet.
+
 - **A rendition's segments now have bookkeeping and a scheduler of their own.**
   `plurxd::titlestore` keeps three separate facts about every planned segment —
   planned, materialized, admitted — because one bitmap cannot mean both "the
