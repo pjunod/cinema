@@ -400,13 +400,24 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     // same payload; only the replicated token record can distinguish them.
     // Rechecking the embedded timestamp here would strand an identity-bound
     // voter that failed after redemption and restarted after the token TTL.
+    // The token names one protocol; this binary implements a range. Refuse
+    // early when that protocol is outside the range at all — but this is only
+    // the cheap local check. `preflight_voter` below is authoritative, because
+    // the cluster's *active* range can have been narrowed after this token was
+    // minted and only the live `cluster_meta` row says so.
     if payload.schema_version != AUTH_SCHEMA_VERSION
-        || payload.protocol_version != crate::store::AUTH_PROTOCOL_VERSION
+        || !(crate::store::AUTH_PROTOCOL_MIN..=crate::store::AUTH_PROTOCOL_MAX)
+            .contains(&payload.protocol_version)
     {
-        return Err(StoreError::Migration(
-            "join_incompatible: joining binary does not match the cluster schema/protocol"
-                .to_owned(),
-        ));
+        return Err(StoreError::Migration(format!(
+            "join_incompatible: this join token declares schema {} and protocol {}, but this \
+             binary implements schema {AUTH_SCHEMA_VERSION} and protocol {}..={}; install a \
+             matching build on this node",
+            payload.schema_version,
+            payload.protocol_version,
+            crate::store::AUTH_PROTOCOL_MIN,
+            crate::store::AUTH_PROTOCOL_MAX,
+        )));
     }
     let remote = Client::remote(
         payload
@@ -470,6 +481,8 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             http_base: configured_artwork_url(config)?,
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
         },
     )
     .await?;
@@ -3730,6 +3743,8 @@ mod tests {
                     .expect("derive the staged node artwork origin"),
                 schema_version: AUTH_SCHEMA_VERSION,
                 protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
             })
             .await
             .expect("reserve the token to the staged node before its failed start");

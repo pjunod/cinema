@@ -6,7 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::cluster::membership::{
-    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, RedeemJoinRequest,
+    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
+    RedeemJoinRequest,
 };
 use serde::Deserialize;
 
@@ -89,6 +90,37 @@ const MAX_ADVERTISED_INGRESSES: usize = 8;
 #[derive(serde::Serialize)]
 pub struct ClusterIngress {
     pub node_urls: Vec<String>,
+}
+
+/// Narrow the cluster onto the learner protocol.
+///
+/// This is the one step that makes a previously compatible binary unable to
+/// boot here, so it is deliberately explicit, admin-only, and separate from
+/// deploying the binary that supports it. `GET /cluster/nodes` reports the
+/// active range and which nodes are not ready yet.
+pub async fn activate_learner_protocol(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ProtocolChange>, ApiError> {
+    state
+        .membership
+        .activate_learner_protocol()
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+/// Widen the cluster back to the pre-learner protocol for a degraded rollback.
+pub async fn deactivate_learner_protocol(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ProtocolChange>, ApiError> {
+    state
+        .membership
+        .deactivate_learner_protocol()
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 pub async fn remove_node(
@@ -186,6 +218,10 @@ fn api_error(error: MembershipError) -> ApiError {
         MembershipError::ReusedToken
         | MembershipError::ReservedToken
         | MembershipError::MembershipUpgradeRequired
+        // Not "you asked the wrong node" and not "already active": a specific
+        // set of nodes is behind, and the message names them.
+        | MembershipError::LearnerProtocolUpgradeRequired(_)
+        | MembershipError::LearnerProtocolInUse(_)
         | MembershipError::RemovalPending(_)
         | MembershipError::LeaderRemoval
         | MembershipError::SelfRemovalRequiresLeave
@@ -195,9 +231,11 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::ActiveMediaSessions
         | MembershipError::OfflineWork(_) => StatusCode::CONFLICT,
         MembershipError::NodeNotFound => StatusCode::NOT_FOUND,
-        MembershipError::LeaderChanged(_) | MembershipError::Internal(_) => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        // Distinct from the roster refusals above: nothing is wrong with the
+        // request, there is simply no leader to commit it right now.
+        MembershipError::LeaderUnavailable
+        | MembershipError::LeaderChanged(_)
+        | MembershipError::Internal(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     ApiError::typed(status, error.code(), error.to_string())
 }

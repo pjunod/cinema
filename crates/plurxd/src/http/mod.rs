@@ -110,6 +110,17 @@ pub fn router(state: AppState) -> Router {
             post(internal_media::diagnostic_offers),
         )
         .route("/cluster/leave", post(cluster::leave))
+        // Protocol activation is a separate deliberate step from installing
+        // the binary that supports it. The active range and each node's
+        // readiness are reported by GET /cluster/nodes above.
+        .route(
+            "/cluster/protocol/learner/activate",
+            post(cluster::activate_learner_protocol),
+        )
+        .route(
+            "/cluster/protocol/learner/deactivate",
+            post(cluster::deactivate_learner_protocol),
+        )
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
         .route("/cluster/join/finalize", post(cluster::finalize_join))

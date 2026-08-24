@@ -57,8 +57,8 @@ use plurx_core::store::{
     ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility, CoordinationStore,
     FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
     PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
-    TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
-    AUTH_SCHEMA_VERSION,
+    TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
+    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -2718,6 +2718,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: String::new(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -2739,6 +2741,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:33001".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -2808,6 +2812,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             http_base: format!("http://127.0.0.1:{}", 33_000 + node_id),
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_VERSION,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
         };
         if node_id == 2 {
             let mut no_http_resume = request.clone();
@@ -2923,6 +2929,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:3".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -4051,6 +4059,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:33999".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -10208,12 +10218,50 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
 /// Start a candidate voter one schema version behind and return the refusal it
 /// printed. Any other exit status is itself a failure.
 pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -> Result<String> {
+    run_preflight(
+        executable,
+        specs,
+        ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION - 1,
+            ..ClusterCompatibility::CURRENT
+        },
+        Some(42),
+    )
+    .await
+}
+
+/// Start a candidate voter that implements only the pre-P6 protocol. Against a
+/// cluster that has not activated protocol 5 this must succeed; against an
+/// activated one it must refuse. The caller says which it expects.
+pub async fn run_previous_release_preflight(
+    executable: &Path,
+    specs: &[NodeSpec],
+    expect_refusal: bool,
+) -> Result<String> {
+    run_preflight(
+        executable,
+        specs,
+        ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min: AUTH_PROTOCOL_VERSION,
+            protocol_max: AUTH_PROTOCOL_VERSION,
+        },
+        expect_refusal.then_some(42),
+    )
+    .await
+}
+
+/// Run one candidate voter's compatibility preflight in its own process and
+/// require the exit status the caller expects (`None` meaning success).
+async fn run_preflight(
+    executable: &Path,
+    specs: &[NodeSpec],
+    compatibility: ClusterCompatibility,
+    expected_exit: Option<i32>,
+) -> Result<String> {
     let input = Preflight {
         addresses: specs.iter().map(|node| node.api.clone()).collect(),
-        compatibility: ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION - 1,
-            protocol_version: AUTH_PROTOCOL_VERSION,
-        },
+        compatibility,
     };
     let output = tokio::time::timeout(
         REQUEST_TIMEOUT,
@@ -10223,10 +10271,11 @@ pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -
             .output(),
     )
     .await
-    .context("incompatible voter preflight timed out")??;
-    if output.status.code() != Some(42) {
+    .context("candidate voter preflight timed out")??;
+    let expected = expected_exit.unwrap_or(0);
+    if output.status.code() != Some(expected) {
         bail!(
-            "incompatible voter exited {:?}: {}",
+            "candidate voter {compatibility:?} exited {:?}, expected {expected}: {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );

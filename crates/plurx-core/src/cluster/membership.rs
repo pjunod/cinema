@@ -24,7 +24,10 @@ use sha2::{Digest, Sha256};
 
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{OfflinePackage, OfflineRemovalPlanEntry, OfflineRemovalReport};
-use crate::store::{ArtworkRepairFence, Store, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION};
+use crate::store::{
+    ArtworkRepairFence, Store, AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION,
+    AUTH_SCHEMA_VERSION,
+};
 
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
@@ -68,6 +71,11 @@ const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
 /// if this best-effort final tombstone write does not finish in time.
 const FINAL_TOMBSTONE_WAIT: Duration = Duration::from_secs(1);
 const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
+/// Proof that the binary running on this node implements protocol 5, the
+/// non-voting learner admission protocol. Written coupled to the heartbeat for
+/// the same reason as [`REMOVAL_ATTEMPT_CAPABILITY`]: activation must be
+/// decided on what each voter is running *now*, not on what it once ran.
+const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
 
 const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_membership_meta (\
@@ -231,6 +239,28 @@ pub enum MembershipError {
     NodeIdentityInUse,
     #[error("finish upgrading every active cluster node before changing membership")]
     MembershipUpgradeRequired,
+    /// Activation was refused because at least one active node is not running
+    /// a binary that has proven the learner protocol. Naming them is the point:
+    /// "finish upgrading" is not actionable at 3am without the roster.
+    #[error(
+        "these cluster nodes are not running a binary that supports the learner protocol: {}; \
+         upgrade each of them, let one heartbeat interval pass, then activate again",
+        .0.join(", ")
+    )]
+    LearnerProtocolUpgradeRequired(Vec<String>),
+    /// Deactivation was refused because removing protocol 5 would strand a
+    /// node that only exists under it.
+    #[error(
+        "these cluster members are not voters and would be stranded by deactivating the learner \
+         protocol: {}; remove them first, then deactivate",
+        .0.join(", ")
+    )]
+    LearnerProtocolInUse(Vec<String>),
+    /// The write is committed by the leader and the client routes it there, so
+    /// this is the state an operator can actually act on: right now there is no
+    /// leader to route to.
+    #[error("the cluster has no elected leader to commit this operation; retry after an election")]
+    LeaderUnavailable,
     #[error(
         "node removal remains pending after the membership change was rejected: {0}; finish upgrading every cluster node and retry this removal"
     )]
@@ -278,6 +308,9 @@ impl MembershipError {
             Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
             Self::NodeIdentityInUse => "cluster_node_identity_in_use",
             Self::MembershipUpgradeRequired => "membership_upgrade_required",
+            Self::LearnerProtocolUpgradeRequired(_) => "learner_protocol_upgrade_required",
+            Self::LearnerProtocolInUse(_) => "learner_protocol_in_use",
+            Self::LeaderUnavailable => "cluster_leader_unavailable",
             Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
@@ -363,7 +396,28 @@ pub struct RedeemJoinRequest {
     #[serde(default)]
     pub http_base: String,
     pub schema_version: i64,
+    /// The oldest protocol the joining binary implements, and the field a
+    /// coordinator that predates the range compares for exact equality.
     pub protocol_version: i64,
+    /// The joining binary's supported protocol range. A joiner that predates
+    /// P6 omits both, and [`RedeemJoinRequest::declared_protocol_range`] then
+    /// reads its single scalar as the one-element range it actually is.
+    #[serde(default)]
+    pub protocol_min: i64,
+    #[serde(default)]
+    pub protocol_max: i64,
+}
+
+impl RedeemJoinRequest {
+    /// The inclusive protocol range this joiner claims to implement.
+    #[must_use]
+    pub fn declared_protocol_range(&self) -> (i64, i64) {
+        if self.protocol_min > 0 && self.protocol_max >= self.protocol_min {
+            (self.protocol_min, self.protocol_max)
+        } else {
+            (self.protocol_version, self.protocol_version)
+        }
+    }
 }
 
 impl std::fmt::Debug for RedeemJoinRequest {
@@ -378,6 +432,7 @@ impl std::fmt::Debug for RedeemJoinRequest {
             .field("api_address", &self.api_address)
             .field("schema_version", &self.schema_version)
             .field("protocol_version", &self.protocol_version)
+            .field("protocol_range", &self.declared_protocol_range())
             .finish()
     }
 }
@@ -442,6 +497,41 @@ pub struct ClusterNodeRecord {
     /// Raft membership after a rejected or indeterminate request, so expose
     /// the fence instead of rendering the node as fully operational.
     pub removal_pending: bool,
+    /// The binary this node is running *now* has proven the learner protocol,
+    /// by writing its capability row inside the same Raft transaction as its
+    /// current heartbeat. False here is exactly what blocks activation.
+    #[serde(default)]
+    pub learner_protocol_ready: bool,
+}
+
+/// What protocol range the cluster is on, what this binary can do, and — when
+/// the two disagree — which nodes are the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterProtocolStatus {
+    /// The range the cluster's replicated features actually require. A node
+    /// may participate only if it implements all of it.
+    pub active_min: i64,
+    pub active_max: i64,
+    /// The range this binary implements.
+    pub binary_min: i64,
+    pub binary_max: i64,
+    /// The active range is the learner protocol.
+    pub learner_protocol_active: bool,
+    /// Active, non-staged nodes whose currently running binary has not proven
+    /// the learner protocol. Activation is refused while this is non-empty.
+    pub learner_protocol_pending: Vec<String>,
+}
+
+/// The outcome of an activation or deactivation request.
+///
+/// `changed` is what separates "this call moved the cluster" from "the cluster
+/// was already there"; both are successes, because these operations are
+/// idempotent and an operator retrying after a timeout must not be told the
+/// cluster is broken.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolChange {
+    pub changed: bool,
+    pub protocol: ClusterProtocolStatus,
 }
 
 /// Internal addressing paired with the privacy-safe health projection.
@@ -549,6 +639,8 @@ pub struct MembershipStatus {
     pub nodes: Vec<ClusterNodeRecord>,
     /// The one canonical lag answer introduced by #233.
     pub replication: ReplicationStatus,
+    /// The cluster's active protocol range and this binary's support for it.
+    pub protocol: ClusterProtocolStatus,
 }
 
 /// Fixed-cardinality, process-local projection for Prometheus scrapes.
@@ -719,29 +811,77 @@ const REQUIRE_REMOVAL_INTENT_SQL: &str =
        WHERE intent.node_id = NEW.node_id) \
      BEGIN SELECT RAISE(ABORT, 'cluster membership removal requires current coordinator'); END";
 
-const CAPABILITY_READY_PREDICATE: &str = "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
-       WHERE active.removed_at IS NULL \
+/// One active node that has *not* proven `capability` with its currently
+/// running binary.
+///
+/// The proof is the equality below: a capability row is written inside the same
+/// Raft transaction as the ordinary heartbeat, so `last_seen_at` matching the
+/// node's `cluster_nodes.last_seen_at` is what distinguishes the binary running
+/// right now from one that was installed, observed, and then rolled back. This
+/// is the cluster's only capability staleness rule; nothing here adds a second
+/// wall-clock window.
+fn capability_unready_node_predicate(capability: &str) -> String {
+    format!(
+        "active.removed_at IS NULL \
          AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
            WHERE staged.node_id = active.node_id) \
          AND NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
            WHERE capability.node_id = active.node_id \
-             AND capability.capability = 'membership_removal_attempt_refs_v1' \
-             AND capability.last_seen_at = active.last_seen_at))";
+             AND capability.capability = '{capability}' \
+             AND capability.last_seen_at = active.last_seen_at)"
+    )
+}
+
+/// "Every active node proves `capability` with the binary it is running now."
+fn capability_ready_predicate(capability: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+       WHERE {})",
+        capability_unready_node_predicate(capability)
+    )
+}
+
+/// The same rule as a roster, so a refusal can name the nodes to upgrade
+/// instead of telling an operator only that something is behind.
+fn capability_unready_nodes_sql(capability: &str) -> String {
+    format!(
+        "SELECT active.node_id FROM cluster_nodes AS active WHERE {} \
+         ORDER BY active.node_id",
+        capability_unready_node_predicate(capability)
+    )
+}
 
 fn begin_removal_attempt_sql() -> String {
+    let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
-         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE} \
+         SELECT $1, $2 WHERE {ready} \
            AND NOT EXISTS (SELECT 1 FROM media_sessions \
              WHERE owner_node_id = $1 AND state = 'active' \
                AND lease_expires_at_ms > $3)"
     )
 }
 
+/// Narrow `cluster_meta` onto exactly one protocol.
+///
+/// `$1` is the protocol to move to and `$2` the protocol the caller believes is
+/// active, so a concurrent change loses instead of overwriting. `guard` is the
+/// precondition that must hold *inside this transaction*: a read-only preflight
+/// can be won and then invalidated by a heartbeat from an older binary before
+/// the write commits, exactly as with `begin_removal_attempt_sql`.
+fn narrow_protocol_range_sql(guard: Option<String>) -> String {
+    let guard = guard.map(|guard| format!(" AND {guard}")).unwrap_or_default();
+    format!(
+        "UPDATE cluster_meta SET protocol_min = $1, protocol_max = $1 \
+         WHERE singleton = 1 AND protocol_min = $2 AND protocol_max = $2{guard}"
+    )
+}
+
 fn rollback_removal_attempt_sql() -> String {
+    let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
     format!(
         "DELETE FROM cluster_node_removal_attempts WHERE node_id = $1 AND attempt_id = $2 \
-         AND {CAPABILITY_READY_PREDICATE}"
+         AND {ready}"
     )
 }
 
@@ -1270,9 +1410,25 @@ impl MembershipManager {
 
     pub async fn redeem(&self, request: &RedeemJoinRequest) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        if request.schema_version != AUTH_SCHEMA_VERSION
-            || request.protocol_version != AUTH_PROTOCOL_VERSION
-        {
+        if request.schema_version != AUTH_SCHEMA_VERSION {
+            return Err(MembershipError::Incompatible);
+        }
+        // The same rule the boot-time guard applies, from the coordinator's
+        // side: the joiner has to implement every protocol this cluster is
+        // actively using. Comparing against a constant instead would admit a
+        // protocol-4-only binary into an activated cluster.
+        let (cluster_min, cluster_max) = self.active_protocol_range().await?;
+        let (joiner_min, joiner_max) = request.declared_protocol_range();
+        if !(joiner_min <= cluster_min && cluster_max <= joiner_max) {
+            tracing::warn!(
+                cluster_min,
+                cluster_max,
+                joiner_min,
+                joiner_max,
+                node_id = %request.node_id,
+                "refusing a join from a binary that does not implement this cluster's \
+                 active protocol range"
+            );
             return Err(MembershipError::Incompatible);
         }
         if !is_join_token_digest(&request.token_digest) {
@@ -1756,6 +1912,23 @@ impl MembershipManager {
                     params!(
                         inner.identity.node_id.as_str(),
                         REMOVAL_ATTEMPT_CAPABILITY,
+                        now
+                    ),
+                ),
+                // Same transaction, same timestamp, same coupling: a protocol-5
+                // capability row can only carry this heartbeat's `last_seen_at`
+                // if this binary wrote this heartbeat. A rollback to an older
+                // build advances `cluster_nodes.last_seen_at` without touching
+                // this row, and the equality that activation requires breaks.
+                (
+                    "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                        .to_owned(),
+                    params!(
+                        inner.identity.node_id.as_str(),
+                        LEARNER_PROTOCOL_CAPABILITY,
                         now
                     ),
                 ),
@@ -2936,10 +3109,17 @@ impl MembershipManager {
                 params!(),
             )
             .await?;
+        let protocol = self.protocol_status().await?;
+        let pending = protocol
+            .learner_protocol_pending
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let nodes = rows
             .into_iter()
             .filter(|row| members.contains(&(row.raft_id as u64)))
             .map(|row| ClusterNodeRecord {
+                learner_protocol_ready: !pending.contains(&row.node_id),
                 node_id: row.node_id,
                 hostname: membership_hostname(&row.hostname, &row.api_address),
                 advertised_host: advertised_host(&row.api_address),
@@ -2965,6 +3145,7 @@ impl MembershipManager {
             availability,
             nodes,
             replication: inner.replication.status().await,
+            protocol,
         })
     }
 
@@ -3341,8 +3522,8 @@ impl MembershipManager {
             .client
             .query_consistent_map::<CountRow, _>(
                 format!(
-                    "SELECT CASE WHEN {CAPABILITY_READY_PREDICATE} \
-                     THEN 1 ELSE 0 END AS count"
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                    capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY)
                 ),
                 params!(),
             )
@@ -3352,6 +3533,202 @@ impl MembershipManager {
         } else {
             Err(MembershipError::MembershipUpgradeRequired)
         }
+    }
+
+    /// The protocol range the cluster's replicated features currently require.
+    ///
+    /// Read through the leader: an activation decision must never be made from
+    /// a follower's unapplied copy of `cluster_meta`.
+    pub async fn active_protocol_range(&self) -> Result<(i64, i64), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ProtocolRangeRow, _>(
+                "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1",
+                params!(),
+            )
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range returned {} rows",
+                rows.len()
+            )));
+        };
+        Ok((row.protocol_min, row.protocol_max))
+    }
+
+    /// Active nodes whose currently running binary has not proven `capability`.
+    async fn nodes_missing_capability(
+        &self,
+        capability: &str,
+    ) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        Ok(inner
+            .client
+            .query_consistent_map::<NodeIdRow, _>(capability_unready_nodes_sql(capability), params!())
+            .await?
+            .into_iter()
+            .map(|row| row.node_id)
+            .collect())
+    }
+
+    /// Members of the committed Raft configuration that do not carry a vote.
+    async fn committed_non_voters(&self) -> Result<Vec<u64>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        Ok(metrics
+            .membership_config
+            .nodes()
+            .map(|(id, _)| *id)
+            .filter(|id| !voters.contains(id))
+            .collect())
+    }
+
+    /// These operations commit one `cluster_meta` write. The Hiqlite client
+    /// routes writes to the leader on the caller's behalf — as every other
+    /// membership mutation here does — so the state an operator can actually
+    /// act on is not "you asked the wrong node" but "there is no leader to
+    /// route to right now".
+    async fn require_elected_leader(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        if metrics.current_leader.is_some() {
+            Ok(())
+        } else {
+            Err(MembershipError::LeaderUnavailable)
+        }
+    }
+
+    pub async fn protocol_status(&self) -> Result<ClusterProtocolStatus, MembershipError> {
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        Ok(ClusterProtocolStatus {
+            active_min,
+            active_max,
+            binary_min: AUTH_PROTOCOL_MIN,
+            binary_max: AUTH_PROTOCOL_MAX,
+            learner_protocol_active: (active_min, active_max)
+                == (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX),
+            learner_protocol_pending: self
+                .nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
+                .await?,
+        })
+    }
+
+    /// Narrow the cluster's active range onto the learner protocol.
+    ///
+    /// Nothing about deploying this binary activates protocol 5; this call is
+    /// the only thing that does, and after it an older binary can no longer
+    /// boot, join, or rejoin as a voter. The precondition — every active node
+    /// proving the capability with its *current* heartbeat — is checked twice
+    /// on purpose. The read-only pass exists to produce a refusal that names
+    /// the nodes; the same predicate is embedded in the committing statement so
+    /// a leader that won the read and then lost the race with an old binary's
+    /// heartbeat cannot commit anyway.
+    pub async fn activate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_elected_leader().await?;
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        if (active_min, active_max) == (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX) {
+            return Ok(ProtocolChange {
+                changed: false,
+                protocol: self.protocol_status().await?,
+            });
+        }
+        if (active_min, active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range {active_min}..={active_max} is neither the unactivated \
+                 range {AUTH_PROTOCOL_MIN}..={AUTH_PROTOCOL_MIN} nor the learner protocol \
+                 {AUTH_PROTOCOL_MAX}..={AUTH_PROTOCOL_MAX}; refusing to narrow it"
+            )));
+        }
+        let pending = self
+            .nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
+            .await?;
+        if !pending.is_empty() {
+            return Err(MembershipError::LearnerProtocolUpgradeRequired(pending));
+        }
+        let changed = inner
+            .client
+            .execute(
+                narrow_protocol_range_sql(Some(capability_ready_predicate(
+                    LEARNER_PROTOCOL_CAPABILITY,
+                ))),
+                params!(AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN),
+            )
+            .await?;
+        let protocol = self.protocol_status().await?;
+        if changed == 0 && !protocol.learner_protocol_active {
+            // The embedded predicate rejected the write after the read-only
+            // pass admitted it: an older binary heartbeat landed in between.
+            return Err(MembershipError::LearnerProtocolUpgradeRequired(
+                self.nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
+                    .await?,
+            ));
+        }
+        Ok(ProtocolChange {
+            changed: changed == 1,
+            protocol,
+        })
+    }
+
+    /// Widen the cluster back onto protocol 4 for a degraded rollback.
+    ///
+    /// The plan concedes that activation may be irreversible in some orderings
+    /// — once learners exist and hold state, dropping protocol 5 strands them,
+    /// and rollback is then a forward fix (upgrade the lagging node instead of
+    /// downgrading the cluster). What is implemented here is the reversible
+    /// case: no learner is present, so nothing depends on protocol 5 and the
+    /// marker can simply be moved back.
+    ///
+    /// Note that this refusal is checked against the committed Raft
+    /// configuration, not against replicated SQL, so it cannot be embedded in
+    /// the committing transaction the way activation's precondition is. See the
+    /// comment on the check below.
+    pub async fn deactivate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_elected_leader().await?;
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        if (active_min, active_max) == (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
+            return Ok(ProtocolChange {
+                changed: false,
+                protocol: self.protocol_status().await?,
+            });
+        }
+        if (active_min, active_max) != (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX) {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range {active_min}..={active_max} is not the learner protocol \
+                 {AUTH_PROTOCOL_MAX}..={AUTH_PROTOCOL_MAX}; refusing to widen it"
+            )));
+        }
+        // Live committed membership is Raft metrics, not replicated SQL, so
+        // this precondition cannot travel into the `cluster_meta` transaction
+        // the way activation's capability predicate does. Today it can strand
+        // nothing: protocol 5 is what admits a learner at all, so a cluster
+        // reaching this line has none. P6's second slice adds a replicated
+        // learner role to `cluster_nodes`; when it does, this check moves into
+        // `narrow_protocol_range_sql`'s guard as a SQL `NOT EXISTS` over that
+        // column, and this metrics read becomes the preflight that names them.
+        let non_voters = self.committed_non_voters().await?;
+        if !non_voters.is_empty() {
+            return Err(MembershipError::LearnerProtocolInUse(
+                non_voters.iter().map(u64::to_string).collect(),
+            ));
+        }
+        let changed = inner
+            .client
+            .execute(
+                narrow_protocol_range_sql(None),
+                params!(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX),
+            )
+            .await?;
+        Ok(ProtocolChange {
+            changed: changed == 1,
+            protocol: self.protocol_status().await?,
+        })
     }
 
     /// Restore the durable job-owner fence for state created before that
@@ -4265,6 +4642,32 @@ struct CountRow {
     count: i64,
 }
 
+struct ProtocolRangeRow {
+    protocol_min: i64,
+    protocol_max: i64,
+}
+
+impl From<&mut Row<'_>> for ProtocolRangeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            protocol_min: row.get("protocol_min"),
+            protocol_max: row.get("protocol_max"),
+        }
+    }
+}
+
+struct NodeIdRow {
+    node_id: String,
+}
+
+impl From<&mut Row<'_>> for NodeIdRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            node_id: row.get("node_id"),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct LeaderMetrics {
     current_leader: Option<u64>,
@@ -4896,6 +5299,278 @@ mod tests {
         assert_eq!(
             leader_self_leave_sequence(6),
             LeaderSelfLeaveSequence::CommitDirectly
+        );
+    }
+
+    /// Seed a three-voter cluster whose nodes have all heartbeated once, on an
+    /// unactivated `cluster_meta` range. `ready` names the nodes whose current
+    /// binary proved the learner protocol.
+    fn protocol_fixture(ready: &[&str]) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_meta (\
+                   singleton INTEGER PRIMARY KEY, schema_version INTEGER, \
+                   protocol_min INTEGER, protocol_max INTEGER, migrated_at INTEGER); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER, \
+                   last_seen_at INTEGER, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_heartbeat_intents (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY, started_at INT); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 INSERT INTO cluster_meta VALUES (1, 11, 4, 4, 0); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 1, 100, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('node-b', 2, 200, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('node-c', 3, 300, NULL);",
+            )
+            .expect("seed a three-voter cluster on the unactivated range");
+        for node_id in ready {
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                     SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                    rusqlite::params![node_id, LEARNER_PROTOCOL_CAPABILITY],
+                )
+                .expect("couple the capability to that node's current heartbeat");
+        }
+        connection
+    }
+
+    fn active_range(connection: &rusqlite::Connection) -> (i64, i64) {
+        connection
+            .query_row(
+                "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read the active protocol range")
+    }
+
+    fn unready_nodes(connection: &rusqlite::Connection) -> Vec<String> {
+        let sql = capability_unready_nodes_sql(LEARNER_PROTOCOL_CAPABILITY);
+        let mut statement = connection.prepare(&sql).expect("prepare the unready roster");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run the unready roster")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect the unready roster");
+        rows
+    }
+
+    fn activate(connection: &rusqlite::Connection) -> usize {
+        connection
+            .execute(
+                &narrow_protocol_range_sql(Some(capability_ready_predicate(
+                    LEARNER_PROTOCOL_CAPABILITY,
+                ))),
+                rusqlite::params![AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN],
+            )
+            .expect("run the activation statement")
+    }
+
+    fn deactivate(connection: &rusqlite::Connection) -> usize {
+        connection
+            .execute(
+                &narrow_protocol_range_sql(None),
+                rusqlite::params![AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX],
+            )
+            .expect("run the deactivation statement")
+    }
+
+    /// The committing statement — not just the preflight — carries the
+    /// capability precondition, and it is idempotent in both directions.
+    #[test]
+    fn activation_commits_once_and_only_with_every_voter_proven() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert!(unready_nodes(&connection).is_empty());
+        assert_eq!(active_range(&connection), (4, 4));
+
+        assert_eq!(activate(&connection), 1, "a proven cluster activates");
+        assert_eq!(active_range(&connection), (5, 5));
+
+        // Idempotent: the second call matches no row precisely because the
+        // range has already moved, so a retried request is not a second write.
+        assert_eq!(activate(&connection), 0, "activation is idempotent");
+        assert_eq!(active_range(&connection), (5, 5));
+
+        assert_eq!(deactivate(&connection), 1, "the reversible case rolls back");
+        assert_eq!(active_range(&connection), (4, 4));
+        assert_eq!(deactivate(&connection), 0, "deactivation is idempotent");
+        assert_eq!(active_range(&connection), (4, 4));
+    }
+
+    /// One voter that has never proven the capability blocks activation, and
+    /// the roster the refusal is built from names exactly that voter.
+    #[test]
+    fn one_unproven_voter_blocks_activation_and_is_named() {
+        let connection = protocol_fixture(&["node-a", "node-c"]);
+        assert_eq!(unready_nodes(&connection), vec!["node-b".to_owned()]);
+        assert_eq!(activate(&connection), 0, "an unproven voter blocks it");
+        assert_eq!(active_range(&connection), (4, 4));
+
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                rusqlite::params!["node-b", LEARNER_PROTOCOL_CAPABILITY],
+            )
+            .expect("the last voter heartbeats on the new binary");
+        assert!(unready_nodes(&connection).is_empty());
+        assert_eq!(activate(&connection), 1);
+    }
+
+    /// The case the heartbeat coupling exists to catch, constructed on purpose.
+    ///
+    /// A node was upgraded, wrote its capability, and was then rolled back to a
+    /// binary that still heartbeats but knows nothing about protocol 5. The
+    /// capability row survives with its old timestamp while `cluster_nodes`
+    /// moves on. Any rule that only asked "does a capability row exist?" would
+    /// activate onto a cluster containing a binary that cannot participate.
+    #[test]
+    fn a_capability_stranded_by_a_rollback_is_not_a_current_proof() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert_eq!(activate(&connection), 1, "the proven cluster would activate");
+        connection
+            .execute("UPDATE cluster_meta SET protocol_min = 4, protocol_max = 4", [])
+            .expect("rewind the fixture to the unactivated range");
+
+        // The rolled-back binary heartbeats: cluster_nodes advances, the
+        // protocol-5 capability row it does not know about does not.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = last_seen_at + 1 \
+                 WHERE node_id = 'node-b'",
+                [],
+            )
+            .expect("old binary heartbeat");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_capabilities \
+                     WHERE node_id = 'node-b' AND capability = ?1",
+                    rusqlite::params![LEARNER_PROTOCOL_CAPABILITY],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count the stranded capability row"),
+            1,
+            "the stale row is still present; only its timestamp disproves it"
+        );
+        assert_eq!(unready_nodes(&connection), vec!["node-b".to_owned()]);
+        assert_eq!(
+            activate(&connection),
+            0,
+            "a capability older than its node's heartbeat is not a current proof"
+        );
+        assert_eq!(active_range(&connection), (4, 4));
+    }
+
+    /// A binary old enough to predate heartbeat intents is caught one step
+    /// earlier: the replicated trigger drops every capability that node holds,
+    /// including the protocol-5 one, the moment it writes a heartbeat.
+    #[test]
+    fn a_pre_intent_binary_heartbeat_invalidates_the_learner_capability() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(MARK_LEGACY_NODE_HEARTBEAT_DURING_REMOVAL_SQL)
+            .expect("install the replicated legacy heartbeat marker");
+        assert!(unready_nodes(&connection).is_empty());
+
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999 WHERE node_id = 'node-c'",
+                [],
+            )
+            .expect("a binary that writes no heartbeat intent");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_capabilities WHERE node_id = 'node-c'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count node-c capabilities"),
+            0,
+            "the trigger invalidates every capability the legacy writer's node held"
+        );
+        assert_eq!(unready_nodes(&connection), vec!["node-c".to_owned()]);
+        assert_eq!(activate(&connection), 0);
+    }
+
+    /// A node that is mid-join has not heartbeated yet and must not be read as
+    /// "behind"; the existing staging exclusion is the one that decides this,
+    /// and the learner capability reuses it rather than adding a second rule.
+    #[test]
+    fn a_staged_joiner_neither_blocks_activation_nor_counts_as_proven() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-joining', 4, 400, NULL); \
+                 INSERT INTO cluster_node_join_staging VALUES ('node-joining');",
+            )
+            .expect("stage a joiner that has not heartbeated");
+        assert!(unready_nodes(&connection).is_empty());
+        assert_eq!(activate(&connection), 1);
+    }
+
+    /// Making the capability predicate generic must not have changed the
+    /// removal capability's meaning; this pins the removal predicate's text
+    /// against the literal that shipped before the refactor.
+    #[test]
+    fn the_generic_capability_predicate_preserves_the_removal_rule() {
+        const SHIPPED: &str = "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+       WHERE active.removed_at IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
+           WHERE staged.node_id = active.node_id) \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
+           WHERE capability.node_id = active.node_id \
+             AND capability.capability = 'membership_removal_attempt_refs_v1' \
+             AND capability.last_seen_at = active.last_seen_at))";
+        assert_eq!(
+            capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY),
+            SHIPPED
+        );
+        assert_ne!(
+            capability_ready_predicate(LEARNER_PROTOCOL_CAPABILITY),
+            SHIPPED,
+            "the two capabilities must be proven independently"
+        );
+    }
+
+    /// The heartbeat is where the proof is made. If the capability write ever
+    /// leaves that transaction, an upgraded-then-rolled-back node can look
+    /// current, so pin the coupling itself.
+    #[test]
+    fn the_learner_capability_is_written_inside_the_heartbeat_transaction() {
+        let source = include_str!("membership.rs");
+        let commit_heartbeat = source
+            .split_once("async fn commit_heartbeat")
+            .expect("commit_heartbeat")
+            .1
+            .split_once("\n    /// Publish the public half")
+            .expect("end of commit_heartbeat")
+            .0;
+        assert!(
+            commit_heartbeat.contains("LEARNER_PROTOCOL_CAPABILITY"),
+            "the learner capability must be written by the heartbeat itself"
+        );
+        assert!(
+            commit_heartbeat.contains(".txn(vec!["),
+            "and inside the heartbeat's single Raft transaction"
+        );
+        let writes = source.matches("LEARNER_PROTOCOL_CAPABILITY,\n                        now").count();
+        assert_eq!(
+            writes, 1,
+            "exactly one place may stamp this capability with a heartbeat time"
         );
     }
 
@@ -5595,6 +6270,8 @@ mod tests {
             http_base: "http://node-b:32400".to_owned(),
             schema_version: payload.schema_version,
             protocol_version: payload.protocol_version,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
         };
         let finalize = FinalizeJoinRequest {
             token_digest: digest.clone(),
