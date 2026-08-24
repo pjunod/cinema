@@ -34,6 +34,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A title's whole playlist can now be rendered before a byte of its media
+  exists.** This is the artifact the rest of the work is for, and the
+  difference between it and what the daemon serves today is the entire point: a
+  live playlist grows, so a client can only ever see as far as the server has
+  produced, and every seek past that edge is a seek into a timeline the player
+  does not believe exists. The plan renders one that lists every segment of the
+  film up front, declared `VOD` rather than `EVENT` — `EVENT` promises only
+  that segments are appended, where `VOD` promises the playlist is final, which
+  is what makes the whole duration seekable — and closed with `EXT-X-ENDLIST`
+  so the end is not provisional. Target duration counts audio-tail entries as
+  well as video ones, because a title whose audio outlives its picture has an
+  honest target duration of fifteen seconds where a video-only reading emits
+  eight, and understating it is a spec violation players act on. Durations are
+  the plan's own and nominal, since measurement showed players preferring the
+  media's own timestamps over the declared ones.
+
 - **A rendition's segments on disk and the manifest that describes them can no
   longer drift apart.** The bookkeeping was pure and testable and the bytes were
   nowhere, which left the dangerous half unwritten: a manifest claiming a
