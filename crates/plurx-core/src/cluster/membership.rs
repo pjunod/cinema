@@ -406,7 +406,7 @@ pub enum MembershipError {
     /// and could never open its store again while still counting for quorum.
     #[error(
         "these cluster nodes are mid-join and have not yet proven what binary they run: {}; \
-         wait for the join to finish or fail, then activate",
+         wait for the join to finish, or remove the node if it is not coming back, then activate",
         .0.join(", ")
     )]
     JoinInFlight(Vec<String>),
@@ -1086,16 +1086,26 @@ fn capability_unready_node_predicate(capability: &str) -> String {
 /// voter that counts for quorum and can never open its store again — on a 3→4
 /// growth that takes fault tolerance to zero.
 ///
-/// The roster stays honest and the *commit* refuses instead. This is a whole-
-/// table check rather than a per-node one on purpose: any join in flight is a
-/// reason to wait, and waiting costs one join.
+/// The roster stays honest and the *commit* refuses instead.
+///
+/// A tombstoned node is excluded, and that is the operator's exit: a
+/// redemption that will never finish would otherwise hold activation for
+/// good. The other exit is time — a staged node that has stopped heartbeating
+/// is named by [`no_absent_node_predicate`] instead, with a refusal that says
+/// to start it or remove it. This one is reserved for a join that is actually
+/// in flight right now, where the honest answer is "wait".
 fn no_join_in_flight_predicate() -> &'static str {
-    "NOT EXISTS (SELECT 1 FROM cluster_node_join_staging)"
+    "NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
+       WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removed \
+         WHERE removed.node_id = staged.node_id AND removed.removed_at IS NOT NULL))"
 }
 
 /// The same rule as a roster, so a refusal can name who is joining.
 fn join_in_flight_nodes_sql() -> &'static str {
-    "SELECT node_id FROM cluster_node_join_staging ORDER BY node_id"
+    "SELECT staged.node_id FROM cluster_node_join_staging AS staged \
+     WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removed \
+       WHERE removed.node_id = staged.node_id AND removed.removed_at IS NOT NULL) \
+     ORDER BY staged.node_id"
 }
 
 /// "Every member that is not tombstoned has heartbeated since `$3`."
@@ -1109,24 +1119,23 @@ fn join_in_flight_nodes_sql() -> &'static str {
 ///
 /// A wall-clock window is a weak proof of presence. It is a perfectly good
 /// proof of *absence*, and absence is the only thing this has to establish.
-/// Nodes that are mid-join are excluded because [`no_join_in_flight_predicate`]
-/// already refuses on them, and their `last_seen_at` is a redemption timestamp
-/// rather than a heartbeat.
+///
+/// Mid-join nodes are deliberately *not* excluded, even though `redeem`
+/// writes their `last_seen_at` as a redemption timestamp rather than a
+/// heartbeat. That timestamp stops advancing the moment a redemption is
+/// abandoned, which makes this the thing that eventually names an interrupted
+/// join — and names it with the refusal an operator can act on, "start it or
+/// remove it", rather than leaving it to a "wait for the join" that will never
+/// end.
 fn no_absent_node_predicate() -> &'static str {
     "NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
-       WHERE present.removed_at IS NULL \
-         AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
-           WHERE staged.node_id = present.node_id) \
-         AND present.last_seen_at < $3)"
+       WHERE present.removed_at IS NULL AND present.last_seen_at < $3)"
 }
 
 /// The same rule as a roster, so a refusal can name who is not answering.
 fn absent_nodes_sql() -> &'static str {
     "SELECT present.node_id FROM cluster_nodes AS present \
-     WHERE present.removed_at IS NULL \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
-         WHERE staged.node_id = present.node_id) \
-       AND present.last_seen_at < $1 \
+     WHERE present.removed_at IS NULL AND present.last_seen_at < $1 \
      ORDER BY present.node_id"
 }
 
@@ -4587,16 +4596,20 @@ impl MembershipManager {
     /// The read-only pass behind [`Self::activate_learner_protocol`], which
     /// exists to *name* what is in the way. Returns `Ok(())` when nothing is.
     async fn refuse_unactivatable_cluster(&self, cutoff: i64) -> Result<(), MembershipError> {
-        let joining = self.join_in_flight_nodes().await?;
-        if !joining.is_empty() {
-            return Err(MembershipError::JoinInFlight(joining));
-        }
+        // Absence first, deliberately. A join that was abandoned satisfies
+        // both rules, and "wait for it to finish" is the wrong thing to tell
+        // an operator about a process that is never coming back; "start it or
+        // remove it" is the one that ends.
         let absent = self.absent_nodes(cutoff).await?;
         if !absent.is_empty() {
             return Err(MembershipError::LearnerProtocolNodeAbsent {
                 nodes: absent,
                 minutes: PROTOCOL_CHANGE_ABSENCE_WINDOW_MS / 60_000,
             });
+        }
+        let joining = self.join_in_flight_nodes().await?;
+        if !joining.is_empty() {
+            return Err(MembershipError::JoinInFlight(joining));
         }
         let pending = self
             .nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
@@ -6656,6 +6669,67 @@ mod tests {
             )
             .expect("the joined node proves the protocol");
         assert_eq!(activate(&connection), 1);
+    }
+
+    /// A join that is never coming back must not hold activation for good.
+    ///
+    /// Two exits, because a refusal with no exit is a lockout of its own. The
+    /// operator can tombstone the node, and time can answer for them: a staged
+    /// node's `last_seen_at` is its redemption timestamp and stops advancing
+    /// the moment the join is abandoned, so it becomes *absent* — refused with
+    /// "start it or remove it" rather than "wait for the join".
+    #[test]
+    fn an_abandoned_join_stops_holding_activation() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-abandoned', 4, 300, NULL, 'voter'); \
+                 INSERT INTO cluster_node_join_staging VALUES ('node-abandoned');",
+            )
+            .expect("redeem a token for a node that never arrives");
+        assert_eq!(activate(&connection), 0);
+
+        // Exit one: time. Nothing about this node has advanced since it
+        // redeemed, and the refusal that names it says what to do about that.
+        connection
+            .execute_batch(
+                "UPDATE cluster_nodes SET last_seen_at = 400 WHERE node_id != 'node-abandoned'; \
+                 UPDATE cluster_node_capabilities SET last_seen_at = 400;",
+            )
+            .expect("the three real voters keep heartbeating and proving");
+        assert_eq!(
+            absent_nodes(&connection, 301),
+            vec!["node-abandoned".to_owned()]
+        );
+        assert_eq!(
+            activate_at(&connection, 301),
+            0,
+            "still refused — but now as an absent node, not as a join to wait for"
+        );
+
+        // Exit two: the operator removes it. Neither rule names a tombstoned
+        // node, and the leftover staging row does not resurrect it.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = 999 WHERE node_id = 'node-abandoned'",
+                [],
+            )
+            .expect("tombstone the abandoned join");
+        assert!(joining_nodes(&connection).is_empty());
+        assert!(absent_nodes(&connection, 301).is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_join_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count staging rows"),
+            1,
+            "the staging row is still there; the tombstone is what stops it counting"
+        );
+        assert_eq!(activate(&connection), 1);
+        assert_eq!(active_range(&connection), (5, 5));
     }
 
     /// A node that proved the capability and then stopped is not a proof.

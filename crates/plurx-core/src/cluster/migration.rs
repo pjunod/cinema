@@ -4260,6 +4260,37 @@ mod tests {
             "an unactivated cluster must not refuse a joiner that predates the range"
         );
 
+        // And that admitted joiner now holds activation, which is exactly the
+        // point: it redeemed on a binary that predates protocol 5, it is
+        // mid-join, and narrowing the range past it would leave a node that
+        // counts for quorum and can never open its store again.
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::JoinInFlight(nodes)) => {
+                assert_eq!(nodes, vec!["pre-range-joiner".to_owned()]);
+            }
+            other => panic!("a join in flight must hold activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a refused activation must not move the range"
+        );
+        // The operator's exit: this joiner has no process behind it and is
+        // never going to finish, so remove it.
+        client
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = $1 WHERE node_id = $2",
+                hiqlite::params!(1_i64, "pre-range-joiner"),
+            )
+            .await
+            .expect("tombstone the abandoned joiner");
+
         // 2. Activation is explicit, and only then does the range move.
         let activated = membership
             .activate_learner_protocol()
@@ -4979,19 +5010,20 @@ mod tests {
             .clone();
 
         // A second node that has heartbeated but never proved the capability,
-        // standing in for a voter still running the previous release.
+        // standing in for a voter still running the previous release. Its
+        // heartbeats are *current* on purpose: activation also refuses for a
+        // node that has gone silent, and this test is about the capability
+        // rule, not that one.
+        let beat = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
         client
             .execute(
                 "INSERT INTO cluster_nodes \
                  (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
                  VALUES ($1, $2, $3, $4, $5, NULL)",
-                hiqlite::params!(
-                    "unproven-voter",
-                    77_i64,
-                    "127.0.0.1:1",
-                    "127.0.0.1:2",
-                    1_000_i64
-                ),
+                hiqlite::params!("unproven-voter", 77_i64, "127.0.0.1:1", "127.0.0.1:2", beat),
             )
             .await
             .expect("seed a voter running an older binary");
@@ -4999,11 +5031,7 @@ mod tests {
             .execute(
                 "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
                  VALUES ($1, $2, $3)",
-                hiqlite::params!(
-                    "unproven-voter",
-                    "membership_removal_attempt_refs_v1",
-                    1_000_i64
-                ),
+                hiqlite::params!("unproven-voter", "membership_removal_attempt_refs_v1", beat),
             )
             .await
             .expect("that binary does write the capability it knows about");
@@ -5035,7 +5063,7 @@ mod tests {
             .execute(
                 "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
                  VALUES ($1, $2, $3)",
-                hiqlite::params!("unproven-voter", "learner_protocol_v5", 1_000_i64),
+                hiqlite::params!("unproven-voter", "learner_protocol_v5", beat),
             )
             .await
             .expect("the node proves the learner protocol once");
@@ -5051,7 +5079,7 @@ mod tests {
         client
             .execute(
                 "UPDATE cluster_nodes SET last_seen_at = $1 WHERE node_id = $2",
-                hiqlite::params!(2_000_i64, "unproven-voter"),
+                hiqlite::params!(beat + 1, "unproven-voter"),
             )
             .await
             .expect("the rolled-back binary heartbeats");
