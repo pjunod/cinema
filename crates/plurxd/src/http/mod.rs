@@ -2678,6 +2678,20 @@ mod tests {
         // setup_required now false; a second setup is rejected.
         let (_, info) = call(&app, get("/api/v1/server", None)).await;
         assert_eq!(info["setup_required"], false);
+
+        // The cluster's ingress list is the one thing this public endpoint
+        // withholds: an anonymous prober may not enumerate the topology, and
+        // the field is present either way so a client can read it uniformly.
+        assert_eq!(
+            info["node_urls"].as_array().map(Vec::len),
+            Some(0),
+            "an anonymous caller never receives the node list: {info}"
+        );
+        let (_, signed_in) = call(&app, get("/api/v1/server", Some(&token))).await;
+        assert!(
+            signed_in["node_urls"].is_array(),
+            "a signed-in caller reads the same field: {signed_in}"
+        );
         let (status, _) = call(
             &app,
             post(

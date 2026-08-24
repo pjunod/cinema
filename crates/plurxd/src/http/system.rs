@@ -46,15 +46,28 @@ pub struct ServerInfo {
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
-pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
+///
+/// `node_urls` is the one field that is not public. It is the cluster's
+/// topology — every reachable node's ingress host and port — and an
+/// unauthenticated caller has no business enumerating it; the admin
+/// diagnostics that expose the same shape are admin-gated. Both clients
+/// re-read this endpoint after signing in, so a signed-in reader gets the
+/// list and an anonymous prober gets an empty one.
+pub async fn server_info(
+    viewer: Option<AuthUser>,
+    State(state): State<AppState>,
+) -> Result<Json<ServerInfo>, ApiError> {
     let instance_id = state.store.instance_id().await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
-    let node_urls = state
-        .membership
-        .reachable_peer_http_urls()
-        .await
-        .unwrap_or_default();
+    let node_urls = match viewer {
+        Some(_) => state
+            .membership
+            .reachable_peer_http_urls()
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     Ok(Json(ServerInfo {
         name: state.server_name.clone(),
         version: crate::version::SEMVER,
@@ -2582,6 +2595,33 @@ pub(crate) async fn metrics(
 
 #[cfg(test)]
 mod tests {
+    /// The topology gate is a property of the handler, not of a fixture: a
+    /// SQLite test server has no peers, so no route-level test can distinguish
+    /// "withheld" from "empty". Assert the shape that makes it withheld —
+    /// an optional viewer, and the peer read reachable only through it.
+    #[test]
+    fn the_public_server_endpoint_reads_peers_only_for_a_signed_in_caller() {
+        const SOURCE: &str = include_str!("system.rs");
+        let start = SOURCE
+            .find("pub async fn server_info(")
+            .expect("server_info handler");
+        let body = &SOURCE[start..start + 1_200];
+        assert!(
+            body.contains("viewer: Option<AuthUser>"),
+            "server_info must accept an optional viewer rather than none at all"
+        );
+        let peers = body
+            .find("reachable_peer_http_urls")
+            .expect("server_info reads reachable peers");
+        let gate = body
+            .find("match viewer")
+            .expect("server_info gates on viewer");
+        assert!(
+            gate < peers,
+            "the peer read must sit inside the signed-in arm, not before it"
+        );
+    }
+
     use super::*;
     use std::time::{Duration, Instant};
 
