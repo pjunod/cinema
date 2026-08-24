@@ -1,0 +1,13 @@
+version = 1
+
+[[coverage]]
+commits = ["43c90879", "35b4a03f", "b4d0eaa8"]
+points = ["cluster.media-observation", "cluster.auth", "playback.pipeline", "core.media"]
+checks = ["rust-gate", "cluster-auth", "playback-recovery", "resource-bounds"]
+reason = """
+The retained backend-neutral Store contract now activates a media session with a nonzero write-once `media_origin_ms`, requires the expired-route inventory and the takeover CAS to carry that origin through unchanged, and adds a separate fixture that claims an expired incarnation and then ends it: the end must report the owner it is actually stopping rather than the pre-read one, retain the ended row with no live lease, leave the successor owning nothing, and stay idempotent across a repeat. Both backends run every one of these; the replicated backend is the one a takeover ever executes on, and its `expired_media_sessions` statement is compiled by that suite, which the pushed branch's temporary-borrow formulation was not.
+
+Runtime fixtures pin the coordinates a fenced successor publishes. Every ownership generation's init object round-trips the serving allowlist while the allowlist stays an allowlist, so an `EXT-X-MAP` URI a replacement advertises is one the segment path returns; the epoch sequence floor stays inside the range ffmpeg's muxer can name and refuses the takeover outright rather than publishing a generation whose every segment resolves to a truncated negative filename; an untouched successor playlist reports its epoch floor instead of zero, emits exactly one discontinuity, and has every URI it advertises checked against that same allowlist; a remux takeover records the media origin it achieved rather than the one it requested, so a keyframe pull-back cannot leave a span no generation produces; the abort path reaches a taken-over worker through the incarnation carried on the session, because a successor is created by no request on its node, and a different incarnation still cannot touch it; and a settling takeover is excluded from the renewal batch entirely, so a claimed-but-not-yet-republished session is neither renewed nor read as lost ownership, then renews normally once its guard drops.
+
+These fixtures do not claim an end-to-end multi-daemon transfer, a real ffmpeg run at a ten-digit start number, wall-clock recovery timing, or client behavior across the discontinuity; those remain PR integration and physical-device validation responsibilities.
+"""

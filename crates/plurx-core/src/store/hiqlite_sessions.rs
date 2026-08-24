@@ -947,26 +947,29 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ));
             statements.push((
+                // SQLite resolves `$N` by first appearance, not by the
+                // number, so the frontier columns must be numbered where they
+                // are written or every value in this statement shifts.
                 "UPDATE media_sessions SET lease_expires_at_ms = $1, updated_at_ms = $2,
                         produced_playable_through_ms = MAX(
-                          produced_playable_through_ms, $7),
-                        fetched_through_ms = MAX(fetched_through_ms, $8),
-                        media_sequence = MAX(media_sequence, $9)
-                      WHERE incarnation_id = $3 AND owner_node_id = $4 AND owner_epoch = $5
+                          produced_playable_through_ms, $3),
+                        fetched_through_ms = MAX(fetched_through_ms, $4),
+                        media_sequence = MAX(media_sequence, $5)
+                      WHERE incarnation_id = $6 AND owner_node_id = $7 AND owner_epoch = $8
                         AND state = 'active' AND lease_expires_at_ms > $2
                         AND EXISTS (SELECT 1 FROM job_leases
-                          WHERE resource = $6 AND owner_node_id = $4 AND fence = $5
+                          WHERE resource = $9 AND owner_node_id = $7 AND fence = $8
                             AND expires_at_ms = $1)",
                 params!(
                     lease_expires_at_ms,
                     now_ms,
+                    renewal.produced_playable_through_ms,
+                    renewal.fetched_through_ms,
+                    renewal.media_sequence,
                     renewal.incarnation_id.as_str(),
                     owner_node_id,
                     renewal.owner_epoch,
-                    lease_resource.as_str(),
-                    renewal.produced_playable_through_ms,
-                    renewal.fetched_through_ms,
-                    renewal.media_sequence
+                    lease_resource.as_str()
                 ),
             ));
             statements.push((
@@ -1223,35 +1226,35 @@ impl MediaSessionStore for HiqliteAuthStore {
             .query_consistent_map::<PendingMaintenanceRow, _>(
                 "SELECT 1 AS pending WHERE
                     EXISTS (SELECT 1 FROM media_sessions
-                      WHERE state = 'active' AND lease_expires_at_ms <= $4)
+                      WHERE state = 'active' AND lease_expires_at_ms <= $1)
                     OR EXISTS (SELECT 1 FROM job_leases lease
                       JOIN media_sessions session
                         ON lease.resource = 'session:' || session.incarnation_id
-                      WHERE session.state = 'ended' AND session.lease_expires_at_ms <= $1
-                        AND lease.expires_at_ms > $1
+                      WHERE session.state = 'ended' AND session.lease_expires_at_ms <= $2
+                        AND lease.expires_at_ms > $2
                         AND lease.revision < 9223372036854775807)
                     OR EXISTS (SELECT 1 FROM media_playback_pointers pointer
                       LEFT JOIN media_sessions session
                         ON session.incarnation_id = pointer.current_incarnation_id
                       WHERE session.incarnation_id IS NULL OR session.state != 'active'
-                        OR session.lease_expires_at_ms <= $4)
+                        OR session.lease_expires_at_ms <= $1)
                     OR EXISTS (SELECT 1 FROM media_session_requests
-                      WHERE state = 'starting' AND claim_expires_at_ms <= $1)
+                      WHERE state = 'starting' AND claim_expires_at_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
-                      WHERE state = 'failed' AND updated_at_ms < $2)
+                      WHERE state = 'failed' AND updated_at_ms < $3)
                     OR EXISTS (SELECT 1 FROM media_session_requests request
-                      WHERE request.state = 'resolved' AND request.updated_at_ms < $3
+                      WHERE request.state = 'resolved' AND request.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE session.incarnation_id = request.incarnation_id
                             AND session.state = 'active'
-                            AND session.lease_expires_at_ms > $1))
+                            AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
-                      WHERE state = 'ended' AND updated_at_ms < $3)
+                      WHERE state = 'ended' AND updated_at_ms < $4)
                     OR EXISTS (SELECT 1 FROM job_leases lease
-                      WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $3
+                      WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE lease.resource = 'session:' || session.incarnation_id))",
-                params!(now_ms, failed_cutoff, retained_cutoff, retire_before),
+                params!(retire_before, now_ms, failed_cutoff, retained_cutoff),
             )
             .await?
             .into_iter()
@@ -1266,9 +1269,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                         updated_at_ms = $1
                   WHERE incarnation_id IN (
                     SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND lease_expires_at_ms <= $3
-                     ORDER BY lease_expires_at_ms, incarnation_id LIMIT $2)",
-                params!(now_ms, MAINTENANCE_BATCH, retire_before),
+                     WHERE state = 'active' AND lease_expires_at_ms <= $2
+                     ORDER BY lease_expires_at_ms, incarnation_id LIMIT $3)",
+                params!(now_ms, retire_before, MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM cache_consumer_pins
@@ -1303,9 +1306,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                    LEFT JOIN media_sessions session
                      ON session.incarnation_id = pointer.current_incarnation_id
                   WHERE session.incarnation_id IS NULL OR session.state != 'active'
-                     OR session.lease_expires_at_ms <= $3
+                     OR session.lease_expires_at_ms <= $1
                   ORDER BY pointer.updated_at_ms, pointer.rowid LIMIT $2)",
-                params!(now_ms, MAINTENANCE_BATCH, retire_before),
+                params!(retire_before, MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM media_session_requests WHERE rowid IN (

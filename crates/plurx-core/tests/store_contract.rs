@@ -1188,7 +1188,12 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
         assert_eq!(renewed_route.media_sequence, 5, "{backend}");
-        assert!(!store
+        // P6's guarantee, restored: renewing the session renews its typed
+        // reader pin, so the generation it is reading cannot be retired out
+        // from under it. The renewal batch's placeholder scramble broke this
+        // and the assertion was inverted to match; the assertion is the
+        // contract, not the observation.
+        assert!(store
             .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
             .await
             .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}"))
