@@ -3022,6 +3022,24 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
 
+        // Narrowing the cluster's protocol range locks out every binary that
+        // does not implement the new one, so both directions are admin-only and
+        // both fail closed where there is no replicated membership to change.
+        for route in [
+            "/api/v1/cluster/protocol/learner/activate",
+            "/api/v1/cluster/protocol/learner/deactivate",
+        ] {
+            let (status, _) = call(&app, post(route, None, json!({}))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{route} must be admin-only"
+            );
+            let (status, body) = call(&app, post(route, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}: {body}");
+            assert_eq!(body["code"], "membership_unavailable", "{route}");
+        }
+
         let (status, _) = call(
             &app,
             put(
