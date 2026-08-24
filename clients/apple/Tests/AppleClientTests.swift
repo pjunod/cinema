@@ -302,6 +302,25 @@ final class AppleClientTests: XCTestCase {
             eventDomain: nil,
             eventStatus: nil
         ))
+        // AVFoundation reports a lost transfer as `-11800` with the real cause
+        // underneath it. The predicate walks `NSUnderlyingErrorKey`, and this
+        // is the shape that reaches it in the field — a bare `NSURLErrorDomain`
+        // error at the top level is the exception, not the rule.
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(
+                domain: AVFoundationErrorDomain,
+                code: -11800, // AVError.Code.unknown, spelled as the raw value
+                              // so this fixture depends on no SDK symbol.
+                userInfo: [
+                    NSUnderlyingErrorKey: NSError(
+                        domain: NSURLErrorDomain,
+                        code: NSURLErrorTimedOut
+                    ),
+                ]
+            ),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
     }
 
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
