@@ -309,8 +309,7 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
             error: NSError(
                 domain: AVFoundationErrorDomain,
-                code: -11800, // AVError.Code.unknown, spelled as the raw value
-                              // so this fixture depends on no SDK symbol.
+                code: AVError.unknown.rawValue,
                 userInfo: [
                     NSUnderlyingErrorKey: NSError(
                         domain: NSURLErrorDomain,
@@ -321,6 +320,74 @@ final class AppleClientTests: XCTestCase {
             eventDomain: nil,
             eventStatus: nil
         ))
+    }
+
+    /// `handleItemFailure` chooses between two recoveries with
+    /// `!isCompatibilityFailure && isTransportFailure`. That gate is only
+    /// meaningful while the two predicates are disjoint: a failure classified
+    /// as both would take whichever branch the expression happens to order
+    /// first, and the ladder and the node list would each be spent on a
+    /// failure the other one owns. Neither predicate mentions the other, so
+    /// nothing but this fixture keeps them apart — and both have been widened
+    /// since they were written.
+    @MainActor
+    func testNoFailureIsBothAMediaVerdictAndANodeFault() {
+        let probes: [(String, NSError?, String?, Int?, String?)] = [
+            (
+                "a timeout wrapped in an opaque AVError",
+                NSError(
+                    domain: AVFoundationErrorDomain,
+                    code: AVError.unknown.rawValue,
+                    userInfo: [
+                        NSUnderlyingErrorKey: NSError(
+                            domain: NSURLErrorDomain,
+                            code: NSURLErrorTimedOut
+                        ),
+                    ]
+                ),
+                NSURLErrorDomain, NSURLErrorTimedOut, "segment request timed out"
+            ),
+            ("a 5xx on a segment", nil, "CoreMediaErrorDomain", 503, nil),
+            ("an ended session's 404", nil, "CoreMediaErrorDomain", 404, nil),
+            (
+                "a Dolby Vision Profile 5 rejection",
+                NSError(domain: "CoreMediaErrorDomain", code: -12927),
+                nil, nil, nil
+            ),
+            (
+                "a decoder malfunction",
+                NSError(domain: "CoreMediaErrorDomain", code: -12911),
+                nil, nil, nil
+            ),
+            (
+                "an unreachable host",
+                NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+                nil, nil, nil
+            ),
+            (
+                "a refused credential",
+                NSError(domain: "CoreMediaErrorDomain", code: -12660),
+                "CoreMediaErrorDomain", -12660, "HTTP 403"
+            ),
+        ]
+
+        for (label, error, eventDomain, eventStatus, eventComment) in probes {
+            let isMediaVerdict = PlayerController.isCompatibilityPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus,
+                eventComment: eventComment
+            )
+            let isNodeFault = PlayerController.isTransportPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus
+            )
+            XCTAssertFalse(
+                isMediaVerdict && isNodeFault,
+                "\(label) was classified as both a media verdict and a node fault"
+            )
+        }
     }
 
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
