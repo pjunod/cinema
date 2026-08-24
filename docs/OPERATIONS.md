@@ -646,7 +646,8 @@ children, and fails startup on an incomplete cleanup. First ownership uses a
 durable non-authorizing `.plurx-transcode-scratch.claiming` state; restart
 promotes it only when the directory is still otherwise empty. A `.claiming`
 marker left empty or truncated by a crash is an interrupted claim and is
-retried instead of wedging startup. A populated unowned root is left untouched.
+retried instead of wedging startup. A populated root plurx does not own refuses
+startup and is left untouched, byte for byte.
 
 Inside a root plurx owns, the entries are its own leftovers. Their permission
 bits and owning uid are not refusal conditions; they are removed. A symbolic
@@ -753,9 +754,13 @@ through a soak period.
 `cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
 changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
 snapshot trigger, disaster-recovery log retention, heartbeat, and election
-timers remain unchanged. Compare 4, 8, and 16 with the same named workload and
-retain the smallest value whose catalogue p95 improves without a write-p99 or
-memory-budget regression. Until that artifact exists for a voter, keep 4.
+timers remain unchanged. The setting now reaches the named-host runner's node
+configuration, so a 4/8/16 sweep measures three different pools; an earlier
+runner built its own configuration and would have measured the default three
+times, so no deferred artifact from before that change means anything. Compare
+4, 8, and 16 with the same named workload and retain the smallest value whose
+catalogue p95 improves without a write-p99 or memory-budget regression. Until
+that artifact exists for a voter, keep 4.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
