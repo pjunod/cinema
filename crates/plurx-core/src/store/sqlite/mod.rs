@@ -808,6 +808,12 @@ const MIGRATIONS: &[&str] = &[
     // backend carries this exact table in its per-voter sidecar rather than
     // replicating one machine's ffmpeg output through Raft.
     crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA,
+    // v28: node-local rendition plans. Separate from the index above because
+    // the two are kept for different reasons: an index is a measurement and
+    // may be rebuilt, a plan is a decision a client already holds a playlist
+    // for. Node-local for the same reason, and additive, so a v27 database
+    // upgrades in place.
+    crate::store::renditionplan::RENDITION_PLANS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1720,7 +1726,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 27,
+            version, 28,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

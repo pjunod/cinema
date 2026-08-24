@@ -328,6 +328,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/shared_cache.rs",
   "crates/plurx-core/src/store/telemetry.rs",
   "crates/plurx-core/src/store/fragindex.rs",
+  "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",

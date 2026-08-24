@@ -45,7 +45,10 @@ use plurx_core::domain::{
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
-use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
+use plurx_core::segplan::{
+    FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
+    SEGPLAN_VERSION,
+};
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
@@ -328,6 +331,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+];
+const RENDITION_PLAN_METHODS: &[&str] = &[
+    "put_rendition_plan",
+    "rendition_plan",
+    "forget_rendition_plans",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
     "observe_network_prior",
@@ -6323,6 +6331,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX transcode_cache_storage_generation;
              DROP TABLE cache_consumer_pins;
              DROP TABLE cache_storage_members;
+             DROP INDEX rendition_plans_by_file;
+             DROP TABLE rendition_plans;
              DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
@@ -7807,6 +7817,7 @@ fn contract_inventory_matches_every_store_method() {
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
         FRAGMENT_INDEX_METHODS,
+        RENDITION_PLAN_METHODS,
         COORDINATION_METHODS,
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
@@ -7817,11 +7828,139 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 224, "review the Store method count");
+    assert_eq!(declared.len(), 227, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn rendition_plan_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");
+        let entry = |index: u32, start: u64, kind: PlanEntryKind, cut: PlanCut| PlanEntry {
+            index,
+            kind,
+            start_ticks: start,
+            duration_ticks: 112_128,
+            est_bytes: 48_000_000 + u64::from(index),
+            cut,
+            fragments: if kind == PlanEntryKind::Video { 4 } else { 0 },
+        };
+        let plan = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 16_000,
+            entries: vec![
+                entry(0, 0, PlanEntryKind::Video, PlanCut::Clean),
+                entry(1, 112_128, PlanEntryKind::Video, PlanCut::ByteCeiling),
+                entry(2, 224_256, PlanEntryKind::AudioTail, PlanCut::EndOfStream),
+            ],
+            target_duration: 15,
+        };
+
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing plan: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        assert!(
+            store
+                .put_rendition_plan("rk", 42, &plan, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a plan: {error}")),
+            "backend {backend}: storing the first plan under a key is the write"
+        );
+        let read = store
+            .rendition_plan("rk", &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the plan: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the plan it just stored"));
+        assert_eq!(read, plan, "backend {backend}");
+
+        // A plan is a decision a client already holds a playlist for, so a
+        // second one under the same key is refused rather than applied. A
+        // backend that upserted here would re-cut a rendition under the index
+        // a viewer is mid-seek against.
+        let mut recut = plan.clone();
+        recut.entries[0].duration_ticks = 999;
+        assert!(
+            !store
+                .put_rendition_plan("rk", 42, &recut, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a second plan: {error}")),
+            "backend {backend}: a second plan under one key must not be stored"
+        );
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-read: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: still stored")),
+            plan,
+            "backend {backend}: the first plan is still the plan"
+        );
+
+        // Invalidation by mismatch, the same discipline the index keeps.
+        let moved_on = SourceIdentity::new(8_192, 1_700_000_000_000, "fingerprint");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &moved_on)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a resized source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        let repiped = SourceIdentity::new(4_096, 1_700_000_000_000, "other-pipeline");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a repiped source: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        // One file carries several renditions; forgetting the file takes all
+        // of them and leaves another file's alone.
+        store
+            .put_rendition_plan("rk-720", 42, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store a second rendition: {error}"));
+        store
+            .put_rendition_plan("rk-other", 43, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store another file's: {error}"));
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the file's plans: {error}")),
+            2,
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .rendition_plan("rk-other", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: another file's plan: {error}"))
+                .is_some(),
+            "backend {backend}: forgetting one file must not take another's"
+        );
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget twice: {error}")),
+            0,
+            "backend {backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

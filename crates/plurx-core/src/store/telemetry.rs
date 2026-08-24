@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 4;
+const SIDECAR_SCHEMA_VERSION: i64 = 5;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -440,6 +440,12 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA);
                 migration.push('\n');
             }
+            // v5: rendition plans. Additive in the same way, so a v4 sidecar
+            // upgrades in place and a v3 one picks up both tables at once.
+            if !table_exists(&conn, "rendition_plans")? {
+                migration.push_str(crate::store::renditionplan::RENDITION_PLANS_SCHEMA);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -549,6 +555,45 @@ impl NodeLocalTelemetry {
 
     pub(crate) async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
+            .await
+    }
+
+    /// Store a rendition's plan unless one is already stored under that key.
+    /// Answers whether this call is the one that stored it — see
+    /// [`crate::store::renditionplan::put_if_absent`] for why this is not an
+    /// upsert.
+    pub(crate) async fn put_rendition_plan(
+        &self,
+        rendition_key: String,
+        file_id: i64,
+        plan: crate::segplan::SegmentPlan,
+        source: crate::segplan::SourceIdentity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::renditionplan::put_if_absent(
+                conn,
+                &rendition_key,
+                file_id,
+                &plan,
+                &source,
+                now_ms,
+            )
+        })
+        .await
+    }
+
+    pub(crate) async fn rendition_plan(
+        &self,
+        rendition_key: String,
+        source: crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError> {
+        self.with_conn(move |conn| crate::store::renditionplan::get(conn, &rendition_key, &source))
+            .await
+    }
+
+    pub(crate) async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
+        self.with_conn(move |conn| crate::store::renditionplan::forget_file(conn, file_id))
             .await
     }
 }
@@ -850,7 +895,7 @@ mod tests {
         let error = NodeLocalTelemetry::open(&path)
             .err()
             .expect("future sidecar schema must be refused");
-        assert!(error.to_string().contains("only knows v4"), "{error}");
+        assert!(error.to_string().contains("only knows v5"), "{error}");
     }
 
     #[tokio::test]
@@ -893,6 +938,82 @@ mod tests {
             .expect("version");
         assert_eq!(version, SIDECAR_SCHEMA_VERSION);
         assert!(table_exists(&conn, "fragment_indexes").expect("table check"));
+        assert!(table_exists(&conn, "rendition_plans").expect("table check"));
+    }
+
+    #[tokio::test]
+    async fn sidecar_v4_keeps_everything_it_has_across_the_v5_upgrade() {
+        // The v4 bump is what dropped a v3 sidecar's priors, and it did so
+        // because every upgrade test then started at v1. This one starts at
+        // v4, so the next bump cannot repeat it — and it checks the fragment
+        // index too, which v4 was the first sidecar to hold.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v4 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA)
+                .expect("indexes");
+            observe_prior(
+                &conn,
+                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            )
+            .expect("record a prior the way a running voter would");
+            crate::store::fragindex::put(
+                &conn,
+                42,
+                &crate::segplan::FragmentIndex::new(
+                    16_000,
+                    vec![crate::segplan::IndexRow {
+                        dts: 0,
+                        duration: 28_016,
+                        bytes: 104_452,
+                        video_bytes: 103_836,
+                        class: crate::fmp4::CutClass::CleanIdr,
+                    }],
+                    "abc123",
+                    crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+                ),
+                1_700_000_000_000,
+            )
+            .expect("record an index the way the indexer would");
+            conn.pragma_update(None, "user_version", 4)
+                .expect("stamp v4");
+        }
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v5");
+        assert!(
+            upgraded
+                .prior(
+                    "test-gen".to_owned(),
+                    "safari".to_owned(),
+                    "home".to_owned(),
+                )
+                .await
+                .expect("read the prior back")
+                .is_some(),
+            "a v4 sidecar's network priors must survive the v5 upgrade"
+        );
+        assert!(
+            upgraded
+                .fragment_index(
+                    42,
+                    crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+                )
+                .await
+                .expect("read the index back")
+                .is_some(),
+            "and so must its fragment indexes, which cost a full read of the \
+             file to rebuild"
+        );
+
+        let conn = Connection::open(&path).expect("inspect");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SIDECAR_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "rendition_plans").expect("table check"));
     }
 
     #[tokio::test]
