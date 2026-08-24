@@ -562,7 +562,21 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
     let identity = plurx_core::cluster::initialize_identity(&config.storage.data_dir, &cluster_id)?;
     let artwork_dir = dirs.artwork;
     std::fs::create_dir_all(&artwork_dir)?;
-    refresh_metadata_with_store(store, &artwork_dir, library_id, &identity.node_id).await
+    // A maintenance command runs the same cluster-wide singleton pass a
+    // scheduled job would, so it is subject to the same rule. This process has
+    // no Raft handle of its own, so the durable admission record in
+    // membership.json is what it has; it can only refuse, never grant.
+    let authority = crate::job_lease::AdmittedRoleJobAuthority::new(
+        plurx_core::cluster::migration::local_cluster_role(&config.storage.data_dir)?,
+    );
+    refresh_metadata_with_store(
+        store,
+        &artwork_dir,
+        library_id,
+        &identity.node_id,
+        &authority,
+    )
+    .await
 }
 
 async fn refresh_metadata_with_store(
@@ -570,6 +584,7 @@ async fn refresh_metadata_with_store(
     artwork_dir: &std::path::Path,
     library_id: Option<i64>,
     node_id: &str,
+    authority: &dyn plurx_core::cluster::coordination::ClusterJobAuthority,
 ) -> anyhow::Result<()> {
     let libraries = store.list_libraries().await?;
 
@@ -582,9 +597,12 @@ async fn refresh_metadata_with_store(
 
     let tmdb_key = store.get_setting(keys::TMDB_API_KEY).await?;
     let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id.to_owned())?;
-    let Some(lease) = acquire_cluster_job(&coordinator, "provider:artwork".to_owned()).await?
+    let Some(lease) =
+        acquire_cluster_job(&coordinator, authority, "provider:artwork".to_owned()).await?
     else {
-        anyhow::bail!("artwork provider pass is active on another cluster node");
+        anyhow::bail!(
+            "the artwork provider pass is not available on this node: it is either active on              another cluster node, or this node was admitted as a learner and never runs              cluster-wide provider work"
+        );
     };
     let lost = lease.loss_token();
     let publisher = lease.publisher(store.as_ref());
@@ -1404,6 +1422,24 @@ impl Drop for BackgroundLoopGuard {
     }
 }
 
+/// Start the daemon's background loops.
+///
+/// Three of these are cluster-wide work and take a live eligibility check on
+/// every pass, so a node carrying no vote runs none of them and a promoted one
+/// starts without a restart: the scheduler (which dispatches every leased
+/// singleton job), the Trakt two-way sync, and the watched outbox. All three
+/// mutate replicated state on behalf of the whole server.
+///
+/// Everything else here is node-local by construction and must keep running on
+/// a learner. The store-metrics and replication loops describe *this* process —
+/// a learner's lag is precisely what an operator needs to see. The membership
+/// heartbeat is how a node stays in the roster and keeps its protocol
+/// capability proof current; a learner that stopped heartbeating would read as
+/// unreachable. The offline source probe answers questions about this node's
+/// own files and has to run everywhere for any node's removal to be provable.
+/// The serving-fence, media-pool, shared-cache, transcode, media-session,
+/// artwork-materialization, offline-package and storage-probe loops all act on
+/// bytes, sessions, and hardware this process owns.
 fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
@@ -1461,12 +1497,18 @@ fn spawn_background_loops(
     );
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
-    tokio::spawn(std::sync::Arc::clone(&state.trakt).sync_loop());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.trakt)
+            .sync_loop(std::sync::Arc::new(state.membership.clone())),
+    );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
     // out has no request to wake it, and a monarr that is down must not stall
     // anything a viewer is waiting on.
-    tokio::spawn(std::sync::Arc::clone(&state.watched).run());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.watched)
+            .run(std::sync::Arc::new(state.membership.clone())),
+    );
 }
 
 /// Which port the GDM responder should answer on, or `None` when it must not
@@ -3692,7 +3734,7 @@ mod startup_tests {
         add_library(&store, "Books", LibraryKind::Books, false).await;
         add_library(&store, "Home", LibraryKind::Home, false).await;
         let artwork = tmp.path().join("artwork");
-        refresh_metadata_with_store(store, &artwork, None, "test-refresh")
+        refresh_metadata_with_store(store, &artwork, None, "test-refresh", &plurx_core::cluster::coordination::UnclusteredJobAuthority)
             .await
             .expect("a provider-less refresh must succeed");
     }
@@ -3708,7 +3750,13 @@ mod startup_tests {
 
         let error = format!(
             "{:#}",
-            refresh_metadata_with_store(store, &artwork, Some(4242), "test-refresh")
+            refresh_metadata_with_store(
+                store,
+                &artwork,
+                Some(4242),
+                "test-refresh",
+                &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+            )
                 .await
                 .expect_err("no such library")
         );
@@ -3726,7 +3774,7 @@ mod startup_tests {
 
         let error = format!(
             "{:#}",
-            refresh_metadata_with_store(store, &artwork, None, "test-refresh")
+            refresh_metadata_with_store(store, &artwork, None, "test-refresh", &plurx_core::cluster::coordination::UnclusteredJobAuthority)
                 .await
                 .expect_err("no TMDB key")
         );
@@ -3754,10 +3802,17 @@ mod startup_tests {
             &artwork,
             Some(movies.id),
             "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
         )
         .await
         .expect("empty TMDB refresh");
-        refresh_metadata_with_store(store, &artwork, Some(anime.id), "test-refresh")
+        refresh_metadata_with_store(
+            store,
+            &artwork,
+            Some(anime.id),
+            "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        )
             .await
             .expect("empty AniList refresh");
     }

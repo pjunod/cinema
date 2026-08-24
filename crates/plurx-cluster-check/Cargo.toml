@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 hiqlite = { workspace = true }
 hiqlite-wal = { version = "=0.14.0" }

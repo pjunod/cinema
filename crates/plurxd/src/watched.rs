@@ -180,10 +180,21 @@ impl WatchedNotifier {
     }
 
     /// Drain the outbox until `ctx` ends. Run in a task beside the others.
-    pub async fn run(self: Arc<Self>) {
+    /// Drain the replicated watched outbox.
+    ///
+    /// Gated per tick for the same reason as the Trakt sync: the outbox is
+    /// cluster-wide state, and a node with no vote must not deliver from it.
+    /// The check is live so a promotion needs no restart.
+    pub async fn run(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+    ) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
+            if !authority.may_run_cluster_jobs().await {
+                continue;
+            }
             self.deliver_due().await;
         }
     }
@@ -663,7 +674,9 @@ mod tests {
         assert!(!permanent);
         assert!(message.contains("cannot reach monarr"));
 
-        let runner = tokio::spawn(Arc::clone(&retry_notifier).run());
+        let runner = tokio::spawn(Arc::clone(&retry_notifier).run(Arc::new(
+            plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        )));
         tokio::task::yield_now().await;
         runner.abort();
         assert!(runner.await.expect_err("runner cancelled").is_cancelled());

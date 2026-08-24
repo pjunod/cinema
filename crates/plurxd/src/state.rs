@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use plurx_core::cluster::coordination::LeaseClaim;
-use plurx_core::cluster::coordination::StoreCoordinator;
+use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
@@ -468,6 +468,7 @@ impl AppState {
             artwork_dir.clone(),
             scan_prune_percent,
             node_id.clone(),
+            Arc::new(membership.clone()),
         ));
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -784,6 +785,10 @@ impl IntegrationMetrics {
 pub struct JobManager {
     store: Arc<dyn Store>,
     coordinator: StoreCoordinator,
+    /// Live "may this node run leader-singleton work?" authority. Held rather
+    /// than sampled once, because committed membership moves under a running
+    /// daemon: a learner may be promoted, and a voter may be removed.
+    job_authority: Arc<dyn ClusterJobAuthority>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -1239,6 +1244,7 @@ impl JobManager {
             artwork_dir,
             plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
             "test-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         )
     }
 
@@ -1247,12 +1253,14 @@ impl JobManager {
         artwork_dir: PathBuf,
         scan_prune_percent: u8,
         node_id: String,
+        job_authority: Arc<dyn ClusterJobAuthority>,
     ) -> Self {
         let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id)
             .expect("configured node id is a valid lease owner");
         JobManager {
             store,
             coordinator,
+            job_authority,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
@@ -1277,7 +1285,12 @@ impl JobManager {
     }
 
     async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
-        acquire_cluster_job(&self.coordinator, resource).await
+        acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    /// Whether this node may run cluster-wide scheduled work right now.
+    pub(crate) async fn may_run_cluster_jobs(&self) -> bool {
+        self.job_authority.may_run_cluster_jobs().await
     }
 
     /// What the last genre-backfill pass did, if one has run since boot.
@@ -2390,11 +2403,22 @@ impl JobManager {
     /// manual runs go through the same `trigger_*` methods, so a scheduled scan
     /// can't stack on top of a running one — `trigger` refuses, and the next
     /// tick tries again.
+    ///
+    /// The scheduler is cluster-wide work: every job it dispatches is one the
+    /// cluster expects exactly one node to run. The eligibility check therefore
+    /// sits on the tick, not on the spawn — a node that is a learner now may be
+    /// a voter in ten minutes, and this loop has to start scheduling then
+    /// without a restart. The individual leases are gated too, but skipping the
+    /// tick keeps a learner from doing the reads and the log noise as well.
     pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         self.scan_on_startup().await;
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             ticker.tick().await;
+            if !self.may_run_cluster_jobs().await {
+                tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
+                continue;
+            }
             if let Err(e) = self.run_due_jobs(&transcode).await {
                 tracing::warn!(error = %e, "scheduler tick failed");
             }
@@ -2418,6 +2442,12 @@ impl JobManager {
             _ => return,
         }
         tokio::time::sleep(SETTLE).await;
+        // After the settle, not before: the answer that matters is the one at
+        // the moment work would start.
+        if !self.may_run_cluster_jobs().await {
+            tracing::debug!("startup scan skipped: this node is not a committed voter");
+            return;
+        }
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
             Err(e) => {
@@ -3944,6 +3974,7 @@ mod tests {
                 artwork.path().to_path_buf(),
                 plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
                 node.to_owned(),
+                Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
             );
             manager.tmdb_base = Some((base.clone(), base.clone()));
             Arc::new(manager)
@@ -4380,6 +4411,172 @@ mod tests {
         let _ = lease.release().await;
         let stamped = jobs.job_stamp("job.stamped").await.expect("stamp");
         assert!((now() - stamped).abs() <= 1);
+    }
+
+    /// A job authority whose answer can be moved while the manager holding it
+    /// keeps running, which is the whole point: committed membership moves
+    /// under a live daemon and the gate has to follow it without a restart.
+    struct MovableJobAuthority(std::sync::atomic::AtomicBool);
+
+    impl MovableJobAuthority {
+        fn learner() -> Arc<Self> {
+            Arc::new(Self(std::sync::atomic::AtomicBool::new(false)))
+        }
+
+        fn promote(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClusterJobAuthority for MovableJobAuthority {
+        async fn may_run_cluster_jobs(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Every cluster-wide singleton resource, named individually.
+    ///
+    /// Spelled out rather than derived, so adding a sixth job without deciding
+    /// whether a node with no vote may run it fails here.
+    const CLUSTER_SINGLETON_RESOURCES: &[&str] = &[
+        "provider:artwork",
+        "provider:genres",
+        "scan:library:1",
+        "repair:probe",
+        "candidate:pretranscode",
+    ];
+
+    /// A node with no vote acquires none of the cluster's singleton leases —
+    /// and the store it is talking to is perfectly writable, so the refusal is
+    /// the gate rather than an incidental failure.
+    #[tokio::test]
+    async fn a_node_without_a_vote_acquires_no_cluster_job() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let authority = MovableJobAuthority::learner();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner-node".to_owned(),
+            authority.clone(),
+        ));
+
+        assert!(!jobs.may_run_cluster_jobs().await);
+        for resource in CLUSTER_SINGLETON_RESOURCES {
+            let claimed = jobs
+                .acquire_job((*resource).to_owned())
+                .await
+                .expect("lease acquisition must not error");
+            assert!(
+                claimed.is_none(),
+                "a node with no vote acquired the {resource} lease"
+            );
+        }
+
+        // Nothing took the leases, so the store still hands every one of them
+        // to a node that is allowed to ask.
+        let voter = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "voter-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        for resource in CLUSTER_SINGLETON_RESOURCES {
+            let claimed = voter
+                .acquire_job((*resource).to_owned())
+                .await
+                .expect("lease acquisition")
+                .unwrap_or_else(|| panic!("an eligible node must acquire {resource}"));
+            let _ = claimed.release().await;
+        }
+    }
+
+    /// The live property. The same manager, never restarted, starts acquiring
+    /// leases the moment its committed role changes — which is what makes this
+    /// a membership check rather than a boot-time flag.
+    #[tokio::test]
+    async fn a_promoted_node_starts_acquiring_without_a_restart() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let authority = MovableJobAuthority::learner();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "promoted-node".to_owned(),
+            authority.clone(),
+        ));
+
+        assert!(jobs
+            .acquire_job("provider:artwork".to_owned())
+            .await
+            .expect("lease acquisition")
+            .is_none());
+
+        authority.promote();
+
+        assert!(jobs.may_run_cluster_jobs().await);
+        let lease = jobs
+            .acquire_job("provider:artwork".to_owned())
+            .await
+            .expect("lease acquisition")
+            .expect("a promoted node acquires the lease it was refused a moment ago");
+        let _ = lease.release().await;
+    }
+
+    /// The scheduler's startup arm asks the same question, and asks it after
+    /// its settle delay rather than before, so the answer is the one that
+    /// holds at the moment work would actually begin.
+    #[tokio::test(start_paused = true)]
+    async fn the_startup_scan_does_not_run_without_a_vote() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        store
+            .put_setting(keys::JOB_SCAN_ON_STARTUP, "1")
+            .await
+            .expect("enable startup scan");
+        let authority = MovableJobAuthority::learner();
+        let store_handle: Arc<dyn Store> = store.clone();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            store_handle,
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner-node".to_owned(),
+            authority.clone(),
+        ));
+
+        let settle = |jobs: Arc<JobManager>| async move {
+            let startup = tokio::spawn(async move { jobs.scan_on_startup().await });
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_secs(30)).await;
+            startup.await.expect("startup task");
+        };
+
+        settle(Arc::clone(&jobs)).await;
+        assert!(
+            jobs.all_statuses().await.is_empty(),
+            "a node with no vote must not start the boot scan"
+        );
+
+        authority.promote();
+        settle(Arc::clone(&jobs)).await;
+        assert!(
+            jobs.all_statuses().await.contains_key(&library.id),
+            "and must start it once it carries one"
+        );
     }
 
     #[tokio::test]
@@ -5345,6 +5542,7 @@ mod tests {
             artwork.path().to_path_buf(),
             plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
             "other-cleanup-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         );
         let other_key = other.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP);
         assert_ne!(cleanup_key, other_key);

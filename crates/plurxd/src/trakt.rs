@@ -506,11 +506,26 @@ impl TraktManager {
     // -- the sync engine -----------------------------------------------------
 
     /// Hourly + on-demand loop over every linked account.
-    pub async fn sync_loop(self: Arc<Self>) {
+    /// The periodic two-way sync.
+    ///
+    /// `authority` gates each pass rather than the spawn: this writes
+    /// replicated watched state on behalf of the whole server, so a node that
+    /// carries no vote must not add an extra copy of it — and a node that is
+    /// promoted later must start syncing without a restart. An unclustered
+    /// server's authority always says yes, so single-node behaviour is
+    /// unchanged.
+    pub async fn sync_loop(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+    ) {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(SYNC_EVERY) => {}
                 _ = self.kick.notified() => {}
+            }
+            if !authority.may_run_cluster_jobs().await {
+                tracing::debug!("trakt: skipping a sync pass; this node is not a committed voter");
+                continue;
             }
             let linked = match self.store.list_trakt_auth().await {
                 Ok(l) => l,

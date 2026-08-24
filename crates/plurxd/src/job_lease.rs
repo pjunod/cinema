@@ -6,9 +6,35 @@
 
 use std::time::Duration;
 
-use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
+use plurx_core::cluster::coordination::{
+    ClusterJobAuthority, Lease, LeaseClaim, StoreCoordinator,
+};
 use plurx_core::error::StoreError;
 use plurx_core::store::{PublicationFence, PublicationStore, Store};
+
+/// The job authority for a process that has no Raft membership handle.
+///
+/// The maintenance commands attach to a running voter as a remote client, so
+/// they cannot read committed membership and must fall back on this data
+/// directory's durable admission record. That record can only be trusted to
+/// *refuse*: it says what this host was admitted as, which is enough to keep
+/// `plurxd refresh-metadata` on a learner from taking the cluster-wide artwork
+/// lease away from the voters, and is never used to grant anything a live
+/// check would deny.
+pub(crate) struct AdmittedRoleJobAuthority(plurx_core::cluster::membership::ClusterRole);
+
+impl AdmittedRoleJobAuthority {
+    pub(crate) fn new(role: plurx_core::cluster::membership::ClusterRole) -> Self {
+        Self(role)
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterJobAuthority for AdmittedRoleJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        !self.0.is_learner()
+    }
+}
 
 const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
 const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -207,10 +233,29 @@ impl Drop for ActiveJobLease {
     }
 }
 
+/// Acquire one cluster-wide singleton job, if this node is allowed to run it.
+///
+/// The eligibility question comes first, and it is asked *now* rather than
+/// remembered from startup. A learner holds the same shared cluster credential
+/// as every voter, so nothing inside the lease itself would stop it winning
+/// one — and a learner that won `provider:artwork` would not merely duplicate
+/// work, it would take the lease away from the voters that should own it.
+///
+/// This is also the only gate the whole singleton-job surface passes through:
+/// `provider:artwork`, `provider:genres`, `scan:library:{id}`, `repair:probe`,
+/// `candidate:pretranscode`, and any future resource all arrive here.
 pub(crate) async fn acquire_cluster_job(
     coordinator: &StoreCoordinator,
+    authority: &dyn ClusterJobAuthority,
     resource: String,
 ) -> Result<Option<ActiveJobLease>, StoreError> {
+    if !authority.may_run_cluster_jobs().await {
+        tracing::debug!(
+            resource,
+            "declining a cluster job: this node is not a committed voter"
+        );
+        return Ok(None);
+    }
     match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
         LeaseClaim::Acquired(lease) => ActiveJobLease::start(coordinator.clone(), lease).map(Some),
         LeaseClaim::Held {
