@@ -85,6 +85,27 @@ const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
 /// decided on what each voter is running *now*, not on what it once ran.
 const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
 
+/// Whether this process must heartbeat the way a binary that predates the
+/// learner protocol does: it advances `cluster_nodes.last_seen_at` like any
+/// other member, and it never writes [`LEARNER_PROTOCOL_CAPABILITY`].
+///
+/// Activation is refused while any active node's currently running binary has
+/// not proven that capability, and the only honest way to test that is to run a
+/// second process that genuinely does not write it. The separate-process
+/// harness starts one with this variable set. `cluster-validation` is a feature
+/// the daemon never enables, so a production build compiles the constant
+/// version below instead and has no variable to read.
+#[cfg(feature = "cluster-validation")]
+fn emulate_pre_learner_protocol_heartbeat() -> bool {
+    std::env::var("PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT").as_deref() == Ok("1")
+}
+
+/// Production builds do not compile the emulation at all.
+#[cfg(not(feature = "cluster-validation"))]
+const fn emulate_pre_learner_protocol_heartbeat() -> bool {
+    false
+}
+
 /// What a cluster member was *admitted* as.
 ///
 /// This is the durable admission record, not the effective role. Whether a
@@ -2285,77 +2306,82 @@ impl MembershipManager {
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
         let now = unix_ms()?;
-        inner
-            .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
+        let mut statements = vec![
+            (
+                "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(inner.identity.node_id.as_str(), now),
-                ),
-                (
-                    // `role` is supplied only on the insert branch. The row
-                    // redemption already wrote owns the admission decision,
-                    // and a promotion — which this slice does not implement —
-                    // must be able to move it without a heartbeat undoing it.
-                    "INSERT INTO cluster_nodes \
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), now),
+            ),
+            (
+                // `role` is supplied only on the insert branch. The row
+                // redemption already wrote owns the admission decision,
+                // and a promotion — which this slice does not implement —
+                // must be able to move it without a heartbeat undoing it.
+                "INSERT INTO cluster_nodes \
                      (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at, \
                       role) \
                      VALUES ($1, $2, $3, $4, $5, NULL, $6) \
                      ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, \
                        removed_at = NULL WHERE cluster_nodes.removed_at IS NULL"
-                        .to_owned(),
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        inner.identity.raft_id as i64,
-                        inner.local.raft_address.as_str(),
-                        inner.local.api_address.as_str(),
-                        now,
-                        inner.role.as_str()
-                    ),
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    inner.identity.raft_id as i64,
+                    inner.local.raft_address.as_str(),
+                    inner.local.api_address.as_str(),
+                    now,
+                    inner.role.as_str()
                 ),
-                (
-                    "INSERT INTO cluster_node_capabilities \
+            ),
+            (
+                "INSERT INTO cluster_node_capabilities \
                      (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
                      ON CONFLICT(node_id, capability) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        REMOVAL_ATTEMPT_CAPABILITY,
-                        now
-                    ),
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    REMOVAL_ATTEMPT_CAPABILITY,
+                    now
                 ),
-                // Same transaction, same timestamp, same coupling: a protocol-5
-                // capability row can only carry this heartbeat's `last_seen_at`
-                // if this binary wrote this heartbeat. A rollback to an older
-                // build advances `cluster_nodes.last_seen_at` without touching
-                // this row, and the equality that activation requires breaks.
-                (
-                    "INSERT INTO cluster_node_capabilities \
+            ),
+        ];
+        // Same transaction, same timestamp, same coupling: a protocol-5
+        // capability row can only carry this heartbeat's `last_seen_at` if this
+        // binary wrote this heartbeat. A rollback to an older build advances
+        // `cluster_nodes.last_seen_at` without touching this row, and the
+        // equality that activation requires breaks. That is the whole contract,
+        // so the only way to omit the statement is to be the emulated old
+        // binary the validation harness starts.
+        if !emulate_pre_learner_protocol_heartbeat() {
+            statements.push((
+                "INSERT INTO cluster_node_capabilities \
                      (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
                      ON CONFLICT(node_id, capability) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        LEARNER_PROTOCOL_CAPABILITY,
-                        now
-                    ),
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    LEARNER_PROTOCOL_CAPABILITY,
+                    now
                 ),
-                (
-                    "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
-                    params!(inner.identity.node_id.as_str()),
-                ),
-                (
-                    "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+            ));
+        }
+        statements.push((
+            "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
+            params!(inner.identity.node_id.as_str()),
+        ));
+        statements.push((
+            "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
                      AND last_seen_at = $2"
-                        .to_owned(),
-                    params!(inner.identity.node_id.as_str(), now),
-                ),
-            ])
+                .to_owned(),
+            params!(inner.identity.node_id.as_str(), now),
+        ));
+        inner
+            .client
+            .txn(statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -6292,29 +6318,86 @@ mod tests {
     /// current, so pin the coupling itself.
     #[test]
     fn the_learner_capability_is_written_inside_the_heartbeat_transaction() {
-        let source = include_str!("membership.rs");
-        let commit_heartbeat = source
+        let commit_heartbeat = production_source()
             .split_once("async fn commit_heartbeat")
             .expect("commit_heartbeat")
             .1
             .split_once("\n    /// Publish the public half")
             .expect("end of commit_heartbeat")
-            .0;
+            .0
+            .to_owned();
         assert!(
             commit_heartbeat.contains("LEARNER_PROTOCOL_CAPABILITY"),
             "the learner capability must be written by the heartbeat itself"
         );
-        assert!(
-            commit_heartbeat.contains(".txn(vec!["),
+        // One statement list, submitted once. The heartbeat builds its
+        // statements before it submits them so the capability write can be
+        // omitted by a validation build, but every statement it builds still
+        // reaches the same single Raft transaction.
+        assert_eq!(
+            commit_heartbeat.matches(".txn(").count(),
+            1,
             "and inside the heartbeat's single Raft transaction"
         );
-        let writes = source
-            .matches("LEARNER_PROTOCOL_CAPABILITY,\n                        now")
-            .count();
+        assert!(
+            commit_heartbeat.contains(".txn(statements)"),
+            "which must be the statement list the heartbeat just built"
+        );
         assert_eq!(
-            writes, 1,
+            commit_heartbeat
+                .matches("LEARNER_PROTOCOL_CAPABILITY")
+                .count(),
+            1,
             "exactly one place may stamp this capability with a heartbeat time"
         );
+    }
+
+    /// The heartbeat may skip its capability proof only in a build the daemon
+    /// never produces. A production `plurx-core` compiles a constant `false`
+    /// instead, so there is no environment variable to set and no branch to
+    /// take — which is what keeps the emulation from becoming a way for a real
+    /// node to look current while running an old binary.
+    #[test]
+    fn the_capability_proof_can_only_be_skipped_by_a_validation_build() {
+        let source = production_source();
+        assert_eq!(
+            source
+                .matches("fn emulate_pre_learner_protocol_heartbeat")
+                .count(),
+            2,
+            "one gated definition and one production constant"
+        );
+        assert_eq!(
+            source
+                .matches("if !emulate_pre_learner_protocol_heartbeat() {")
+                .count(),
+            1,
+            "and exactly one caller, in the heartbeat"
+        );
+        assert!(source.contains(
+            "#[cfg(feature = \"cluster-validation\")]\nfn emulate_pre_learner_protocol_heartbeat("
+        ));
+        assert!(source.contains(
+            "#[cfg(not(feature = \"cluster-validation\"))]\nconst fn \
+             emulate_pre_learner_protocol_heartbeat() -> bool {\n    false\n}"
+        ));
+        assert_eq!(
+            source
+                .matches("PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT")
+                .count(),
+            1,
+            "the emulation is reachable only through its own gated definition"
+        );
+    }
+
+    /// This module's own source, so a text-shape assertion cannot be satisfied
+    /// by the string literal that states it.
+    fn production_source() -> String {
+        include_str!("membership.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module")
+            .0
+            .to_owned()
     }
 
     #[test]

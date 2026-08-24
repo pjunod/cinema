@@ -403,6 +403,8 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
         read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
+        role: Default::default(),
+        emulate_pre_learner_heartbeat: false,
     };
 
     let mut node = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
@@ -727,11 +729,12 @@ fn the_request_and_response_encoding_is_stable() {
             leader: Some(1),
             current_term: 7,
             voters: vec![1, 2, 3],
+            members: vec![1, 2, 3, 4],
             applied_index: None,
             quorum_acknowledged: true,
         })
         .expect("encode"),
-        r#"{"Metrics":{"leader":1,"current_term":7,"voters":[1,2,3],"applied_index":null,"quorum_acknowledged":true}}"#
+        r#"{"Metrics":{"leader":1,"current_term":7,"voters":[1,2,3],"members":[1,2,3,4],"applied_index":null,"quorum_acknowledged":true}}"#
     );
 
     let decoded: Request =
@@ -833,6 +836,8 @@ async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
         read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
+        role: Default::default(),
+        emulate_pre_learner_heartbeat: false,
     };
     let mut voter = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
     let error = voter
@@ -1010,6 +1015,8 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
+        role: Default::default(),
+        emulate_pre_learner_heartbeat: false,
     };
 
     let config = node_config(&launch).expect("build the voter config");
@@ -1081,6 +1088,8 @@ async fn a_malformed_request_is_answered_and_the_voter_keeps_serving() {
         read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
+        role: Default::default(),
+        emulate_pre_learner_heartbeat: false,
     };
     // Driven as a raw child rather than through `NodeProcess`, which can only
     // send a well-formed `Request`.
