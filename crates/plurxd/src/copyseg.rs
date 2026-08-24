@@ -437,7 +437,7 @@ pub async fn run<R: AsyncRead + Unpin>(
 /// base layer is ordinary `hvc1` HDR10, so replace only the stale file-type
 /// brand with the ISO fragmented-MP4 brand already used by this muxer. A real
 /// Dolby Vision sample entry keeps its brand untouched.
-fn sanitize_stale_dolby_brand(init: &mut Init) -> bool {
+pub(crate) fn sanitize_stale_dolby_brand(init: &mut Init) -> bool {
     if init.video().is_none_or(|video| video.dolby_vision_config) {
         return false;
     }

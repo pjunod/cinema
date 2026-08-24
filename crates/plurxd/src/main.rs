@@ -34,6 +34,7 @@ mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
+mod vodgen;
 mod waitpool;
 mod watched;
 
