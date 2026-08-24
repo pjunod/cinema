@@ -3,12 +3,13 @@
 **Status:** M2 implemented on `agent/vod-m2c`, gates green, nothing on a
 request path · **From:** milestones M1–M2 of
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) ·
-**Written:** 2026-08-24
+**Written:** 2026-08-24 · **§2 partially measured** 2026-08-24
 
 Companion to [VOD-M0-ISSUES.md](VOD-M0-ISSUES.md) (what measurement found) —
 this is *what implementation found, and what I could not decide on my own*.
 
-Read §1 and §2 first: both block M3, and §2 is the one I would attack. §3 is
+Read §1 and §2 first: both block M3, and §2 is the one I would attack — now
+partly measured, and the measurement narrowed it rather than closing it. §3 is
 three decisions I made in order to keep moving, each of which reverses cheaply
 now and expensively later. §4 is four defects I found and deliberately did not
 fix. §5 is a scope question.
@@ -108,10 +109,49 @@ Byte-identity requires the init to be *the same regardless of what follows*. On
 exactly the files promotion exists for — HEVC, Dolby Vision, HDR10 — a
 repositioned generation is the case where those two collide.
 
-**What I could not determine.** Whether any real file has per-GOP parameter set
-variation that survives the copy path. M0-P0 clause (d) proved init
-reproducibility, but for *same-source-same-args from the same start*, which is
-not this case. Nothing in the corpus was repositioned and re-promoted.
+**What clause (d) actually measured.** `scripts/vod-plan-probe` hashes
+`Unit::Init` and says so in as many words — "the same bytes `FragmentReader`
+publishes as `Unit::Init` ... not 'everything before the first moof'". That is
+byte string (1). The probe never calls either `promote_*` function. So M0
+proved **(1)** is stable across generations including a seeked one, 9/9, and
+measured **(2)** — the one written to `init.mp4` and served to a viewer — not
+at all.
+
+**What I measured, 2026-08-24.** A new probe,
+`crates/plurx-core/examples/init-promotion-probe.rs`, runs the video copy pipe,
+then promotes the init from *every clean fragment in the file* and compares.
+Two useful results and one dead end:
+
+| Fixture | Clean starts | In-band parameter sets | Promoted init |
+|---|---|---|---|
+| `closed-gop-2397` | 23 | byte-identical at all 23 | identical from all 23 |
+| `clean-cra-2397` | 23 | byte-identical at all 23 | identical from all 23 |
+| `open-gop-2397` | 1 | — | not measurable, one start |
+
+The dead end: **promotion never fires on a synthetic fixture.** It is guarded on
+`hvcC` carrying zero NAL arrays, and `fmp4.rs:718` names the real population —
+"a few WEB-DL Matroska sources carry the 23-byte minimum hvcC record and put all
+three parameter sets in their first sample". A libx265 encode always writes a
+rich `hvcC`, so the corpus cannot exercise the branch directly, and neither
+could M0's.
+
+So the probe measures the thing that *decides* the answer instead: the
+VPS/SPS/PPS NAL units in each candidate starting fragment's first sample, which
+are exactly the bytes promotion copies. Identical NALs at every start means an
+identical promoted init whether or not the branch fires.
+
+**What that settles, and what it does not.** On a single-pass libx265 encode
+with `repeat-headers=1`, every IDR carries the same parameter sets and §2.2 is
+safe. That is a real result and it removes the most alarming reading — this is
+not broken for everything.
+
+It does not settle the population promotion exists for. Every fixture here was
+produced by one encoder in one pass with fixed settings, which is the case
+*least* likely to vary. The sources that reach the promotion branch at all are
+WEB-DL remuxes, and the ones this most likely bites — a title assembled from
+more than one encode, or one with per-scene parameter changes — are neither
+synthetic nor in the corpus. M0 recorded the same gap for Dolby Vision: "no DV
+source was reachable".
 
 **What I did meanwhile.** Nothing. I reverted my attempt rather than pick one of
 the three, because every choice writes a different rule into the store:
@@ -130,10 +170,17 @@ reading) or a reason to *re-promote and rewrite* the stored init — which is
 safe only if every already-materialized segment still decodes against the new
 one, and I do not think that is knowable without measuring.
 
-**Cheapest thing that would settle it:** promote from a mid-film IDR on the nine
-M0 fixtures and diff against the opening one. If 9/9 are byte-identical the rule
-is fine as written and I will implement (2). One fixture that differs makes this
-a design question rather than a naming one.
+**Cheapest thing that would finish settling it:** run the probe against a real
+HEVC WEB-DL from the library — one whose `ffprobe` shows an `hev1` sample entry
+rather than `hvc1`, which is the shape that reaches the branch:
+
+```bash
+cargo run -p plurx-core --example init-promotion-probe -- /path/to/title.mkv
+```
+
+It prints one line per file and needs no fixtures. If in-band parameter sets are
+byte-identical at every clean start there too, §2.2 is safe as written and I
+will implement (2) and stop asking.
 
 ---
 
