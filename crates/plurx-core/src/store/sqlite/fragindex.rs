@@ -32,6 +32,26 @@ impl FragmentIndexStore for SqliteStore {
         self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
             .await
     }
+
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
+        self.with_read(move |conn| crate::store::fragindex::vod_row_file_ids(conn, limit))
+            .await
+    }
+
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+        let wanted = file_ids.to_vec();
+        self.with_read(move |conn| {
+            let mut alive = Vec::new();
+            let mut statement = conn.prepare("SELECT 1 FROM files WHERE id = ?1")?;
+            for id in wanted {
+                if statement.exists(rusqlite::params![id])? {
+                    alive.push(id);
+                }
+            }
+            Ok(alive)
+        })
+        .await
+    }
 }
 
 #[async_trait]

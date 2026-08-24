@@ -32,7 +32,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fmp4::{CutClass, CutPolicy, CutReason};
+use crate::fmp4::{CutClass, CutPolicy, CutReason, PromotionInputs};
 
 /// Bumped when a stored index or plan stops being readable by this binary.
 /// A persisted row from a newer version is discarded and rebuilt rather than
@@ -41,7 +41,12 @@ use crate::fmp4::{CutClass, CutPolicy, CutReason};
 /// v2 added `IndexRow::video_bytes`. v1 rows stored only the wire length of
 /// the video-only pipe, which a production generation never reproduces, so
 /// every v1 index is discarded rather than matched against.
-pub const SEGPLAN_VERSION: u32 = 2;
+///
+/// v3 added `promotion` and `parameter_sets_constant`. A v2 index cannot
+/// answer whether the film's parameter sets are constant, and defaulting that
+/// to `true` on a stored row would VOD-present a title that has never been
+/// checked — so v2 rows are rebuilt rather than read.
+pub const SEGPLAN_VERSION: u32 = 3;
 
 /// How many consecutive fragments a landing match compares.
 ///
@@ -197,7 +202,29 @@ pub struct FragmentIndex {
     pub rows: Vec<IndexRow>,
     /// SHA-256 of the initialization segment this index was built against.
     /// A generation whose init differs is refused (plan §2.2).
+    ///
+    /// This is the **muxer** init — `Unit::Init`, ffmpeg's raw `ftyp`+`moov`,
+    /// which is the byte string M0-P0 clause (d) proved stable across
+    /// generations including a seeked one. It is not what a viewer receives;
+    /// see [`FragmentIndex::promotion`].
     pub init_sha256: String,
+    /// What promotion must copy into every generation's init, captured once
+    /// from the film's opening clean fragment.
+    ///
+    /// The served `init.mp4` is the muxer init plus this. Capturing it here
+    /// rather than reading it from whichever fragment a generation landed on
+    /// is what makes the served init byte-identical across generations — see
+    /// [`plurx_core::fmp4::PromotionInputs`] for the collision this dissolves.
+    pub promotion: PromotionInputs,
+    /// False when the film's clean fragments do not all carry the same
+    /// parameter sets.
+    ///
+    /// A single immutable init genuinely cannot describe such a film, so it is
+    /// not VOD-presentable and keeps the legacy presentation. Deciding that
+    /// here — at index time, in the background, before any viewer exists — is
+    /// the difference between a scan-time verdict and a `producer_failed` in
+    /// the middle of someone's playback.
+    pub parameter_sets_constant: bool,
     pub source: SourceIdentity,
 }
 
@@ -212,6 +239,11 @@ impl FragmentIndex {
             version: SEGPLAN_VERSION,
             timescale: timescale.max(1),
             rows,
+            promotion: PromotionInputs::default(),
+            // Vacuously true until an indexer says otherwise: a film whose
+            // clean fragments were never compared has not been shown to vary.
+            // The indexer sets this from what it actually walked.
+            parameter_sets_constant: true,
             init_sha256: init_sha256.into(),
             source,
         }
@@ -363,6 +395,13 @@ impl SegmentPlan {
     /// No `EXT-X-INDEPENDENT-SEGMENTS`, for [`crate::fmp4::playlist_header`]'s
     /// reason: a ceiling cut makes the claim a lie, and a lie in a spec tag is
     /// what this path exists to stop shipping.
+    ///
+    /// One known residual, carried deliberately: a planned audio-tail entry's
+    /// `EXTINF` and the segment actually emitted for it can differ by up to
+    /// one audio frame — roughly 21 to 32 ms — because the segmenter splits on
+    /// whole frames and the plan splits on ticks. That is well inside the
+    /// rounding the format allows, and nominal durations are what players use
+    /// anyway.
     pub fn playlist(&self) -> String {
         use std::fmt::Write;
         let mut out = String::with_capacity(64 + self.entries.len() * 32);

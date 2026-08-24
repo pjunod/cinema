@@ -814,6 +814,11 @@ const MIGRATIONS: &[&str] = &[
     // for. Node-local for the same reason, and additive, so a v27 database
     // upgrades in place.
     crate::store::renditionplan::RENDITION_PLANS_SCHEMA,
+    // v29: the promotion inputs every generation's init is built from, and
+    // whether the film's clean fragments agree about them (plan §2.2 ruling).
+    // Additive, and `parameter_sets_constant` defaults to 0 so an index built
+    // before the check existed is rebuilt rather than trusted.
+    crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1726,7 +1731,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 28,
+            version, 29,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

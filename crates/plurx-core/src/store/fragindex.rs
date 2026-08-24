@@ -34,6 +34,21 @@ CREATE TABLE fragment_indexes (
     built_at_ms       INTEGER NOT NULL
 ) STRICT;";
 
+/// The two columns plan §2.2's ruling added, applied by migration rather than
+/// written into the create above.
+///
+/// The create is what a v27 database already got and the migration list is
+/// append-only, so editing it would leave a fresh install and an upgraded one
+/// with different tables. Both backends reach this shape the same way instead.
+///
+/// `parameter_sets_constant` defaults to **0**, not 1. An upgraded row was
+/// built by an indexer that never compared anything, and presenting a title on
+/// a promise nobody made is the failure this whole mechanism exists to prevent.
+/// A zero forces a rebuild, which the version bump would have forced anyway.
+pub(crate) const FRAGMENT_INDEXES_PROMOTION_COLUMNS: &str = "
+ALTER TABLE fragment_indexes ADD COLUMN promotion TEXT NOT NULL DEFAULT '';
+ALTER TABLE fragment_indexes ADD COLUMN parameter_sets_constant INTEGER NOT NULL DEFAULT 0;";
+
 /// Bytes per packed row: dts u64, duration u32, wire bytes u32, video bytes
 /// u32, class u8, 3 pad.
 ///
@@ -119,8 +134,8 @@ pub(crate) fn put(
         "INSERT INTO fragment_indexes (
              file_id, source_size, source_mtime, argv_fingerprint,
              segplan_version, timescale, init_sha256, fragments, rows_packed,
-             built_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             built_at_ms, promotion, parameter_sets_constant
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(file_id) DO UPDATE SET
              source_size = excluded.source_size,
              source_mtime = excluded.source_mtime,
@@ -130,7 +145,9 @@ pub(crate) fn put(
              init_sha256 = excluded.init_sha256,
              fragments = excluded.fragments,
              rows_packed = excluded.rows_packed,
-             built_at_ms = excluded.built_at_ms",
+             built_at_ms = excluded.built_at_ms,
+             promotion = excluded.promotion,
+             parameter_sets_constant = excluded.parameter_sets_constant",
         params![
             file_id,
             index.source.size as i64,
@@ -142,6 +159,9 @@ pub(crate) fn put(
             index.rows.len() as i64,
             pack(&index.rows),
             now_ms,
+            serde_json::to_string(&index.promotion)
+                .map_err(|error| StoreError::Migration(error.to_string()))?,
+            i64::from(index.parameter_sets_constant),
         ],
     )?;
     Ok(())
@@ -160,7 +180,8 @@ pub(crate) fn get(
     let row = conn
         .query_row(
             "SELECT source_size, source_mtime, argv_fingerprint, segplan_version,
-                    timescale, init_sha256, rows_packed
+                    timescale, init_sha256, rows_packed, promotion,
+                    parameter_sets_constant
                FROM fragment_indexes
               WHERE file_id = ?1",
             params![file_id],
@@ -173,11 +194,24 @@ pub(crate) fn get(
                     row.get::<_, i64>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((size, mtime, fingerprint, version, timescale, init_sha256, packed)) = row else {
+    let Some((
+        size,
+        mtime,
+        fingerprint,
+        version,
+        timescale,
+        init_sha256,
+        packed,
+        promotion,
+        constant,
+    )) = row
+    else {
         return Ok(None);
     };
     if version != i64::from(SEGPLAN_VERSION) {
@@ -191,12 +225,37 @@ pub(crate) fn get(
     if rows.is_empty() {
         return Ok(None);
     }
-    Ok(Some(FragmentIndex::new(
+    let mut index = FragmentIndex::new(
         u32::try_from(timescale).unwrap_or(1),
         rows,
         init_sha256,
         stored,
-    )))
+    );
+    // A promotion blob that will not parse is not a reason to serve an index
+    // whose promotion inputs are unknown -- that is precisely the state that
+    // makes the served init unreproducible. Rebuild instead.
+    index.promotion = match serde_json::from_str(&promotion) {
+        Ok(inputs) => inputs,
+        Err(_) => return Ok(None),
+    };
+    index.parameter_sets_constant = constant != 0;
+    Ok(Some(index))
+}
+
+/// File ids this node holds an index or a plan for, lowest first.
+///
+/// Both tables in one answer because the sweep that consumes it forgets from
+/// both, and asking twice would sweep two different bounded windows.
+pub(crate) fn vod_row_file_ids(conn: &Connection, limit: i64) -> Result<Vec<i64>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT file_id FROM (
+             SELECT file_id FROM fragment_indexes
+             UNION
+             SELECT file_id FROM rendition_plans
+         ) ORDER BY file_id LIMIT ?1",
+    )?;
+    let rows = statement.query_map(params![limit.max(0)], |row| row.get::<_, i64>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError> {
@@ -244,7 +303,11 @@ mod tests {
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory sidecar");
+        // Create then migrate, exactly as both real backends do -- the create
+        // constant is frozen at its v27 shape on purpose.
         conn.execute_batch(FRAGMENT_INDEXES_SCHEMA).expect("schema");
+        conn.execute_batch(FRAGMENT_INDEXES_PROMOTION_COLUMNS)
+            .expect("promotion columns");
         conn
     }
 

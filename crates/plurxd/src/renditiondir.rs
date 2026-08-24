@@ -35,12 +35,128 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use plurx_core::fmp4::segment_name;
+use plurx_core::fmp4::{promote_from, segment_name, Fmp4Error, Init, PromotionInputs};
+use sha2::{Digest, Sha256};
 
 use crate::titlestore::{Manifest, ReaderWindow, SegState};
 
 /// The initialization segment's name, as every other producer writes it.
 pub const INIT_NAME: &str = "init.mp4";
+
+/// The two digests plan §2.2's identity check compares, and the inputs that
+/// connect them.
+///
+/// Two, not one, because they detect different things and only one of them can
+/// be compared across generations at all.
+///
+/// - `muxer_init` is ffmpeg's raw `ftyp`+`moov`. It is byte-identical across
+///   generations including `-ss`-started ones — M0-P0 clause (d), 9/9 — so a
+///   mismatch here is real pipeline drift: a different ffmpeg, a different
+///   argv, a re-fragmenting upgrade. That is the `producer_failed` case.
+/// - `served_init` is what is written to `init.mp4` and what a viewer holds.
+///   It is the muxer init plus [`PromotionInputs`], and because those inputs
+///   are captured once rather than read from whichever fragment a generation
+///   landed on, it is byte-identical across generations *by construction*.
+///   Checking it is an assertion, not a test — it cannot fire spuriously, and
+///   if it ever does, promotion stopped being a pure function of stored facts.
+///
+/// Re-promoting and rewriting a stored init is not an option this type offers,
+/// deliberately: viewers and already-materialized segments hold the old bytes,
+/// and quietly replacing them is the outcome §2.2 exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitIdentity {
+    pub muxer_init: String,
+    pub served_init: String,
+    pub promotion: PromotionInputs,
+}
+
+/// Why a generation's init was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitRefused {
+    /// The muxer init differs from the rendition's. Real pipeline drift.
+    MuxerDrift { stored: String, found: String },
+    /// The muxer init matched and the served init did not, which means
+    /// promotion is no longer a pure function of the stored inputs. Nothing
+    /// should be able to cause this; it is here so that if something does, it
+    /// is a loud refusal rather than a viewer receiving different bytes.
+    PromotionDrift { stored: String, found: String },
+}
+
+impl std::fmt::Display for InitRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InitRefused::MuxerDrift { stored, found } => write!(
+                f,
+                "this generation's muxer init is {found}, and the rendition \
+                 was built against {stored} — the video pipeline changed under \
+                 a rendition a client already holds a playlist for"
+            ),
+            InitRefused::PromotionDrift { stored, found } => write!(
+                f,
+                "promoting the stored inputs produced {found} where the \
+                 rendition's served init is {stored}"
+            ),
+        }
+    }
+}
+
+impl InitIdentity {
+    /// Establish a rendition's identity from its first generation.
+    pub fn establish(muxer: &Init, promotion: PromotionInputs) -> Result<InitIdentity, Fmp4Error> {
+        let mut served = muxer.clone();
+        promote_from(&mut served, &promotion)?;
+        Ok(InitIdentity {
+            muxer_init: digest(&muxer.bytes),
+            served_init: digest(&served.bytes),
+            promotion,
+        })
+    }
+
+    /// Build a later generation's served init, refusing rather than serving
+    /// bytes that do not match what the rendition promised.
+    ///
+    /// This is plan §2.2's check. It runs at generation start, against the
+    /// muxer init the pipe just emitted, before a single segment is written.
+    pub fn served_init_for(&self, muxer: &Init) -> Result<Init, InitRefused> {
+        let found = digest(&muxer.bytes);
+        if found != self.muxer_init {
+            return Err(InitRefused::MuxerDrift {
+                stored: self.muxer_init.clone(),
+                found,
+            });
+        }
+        let mut served = muxer.clone();
+        // A promotion error here is the same class of answer as a digest
+        // mismatch: the stored inputs no longer apply to this init.
+        if promote_from(&mut served, &self.promotion).is_err() {
+            return Err(InitRefused::PromotionDrift {
+                stored: self.served_init.clone(),
+                found: "unpromotable".to_owned(),
+            });
+        }
+        let served_digest = digest(&served.bytes);
+        if served_digest != self.served_init {
+            return Err(InitRefused::PromotionDrift {
+                stored: self.served_init.clone(),
+                found: served_digest,
+            });
+        }
+        Ok(served)
+    }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    hex(Sha256::digest(bytes))
+}
+
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.as_ref().len() * 2);
+    for byte in bytes.as_ref() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
 
 /// One rendition's directory.
 #[derive(Debug)]
@@ -213,14 +329,26 @@ impl RenditionDir {
             // something else — a truncated restore, a filesystem that
             // journalled the rename and not the data — and adopting it
             // publishes an unplayable segment as a cache hit.
+            let claimed_bytes = manifest.state(index).and_then(|state| match state {
+                SegState::Materialized { bytes, .. } => Some(bytes),
+                SegState::Planned => None,
+            });
+            // Zero length is not a segment, and neither is a segment whose
+            // length disagrees with what the manifest recorded. `publish_file`
+            // renames a complete file into place, so both shapes are residue
+            // of something else -- a truncated restore, or a filesystem that
+            // journalled the rename while the data blocks were still unwritten,
+            // which is the power-loss case fsync-at-admission bounds but does
+            // not eliminate for un-admitted renditions. Adopting either
+            // publishes an unplayable segment as a cache hit.
+            //
+            // The check costs nothing: the recorded length is already in hand.
             let on_disk = tokio::fs::metadata(self.segment_path(index))
                 .await
                 .ok()
-                .filter(|meta| meta.len() > 0);
-            let claimed = manifest
-                .state(index)
-                .map(|state| state.is_materialized())
-                .unwrap_or(false);
+                .filter(|meta| meta.len() > 0)
+                .filter(|meta| claimed_bytes.is_none_or(|bytes| meta.len() == bytes));
+            let claimed = claimed_bytes.is_some();
             match (on_disk, claimed) {
                 (Some(meta), false) => {
                     manifest.materialize(index, meta.len(), at_ms);
@@ -290,6 +418,51 @@ pub struct Freed {
 impl Freed {
     pub fn is_complete(&self) -> bool {
         self.error.is_none()
+    }
+}
+
+impl RenditionDir {
+    /// Make every byte of this rendition durable, then let the manifest admit
+    /// it.
+    ///
+    /// Admission is the durability boundary, and the only one. The live path
+    /// deliberately does not fsync per segment: a materializing producer runs
+    /// at several times realtime, an fsync per segment is a throughput cost
+    /// paid on every title, and a power loss before admission re-materializes
+    /// honestly — the manifest is in memory, so nothing survives to be wrong.
+    ///
+    /// Admission is different because `admitted` is a promise that outlives
+    /// the process: every member is present, and the rendition may be served
+    /// as a cache hit for as long as it is kept. A rename can be journalled
+    /// while the data blocks are not, on ext4 for a fresh destination as well
+    /// as on XFS and btrfs — so without this, "admitted" can mean a directory
+    /// of plausible-length half-segments, served weeks later with nothing left
+    /// to notice.
+    ///
+    /// Files first, then the directory: fsyncing the directory makes the names
+    /// durable, and a durable name pointing at unwritten blocks is the exact
+    /// failure this is here to prevent.
+    ///
+    /// Once per rendition, off the hot path, bounded by the member count.
+    pub async fn make_durable(&self, manifest: &Manifest) -> io::Result<()> {
+        for index in 0..manifest.len() as u32 {
+            if !manifest
+                .state(index)
+                .is_some_and(|state| state.is_materialized())
+            {
+                continue;
+            }
+            let file = tokio::fs::File::open(self.segment_path(index)).await?;
+            file.sync_all().await?;
+        }
+        if self.has_init().await {
+            let init = tokio::fs::File::open(self.dir.join(INIT_NAME)).await?;
+            init.sync_all().await?;
+        }
+        // The directory entry itself. Opening a directory read-only and
+        // syncing it is the portable way to make renames durable.
+        let dir = tokio::fs::File::open(&self.dir).await?;
+        dir.sync_all().await
     }
 }
 
@@ -591,6 +764,168 @@ mod tests {
             .expect("reconcile");
         assert_eq!(report.forgotten, vec![1]);
         assert!(!manifest.state(1).expect("planned").is_materialized());
+    }
+
+    // ---- durability ------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_segment_whose_length_disagrees_with_the_record_is_not_adopted() {
+        // The torn write a zero-length check cannot see. `publish_file`
+        // renames a complete file into place, so a member that is on disk at
+        // the wrong length is residue -- and adopting it publishes an
+        // unplayable segment as a cache hit. The recorded length is already in
+        // hand, so the check is free.
+        let (_temp, rendition) = dir().await;
+        let mut manifest = manifest(24);
+        rendition.write_init(b"moov").await.expect("init");
+        rendition
+            .materialize(&mut manifest, 0, b"0123456789", 1)
+            .await
+            .expect("materialize");
+
+        // Truncate it behind the manifest's back.
+        tokio::fs::write(rendition.path().join(segment_name(0)), b"012")
+            .await
+            .expect("truncate");
+
+        let report = rendition
+            .reconcile(&mut manifest, 2)
+            .await
+            .expect("reconcile");
+        assert_eq!(report.forgotten, vec![0], "{report:?}");
+        assert!(
+            !manifest.state(0).expect("state").is_materialized(),
+            "a claim on bytes that are not the bytes recorded is still a \
+             phantom row"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_segment_nothing_claimed_keeps_its_own_length() {
+        // The other side of the same check: an unclaimed file has no recorded
+        // length to disagree with, so it is adopted at whatever length it has.
+        // Refusing it would throw away bytes that cost a read of the source.
+        let (_temp, rendition) = dir().await;
+        let mut manifest = manifest(24);
+        rendition.write_init(b"moov").await.expect("init");
+        tokio::fs::write(rendition.path().join(segment_name(3)), b"0123456789")
+            .await
+            .expect("orphan");
+
+        let report = rendition
+            .reconcile(&mut manifest, 7)
+            .await
+            .expect("reconcile");
+        assert_eq!(report.adopted, vec![3]);
+        assert_eq!(manifest.state(3).expect("state").bytes(), 10);
+    }
+
+    #[tokio::test]
+    async fn making_a_rendition_durable_covers_every_member_and_the_init() {
+        // Admission is the durability boundary, so this must not quietly skip
+        // a member. It is also the only fsync on the path, so it must not
+        // error on a rendition with holes -- an un-admitted one is allowed to
+        // have them.
+        let (_temp, rendition) = dir().await;
+        let mut manifest = manifest(24);
+        rendition.write_init(b"moov").await.expect("init");
+        for index in [0u32, 1, 3] {
+            rendition
+                .materialize(&mut manifest, index, b"bytes", i64::from(index))
+                .await
+                .expect("materialize");
+        }
+        rendition
+            .make_durable(&manifest)
+            .await
+            .expect("a rendition with holes is still syncable");
+    }
+
+    #[tokio::test]
+    async fn making_a_rendition_durable_fails_loudly_when_a_member_is_missing() {
+        // Better a refused admission than one that promises presence for a
+        // member nothing can open.
+        let (_temp, rendition) = dir().await;
+        let mut manifest = manifest(24);
+        rendition.write_init(b"moov").await.expect("init");
+        rendition
+            .materialize(&mut manifest, 0, b"bytes", 1)
+            .await
+            .expect("materialize");
+        tokio::fs::remove_file(rendition.path().join(segment_name(0)))
+            .await
+            .expect("remove");
+        assert!(rendition.make_durable(&manifest).await.is_err());
+    }
+
+    // ---- init identity (plan §2.2) ---------------------------------------
+
+    /// Two muxer inits standing in for two generations of one rendition.
+    ///
+    /// The surgery promotion performs is plurx-core's to test, and it does
+    /// (`promoting_from_captured_inputs_does_not_depend_on_the_landing_fragment`).
+    /// What is under test here is the identity check itself — which digest is
+    /// compared, and what is refused — so an init promotion no-ops on is the
+    /// right fixture: it isolates the comparison from the surgery.
+    fn two_generations() -> (Init, Init) {
+        (
+            Init {
+                bytes: b"ftypmoov-generation-one".to_vec(),
+                tracks: Vec::new(),
+            },
+            Init {
+                bytes: b"ftypmoov-after-an-ffmpeg-upgrade".to_vec(),
+                tracks: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_second_generation_serves_the_same_bytes_as_the_first() {
+        let (first, _) = two_generations();
+        let identity = InitIdentity::establish(&first, PromotionInputs::default()).expect("first");
+
+        // A later generation emits the same muxer init -- M0 measured that
+        // 9/9, including a seeked generation -- and gets the same served init.
+        let served = identity.served_init_for(&first).expect("second generation");
+        assert_eq!(digest(&served.bytes), identity.served_init);
+    }
+
+    #[test]
+    fn a_changed_video_pipeline_is_refused_before_a_segment_is_written() {
+        // The `producer_failed` case, and the one this check is really for: a
+        // different ffmpeg or a different argv under a rendition whose
+        // playlist a client already holds.
+        let (first, drifted) = two_generations();
+        let identity = InitIdentity::establish(&first, PromotionInputs::default()).expect("first");
+
+        match identity.served_init_for(&drifted) {
+            Err(InitRefused::MuxerDrift { stored, found }) => {
+                assert_eq!(stored, identity.muxer_init);
+                assert_ne!(found, stored);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_two_digests_are_not_the_same_fact() {
+        // If promotion does something, the served init is not the muxer init,
+        // and storing one digest would mean checking the wrong artifact --
+        // which is exactly what M0-P0 clause (d) turned out to have measured.
+        let (first, _) = two_generations();
+        let promoting = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
+            hdr10_sei: Vec::new(),
+        };
+        // This init has no hvcC, so promotion no-ops and the two agree...
+        let identity = InitIdentity::establish(&first, promoting).expect("establish");
+        assert_eq!(identity.muxer_init, identity.served_init);
+
+        // ...which is the honest outcome for a source promotion does nothing
+        // to, and is why the digests are stored separately rather than one
+        // being derived from the other at read time.
+        assert_eq!(identity.muxer_init, digest(&first.bytes));
     }
 
     #[tokio::test]

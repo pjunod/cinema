@@ -8228,6 +8228,35 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
             0,
             "backend {backend}"
         );
+
+        // The sweep's two queries. Both backends must answer the same way, and
+        // they reach the answer differently: SQLite reads one database, while
+        // hiqlite asks its own sidecar what it holds and the replicated table
+        // which of those still exist. That split is the whole reason the sweep
+        // is per-node rather than a hook inside `delete_files`.
+        let held = store
+            .vod_row_file_ids(512)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list held rows: {error}"));
+        assert!(
+            held.contains(&43),
+            "backend {backend}: the surviving file's plan must still be listed, got {held:?}"
+        );
+        assert!(
+            held.windows(2).all(|pair| pair[0] < pair[1]),
+            "backend {backend}: ordered so consecutive sweeps make progress"
+        );
+
+        // Neither file id was ever inserted into `files`, so both are orphans
+        // — which is exactly what the sweep is looking for.
+        let alive = store
+            .surviving_file_ids(&held)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: check survivors: {error}"));
+        assert!(
+            alive.is_empty(),
+            "backend {backend}: no rows in `files`, so nothing survives, got {alive:?}"
+        );
     })
     .await;
 }

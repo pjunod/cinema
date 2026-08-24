@@ -24,6 +24,14 @@
 //! process that is doing nothing, and that may never be resumed, is exactly
 //! the failure that comment describes. Those two terminate.
 //!
+//! One asymmetry worth stating so it is not "simplified" away later: a **copy**
+//! producer holds no codec session at all. For it a SIGSTOP costs only memory
+//! and an idle NFS read, so the table above is merely cheap rather than
+//! necessary. The table is still right for both — a copy producer gains
+//! nothing from being terminated on a capacity hold, and treating the two
+//! producer kinds alike is one behaviour to reason about instead of two — but
+//! the argument that *forces* it is the transcode path's.
+//!
 //! **A signal is sent to a pid, and pids are recycled.** Every transition here
 //! is idempotent: a producer already stopped is never stopped again, a
 //! producer already running is never continued. Not tidiness — a duplicate

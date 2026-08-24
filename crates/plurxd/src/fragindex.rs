@@ -26,7 +26,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::MediaFile;
-use plurx_core::fmp4::{self, FragmentReader, Init, TrackKind, Unit};
+use plurx_core::fmp4::{self, FragmentReader, Init, PromotionInputs, TrackKind, Unit};
 use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
 use plurx_core::transcode;
 use sha2::{Digest, Sha256};
@@ -68,6 +68,12 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     let mut init_sha = String::new();
     let mut timescale: u32 = 0;
     let mut rows: Vec<IndexRow> = Vec::new();
+    // The promotion inputs the whole film's generations will share, taken from
+    // the first clean fragment, plus whether every later clean fragment agrees
+    // with it. Both are plan §2.2's ruling: capture once, check continuously,
+    // and refuse a varying title here rather than mid-playback.
+    let mut promotion: Option<PromotionInputs> = None;
+    let mut parameter_sets_constant = true;
     let mut buf = vec![0u8; READ_CHUNK];
 
     loop {
@@ -153,6 +159,29 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                     // out byte for byte identical.
                     let video_bytes = u32::try_from(track.byte_len()).unwrap_or(u32::MAX);
                     let class = fmp4::classify(&fragment, init);
+
+                    // Only a clean fragment can begin a segment, so only a
+                    // clean fragment can ever be a generation's first — which
+                    // makes these the only fragments whose promotion inputs
+                    // could ever differ from the stored ones.
+                    if class.is_clean() {
+                        let here = PromotionInputs::from_fragment(&fragment, init);
+                        match promotion {
+                            None => promotion = Some(here),
+                            Some(ref canonical) => {
+                                if &here != canonical {
+                                    // A film whose clean starts disagree cannot
+                                    // be described by one immutable init. Not a
+                                    // failure — a fact, recorded so the title
+                                    // keeps the legacy presentation instead of
+                                    // being VOD-presented on a promise that
+                                    // cannot be kept.
+                                    parameter_sets_constant = false;
+                                }
+                            }
+                        }
+                    }
+
                     rows.push(IndexRow {
                         dts,
                         duration,
@@ -196,9 +225,10 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
         }
     }
 
-    IndexOutcome::Built(Box::new(FragmentIndex::new(
-        timescale, rows, init_sha, identity,
-    )))
+    let mut built = FragmentIndex::new(timescale, rows, init_sha, identity);
+    built.promotion = promotion.unwrap_or_default();
+    built.parameter_sets_constant = parameter_sets_constant;
+    IndexOutcome::Built(Box::new(built))
 }
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
@@ -352,6 +382,62 @@ mod tests {
             ])
             .args(["-use_editlist", "0", "-f", "mp4", "pipe:1"]);
         testfixtures::run(&mut command)
+    }
+
+    #[tokio::test]
+    async fn a_real_pipe_reports_its_parameter_sets_constant() {
+        // The scan-time check plan §2.2's ruling asks for. Every clean
+        // fragment of a single-pass encode carries the same parameter sets, so
+        // the film is VOD-presentable.
+        let IndexOutcome::Built(index) = index_fixture("closed-gop").await else {
+            panic!("the closed-gop fixture must index");
+        };
+        assert!(
+            index.parameter_sets_constant,
+            "a single-pass encode's clean starts must agree"
+        );
+        // And this corpus carries nothing promotable -- the test pipe strips
+        // types 32-34 the way `copy_video_args` does for ordinary HEVC, so
+        // promotion is a no-op and there is nothing to capture. Asserted
+        // rather than assumed, because a corpus that silently started
+        // carrying them would make the test above pass for a different reason.
+        assert!(
+            index.promotion.is_empty(),
+            "ordinary HEVC carries its parameter sets in hvcC, not in band"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_film_whose_clean_starts_disagree_is_not_vod_presentable() {
+        // Built by hand, because no fixture can produce it: the corpus is
+        // single-invocation encodes, which are structurally incapable of
+        // per-IDR parameter-set variation. The check still has to work.
+        let bytes = index_pipe_bytes("closed-gop");
+        let IndexOutcome::Built(index) =
+            index_stream(std::io::Cursor::new(bytes), identity(), None).await
+        else {
+            panic!("must index");
+        };
+        // A constant film, as the fixture is.
+        assert!(index.parameter_sets_constant);
+
+        // Now the same walk with one start disagreeing. `PromotionInputs`
+        // compares by value, so this is the exact comparison `index_stream`
+        // makes.
+        use plurx_core::fmp4::PromotionInputs;
+        let canonical = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
+            hdr10_sei: Vec::new(),
+        };
+        let differing = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
+            hdr10_sei: Vec::new(),
+        };
+        assert_ne!(
+            canonical, differing,
+            "the comparison that decides VOD-presentability must see the \
+             difference between two parameter sets that differ by one byte"
+        );
     }
 
     #[tokio::test]

@@ -56,6 +56,42 @@ bump may break compatibility and a **patch** bump never does.
   sessions that were already playing when it was switched on, and
   `docs/OPERATIONS.md` covers enabling it and what it makes visible.
 
+- **A title's initialization data is now settled once, for the whole film,
+  instead of being taken from wherever a producer happened to start.** A few
+  sources — mostly HEVC web releases — leave the decoder's setup information
+  out of the container header and repeat it inside the picture data instead, so
+  the server lifts it out of the first frame it sees and writes it into the
+  header it serves. That worked while a session only ever started at the
+  beginning. A VOD title's producer restarts all over the film, and one
+  restarting in the middle was lifting a *different* copy — or, where the data
+  appears only on some scenes, none at all — producing a header that no longer
+  matched the one already published, and a title that would refuse to continue
+  after a seek. The scan now takes that setup information once, from the film's
+  opening, and every later restart uses the stored copy, so what a viewer holds
+  is the same bytes no matter where production resumed. The scan also checks
+  every legal restart point for disagreement, and a title whose scenes genuinely
+  disagree keeps the old presentation rather than being offered as something it
+  cannot be — decided in the background, before anyone watches it, rather than
+  as a failure mid-playback.
+
+- **Completing a title now makes it durable before promising it is complete.**
+  Marking a title cached is a promise that survives restarts, so it is now the
+  point where every segment and the header are flushed to the disk properly.
+  Nothing else on the path pays that cost: a power cut before completion simply
+  produces the title again, honestly, but one after it would otherwise leave a
+  directory of plausible-looking half-files that get served as a finished copy
+  weeks later with nothing left to notice. Adoption also checks each file
+  against the length that was recorded for it, so a half-written segment is
+  rebuilt rather than believed.
+
+- **Bookkeeping for deleted files is now cleaned up on each machine's own
+  schedule.** The scan and plan records live on the machine that made them
+  while the file list is shared across machines, so cleaning them up at the
+  moment of deletion could only ever tidy the one machine that ran it — and
+  never one that was switched off at the time. Each machine now checks its own
+  records against the shared list as part of its regular scan, so every machine
+  converges whether or not it was there.
+
 - **A decision about a producer is now turned into exactly one thing done to
   the process.** Two facts the scheduler cannot see decide most of it. A
   stopped encoder still holds its hardware codec session, so stopping is only

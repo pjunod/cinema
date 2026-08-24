@@ -182,6 +182,18 @@ pub struct Position {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WorkingSet {
     pub used_bytes: u64,
+    /// The node-wide budget. **Zero means not configured**, and therefore
+    /// never holds anything.
+    ///
+    /// This repo's idiom — `playback.vod_index_mins` reads 0 as off — and the
+    /// only safe reading here: taking a zero as "no bytes allowed" stops every
+    /// producer on the node the moment a setting is missing or misparsed.
+    ///
+    /// Carries one obligation into M3. When this is exposed through
+    /// `/api/v1/settings`, validation must refuse a parsed zero from an
+    /// operator who meant "no working set" and offer a small floor instead, so
+    /// the config error stays impossible rather than merely documented. The
+    /// two zeroes mean opposite things and only the caller knows which it got.
     pub budget_bytes: u64,
     /// Whether the producer is already stopped for this bound.
     ///

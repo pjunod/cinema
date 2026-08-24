@@ -723,7 +723,99 @@ fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
 /// segmenter already holds the init until this first sample arrives, so copy
 /// the authored units into hvcC without changing the encoded picture or Dolby
 /// Vision RPU data.
+/// Everything the two promotions copy into `hvcC`, captured away from the
+/// generation that will use it.
+///
+/// Both promotions read **the first video sample of the fragment they are
+/// handed**, which for the live path is the first fragment the session
+/// produced and is exactly right: a session with no plan has nothing else to
+/// go on, and the init it writes describes the media that follows it.
+///
+/// A VOD rendition cannot work that way. Its `init.mp4` is written once and
+/// then served for the life of the rendition, while its producer is
+/// repositioned all over the film — so an init promoted from whichever
+/// fragment a generation happened to land on is a different byte string per
+/// generation, and plan §2.2 refuses the second one. The two requirements are
+/// opposites: promotion wants the init to describe what follows, and §2.2
+/// wants it to be the same regardless of what follows.
+///
+/// Capturing the inputs once dissolves that. The indexer takes them from the
+/// film's opening clean fragment — film-level facts, and the index pipe emits
+/// byte-identical video samples to the production pipe, which M0 measured
+/// 28/28 — and every later generation promotes from the stored copy. Promotion
+/// becomes a pure function of facts that do not depend on where a producer
+/// started, so byte-identity holds by construction rather than by luck, and
+/// §2.2's check becomes an assertion that cannot fire spuriously.
+///
+/// The failure this prevents is not only variation. Mastering-display SEI need
+/// not appear on every GOP, so a generation landing on a fragment without it
+/// promotes *nothing* and produces an init missing boxes the stored one has —
+/// a refused generation whose media the stored init describes perfectly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromotionInputs {
+    /// HEVC VPS/SPS/PPS NAL units (types 32-34), in the order found.
+    pub parameter_sets: Vec<Vec<u8>>,
+    /// Prefix-SEI NAL units carrying HDR10 static metadata.
+    pub hdr10_sei: Vec<Vec<u8>>,
+}
+
+impl PromotionInputs {
+    /// What promotion would copy out of this fragment.
+    ///
+    /// Answers empty for every source promotion no-ops on, which is most of
+    /// them: a normal HEVC encode writes a populated `hvcC` and carries no
+    /// parameter sets in band.
+    pub fn from_fragment(fragment: &Fragment, init: &Init) -> PromotionInputs {
+        let Some(video) = init.video() else {
+            return PromotionInputs::default();
+        };
+        if video.codec != Some(VideoCodec::Hevc) || video.nal_length_size == 0 {
+            return PromotionInputs::default();
+        }
+        let Some(sample) = first_video_sample(fragment, video) else {
+            return PromotionInputs::default();
+        };
+        PromotionInputs {
+            parameter_sets: hevc_parameter_set_nals(sample, video.nal_length_size)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect(),
+            hdr10_sei: hdr10_prefix_sei_nals(sample, video.nal_length_size)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parameter_sets.is_empty() && self.hdr10_sei.is_empty()
+    }
+}
+
+/// Promote an init from captured inputs — the planned generation's path.
+///
+/// Answers whether anything changed. Applying this to a muxer init that is
+/// byte-identical across generations yields a served init that is
+/// byte-identical across generations, which is the whole point.
+pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
+    let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
+    let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
+    Ok(hevc || hdr10)
+}
+
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
+    let inputs = PromotionInputs::from_fragment(first, init);
+    promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)
+}
+
+/// The same surgery, from parameter sets captured somewhere else.
+///
+/// This is the form a planned generation uses. See [`PromotionInputs`] for why
+/// a repositioned generation must not read its own landing fragment.
+pub fn promote_hevc_parameter_sets_from(
+    init: &mut Init,
+    parameter_sets: &[Vec<u8>],
+) -> Result<bool, Fmp4Error> {
     let Some(video) = init.video() else {
         return Ok(false);
     };
@@ -731,10 +823,7 @@ pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<
         return Ok(false);
     }
 
-    let Some(sample) = first_video_sample(first, video) else {
-        return Ok(false);
-    };
-    let candidate_nals = hevc_parameter_set_nals(sample, video.nal_length_size);
+    let candidate_nals: Vec<&[u8]> = parameter_sets.iter().map(Vec::as_slice).collect();
     if candidate_nals.is_empty() {
         return Ok(false);
     }
@@ -852,6 +941,15 @@ fn length_prefixed_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
 /// without the metadata, real Dolby Vision sample entries, and already-rich
 /// `hvcC` records are no-ops.
 pub fn promote_hdr10_static_metadata(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
+    let inputs = PromotionInputs::from_fragment(first, init);
+    promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)
+}
+
+/// The same surgery, from prefix SEI captured somewhere else.
+pub fn promote_hdr10_static_metadata_from(
+    init: &mut Init,
+    hdr10_sei: &[Vec<u8>],
+) -> Result<bool, Fmp4Error> {
     let Some(video) = init.video() else {
         return Ok(false);
     };
@@ -862,10 +960,7 @@ pub fn promote_hdr10_static_metadata(init: &mut Init, first: &Fragment) -> Resul
         return Ok(false);
     }
 
-    let Some(sample) = first_video_sample(first, video) else {
-        return Ok(false);
-    };
-    let candidate_nals = hdr10_prefix_sei_nals(sample, video.nal_length_size);
+    let candidate_nals: Vec<&[u8]> = hdr10_sei.iter().map(Vec::as_slice).collect();
     if candidate_nals.is_empty() {
         return Ok(false);
     }
@@ -3104,6 +3199,47 @@ mod tests {
         }
     }
 
+    /// The Dexter WEB-DL shape: a valid 23-byte `hvcC` header with zero NAL
+    /// arrays, while VPS/SPS/PPS live only in the first sample. This is the
+    /// only shape promotion fires on, and no encoder in the corpus produces
+    /// it, so every test that needs it builds it.
+    fn minimal_hvcc_dv_init() -> Init {
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let video = init.video().expect("HEVC video").clone();
+        strip_hvcc_arrays(&mut init);
+        init.tracks
+            .iter_mut()
+            .find(|track| track.id == video.id)
+            .expect("video track")
+            .dolby_vision_config = true;
+        init
+    }
+
+    fn strip_hvcc_arrays(init: &mut Init) {
+        let location = locate_hvcc(&init.bytes)
+            .expect("locating hvcC")
+            .expect("hvcC");
+        let arrays_start = location.payload.start + 23;
+        let delta = location.payload.end - arrays_start;
+        init.bytes.drain(arrays_start..location.payload.end);
+        init.bytes[location.payload.start + 22] = 0;
+        for at in location.ancestors {
+            match at.header_len {
+                8 => {
+                    let size = be_u32(&init.bytes, at.start) as usize - delta;
+                    init.bytes[at.start..at.start + 4]
+                        .copy_from_slice(&(size as u32).to_be_bytes());
+                }
+                16 => {
+                    let size = be_u64(&init.bytes, at.start + 8) - delta as u64;
+                    init.bytes[at.start + 8..at.start + 16].copy_from_slice(&size.to_be_bytes());
+                }
+                _ => panic!("unexpected box header"),
+            }
+        }
+    }
+
     #[test]
     fn in_band_hevc_parameter_sets_fill_an_empty_dolby_vision_hvcc() {
         let feed = pipe("open-gop");
@@ -3714,6 +3850,156 @@ mod tests {
             .push(synthetic(1, 96_000, 1_000, 96, 4_000))
             .expect_err("a fragment that steps over two boundaries");
         assert!(error.to_string().contains("does not match the plan"));
+    }
+
+    // ---- canonical promotion (plan §2.2) ---------------------------------
+
+    #[test]
+    fn promoting_from_captured_inputs_does_not_depend_on_the_landing_fragment() {
+        // The whole mechanism, on the only init shape promotion fires on.
+        //
+        // Two generations of one rendition land on fragments whose in-band
+        // parameter sets differ — the case plan §2.2 could not survive. Under
+        // the old rule each promotes from its own landing fragment and the two
+        // served inits differ, so the second generation is refused for doing
+        // exactly what it was told to do. Under the ruling both promote from
+        // the inputs the indexer captured, and the bytes are the same.
+        let init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        // One byte different, which is all it takes.
+        let sps_later = [0x42, 0x01, 0x02];
+        let vcl = [0x26, 0x01, 0x80];
+
+        let opening = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps, &vcl]),
+        );
+        let mid_film = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps_later, &pps, &vcl]),
+        );
+
+        // The old rule: each generation reads its own landing fragment.
+        let mut own_opening = init.clone();
+        promote_hevc_parameter_sets(&mut own_opening, &opening).expect("promote");
+        let mut own_mid_film = init.clone();
+        promote_hevc_parameter_sets(&mut own_mid_film, &mid_film).expect("promote");
+        assert_ne!(
+            own_opening.bytes, own_mid_film.bytes,
+            "the collision this mechanism exists for must be real, or the \
+             test below proves nothing"
+        );
+
+        // The ruling: both promote from what the indexer captured once.
+        let canonical = PromotionInputs::from_fragment(&opening, &init);
+        let mut served_first = init.clone();
+        promote_from(&mut served_first, &canonical).expect("promote");
+        let mut served_later = init.clone();
+        promote_from(&mut served_later, &canonical).expect("promote");
+        assert_eq!(
+            served_first.bytes, served_later.bytes,
+            "a served init must not depend on where its generation started"
+        );
+        assert_eq!(
+            served_first.bytes, own_opening.bytes,
+            "and it must be the init the first generation would have written"
+        );
+    }
+
+    #[test]
+    fn a_generation_landing_where_promotion_finds_nothing_still_serves_the_same_init() {
+        // The failure that is not variation. Mastering-display SEI need not
+        // appear on every GOP, so a generation landing on a fragment without
+        // it promotes nothing and produces an init missing boxes the stored
+        // one has — a refused generation whose media the stored init describes
+        // perfectly. Captured inputs make the landing irrelevant.
+        let init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        let vcl = [0x26, 0x01, 0x80];
+
+        let opening = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps, &vcl]),
+        );
+        // Carries picture data and no parameter sets at all.
+        let bare = fragment_with_first_video_sample(video.id, length_prefixed_hevc_nals(&[&vcl]));
+
+        let mut promoted_from_bare = init.clone();
+        assert!(
+            !promote_hevc_parameter_sets(&mut promoted_from_bare, &bare).expect("promote"),
+            "a fragment with no parameter sets promotes nothing"
+        );
+
+        let canonical = PromotionInputs::from_fragment(&opening, &init);
+        let mut served = init.clone();
+        promote_from(&mut served, &canonical).expect("promote");
+        assert_ne!(
+            served.bytes, promoted_from_bare.bytes,
+            "which is exactly why the landing fragment must not decide"
+        );
+    }
+
+    #[test]
+    fn capturing_inputs_reproduces_what_promoting_from_the_fragment_would_do() {
+        // The canonical path must not be a second, subtly different
+        // implementation of promotion. Same fragment in, same init out.
+        let init = muxed_init();
+        let fragment = synthetic_muxed(0, 0);
+
+        let mut direct = init.clone();
+        let a = promote_hevc_parameter_sets(&mut direct, &fragment).expect("direct");
+        let b = promote_hdr10_static_metadata(&mut direct, &fragment).expect("direct");
+
+        let mut captured = init.clone();
+        let inputs = PromotionInputs::from_fragment(&fragment, &init);
+        let changed = promote_from(&mut captured, &inputs).expect("captured");
+
+        assert_eq!(direct.bytes, captured.bytes);
+        assert_eq!(changed, a || b);
+    }
+
+    #[test]
+    fn a_fragment_carrying_nothing_promotable_captures_nothing() {
+        // Most sources. A normal encode writes a populated hvcC and carries no
+        // parameter sets in band, so promotion is a no-op and there is nothing
+        // for the indexer to store.
+        let init = muxed_init();
+        let inputs = PromotionInputs::from_fragment(&synthetic_muxed(0, 0), &init);
+        assert!(inputs.is_empty());
+
+        // And promoting from nothing changes nothing, rather than erroring or
+        // producing a different init than the unpromoted one.
+        let mut served = init.clone();
+        assert!(!promote_from(&mut served, &inputs).expect("promote"));
+        assert_eq!(served.bytes, init.bytes);
+    }
+
+    #[test]
+    fn captured_inputs_survive_a_round_trip_through_storage() {
+        // They are persisted beside the index as JSON, and a generation
+        // promotes from the stored copy rather than a live one.
+        let init = muxed_init();
+        let inputs = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],
+            hdr10_sei: vec![vec![0x4e, 0x01, 0x89]],
+        };
+        let text = serde_json::to_string(&inputs).expect("encode");
+        let back: PromotionInputs = serde_json::from_str(&text).expect("decode");
+        assert_eq!(inputs, back);
+
+        // And the same bytes come out the far side of promotion either way.
+        let mut a = init.clone();
+        let mut b = init.clone();
+        let _ = promote_from(&mut a, &inputs);
+        let _ = promote_from(&mut b, &back);
+        assert_eq!(a.bytes, b.bytes);
     }
 
     #[test]

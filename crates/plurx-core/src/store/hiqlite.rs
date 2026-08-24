@@ -1636,6 +1636,32 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.telemetry.forget_fragment_index(file_id).await
     }
+
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
+        // The sidecar's own rows -- this node's, which is the whole point.
+        self.telemetry.vod_row_file_ids(limit).await
+    }
+
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+        // The replicated side. Every node agrees on this answer, which is why
+        // the sweep converges rather than each node guessing -- and why a node
+        // that was down for the delete still cleans up on its next tick.
+        //
+        // One query per id rather than an `IN` list: the caller's window is
+        // small and bounded, and building an n-placeholder statement here
+        // would be the only dynamic SQL in this file.
+        let mut alive = Vec::new();
+        for id in file_ids {
+            let rows: Vec<IdRow> = self
+                .client
+                .query_map("SELECT id FROM files WHERE id = $1", hiqlite::params!(*id))
+                .await?;
+            if !rows.is_empty() {
+                alive.push(*id);
+            }
+        }
+        Ok(alive)
+    }
 }
 
 #[async_trait]
@@ -2438,6 +2464,19 @@ impl From<&mut Row<'_>> for PingRow {
 
 struct CountRow {
     count: i64,
+}
+
+/// One `id` column. Existence is the whole answer the sweep needs, but the
+/// column still has to be decoded for the row to be built.
+struct IdRow {
+    #[allow(dead_code)]
+    id: i64,
+}
+
+impl<'a> From<&'a mut hiqlite::Row<'_>> for IdRow {
+    fn from(row: &'a mut hiqlite::Row<'_>) -> IdRow {
+        IdRow { id: row.get("id") }
+    }
 }
 
 struct PrometheusStoreRow {

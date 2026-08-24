@@ -2099,6 +2099,21 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
 
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+
+    /// File ids this node holds node-local VOD rows for — indexes, plans, or
+    /// both. Bounded, and ordered so a sweep makes progress across ticks.
+    ///
+    /// The sweep this feeds cannot be a hook inside `delete_files`. That is a
+    /// *replicated* write, while these rows live in each node's own sidecar
+    /// and share no transaction with it — so a hook there would only ever
+    /// clean the node that happened to run the delete, and would miss every
+    /// node that was down at the time. Asking each node what it holds and
+    /// checking those ids against the replicated `files` table converges
+    /// everywhere, on each node's own schedule.
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError>;
+
+    /// Which of `file_ids` still exist in the replicated `files` table.
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError>;
 }
 
 /// Node-local rendition plans.
