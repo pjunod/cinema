@@ -851,6 +851,18 @@ fn capability_unready_nodes_sql(capability: &str) -> String {
     )
 }
 
+/// Which copy of replicated state a read may answer from.
+///
+/// The roster route has to keep answering during quorum loss — that is when an
+/// operator most needs to see the cluster — so its reads are local. Anything
+/// that decides whether to commit a protocol change takes the quorum read, so
+/// a partitioned follower can never answer for the cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    Local,
+    Quorum,
+}
+
 /// Committed members that carry no vote, in a stable order.
 ///
 /// Deliberately derived from the committed configuration rather than from
@@ -3556,14 +3568,26 @@ impl MembershipManager {
     /// Read through the leader: an activation decision must never be made from
     /// a follower's unapplied copy of `cluster_meta`.
     pub async fn active_protocol_range(&self) -> Result<(i64, i64), MembershipError> {
+        self.protocol_range(Read::Quorum).await
+    }
+
+    async fn protocol_range(&self, read: Read) -> Result<(i64, i64), MembershipError> {
         let inner = self.replicated_inner()?;
-        let rows = inner
-            .client
-            .query_consistent_map::<ProtocolRangeRow, _>(
-                "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1",
-                params!(),
-            )
-            .await?;
+        const SQL: &str = "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1";
+        let rows = match read {
+            Read::Quorum => {
+                inner
+                    .client
+                    .query_consistent_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .await?
+            }
+            Read::Local => {
+                inner
+                    .client
+                    .query_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .await?
+            }
+        };
         let [row] = rows.as_slice() else {
             return Err(MembershipError::Internal(format!(
                 "cluster protocol range returned {} rows",
@@ -3578,17 +3602,31 @@ impl MembershipManager {
         &self,
         capability: &str,
     ) -> Result<Vec<String>, MembershipError> {
+        self.unready_nodes(capability, Read::Quorum).await
+    }
+
+    async fn unready_nodes(
+        &self,
+        capability: &str,
+        read: Read,
+    ) -> Result<Vec<String>, MembershipError> {
         let inner = self.replicated_inner()?;
-        Ok(inner
-            .client
-            .query_consistent_map::<NodeIdRow, _>(
-                capability_unready_nodes_sql(capability),
-                params!(),
-            )
-            .await?
-            .into_iter()
-            .map(|row| row.node_id)
-            .collect())
+        let sql = capability_unready_nodes_sql(capability);
+        let rows = match read {
+            Read::Quorum => {
+                inner
+                    .client
+                    .query_consistent_map::<NodeIdRow, _>(sql, params!())
+                    .await?
+            }
+            Read::Local => {
+                inner
+                    .client
+                    .query_map::<NodeIdRow, _>(sql, params!())
+                    .await?
+            }
+        };
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
 
     /// Members of the committed Raft configuration that do not carry a vote.
@@ -3619,8 +3657,23 @@ impl MembershipManager {
         }
     }
 
+    /// The operator-facing projection of the protocol range.
+    ///
+    /// This is a report, not a decision, and it is reached through the roster
+    /// route — which has to keep answering when the cluster has lost quorum,
+    /// precisely so an operator can see what the cluster looks like while it is
+    /// broken. It therefore reads the applied local state, exactly as the
+    /// roster beside it does. Every path that *acts* on the range takes the
+    /// quorum read instead.
     pub async fn protocol_status(&self) -> Result<ClusterProtocolStatus, MembershipError> {
-        let (active_min, active_max) = self.active_protocol_range().await?;
+        self.protocol_projection(Read::Local).await
+    }
+
+    async fn protocol_projection(
+        &self,
+        read: Read,
+    ) -> Result<ClusterProtocolStatus, MembershipError> {
+        let (active_min, active_max) = self.protocol_range(read).await?;
         Ok(ClusterProtocolStatus {
             active_min,
             active_max,
@@ -3629,7 +3682,7 @@ impl MembershipManager {
             learner_protocol_active: (active_min, active_max)
                 == (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX),
             learner_protocol_pending: self
-                .nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
+                .unready_nodes(LEARNER_PROTOCOL_CAPABILITY, read)
                 .await?,
         })
     }
@@ -3651,7 +3704,7 @@ impl MembershipManager {
         if (active_min, active_max) == (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX) {
             return Ok(ProtocolChange {
                 changed: false,
-                protocol: self.protocol_status().await?,
+                protocol: self.protocol_projection(Read::Quorum).await?,
             });
         }
         if (active_min, active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
@@ -3676,7 +3729,7 @@ impl MembershipManager {
                 params!(AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN),
             )
             .await?;
-        let protocol = self.protocol_status().await?;
+        let protocol = self.protocol_projection(Read::Quorum).await?;
         if changed == 0 && !protocol.learner_protocol_active {
             // The embedded predicate rejected the write after the read-only
             // pass admitted it: an older binary heartbeat landed in between.
@@ -3711,7 +3764,7 @@ impl MembershipManager {
         if (active_min, active_max) == (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
             return Ok(ProtocolChange {
                 changed: false,
-                protocol: self.protocol_status().await?,
+                protocol: self.protocol_projection(Read::Quorum).await?,
             });
         }
         if (active_min, active_max) != (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX) {
@@ -3743,7 +3796,7 @@ impl MembershipManager {
             .await?;
         Ok(ProtocolChange {
             changed: changed == 1,
-            protocol: self.protocol_status().await?,
+            protocol: self.protocol_projection(Read::Quorum).await?,
         })
     }
 
@@ -5545,6 +5598,63 @@ mod tests {
             .expect("stage a joiner that has not heartbeated");
         assert!(unready_nodes(&connection).is_empty());
         assert_eq!(activate(&connection), 1);
+    }
+
+    /// The roster route answers during quorum loss; that is when an operator
+    /// most needs it. Adding the protocol block to it must not turn it into a
+    /// leader read, and the paths that commit a change must not become local
+    /// ones. The separate-process membership scenario proves the first half
+    /// end to end; this pins both halves where they are decided.
+    #[test]
+    fn the_roster_projection_reads_locally_and_the_decisions_do_not() {
+        let source = include_str!("membership.rs");
+        let between = |from: &str, to: &str| {
+            source
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} is missing"))
+                .1
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
+                .0
+                .to_owned()
+        };
+
+        let status = between(
+            "pub async fn status(&self)",
+            "\n    pub async fn remove_voter",
+        );
+        assert!(
+            !status.contains("query_consistent_map"),
+            "the roster must stay readable without a quorum"
+        );
+        let projection = between(
+            "pub async fn protocol_status(&self)",
+            "\n    async fn protocol_projection",
+        );
+        assert!(
+            projection.contains("Read::Local") && !projection.contains("Read::Quorum"),
+            "the roster's protocol block must read the applied local state"
+        );
+
+        for decision in [
+            between(
+                "pub async fn activate_learner_protocol",
+                "\n    /// Widen the cluster back",
+            ),
+            between(
+                "pub async fn deactivate_learner_protocol",
+                "\n    /// Restore the durable job-owner fence",
+            ),
+        ] {
+            assert!(
+                !decision.contains("Read::Local"),
+                "a protocol change must never be decided from unapplied local state"
+            );
+            assert!(
+                decision.contains("active_protocol_range") && decision.contains("Read::Quorum"),
+                "a protocol change reads the range and its roster through the leader"
+            );
+        }
     }
 
     /// Deactivation must refuse before it can strand a member that only exists
