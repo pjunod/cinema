@@ -1168,6 +1168,30 @@ default, requires effective P5 placement readiness, and disabling placement
 also disables takeover. Direct-play range delivery remains stateless through a
 healthy ingress.
 
+Three implementation facts the contract above does not fix, recorded because
+they constrain anything built on top:
+
+- **The epoch sequence range is a million wide, and bounded.** "Starts
+  numbering at the replicated `media_sequence`" is a floor, not the value: the
+  successor starts at `max(media_sequence, owner_epoch × 1,000,000)`, so no
+  epoch can name a URI another epoch used even for segments the expired owner
+  produced after its last successful heartbeat. The ceiling is ffmpeg's — the
+  HLS muxer carries the segment number through a C `int`, so a floor above
+  `i32::MAX` is truncated into a negative filename that nothing will serve.
+  A takeover whose floor would cross that line is refused rather than
+  published.
+- **A generation-specific init object is `init-e{epoch}.mp4`.** Epoch 1 keeps
+  the historical `init.mp4`, so no existing URL changes meaning. Every
+  filename allowlist, exact-codec probe, and Apple tier rewrite recognises the
+  generation form, because a URI advertised in `EXT-X-MAP` that the serving
+  path will not return is worse than no failover at all.
+- **A session a successor may republish serves the typeless sliding shape from
+  its first response.** A replacement playlist renumbers and drops the
+  predecessor's prefix, which RFC 8216 §6.2.1 forbids an EVENT playlist from
+  doing. Changing shape at failover would break the invariant on exactly the
+  client the acceptance corpus ends with, so the shape is chosen once, at
+  creation, from whether takeover is enabled.
+
 ### 8.9 P8 — finish operations and native-client consumption
 
 Add load-balancer/keepalived/Kubernetes routing examples, cluster media status,

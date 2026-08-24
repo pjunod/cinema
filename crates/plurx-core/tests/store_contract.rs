@@ -998,7 +998,10 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-b".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
-                media_origin_ms: 0,
+                // Write-once at activation. Every generation's frontier is
+                // measured from this zero, so a claim that rewrote it would
+                // silently reinterpret every offset already published.
+                media_origin_ms: 90_000,
                 now_ms: 145,
                 lease_expires_at_ms: 345,
             })
@@ -1231,6 +1234,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .find(|route| route.session_id == session_b)
             .unwrap_or_else(|| panic!("{backend}: expired route must be offered for takeover"));
         assert_eq!(expired_b.owner_epoch, 1, "{backend}");
+        assert_eq!(expired_b.media_origin_ms, 90_000, "{backend}");
         let takeover = MediaSessionTakeover {
             incarnation_id: incarnation_b.to_owned(),
             expected_owner_node_id: "node-b".to_owned(),
@@ -1248,6 +1252,10 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(taken.owner_node_id, "node-c", "{backend}");
         assert_eq!(taken.owner_epoch, 2, "{backend}");
         assert_eq!(taken.discontinuity_sequence, 1, "{backend}");
+        assert_eq!(
+            taken.media_origin_ms, 90_000,
+            "{backend}: a claim moves ownership, never the timeline's zero"
+        );
         assert!(store
             .claim_media_session_takeover(&takeover)
             .await
@@ -1424,6 +1432,103 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: inspect pruned route: {error}"))
             .is_none());
+    })
+    .await;
+}
+
+/// Ending an incarnation that has just been taken over must act on the owner
+/// it really has.
+///
+/// The route read that drives the end is not inside the mutation, so a claim
+/// can commit between the two. If the dependent statements trust that stale
+/// snapshot, the end clamps a lease the dead node no longer holds, leaves the
+/// successor's shared-cache pin behind, and hands the caller a route naming a
+/// host that is gone — so the abort is sent into the void while the
+/// replacement encoder keeps running and keeps its admission slot.
+#[tokio::test]
+async fn ending_a_taken_over_session_acts_on_the_current_owner() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("takeover-end-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let fingerprint = "e".repeat(64);
+        let incarnation = "00000000-0000-4000-8000-00000000e001";
+        let session = "00000000-0000-4000-8000-00000000e002";
+
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                user_id: user.id,
+                playback_id: "takeover-end-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-old".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 4_000,
+                now_ms: 1_000,
+                lease_expires_at_ms: 2_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+
+        let taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation.to_owned(),
+                expected_owner_node_id: "node-old".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "node-new".to_owned(),
+                now_ms: 2_000,
+                lease_expires_at_ms: 14_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the survivor must win the claim"));
+        assert_eq!(taken.owner_node_id, "node-new", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+
+        let ended = store
+            .end_media_session(session, 3_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ending a live session returns its route"));
+        assert_eq!(
+            ended.owner_node_id, "node-new",
+            "{backend}: the end must name the owner it is actually stopping"
+        );
+        assert_eq!(ended.owner_epoch, 2, "{backend}");
+
+        let route = store
+            .media_session_route(session)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read ended route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ended row is retained"));
+        assert_eq!(route.state, "ended", "{backend}");
+        assert!(
+            route.lease_expires_at_ms <= 3_000,
+            "{backend}: an ended incarnation keeps no live lease"
+        );
+        assert!(
+            store
+                .owned_media_sessions("node-new", 3_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: successor inventory: {error}"))
+                .is_empty(),
+            "{backend}: the successor must not still own an ended incarnation"
+        );
+
+        // Idempotent, and still reporting the same owner.
+        let again = store
+            .end_media_session(session, 3_100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
+        assert_eq!(again.owner_node_id, "node-new", "{backend}");
     })
     .await;
 }

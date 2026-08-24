@@ -1854,6 +1854,15 @@ HLS discontinuity before publishing new segments. Direct-play range requests
 remain stateless and continue through any healthy ingress without this worker
 replacement path.
 
+Two operator-visible consequences of enabling it. Sessions created while the
+gate is on serve a playlist with no `EXT-X-PLAYLIST-TYPE`, because a
+replacement generation cannot satisfy EVENT semantics and the shape must not
+change under a player mid-film; this is the same shape the
+`hls.typeless_sliding` experiment serves. And a replacement's segment numbers
+jump — each ownership epoch owns a range a million wide, so a first failover
+begins at `seg2000000`. Both are expected, and neither indicates retention
+pressure or a renumbering bug.
+
 #### Optional verified shared cache
 
 P6 adds a direct shared-cache fast path without making it a cluster

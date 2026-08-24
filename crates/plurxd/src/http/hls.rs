@@ -2690,7 +2690,7 @@ async fn segment_local(
                 .into_response());
         }
     };
-    if crate::transcode::is_init_object(&seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -2746,7 +2746,7 @@ async fn segment_local(
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()));
     }
-    if crate::transcode::is_init_object(&seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
             session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,

@@ -2847,6 +2847,23 @@ pub(crate) struct SessionTakeoverStart {
     pub owner_epoch: i64,
 }
 
+/// Where this generation's session-relative zero sits on the durable
+/// incarnation timeline.
+///
+/// Measured from the origin the session *achieved*, never the one it asked
+/// for. A remux cannot start anywhere but a keyframe, so it begins at or
+/// before its requested start; recording the requested offset would report a
+/// frontier ahead of the media actually produced, and the next successor
+/// would resume past a gap no generation ever fills.
+fn takeover_frontier_offset(
+    takeover: Option<&SessionTakeoverStart>,
+    achieved_origin_seconds: f64,
+) -> i64 {
+    takeover.map_or(0, |takeover| {
+        ((achieved_origin_seconds * 1_000.0).round() as i64).saturating_sub(takeover.origin_base_ms)
+    })
+}
+
 /// The fMP4 init object a given ownership generation publishes.
 ///
 /// Epoch 1 — every session that has never been taken over — keeps the
@@ -7869,6 +7886,14 @@ impl TranscodeManager {
         let replacement = self
             .acquire_cluster_replacement_gate(gate_key, deadline)
             .await?;
+        // Same check the ordinary cluster start makes after its gate wait: a
+        // start with no budget left cannot finish, and spawning ffmpeg only to
+        // abandon it costs an admission slot for nothing.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the takeover start expired while waiting for this player's gate",
+            ));
+        }
         let info = self
             .create_session_inner(
                 req,
@@ -9263,9 +9288,7 @@ impl TranscodeManager {
 
         // A transcode seeks accurately, so the origin it achieves is the one
         // it was asked for and this offset is exactly the requested one.
-        let frontier_offset_ms = takeover.as_ref().map_or(0, |takeover| {
-            ((start_seconds * 1_000.0).round() as i64).saturating_sub(takeover.origin_base_ms)
-        });
+        let frontier_offset_ms = takeover_frontier_offset(takeover.as_ref(), start_seconds);
         let session = Arc::new(Session {
             dir: dir.clone(),
             child: Mutex::new(Some(child)),
@@ -9842,10 +9865,7 @@ impl TranscodeManager {
         // it was *asked* for would over-report this generation's frontier by
         // that pull-back, and the next successor would resume past media no
         // generation ever produced. Measure from the origin actually achieved.
-        let frontier_offset_ms = takeover.as_ref().map_or(0, |takeover| {
-            ((media_origin_seconds * 1_000.0).round() as i64)
-                .saturating_sub(takeover.origin_base_ms)
-        });
+        let frontier_offset_ms = takeover_frontier_offset(takeover.as_ref(), media_origin_seconds);
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -10121,7 +10141,10 @@ impl TranscodeManager {
         let sessions = self.sessions.lock().await;
         let session = sessions.get(session_id)?;
         Some(init_object_name(
-            session.takeover.as_ref().map(|takeover| takeover.owner_epoch),
+            session
+                .takeover
+                .as_ref()
+                .map(|takeover| takeover.owner_epoch),
         ))
     }
 
@@ -10570,12 +10593,17 @@ impl TranscodeManager {
             )
         });
         let matches = matches
-            || self.sessions.lock().await.get(session_id).is_some_and(|session| {
-                session
-                    .takeover
-                    .as_ref()
-                    .is_some_and(|takeover| takeover.incarnation_id == request_id)
-            });
+            || self
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .takeover
+                        .as_ref()
+                        .is_some_and(|takeover| takeover.incarnation_id == request_id)
+                });
         matches && self.stop_session(session_id, reason).await
     }
 
@@ -12863,6 +12891,115 @@ mod tests {
         assert!(!is_safe_segment("seg0/../../etc.ts"));
     }
 
+    /// A fenced successor's `EXT-X-MAP` names its own init object. If the
+    /// serving allowlist does not know that shape, the very first thing a
+    /// taken-over copy session advertises is unretrievable and no fMP4
+    /// segment can be decoded for the rest of the session.
+    #[test]
+    fn every_generation_init_object_is_routable() {
+        assert_eq!(init_object_name(None), "init.mp4");
+        assert_eq!(init_object_name(Some(1)), "init.mp4");
+        assert_eq!(init_object_name(Some(2)), "init-e2.mp4");
+        assert_eq!(init_object_name(Some(37)), "init-e37.mp4");
+
+        for epoch in [None, Some(1), Some(2), Some(37), Some(2_000)] {
+            let name = init_object_name(epoch);
+            assert!(is_init_object(&name), "{name} is an init object");
+            assert!(is_safe_segment(&name), "{name} must be servable");
+            assert_eq!(segment_index(&name), None, "{name} is not a segment index");
+        }
+
+        // The shape is still an allowlist, not a prefix match.
+        assert!(!is_init_object("init-e.mp4"));
+        assert!(!is_init_object("init-ex.mp4"));
+        assert!(!is_init_object("init-e2.mp4.bak"));
+        assert!(!is_init_object("init-e2/../../etc.mp4"));
+        assert!(!is_safe_segment("init-e.mp4"));
+        assert!(!is_safe_segment("init-ex.mp4"));
+    }
+
+    /// A remux begins at the keyframe at or before its requested start. The
+    /// offset the session records is therefore the origin it *achieved*: the
+    /// requested one would report a frontier ahead of the media produced, and
+    /// the next successor would resume past a gap nobody fills.
+    #[test]
+    fn takeover_offset_follows_the_origin_the_session_achieved() {
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 120_000,
+            frontier_offset_ms: 600_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+
+        // Asked to resume at 720.000s absolute — 600s past the origin.
+        assert_eq!(
+            takeover_frontier_offset(Some(&takeover), 720.0),
+            600_000,
+            "an accurate seek records exactly the requested offset"
+        );
+        // A 9s keyframe pull-back means this generation really starts at
+        // 711.000s, and its offset must say so.
+        assert_eq!(
+            takeover_frontier_offset(Some(&takeover), 711.0),
+            591_000,
+            "a remux records the origin it reached, not the one it asked for"
+        );
+        assert_eq!(takeover_frontier_offset(None, 711.0), 0);
+    }
+
+    /// DELETE and the peer abort prove ownership from the process-local
+    /// request record. A fenced successor has none — nothing on this node
+    /// requested it — so without the incarnation carried on the session both
+    /// return success while the replacement encoder keeps running.
+    #[tokio::test]
+    async fn delete_reaches_a_taken_over_session_with_no_request_record() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        let mut session = test_session(dir.path().join("session"));
+        session.takeover = Some(SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 0,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        });
+        mgr.sessions
+            .lock()
+            .await
+            .insert("capability-a".into(), Arc::new(session));
+
+        assert!(
+            !mgr.stop_session_for_request("incarnation-b", "capability-a", "test")
+                .await,
+            "a different incarnation may not stop this worker"
+        );
+        assert!(
+            mgr.sessions.lock().await.contains_key("capability-a"),
+            "the refused abort left the worker alone"
+        );
+        assert!(
+            mgr.stop_session_for_request("incarnation-a", "capability-a", "test")
+                .await,
+            "the incarnation that owns the successor stops it"
+        );
+        assert!(
+            !mgr.sessions.lock().await.contains_key("capability-a"),
+            "the worker is gone, not merely reported as gone"
+        );
+    }
+
     #[test]
     fn bitrate_ladder() {
         assert_eq!(bitrate_for_height(2160), 20_000);
@@ -14410,6 +14547,66 @@ mod tests {
         .expect("slid takeover playlist");
         assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
         assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
+    }
+
+    /// A successor numbers from its epoch floor, so "nothing has been pruned
+    /// yet" is that floor and not zero. Measuring from zero made the first
+    /// response of every takeover claim it had already begun sliding, and
+    /// pinned MEDIA-SEQUENCE to 0 while the segments on disk were numbered in
+    /// the millions.
+    #[test]
+    fn an_untouched_takeover_playlist_reports_its_epoch_floor() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:2000000\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg2000000.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg2000001.m4s\n";
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 8_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let served = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            None,
+            false,
+            Some(&takeover),
+        ))
+        .expect("takeover playlist");
+
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2000000"), "{served}");
+        assert!(
+            served.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"),
+            "{served}"
+        );
+        assert_eq!(served.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(served.contains("seg2000000.m4s"), "{served}");
+        assert!(served.contains("seg2000001.m4s"), "{served}");
+
+        // Every URI the successor advertises must be one the serving path
+        // will actually hand back.
+        for line in served.lines() {
+            let line = line.trim();
+            if let Some(uri) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
+                let uri = uri.trim_end_matches('"');
+                assert!(
+                    is_safe_segment(uri),
+                    "advertised init {uri} must be servable"
+                );
+            } else if !line.starts_with('#') && !line.is_empty() {
+                assert!(
+                    is_safe_segment(line),
+                    "advertised segment {line} must be servable"
+                );
+            }
+        }
     }
 
     // ---- the append-oriented index (review §2.6) ----------------------------

@@ -34,6 +34,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A node that dies mid-film no longer ends the stream.** When an HLS owner's
+  replicated lease expires, an eligible survivor reproduces that exact session
+  behind the same capability URL: the player's address does not change, so
+  nothing about the client has to know a failover happened. Owners publish
+  their produced and fetched frontiers in the two-second liveness batch they
+  already send, and a successor resumes one complete segment behind the last
+  frontier the client actually reached. Only a node that can prove it has the
+  same source revision and can build the same pipeline may claim, and the
+  replicated compare-and-swap admits exactly one of them — losers stop the
+  worker they had speculatively started. The replacement advertises one HLS
+  discontinuity, an init object named for its own ownership epoch so it can
+  never overwrite one a client cached, and segment numbers in a range no
+  earlier generation could have used, so no URL in the session's life ever
+  names two different sets of bytes. This is off by default and gated
+  separately from remote placement; `docs/OPERATIONS.md` covers enabling it
+  and the two shape changes it makes visible.
+
 - **A file's segmentation is now computed once and kept, instead of being
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
   from a fragment index — one row per fragment of the production-shaped
