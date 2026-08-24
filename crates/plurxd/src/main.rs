@@ -2551,18 +2551,31 @@ mod startup_tests {
             "{:#}",
             create_dirs(&data).expect_err("legacy scratch symlink must fail")
         );
-        assert!(error.contains("legacy transcode scratch"), "{error}");
+        // Assert on the guard's own words, not on the surrounding context
+        // string: "legacy transcode scratch" is in the `with_context` of every
+        // path through here, so it stays green with the guard deleted.
+        assert!(error.contains("is a symlink"), "{error}");
+        assert!(
+            error.contains("configure an explicit empty scratch root"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read(&unrelated).expect("external target survives"),
             b"must survive"
         );
     }
 
+    /// A failed scratch clear must fail startup and leave the bytes it could
+    /// not remove observable.
+    ///
+    /// The injection is deliberately not a permission change: `chmod 0500` is
+    /// ignored by uid 0, so as root the clear succeeded, this test failed, and
+    /// the bytes it claims to preserve were in fact deleted. The failure is
+    /// injected through plurx-core's test-only scratch failpoint instead, which
+    /// behaves identically for root and for an unprivileged uid.
     #[cfg(unix)]
     #[test]
     fn incomplete_scratch_cleanup_fails_startup_and_preserves_the_error_target() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let storage = StorageConfig {
             data_dir: tmp.path().join("durable"),
@@ -2573,25 +2586,51 @@ mod startup_tests {
         let first = create_dirs_for_storage(&storage).expect("claim scratch");
         let stale = first.transcode.join("stale-session.m4s");
         std::fs::write(&stale, b"partial").expect("stale segment");
-        let mut locked = std::fs::metadata(&first.transcode)
-            .expect("scratch metadata")
-            .permissions();
-        locked.set_mode(0o500);
-        std::fs::set_permissions(&first.transcode, locked).expect("lock scratch");
 
+        plurx_core::fs_secure::scratch_fault::arm_cleanup_failure();
         let result = create_dirs_for_storage(&storage);
+        plurx_core::fs_secure::scratch_fault::disarm();
 
-        let mut restored = std::fs::metadata(&first.transcode)
-            .expect("locked scratch metadata")
-            .permissions();
-        restored.set_mode(0o700);
-        std::fs::set_permissions(&first.transcode, restored).expect("restore scratch");
         let error = format!(
             "{:#}",
             result.expect_err("partial cleanup must fail startup")
         );
         assert!(
             error.contains("securely clearing transcode scratch"),
+            "{error}"
+        );
+        assert!(
+            stale.exists(),
+            "the failed cleanup target must remain observable"
+        );
+
+        // And with nothing injected the same boot clears it, so the assertion
+        // above is about the failure and not about a clear that never runs.
+        let second = create_dirs_for_storage(&storage).expect("uninjected boot clears scratch");
+        assert!(!second.transcode.join("stale-session.m4s").exists());
+    }
+
+    /// The same property for the legacy `<data_dir>/transcode` root, which
+    /// carries no ownership marker and takes a different cleanup call.
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_legacy_scratch_cleanup_fails_startup_and_preserves_its_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("durable");
+        let first = create_dirs(&data).expect("first boot");
+        let stale = first.transcode.join("stale-session.m4s");
+        std::fs::write(&stale, b"partial").expect("stale segment");
+
+        plurx_core::fs_secure::scratch_fault::arm_cleanup_failure();
+        let result = create_dirs(&data);
+        plurx_core::fs_secure::scratch_fault::disarm();
+
+        let error = format!(
+            "{:#}",
+            result.expect_err("a failed legacy clear must fail startup")
+        );
+        assert!(
+            error.contains("securely clearing legacy transcode scratch"),
             "{error}"
         );
         assert!(
@@ -2635,6 +2674,172 @@ mod startup_tests {
             std::fs::read(&marker).expect("authority survives scratch failure"),
             b"do-not-move"
         );
+    }
+
+    /// The ENOTDIR test above simulates a dead device with a regular file
+    /// where a directory belongs, which is a different error class from a full
+    /// one. This is the real thing: a filesystem that returns `ENOSPC` for
+    /// every new inode, which is what a full cache or scratch device does.
+    ///
+    /// Mounting a tmpfs needs privilege, so an unprivileged run says so and
+    /// skips rather than passing silently.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_cache_or_scratch_device_never_relocates_authoritative_bytes() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!(
+                "skipping a_full_cache_or_scratch_device_never_relocates_authoritative_bytes: \
+                 mounting the ENOSPC tmpfs needs root"
+            );
+            return;
+        }
+        struct Mounted(PathBuf);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount").arg(&self.0).status();
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let full = tmp.path().join("full-device");
+        std::fs::create_dir(&full).expect("mount point");
+        let status = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", "size=64k,nr_inodes=8", "tmpfs"])
+            .arg(&full)
+            .status()
+            .expect("run mount");
+        if !status.success() {
+            eprintln!(
+                "skipping a_full_cache_or_scratch_device_never_relocates_authoritative_bytes: \
+                 tmpfs mount unavailable in this environment ({status})"
+            );
+            return;
+        }
+        let _mounted = Mounted(full.clone());
+        // Exhaust the filesystem so every later create returns ENOSPC,
+        // whatever this kernel charges a directory.
+        let mut exhausted = false;
+        for index in 0..4_096 {
+            if let Err(error) = std::fs::create_dir(full.join(format!("filler-{index}"))) {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSPC),
+                    "the filler must stop on a full device, not on {error}"
+                );
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "the tmpfs never filled up");
+
+        let data = tmp.path().join("durable");
+        std::fs::create_dir_all(&data).expect("durable root");
+        let marker = data.join("authority.marker");
+        std::fs::write(&marker, b"do-not-move").expect("authority marker");
+
+        let cache_error = format!(
+            "{:#}",
+            create_dirs_for_storage(&StorageConfig {
+                data_dir: data.clone(),
+                cache_dir: full.join("cache"),
+                ..Default::default()
+            })
+            .expect_err("a full cache device must fail startup")
+        );
+        assert!(cache_error.contains("persistent cache"), "{cache_error}");
+        assert!(
+            cache_error.contains("No space left on device"),
+            "the operator must see why: {cache_error}"
+        );
+
+        let scratch_error = format!(
+            "{:#}",
+            create_dirs_for_storage(&StorageConfig {
+                data_dir: data.clone(),
+                transcode_dir: full.join("scratch"),
+                ..Default::default()
+            })
+            .expect_err("a full scratch device must fail startup")
+        );
+        assert!(scratch_error.contains("transcode"), "{scratch_error}");
+        assert!(
+            scratch_error.contains("No space left on device"),
+            "{scratch_error}"
+        );
+
+        assert_eq!(
+            std::fs::read(&marker).expect("authority survives a full device"),
+            b"do-not-move"
+        );
+        assert!(
+            !data.join("plurx.db").exists(),
+            "a failed cache or scratch layout must not create a database"
+        );
+        for entry in std::fs::read_dir(&full).expect("read the full device") {
+            let entry = entry.expect("full device entry");
+            assert!(
+                entry.file_name().to_string_lossy().starts_with("filler-"),
+                "nothing may be placed on the full device: {:?}",
+                entry.path()
+            );
+        }
+    }
+
+    /// `storage.cache_dir` switches the node-local caches wholesale and
+    /// migrates nothing. Completed offline packages live under the old root,
+    /// so silence there is bytes the operator cannot find and cannot reclaim.
+    #[test]
+    fn setting_cache_dir_warns_about_the_legacy_cache_it_strands() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("durable");
+        let legacy = create_dirs(&data).expect("legacy boot");
+        std::fs::write(legacy.artwork.join("poster.jpg"), b"kept").expect("legacy artwork");
+        let offline = legacy.cache.join("offline/ready/media");
+        std::fs::create_dir_all(&offline).expect("offline generation");
+        std::fs::write(offline.join("segment-00001.m4s"), b"kept").expect("offline segment");
+
+        let storage = StorageConfig {
+            data_dir: data.clone(),
+            cache_dir: tmp.path().join("persistent"),
+            ..Default::default()
+        };
+        let logs = captured(|| {
+            create_dirs_for_storage(&storage).expect("split boot");
+        });
+
+        let warned = logs.tail("warn", 16);
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        let message = format!("{warned:?}");
+        assert!(message.contains("still holds entries"), "{message}");
+        assert!(message.contains("offline"), "{message}");
+        assert!(
+            message.contains(&data.display().to_string()),
+            "both roots must be named: {message}"
+        );
+        assert!(
+            message.contains(&tmp.path().join("persistent").display().to_string()),
+            "both roots must be named: {message}"
+        );
+        // The legacy bytes are reported, never removed.
+        assert!(legacy.artwork.join("poster.jpg").exists());
+        assert!(offline.join("segment-00001.m4s").exists());
+    }
+
+    /// The warning is about strandedness, not about `cache_dir` being set: an
+    /// empty legacy cache has nothing to report.
+    #[test]
+    fn an_empty_legacy_cache_produces_no_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = StorageConfig {
+            data_dir: tmp.path().join("durable"),
+            cache_dir: tmp.path().join("persistent"),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&storage.data_dir).expect("durable root");
+        let logs = captured(|| {
+            create_dirs_for_storage(&storage).expect("split boot");
+        });
+        assert!(logs.tail("warn", 16).is_empty(), "{:?}", logs.tail("warn", 16));
     }
 
     #[test]

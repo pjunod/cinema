@@ -2347,12 +2347,64 @@ fn clear_scratch_capability(
     result
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ScratchHookPhase {
     AfterPendingCreate,
     AfterMarkerCreate,
     BeforeCleanup,
+    /// Test-only: the last point at which the scratch tree is still whole.
+    ///
+    /// A failure injected here is how the "a failed scratch clear fails
+    /// startup and leaves the bytes observable" property is proven. The
+    /// permission-based injection plurxd used before was silently a no-op for
+    /// uid 0, so as root that test asserted the opposite of what happened.
+    CleanupFault,
     AfterCleanup,
+}
+
+/// Test-only fault injection for the scratch cleanup sequence.
+///
+/// Compiled only under the `scratch-fault-injection` feature, which the daemon
+/// never enables — plurxd turns it on through its dev-dependency so the
+/// startup property can be proven from the crate that owns it, identically for
+/// root and for an unprivileged uid.
+#[cfg(feature = "scratch-fault-injection")]
+pub mod scratch_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make the next scratch clear on this thread fail before it removes
+    /// anything. Consumed by that clear, so it cannot leak into another test.
+    pub fn arm_cleanup_failure() {
+        ARMED.with(|armed| armed.set(true));
+    }
+
+    /// Disarm without running a clear.
+    pub fn disarm() {
+        ARMED.with(|armed| armed.set(false));
+    }
+
+    pub(super) fn take() -> bool {
+        ARMED.with(|armed| armed.replace(false))
+    }
+}
+
+/// Fire one hook phase, honouring any injected fault at that phase.
+fn scratch_hook(
+    hook: Option<&dyn Fn(ScratchHookPhase)>,
+    phase: ScratchHookPhase,
+) -> io::Result<()> {
+    #[cfg(feature = "scratch-fault-injection")]
+    if phase == ScratchHookPhase::CleanupFault && scratch_fault::take() {
+        return Err(io::Error::other("injected scratch cleanup failure"));
+    }
+    if let Some(hook) = hook {
+        hook(phase);
+    }
+    Ok(())
 }
 
 /// Create the pending ownership marker in an otherwise-empty scratch root and
@@ -2390,9 +2442,7 @@ fn create_pending_scratch_marker(
     file.write_all(expected_marker)?;
     file.sync_all()?;
     directory.sync_all()?;
-    if let Some(hook) = hook {
-        hook(ScratchHookPhase::AfterPendingCreate);
-    }
+    scratch_hook(hook, ScratchHookPhase::AfterPendingCreate)?;
     scratch_marker_identity(path, directory, pending, expected_marker)
 }
 
@@ -2539,9 +2589,7 @@ fn claim_and_clear_scratch_inner(
                     return Err(io::Error::last_os_error());
                 }
                 directory.sync_all()?;
-                if let Some(hook) = hook {
-                    hook(ScratchHookPhase::AfterMarkerCreate);
-                }
+                scratch_hook(hook, ScratchHookPhase::AfterMarkerCreate)?;
                 if !scratch_has_only_preserved(
                     &directory,
                     &[pending.as_c_str(), marker.as_c_str()],
@@ -2576,9 +2624,7 @@ fn claim_and_clear_scratch_inner(
             ));
         }
     }
-    if let Some(hook) = hook {
-        hook(ScratchHookPhase::BeforeCleanup);
-    }
+    scratch_hook(hook, ScratchHookPhase::BeforeCleanup)?;
     let mut counted = 0usize;
     // Reaching here means the root is one the daemon owns: the euid check at
     // the top passed, and an explicit root additionally carries a published
@@ -2604,6 +2650,7 @@ fn claim_and_clear_scratch_inner(
         );
         return Ok(());
     }
+    scratch_hook(hook, ScratchHookPhase::CleanupFault)?;
     let mut removed = 0usize;
     clear_scratch_capability(
         &directory,
@@ -2613,9 +2660,7 @@ fn claim_and_clear_scratch_inner(
         root_identity.device,
         protected,
     )?;
-    if let Some(hook) = hook {
-        hook(ScratchHookPhase::AfterCleanup);
-    }
+    scratch_hook(hook, ScratchHookPhase::AfterCleanup)?;
     let only_preserved = match marker.as_deref() {
         Some(marker) => scratch_has_only_preserved(&directory, &[marker])?,
         None => scratch_has_only_preserved(&directory, &[])?,
