@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["8917c8d0"]
+points = []
+checks = []
+reason = "This commit only records the landing-quantity and sidecar-prior corrections' current validation evidence in regressions.d; it does not change runtime behavior."
+ignore = true

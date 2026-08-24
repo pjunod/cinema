@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8327abfb"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`a_planned_generation_cuts_where_the_plan_said_not_where_the_policy_would` feeds a byte ceiling the policy would cross at a different fragment than the plan's boundaries name, asserts the policy really would have chosen otherwise, and then requires every published segment to carry the plan's index and to begin at the film time the plan named -- so a segmenter that went back to deciding for itself fails on the first boundary. `a_generation_that_steps_over_a_planned_boundary_is_refused` feeds a fragment spanning two boundaries and requires a typed refusal rather than an empty segment under an index a client will request. `a_planless_segmenter_still_decides_for_itself` holds the existing live-session path unchanged, so the plan-driven branch cannot be made to swallow callers that have no plan."

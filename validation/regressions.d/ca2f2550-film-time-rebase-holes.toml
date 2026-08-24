@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ca2f2550"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Each hole has a test that fails against the code it replaces. `a_leading_audio_only_fragment_is_rebased_with_the_anchor_not_left_behind` opens a repositioned generation with an audio-only fragment and requires it to move with the anchor that follows, which the pass-through model leaves on the source clock. `a_generation_that_would_start_before_the_film_is_refused_not_clamped` places video at film time zero on a stream whose audio starts earlier and requires a typed refusal naming the track, where `saturating_add_signed` silently moved audio away from picture. `a_repositioned_generation_needs_a_video_track_to_anchor_against` requires `resuming_at` to refuse an init with no video rather than return an unanchored segmenter. `a_resumed_generation_does_not_spend_the_first_segment_floor_again` covers the constructor's second documented job, which had no test. `two_generations_publish_one_continuous_film_timeline` now requires two overlapping segments, compares durations as well as start times, and requires the landing to be unique over the inclusive range -- so a wrong discard, a shorter fixture, or an ambiguous byte sequence fails rather than passing on a single tautological first segment."
