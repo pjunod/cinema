@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["84790cff"]
+points = ["cluster.membership"]
+checks = ["rust-gate"]
+reason = "The correction and its evidence landed together, in `crates/plurxd/src/http/images.rs` and `crates/plurxd/src/state.rs`. `dc592644` routed every leader-singleton decision through committed membership, and artwork reconciliation was caught by that net even though a learner's artwork is node-local bytes it alone can serve: the replicated filename is the cluster's fact, the file on disk is this node's, and a learner that never reconciles serves nothing. The tests added beside the fix assert both directions on the same manager — a node with no vote still reconciles its own artwork, and still takes no cluster-wide provider lease — so deleting either half of that distinction fails `cargo test -p plurxd`, which `rust-gate` runs."

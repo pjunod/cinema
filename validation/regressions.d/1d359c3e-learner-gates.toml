@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1d359c3e"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "Evidence-first: deleting the Trakt sync gate, the watched-outbox gate, the scheduler tick gate and `AdmittedRoleJobAuthority`'s negation all at once left 810 `plurxd` tests and the separate-process harness green, so four of the gates `dc592644` installed were unfalsifiable. Two of them are the whole mechanism — neither the Trakt sync nor the outbox drain takes a cluster lease anywhere, so the gate is the only thing between a learner and delivering the entire cluster's watched notifications alongside the voters. Each now has a test in `crates/plurxd/src/{trakt,watched,state}.rs` that fails when its gate is removed, and each also asserts the live half: the same manager, never restarted, starts working the moment its committed role changes. The commit also gates `claim_next_offline_package`, which pops a cluster-wide queue and binds work to a node this release cannot remove, while leaving the expiry sweep beside it ungated. `rust-gate` runs all of them; `cluster-auth` runs the same authority against a real admitted learner."

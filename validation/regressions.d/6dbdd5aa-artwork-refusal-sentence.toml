@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6dbdd5aa"]
+points = ["cluster.auth"]
+checks = ["rust-gate"]
+reason = "The refresh-metadata refusal had been corrected to drop two runs of fourteen literal spaces — continuation lines inside the string literal that had lost their trailing `\\` — but nothing asserted on it, which is how it shipped that way: `cargo fmt` keeps the source aligned and every test stays green whichever form the message is in. The literal is now `ARTWORK_PASS_UNAVAILABLE`, and `the_cluster_refusals_read_as_sentences` in `crates/plurxd/src/main.rs` asserts it contains no double space, paired with three assertions on the sentence itself so the check cannot be satisfied by deleting the message instead of fixing it. `rust-gate` runs it."

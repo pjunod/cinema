@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["33d1942a"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "database-upgrades"]
+reason = "The correction and its evidence landed together in `crates/plurx-core/src/cluster/migration.rs`. `local_cluster_role` folded a missing `membership.json` into the voter default, so a learner whose one durable statement of what it was admitted as had been deleted granted itself cluster-wide job authority — including the artwork lease the voters own. `a_clustered_directory_with_no_admitted_role_record_refuses_instead_of_defaulting` landed in the same commit and pins all three cases the function now distinguishes: no record and no activation marker is the honest single-node case and still answers voter, no record beside an activation marker is refused with the missing filename named, and a present record answers what it says. Restoring the fold makes that test fail under `cargo test -p plurx-core`, which both `rust-gate` and `database-upgrades` run."
