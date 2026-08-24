@@ -2441,10 +2441,31 @@ fn read_local_membership(data_dir: &Path) -> Result<Option<LocalMembership>, Sto
 /// the only durable statement of what the node is. It is a boot record, not
 /// live committed membership, so it may only be used to *refuse*: it can say
 /// "this host was admitted as a learner", never "this host is a voter now".
+///
+/// A missing record has to be read carefully, because the answer this hands
+/// back grants cluster-wide job authority. No record at all on a directory
+/// that was never clustered is the honest single-node case and answers voter.
+/// A missing record *beside an activation marker* is not: the directory is
+/// clustered and the one file that says what it was admitted as is gone, so
+/// answering "voter" would let a learner whose record was deleted grant itself
+/// the cluster's artwork lease. That is refused instead.
+#[cfg(feature = "hiqlite-store")]
 pub fn local_cluster_role(data_dir: &Path) -> Result<ClusterRole, StoreError> {
-    Ok(read_local_membership(data_dir)?
-        .map(|membership| membership.role)
-        .unwrap_or_default())
+    if let Some(membership) = read_local_membership(data_dir)? {
+        return Ok(membership.role);
+    }
+    let marker = data_dir
+        .join(HIQLITE_ACTIVE_DIRNAME)
+        .join(ACTIVATION_MARKER_FILENAME);
+    if path_exists(&marker)? {
+        return Err(StoreError::Identity(format!(
+            "{} records an activated cluster node but {} is missing, so this host's admitted \
+             role cannot be established; restore it before running cluster-wide work here",
+            marker.display(),
+            data_dir.join(LOCAL_MEMBERSHIP_FILENAME).display()
+        )));
+    }
+    Ok(ClusterRole::default())
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4496,6 +4517,65 @@ mod tests {
         assert!(
             read_local_membership(dir.path()).is_err(),
             "a v1 record must not be allowed to claim the learner role"
+        );
+    }
+
+    /// The admitted-role record grants cluster-wide job authority to a process
+    /// that cannot read committed membership, so a *missing* record must not
+    /// be read as "voter" on a clustered directory.
+    ///
+    /// Two different absences: a directory that was never clustered has no
+    /// record because there is nothing to record, and that is the ordinary
+    /// single-node server which owns every job. A directory with an activation
+    /// marker and no record is a cluster node whose one durable statement of
+    /// what it was admitted as has been lost — and if that node was a learner,
+    /// answering "voter" hands it `provider:artwork`.
+    #[test]
+    fn a_clustered_directory_with_no_admitted_role_record_refuses_instead_of_defaulting() {
+        let dir = tempfile::tempdir().expect("data dir");
+
+        // Never clustered: no marker, no record, and the single-node answer.
+        assert_eq!(
+            local_cluster_role(dir.path()).expect("an unclustered directory answers"),
+            ClusterRole::Voter
+        );
+
+        // Clustered, record present: the record answers.
+        let peer = ClusterPeer {
+            raft_id: 2,
+            raft_address: "localhost:32401".to_owned(),
+            api_address: "localhost:32402".to_owned(),
+        };
+        let learner = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            raft_id: 2,
+            local: peer.clone(),
+            bootstrap: vec![peer],
+            join_token_digest: None,
+            role: ClusterRole::Learner,
+        };
+        write_local_membership(dir.path(), &learner).expect("write a learner record");
+        let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("create the active directory");
+        std::fs::write(active.join(ACTIVATION_MARKER_FILENAME), b"{}")
+            .expect("write an activation marker");
+        assert_eq!(
+            local_cluster_role(dir.path()).expect("a clustered directory answers from its record"),
+            ClusterRole::Learner
+        );
+
+        // Clustered, record gone: refuse rather than grant.
+        std::fs::remove_file(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
+            .expect("delete the learner's record");
+        let refused = local_cluster_role(dir.path())
+            .err()
+            .expect("a clustered directory with no admitted-role record must refuse")
+            .to_string();
+        assert!(
+            refused.contains(LOCAL_MEMBERSHIP_FILENAME),
+            "the refusal must name the missing file: {refused}"
         );
     }
 
