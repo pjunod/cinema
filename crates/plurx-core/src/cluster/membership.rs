@@ -2818,6 +2818,24 @@ impl MembershipManager {
             .any(|raft_id| raft_id == inner.identity.raft_id))
     }
 
+    /// Whether committed membership still lists this node at all.
+    ///
+    /// Not a synonym for [`Self::local_node_is_committed_voter`]: a learner is
+    /// a committed member for as long as it is admitted and never becomes a
+    /// voter, and so is a joining voter that Raft has added but not yet
+    /// promoted out of its intermediate learner state. Anything that reads
+    /// "carries no vote" as "was removed" stops work a healthy member still
+    /// has to do.
+    pub async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let is_member = metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
+        Ok(is_member)
+    }
+
     /// Retire one completed or timed-out provider repair generation. The
     /// conditional increment is itself a Raft command submitted after the
     /// repair work, so an earlier command either lands before retirement or
