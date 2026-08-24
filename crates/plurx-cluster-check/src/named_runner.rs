@@ -22,7 +22,8 @@ use tokio::process::Command;
 
 use super::topology::{exercise_topology, unix_ms, ResourceIdentity, RunEvidence};
 use super::{
-    validate_topology_artifact, ClusterProcesses, ClusterTopologyArtifact, NodeLaunch, NodeProcess,
+    default_read_pool_size, validate_topology_artifact, ClusterProcesses, ClusterTopologyArtifact,
+    NodeLaunch, NodeProcess,
     NodeSpec, TopologyRun, TopologyWorkload, CONVERGENCE_TIMEOUT, TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
 };
 
@@ -66,6 +67,12 @@ pub struct NamedRunnerConfig {
     pub min_pairs: u64,
     pub max_pairs: u64,
     pub confidence_half_width_percent: f64,
+    /// Read-only pool each measured voter runs with. Defaulted so an existing
+    /// runner config keeps working, and carried into every node launch so a
+    /// 4/8/16 comparison measures three different pools rather than three runs
+    /// of Hiqlite's default.
+    #[serde(default = "default_read_pool_size")]
+    pub read_pool_size: usize,
     pub voters: Vec<NamedVoter>,
 }
 
@@ -405,6 +412,7 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
             root: PathBuf::from("/data"),
             nodes: specs.clone(),
             listen_addr: "0.0.0.0".to_owned(),
+            read_pool_size: config.read_pool_size,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
         };
@@ -1257,6 +1265,11 @@ fn validate_config(config: &NamedRunnerConfig) -> Result<()> {
     }
     if config.min_pairs != 3 || config.max_pairs != 7 {
         bail!("named runner must use the pre-registered 3--7 pair rule");
+    }
+    // The same range plurxd enforces for `cluster.read_pool_size`: a campaign
+    // must not measure a pool the daemon would refuse to start with.
+    if !(1..=16).contains(&config.read_pool_size) {
+        bail!("named runner read_pool_size must be between 1 and 16");
     }
     if (config.confidence_half_width_percent - 5.0).abs() > f64::EPSILON {
         bail!("named runner confidence half-width target must be 5 percent");

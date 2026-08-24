@@ -41,7 +41,9 @@ use plurx_core::cluster::membership::{
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
 };
-use plurx_core::cluster::migration::{ActivationMarker, HIQLITE_WAL_SIZE_BYTES};
+use plurx_core::cluster::migration::{
+    production_hiqlite_defaults_with_read_pool, ActivationMarker, HIQLITE_WAL_SIZE_BYTES,
+};
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, ItemKind, ItemSort, LibraryKind, MetadataPatch, NewItem,
@@ -2861,6 +2863,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
                     listen_addr: default_listen_addr(),
+                    read_pool_size: default_read_pool_size(),
                     emulate_old_watermark_handler: false,
                     emulate_p3a_watermark_handler: false,
                 },
@@ -4656,6 +4659,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         root,
         nodes: specs,
         listen_addr: default_listen_addr(),
+        read_pool_size: default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };
@@ -5449,6 +5453,12 @@ pub struct NodeLaunch {
     pub nodes: Vec<NodeSpec>,
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+    /// Local read-only connection pool, carried to the voter that is actually
+    /// measured. Without it every arm of a 4/8/16 comparison would launch on
+    /// the same default pool and the run would validate whichever number the
+    /// report happened to claim.
+    #[serde(default = "default_read_pool_size")]
+    pub read_pool_size: usize,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
     #[serde(default)]
@@ -5457,6 +5467,12 @@ pub struct NodeLaunch {
 
 fn default_listen_addr() -> String {
     LISTEN_ADDR.to_owned()
+}
+
+/// The daemon's own default, read from the daemon's own config type so the two
+/// cannot drift.
+pub fn default_read_pool_size() -> usize {
+    plurx_core::config::ClusterConfig::default().read_pool_size
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -6462,6 +6478,7 @@ impl ClusterProcesses {
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
                 listen_addr: default_listen_addr(),
+                read_pool_size: default_read_pool_size(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
                 emulate_p3a_watermark_handler: p3a_handler_node == Some(node_id),
             };
@@ -9992,10 +10009,10 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         secret_api: API_SECRET.to_owned(),
         tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
         tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
-        health_check_delay_secs: 0,
-        wal_size: HIQLITE_WAL_SIZE_BYTES,
-        raft_config: NodeConfig::default_raft_config(10_000),
-        ..Default::default()
+        // Raft, WAL, and read-pool settings come from the daemon's own builder
+        // rather than a second copy here, so a harness run cannot measure a
+        // configuration production never runs.
+        ..production_hiqlite_defaults_with_read_pool(launch.read_pool_size)
     })
 }
 
@@ -10352,23 +10369,57 @@ mod tests {
         assert!(snapshot_trigger_plan(Some(u64::MAX), u64::MAX).is_err());
     }
 
-    #[test]
-    fn voter_config_uses_the_production_wal_size() {
-        let root = tempfile::tempdir().expect("config test root");
-        let launch = NodeLaunch {
+    fn test_launch(root: &Path, read_pool_size: usize) -> NodeLaunch {
+        NodeLaunch {
             node_id: 1,
-            root: root.path().to_path_buf(),
+            root: root.to_path_buf(),
             nodes: vec![NodeSpec {
                 id: 1,
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
             listen_addr: default_listen_addr(),
+            read_pool_size,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
-        };
+        }
+    }
+
+    #[test]
+    fn voter_config_uses_the_production_wal_size() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch = test_launch(root.path(), default_read_pool_size());
 
         let config = node_config(&launch).expect("build the voter config");
         assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        assert_eq!(config.health_check_delay_secs, 0);
+    }
+
+    /// A read-pool comparison is only evidence if the voter under measurement
+    /// actually runs the pool the arm claims. The harness built its own
+    /// `NodeConfig` and never set this, so 4, 8, and 16 all measured Hiqlite's
+    /// default pool.
+    #[test]
+    fn the_launched_voter_runs_the_read_pool_it_was_given() {
+        let root = tempfile::tempdir().expect("config test root");
+        for size in [4, 8, 16] {
+            let config =
+                node_config(&test_launch(root.path(), size)).expect("build the voter config");
+            assert_eq!(config.read_pool_size, size);
+            // The extracted defaults must arrive with it, not be traded for it.
+            assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        }
+    }
+
+    /// A launch written by an older controller carries no pool size, and must
+    /// land on the daemon's default rather than Hiqlite's.
+    #[test]
+    fn a_launch_without_a_read_pool_size_uses_the_daemon_default() {
+        let launch: NodeLaunch = serde_json::from_str(
+            r#"{"node_id":1,"root":"/data","nodes":[{"id":1,"raft":"127.0.0.1:19001","api":"127.0.0.1:19002"}]}"#,
+        )
+        .expect("decode a legacy launch");
+        assert_eq!(launch.read_pool_size, default_read_pool_size());
+        assert_eq!(launch.read_pool_size, 4);
     }
 }

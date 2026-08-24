@@ -1731,17 +1731,29 @@ async fn start_voter(
     Ok((client, local))
 }
 
+/// The Raft, WAL, and read-pool settings every plurx voter runs with.
+///
+/// Public because the separate-process cluster harness launches voters of its
+/// own: with its own copy of this block, a measurement run could report
+/// numbers for a configuration production never runs — and a read-pool
+/// comparison in particular would silently measure Hiqlite's default pool at
+/// every size. One builder, one set of safety defaults.
 #[cfg(feature = "hiqlite-store")]
-fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
+pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> NodeConfig {
     NodeConfig {
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
-        read_pool_size: config.cluster.read_pool_size,
+        read_pool_size,
         // Snapshot, disaster-recovery retention, WAL sync, heartbeat, and
         // election settings remain Hiqlite's established production values.
         raft_config: NodeConfig::default_raft_config(10_000),
         ..Default::default()
     }
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
+    production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size)
 }
 
 /// Build Hiqlite's connection roster without treating durable Raft ids as
