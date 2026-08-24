@@ -34,6 +34,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A rendition's plan is now kept, because it is a decision and not a
+  measurement.** Segment boundaries are computed once and a producer cuts at
+  them for the life of the file, but nothing was storing them — the plan was
+  re-derived on demand, which sounds like a cheaper route to the same answer
+  and is not. The cut policy is built from tuning constants, and any release
+  may move one; nothing in the plan version or the source identity covers that,
+  so the file, the pipeline and the index can all be unchanged while the plan
+  comes out cut somewhere else. A client holding the old playlist then asks for
+  segment 412 and is handed a different part of the film. Plans are now stored
+  node-local beside the fragment index, packed at 32 bytes an entry, and the
+  first plan written under a rendition key is the plan: a second write is
+  refused rather than silently re-cutting a rendition somebody is mid-seek
+  against. SQLite migration v28 and sidecar v5, both additive, both held to one
+  behaviour across the two durable backends.
+
 - **A rendition's segment boundaries are now obeyed, not re-derived.** The
   segment plan has always been normative — a producer cuts *at* its boundaries
   and never re-decides them — but the segmenter had never seen a plan, so every
