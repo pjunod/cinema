@@ -508,6 +508,16 @@ pub async fn create(
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
+        // The source snapshot a later takeover must match exactly (§7.3). A
+        // row we could not read records an impossible snapshot rather than a
+        // plausible one, so takeover refuses instead of reproducing a session
+        // against a file it never verified.
+        source_size: source.as_ref().map_or(0, |f| f.size),
+        source_mtime: source.as_ref().map_or(0, |f| f.mtime),
+        // Recorded from the same decision the worker will make, so a later
+        // takeover can tell whether this URL was ever serving a shape a
+        // successor is allowed to continue.
+        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
@@ -824,6 +834,7 @@ pub async fn create(
         lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
         recipe_json,
         response_json,
+        media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
     // Once activation begins, this owned task also owns the cleanup guard.
@@ -1740,7 +1751,15 @@ async fn exact_hls_context(
     else {
         return context;
     };
-    let Ok(Some(opened)) = state.transcode.segment(session, "init.mp4").await else {
+    // A fenced successor names its init after its ownership epoch, so the
+    // object to probe comes from the session, not from a literal. Asking for
+    // the wrong name does not fail fast: `segment` waits for a segment that
+    // will never be produced, stalling every playlist request for the full
+    // production wait before falling back to the scanner's guessed tier.
+    let Some(init_object) = state.transcode.session_init_object(session).await else {
+        return context;
+    };
+    let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
         return context;
     };
     // Initialization segments are a few KiB. Bound malformed input so a
@@ -2675,7 +2694,7 @@ async fn segment_local(
                 .into_response());
         }
     };
-    if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -2731,7 +2750,7 @@ async fn segment_local(
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()));
     }
-    if seg == "init.mp4" && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
             session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,

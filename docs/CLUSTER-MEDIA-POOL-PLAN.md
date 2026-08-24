@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P6 delivered; P7 is next ·
+**Status:** P0–P7 delivered; P8 is next ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -1156,6 +1156,62 @@ URI with different bytes, and every newly advertised URI retrievable after the
 old disk disappears. An incapable survivor cannot claim; delete racing takeover
 leaves no replacement child; 80 concurrent sessions stay within the named Raft
 budget.
+
+**Delivered:** owner renewals now publish bounded monotone produced, fetched,
+and next-sequence frontiers. Expired active routes remain recoverable for one
+minute and eligible survivors start a bounded-overlap provisional worker before
+an exact owner/epoch/lease CAS advances the fence. The winner retains the
+stable public session bearer, starts at the next unused segment sequence, uses
+a generation-specific fMP4 map, and publishes exactly one HLS discontinuity;
+losers stop their provisional workers. The separately gated rollout is off by
+default, requires effective P5 placement readiness, and disabling placement
+also disables takeover. Direct-play range delivery remains stateless through a
+healthy ingress.
+
+**Not delivered, and not claimed:** the ten-second budget above. Detection
+cannot begin before the owner's lease expires, and P5 shipped
+`LEASE_TTL_MS = 12_000` / `LEASE_INTERVAL = 3 s` rather than the 6 s/2 s §4.4
+specifies. Abrupt owner loss is therefore observed 9–12 s later, before any
+takeover work starts; add the two-second contest tick and the eight-second
+takeover deadline and the floor is above ten seconds by construction. P7 does
+not retune those constants — they govern every fenced singleton, not just
+media sessions, and moving them belongs with a measurement rather than with
+this milestone. Closing the budget is P8's first item: either §4.4's values
+are adopted and measured, or §8.8's number is amended to the one the
+constants permit.
+
+Four implementation facts the contract above does not fix, recorded because
+they constrain anything built on top:
+
+- **The epoch sequence range is a million wide, and bounded.** "Starts
+  numbering at the replicated `media_sequence`" is a floor, not the value: the
+  successor starts at `max(media_sequence, owner_epoch × 1,000,000)`, so no
+  epoch can name a URI another epoch used even for segments the expired owner
+  produced after its last successful heartbeat. The ceiling is ffmpeg's — the
+  HLS muxer carries the segment number through a C `int`, so a floor above
+  `i32::MAX` is truncated into a negative filename that nothing will serve.
+  A takeover whose floor would cross that line is refused rather than
+  published.
+- **A generation-specific init object is `init-e{epoch}.mp4`.** Epoch 1 keeps
+  the historical `init.mp4`, so no existing URL changes meaning. Every
+  filename allowlist, exact-codec probe, and Apple tier rewrite recognises the
+  generation form, because a URI advertised in `EXT-X-MAP` that the serving
+  path will not return is worse than no failover at all.
+- **A session a successor may republish serves the typeless sliding shape from
+  its first response.** A replacement playlist renumbers and drops the
+  predecessor's prefix, which RFC 8216 §6.2.1 forbids an EVENT playlist from
+  doing. Changing shape at failover would break the invariant on exactly the
+  client the acceptance corpus ends with, so the shape is chosen once, at
+  creation, from whether takeover is enabled — and recorded on the recipe, so
+  a session that predates the switch being turned on is refused a takeover
+  rather than having its semantics changed underneath a running player.
+- **A successor overlaps one whole segment of its own shape, not a fixed
+  margin.** `fetched_through_ms` advances to a segment's end when the client
+  *requests* it, so an owner lost mid-response has published a frontier ahead
+  of what the viewer holds — by up to `COPY_SEGMENT_MAX_SECS` on a remux. The
+  overlap is that segment plus two seconds; the cost is media the viewer sees
+  twice across the discontinuity, which is the right side of the trade against
+  media nothing ever produces.
 
 ### 8.9 P8 — finish operations and native-client consumption
 

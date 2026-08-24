@@ -34,6 +34,28 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A node that dies mid-film no longer ends the stream.** When an HLS owner's
+  replicated lease expires, an eligible survivor reproduces that exact session
+  behind the same capability URL: the player's address does not change, so
+  nothing about the client has to know a failover happened. Owners publish
+  their produced and fetched frontiers in the two-second liveness batch they
+  already send, and a successor resumes one complete segment behind the last
+  frontier the client actually reached. Only a node that can prove it has the
+  same source revision and can build the same pipeline may claim, and the
+  replicated compare-and-swap admits exactly one of them — losers stop the
+  worker they had speculatively started. The replacement advertises one HLS
+  discontinuity, an init object named for its own ownership epoch so it can
+  never overwrite one a client cached, and segment numbers in a range no
+  earlier generation could have used, so no URL in the session's life ever
+  names two different sets of bytes. It resumes a whole segment behind the
+  frontier rather than a fixed margin, because that frontier records what the
+  client asked for and not what it received — the viewer sees a moment
+  twice rather than losing a moment nobody produced. Recovery takes fifteen to
+  twenty seconds, most of it waiting out the dead owner's lease. This is off
+  by default and gated separately from remote placement, it does not apply to
+  sessions that were already playing when it was switched on, and
+  `docs/OPERATIONS.md` covers enabling it and what it makes visible.
+
 - **A title's whole playlist can now be rendered before a byte of its media
   exists.** This is the artifact the rest of the work is for, and the
   difference between it and what the daemon serves today is the entire point: a

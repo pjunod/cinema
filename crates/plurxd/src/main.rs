@@ -883,6 +883,7 @@ fn spawn_background_loops(
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
+    tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be

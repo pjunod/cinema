@@ -2986,6 +2986,45 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["cluster_media_pool_enabled"], false);
         assert_eq!(body["cluster_media_pool_ready"], false);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("remote placement")),
+            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
 
         let leave_body = json!({ "node_id": "test-node" });
         let (status, _) = call(

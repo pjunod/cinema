@@ -1843,6 +1843,35 @@ when the client happened to reach its holder. Enablement is still explicit:
 voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
 separates enabled, rollout-ready, and effective-ready state.
 
+P7 can replace an expired HLS owner without changing the public session URL.
+Keep this second rollout gate off until P5 placement is healthy, then enable it
+with `PUT /api/v1/settings` and
+`{"cluster_session_takeover_enabled": true}`. Enabling is refused unless remote
+placement is enabled and every committed voter publishes the current media
+protocol; disabling always succeeds. A replacement resumes behind the last
+fetched frontier with bounded overlap, advances the owner epoch, and inserts an
+HLS discontinuity before publishing new segments. Direct-play range requests
+remain stateless and continue through any healthy ingress without this worker
+replacement path.
+
+Three operator-visible consequences of enabling it. Sessions created while the
+gate is on serve a playlist with no `EXT-X-PLAYLIST-TYPE`, because a
+replacement generation cannot satisfy EVENT semantics and the shape must not
+change under a player mid-film; this is the same shape the
+`hls.typeless_sliding` experiment serves. A replacement's segment numbers jump
+— each ownership epoch owns a range a million wide, so a first failover begins
+at `seg2000000`. And sessions that were already playing when the gate was
+turned on are **not** covered: they were created serving EVENT, so a takeover
+refuses them and those viewers restart exactly as they would have before. None
+of the three indicates retention pressure or a renumbering bug.
+
+Expect recovery on the order of **fifteen to twenty seconds**, not the ten the
+plan's acceptance names. Nothing contests a session until its lease expires,
+and the media-session lease is twelve seconds with a three-second renewal
+(`LEASE_TTL_MS`, `LEASE_INTERVAL`); the contest tick and the takeover deadline
+sit on top of that. Recovery is bounded and correct at these values, just not
+fast — closing the gap is tracked in `docs/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
+
 #### Optional verified shared cache
 
 P6 adds a direct shared-cache fast path without making it a cluster

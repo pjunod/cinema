@@ -1142,6 +1142,9 @@ pub struct SettingsDto {
     /// every committed voter publishes the current media protocol.
     pub cluster_media_pool_enabled: bool,
     pub cluster_media_pool_ready: bool,
+    /// Opt-in replacement of expired HLS owners. This remains independently
+    /// gated after remote placement is enabled so operators can stage rollout.
+    pub cluster_session_takeover_enabled: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -1305,6 +1308,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
     let cluster_media_pool_ready =
         cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
+    let cluster_session_takeover_enabled =
+        setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1332,6 +1337,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .is_some_and(|value| value.trim() == "1"),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
+        cluster_session_takeover_enabled,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -1398,6 +1404,9 @@ pub struct UpdateSettings {
     /// until every committed voter is freshly publishing this protocol;
     /// disabling always succeeds.
     pub cluster_media_pool_enabled: Option<bool>,
+    /// Replace an expired remote HLS owner while retaining the public session
+    /// id. Requires remote placement to remain enabled and rollout-ready.
+    pub cluster_session_takeover_enabled: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -1438,6 +1447,24 @@ pub async fn update_settings(
         return Err(ApiError::Conflict(
             "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
         ));
+    }
+    if req.cluster_session_takeover_enabled == Some(true) {
+        let media_pool_enabled = match req.cluster_media_pool_enabled {
+            Some(enabled) => enabled,
+            None => {
+                state
+                    .store
+                    .get_setting(keys::CLUSTER_MEDIA_POOL_ENABLED)
+                    .await?
+                    .as_deref()
+                    == Some("1")
+            }
+        };
+        if !media_pool_enabled || !state.media_pool.remote_rollout_ready().await {
+            return Err(ApiError::Conflict(
+                "cluster media session takeover requires remote placement to be enabled and every committed voter to publish the current media protocol".into(),
+            ));
+        }
     }
     match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => {}
@@ -1510,6 +1537,21 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::CLUSTER_MEDIA_POOL_ENABLED, if on { "1" } else { "0" })
+            .await?;
+        if !on {
+            state
+                .store
+                .put_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED, "0")
+                .await?;
+        }
+    }
+    if let Some(on) = req.cluster_session_takeover_enabled {
+        state
+            .store
+            .put_setting(
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                if on { "1" } else { "0" },
+            )
             .await?;
     }
     if let Some(mode) = &req.sub_mode {

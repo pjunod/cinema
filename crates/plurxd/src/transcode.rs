@@ -485,6 +485,12 @@ impl SegmentIndex {
         self.segs.last().map(|s| s.end_ms)
     }
 
+    fn next_media_sequence(&self) -> i64 {
+        self.segs
+            .last()
+            .map_or(0, |segment| segment.index.saturating_add(1).max(0))
+    }
+
     /// Where a given segment ends, for turning "the client fetched segment N"
     /// into a position on the media timeline.
     fn end_ms_of(&self, index: i64) -> Option<i64> {
@@ -696,9 +702,15 @@ fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
     typeless_sliding: bool,
+    takeover: Option<&SessionTakeoverStart>,
 ) -> Vec<u8> {
-    let first_retained = first_retained.filter(|index| *index > 0).unwrap_or(0);
-    if first_retained == 0 && !typeless_sliding {
+    // A successor's numbering starts at its epoch floor, not at zero, so the
+    // "nothing has been pruned yet" baseline is that floor.
+    let baseline = takeover.map_or(0, |takeover| takeover.media_sequence);
+    let first_retained = first_retained
+        .filter(|index| *index > baseline)
+        .unwrap_or(baseline);
+    if first_retained == 0 && !typeless_sliding && takeover.is_none() {
         return raw;
     }
     let Ok(text) = std::str::from_utf8(&raw) else {
@@ -744,6 +756,7 @@ fn served_live_playlist(
 
     let mut out = String::with_capacity(text.len());
     let mut wrote_media_sequence = false;
+    let mut wrote_discontinuity_sequence = false;
     let mut wrote_start = false;
     for line in &lines[..header_end] {
         let trimmed = line.trim();
@@ -756,6 +769,18 @@ fn served_live_playlist(
         if trimmed.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
             wrote_media_sequence = true;
+        } else if trimmed.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            if let Some(takeover) = takeover {
+                let includes_boundary = first_retained <= takeover.media_sequence;
+                let sequence = takeover
+                    .discontinuity_sequence
+                    .saturating_sub(i64::from(includes_boundary));
+                out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+                wrote_discontinuity_sequence = true;
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
         } else {
             out.push_str(line);
             out.push('\n');
@@ -763,6 +788,18 @@ fn served_live_playlist(
     }
     if !wrote_media_sequence {
         out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
+    }
+    if let Some(takeover) = takeover {
+        let includes_boundary = first_retained <= takeover.media_sequence;
+        if !wrote_discontinuity_sequence {
+            let sequence = takeover
+                .discontinuity_sequence
+                .saturating_sub(i64::from(includes_boundary));
+            out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+        }
+        if includes_boundary {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
     }
     if typeless_sliding && !wrote_start {
         out.push_str("#EXT-X-START:TIME-OFFSET=0\n");
@@ -1676,6 +1713,8 @@ struct Session {
     /// Snapshot of the EVENT-to-typeless experiment at session creation. A
     /// settings edit must never mutate one URL's playlist type mid-play.
     typeless_sliding: bool,
+    /// Fenced successor coordinates for URI and playlist continuity.
+    takeover: Option<SessionTakeoverStart>,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
     /// transition is evidence about the EVENT/sliding experiment.
@@ -1719,6 +1758,23 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// Where this generation's session-relative zero sits on the durable
+    /// incarnation timeline.
+    ///
+    /// Derived, never stored, and derived from `media_origin_seconds` — the
+    /// origin this session *achieved*. A remux cannot start anywhere but a
+    /// keyframe, so it begins at or before the position it was asked for;
+    /// recording the requested offset instead would report a frontier ahead
+    /// of the media actually produced, and the next successor would resume
+    /// past a span no generation ever fills. Because there is one field to
+    /// read, no construction site can pick the wrong one.
+    fn frontier_offset_ms(&self) -> i64 {
+        self.takeover.as_ref().map_or(0, |takeover| {
+            ((self.media_origin_seconds * 1_000.0).round() as i64)
+                .saturating_sub(takeover.origin_base_ms)
+        })
+    }
+
     /// Fail this session *and say why*, in one step.
     ///
     /// The pairing is the point: a bare `failed.store(true)` is how a cause
@@ -2774,6 +2830,61 @@ pub struct SessionInfo {
     /// after resume so a flapping session cannot look healthy merely because
     /// the activity poll landed between transitions.
     pub suspend_count: u64,
+}
+
+/// Monotone failover coordinates sampled for the owner's two-second liveness
+/// batch. This intentionally excludes activity-page locks and byte accounting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionFrontier {
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_sequence: i64,
+}
+
+/// Coordinates selected before an expired incarnation is reproduced locally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionTakeoverStart {
+    /// The durable incarnation this generation continues. Teardown keys off
+    /// the incarnation rather than the process-local request record, because
+    /// a successor is not created by any request on this node.
+    pub incarnation_id: String,
+    /// The replicated row's `media_origin_ms`: the fixed zero every
+    /// generation's frontier is measured from. The offset a session finally
+    /// records is the difference between the origin it *achieved* and this
+    /// base, so a copy session's keyframe pull-back cannot over-report
+    /// progress and strand media no generation ever produces.
+    pub origin_base_ms: i64,
+    /// Where this generation was asked to resume, relative to `origin_base_ms`.
+    pub frontier_offset_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub owner_epoch: i64,
+}
+
+/// The fMP4 init object a given ownership generation publishes.
+///
+/// Epoch 1 — every session that has never been taken over — keeps the
+/// historical `init.mp4`, so no existing URL changes meaning. A fenced
+/// successor names its own object: §7.3 forbids overwriting an init a client
+/// may already have cached, and requires every URI in a newly served playlist
+/// to stay retrievable once the old disk is gone.
+pub(crate) fn init_object_name(owner_epoch: Option<i64>) -> String {
+    match owner_epoch {
+        Some(epoch) if epoch > 1 => format!("init-e{epoch}.mp4"),
+        _ => "init.mp4".to_owned(),
+    }
+}
+
+/// True for the init object of any generation. Every filename allowlist,
+/// codec probe, and Apple tier rewrite compares through this, so a
+/// generation-specific init is never mistaken for an arbitrary file.
+pub(crate) fn is_init_object(name: &str) -> bool {
+    if name == "init.mp4" {
+        return true;
+    }
+    name.strip_prefix("init-e")
+        .and_then(|rest| rest.strip_suffix(".mp4"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Cheap identity used to choose the globally newest activity before walking
@@ -6445,6 +6556,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -7723,7 +7835,7 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None)
+        self.create_session_inner(req, user_name, &supersession_user, None, None)
             .await
     }
 
@@ -7748,7 +7860,44 @@ impl TranscodeManager {
             ));
         }
         let info = self
-            .create_session_inner(req, user_name, &supersession_user, Some(deadline))
+            .create_session_inner(req, user_name, &supersession_user, Some(deadline), None)
+            .await?;
+        Ok(ClusterSessionStart { info, replacement })
+    }
+
+    /// Start a provisional fenced-successor generation. The caller publishes
+    /// ownership only after this method has acquired capacity and produced a
+    /// live local worker; a losing CAS stops the provisional session.
+    pub(crate) async fn create_cluster_takeover_session(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        takeover: SessionTakeoverStart,
+    ) -> Result<ClusterSessionStart, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        // Same check the ordinary cluster start makes after its gate wait: a
+        // start with no budget left cannot finish, and spawning ffmpeg only to
+        // abandon it costs an admission slot for nothing.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the takeover start expired while waiting for this player's gate",
+            ));
+        }
+        let info = self
+            .create_session_inner(
+                req,
+                user_name,
+                &supersession_user,
+                Some(deadline),
+                Some(takeover),
+            )
             .await?;
         Ok(ClusterSessionStart { info, replacement })
     }
@@ -7800,6 +7949,7 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
     ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
@@ -7842,6 +7992,7 @@ impl TranscodeManager {
                     user_name,
                     supersession_user,
                     replacement_deadline,
+                    takeover,
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
@@ -7864,6 +8015,7 @@ impl TranscodeManager {
                     user_name,
                     supersession_user,
                     replacement_deadline,
+                    takeover,
                     &req.playback_id,
                     req.automatic,
                 )
@@ -8090,6 +8242,32 @@ impl TranscodeManager {
                 .unwrap_or(default),
             _ => default,
         }
+    }
+
+    /// Whether this session must serve the typeless sliding playlist shape.
+    ///
+    /// The standing answer is the `HLS_TYPELESS_SLIDING` experiment. Session
+    /// takeover adds a second, non-negotiable reason: a fenced successor
+    /// renumbers from its epoch floor and advertises none of the
+    /// predecessor's segments (§7.3), which is exactly what RFC 8216 §6.2.1
+    /// forbids an EVENT playlist from doing. A URL a successor may republish
+    /// therefore serves the stable shape from its *first* response instead of
+    /// changing shape under the client at failover.
+    /// The shape a cluster-published session will serve, asked before the
+    /// session exists so the recipe can record it. A successor may only
+    /// replace a session that was already serving this shape.
+    pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
+        self.stable_playlist_shape(true, false).await
+    }
+
+    async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
+        if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
+            return true;
+        }
+        cluster_published
+            && self
+                .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+                .await
     }
 
     /// A feature switch stored in the ordinary settings table. Only the
@@ -8766,6 +8944,7 @@ impl TranscodeManager {
             user_name,
             &supersession_user,
             None,
+            None,
             playback_id,
             false,
             false,
@@ -8895,6 +9074,7 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
@@ -8903,8 +9083,16 @@ impl TranscodeManager {
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
-            .await?;
+        //
+        // A takeover is a continuation of an existing incarnation, not a new
+        // player start, so it supersedes nothing. Reaping here would retire
+        // whatever this viewer and player id are already running on THIS
+        // node — including a session the client legitimately started here
+        // while the old owner's lease was still expiring.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -8946,7 +9134,7 @@ impl TranscodeManager {
         let (mut encoder, grade) = self
             .encoder_and_grade_for(&file, hdr10, target_height)
             .await?;
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -8957,22 +9145,27 @@ impl TranscodeManager {
             None,
             grade,
         );
-        if let Some(info) = self
-            .serve_cached(
-                &file,
-                &opts,
-                encoder,
-                &item_title,
-                SessionOwner {
-                    user_name,
-                    supersession_user,
-                    playback_id,
-                    automatic,
-                },
-            )
-            .await
-        {
-            return Ok(info);
+        if let Some(takeover) = takeover.as_ref() {
+            opts.start_number = takeover.media_sequence;
+        }
+        if takeover.is_none() {
+            if let Some(info) = self
+                .serve_cached(
+                    &file,
+                    &opts,
+                    encoder,
+                    &item_title,
+                    SessionOwner {
+                        user_name,
+                        supersession_user,
+                        playback_id,
+                        automatic,
+                    },
+                )
+                .await
+            {
+                return Ok(info);
+            }
         }
         // Can this ffmpeg build actually burn? Asked here — after the cache
         // lookup, which needs no ffmpeg at all, and before any slot, process
@@ -9033,7 +9226,7 @@ impl TranscodeManager {
         // patched. Same builder, so the two cannot describe different sessions.
         // The software permit's thread budget rides in the same rebuild: what
         // admission reserved is exactly what x264 is told to spend.
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -9044,8 +9237,13 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
+        if let Some(takeover) = takeover.as_ref() {
+            opts.start_number = takeover.media_sequence;
+        }
         let pacing = self.pacing(false).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let args = transcode::hls_args(&file, encoder, &opts, pacing, &dir.to_string_lossy());
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
@@ -9162,6 +9360,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9477,6 +9676,7 @@ impl TranscodeManager {
             user_name,
             &supersession_user,
             None,
+            None,
             playback_id,
             false,
         )
@@ -9494,13 +9694,17 @@ impl TranscodeManager {
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
-            .await?;
+        // A takeover continues an existing incarnation and supersedes nothing.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -9546,17 +9750,34 @@ impl TranscodeManager {
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
         let pacing = self.pacing(true).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let legacy_args = || {
-            transcode::hls_copy_args_with_dolby_vision(
-                &file,
-                start_seconds,
-                audio_index,
-                options.transcode_audio,
-                pacing,
-                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision),
-                &dir.to_string_lossy(),
-            )
+            let dolby_vision =
+                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision);
+            match takeover.as_ref() {
+                Some(takeover) => transcode::hls_copy_args_with_sequence(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    takeover.media_sequence,
+                    &init_object_name(Some(takeover.owner_epoch)),
+                    &dir.to_string_lossy(),
+                ),
+                None => transcode::hls_copy_args_with_dolby_vision(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    &dir.to_string_lossy(),
+                ),
+            }
         };
         let progress = Arc::new(Progress::new());
         let generation = progress.begin_attempt();
@@ -9568,7 +9789,7 @@ impl TranscodeManager {
         // leading picture at. If anything about that stream turns out to be
         // unreadable, the reader task respawns this same session on the
         // arguments below, so the worst case is exactly today's behaviour.
-        let segmenting = copyseg::supports(file.video_codec.as_deref());
+        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
         let (child, pipe_stdout) = if segmenting {
             let args = transcode::copy_pipe_args_with_dolby_vision(
                 &file,
@@ -9706,6 +9927,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9871,6 +10093,100 @@ impl TranscodeManager {
     /// Number of live transcode sessions (for /metrics).
     pub async fn active_sessions(&self) -> usize {
         self.sessions.lock().await.len()
+    }
+
+    /// Publish a provisional successor under the incarnation's stable bearer
+    /// capability after the replicated owner CAS succeeds.
+    pub(crate) async fn adopt_session_id(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+    ) -> bool {
+        if provisional_id == durable_session_id {
+            return self.sessions.lock().await.contains_key(durable_session_id);
+        }
+        let mut sessions = self.sessions.lock().await;
+        if sessions.contains_key(durable_session_id) {
+            return false;
+        }
+        let Some(session) = sessions.remove(provisional_id) else {
+            return false;
+        };
+        sessions.insert(durable_session_id.to_owned(), session);
+        drop(sessions);
+
+        let mut requests = self.requests.lock().expect("requests mutex");
+        for entry in requests.values_mut() {
+            if matches!(&entry.state, RequestState::Ready(id) if id == provisional_id) {
+                entry.state = RequestState::Ready(durable_session_id.to_owned());
+            }
+        }
+        true
+    }
+
+    /// The fMP4 init object this session actually publishes.
+    ///
+    /// Anything that opens the init by name — the exact-codec probe, the
+    /// Apple High-tier rewrite — must ask, because a fenced successor names
+    /// its init after its ownership epoch. `None` for an unknown session.
+    pub(crate) async fn session_init_object(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        Some(init_object_name(
+            session
+                .takeover
+                .as_ref()
+                .map(|takeover| takeover.owner_epoch),
+        ))
+    }
+
+    /// Snapshot only the monotone coordinates needed by the replicated owner
+    /// heartbeat. Session identities are cloned under the map lock; the
+    /// segment locks are then sampled without holding that global lock.
+    pub(crate) async fn session_frontiers(
+        &self,
+        session_ids: &[String],
+    ) -> HashMap<String, SessionFrontier> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    sessions
+                        .get(session_id)
+                        .cloned()
+                        .map(|session| (session_id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut frontiers = HashMap::with_capacity(selected.len());
+        for (session_id, session) in selected {
+            let (local_produced_through_ms, media_sequence) = {
+                let segments = session.segments.lock().await;
+                (
+                    segments.produced_playable_end_ms().unwrap_or(0).max(0),
+                    segments.next_media_sequence(),
+                )
+            };
+            let local_fetched_through_ms = session
+                .fetched_end_ms
+                .load(Relaxed)
+                .clamp(0, local_produced_through_ms);
+            let offset = session.frontier_offset_ms();
+            let produced_playable_through_ms = offset.saturating_add(local_produced_through_ms);
+            let fetched_through_ms = offset
+                .saturating_add(local_fetched_through_ms)
+                .min(produced_playable_through_ms);
+            frontiers.insert(
+                session_id,
+                SessionFrontier {
+                    produced_playable_through_ms,
+                    fetched_through_ms,
+                    media_sequence,
+                },
+            );
+        }
+        frontiers
     }
 
     /// Every live session, paired with how it is really delivering.
@@ -10243,8 +10559,18 @@ impl TranscodeManager {
         }
     }
 
-    /// Abort a remote start only when the worker's process-local idempotency
-    /// record proves that this exact internal incarnation created the session.
+    /// Abort a remote start only when this process can prove it owns the
+    /// worker behind that incarnation.
+    ///
+    /// The ordinary proof is the process-local idempotency record left by the
+    /// start request. A fenced successor has no such record — nothing on this
+    /// node requested it — so it carries the incarnation on the session
+    /// itself. Without the second proof DELETE and the peer abort endpoint are
+    /// permanent no-ops against every taken-over session: they return success
+    /// while the replacement encoder keeps running and keeps its admission
+    /// slot, and §7.2's "a delete racing takeover resolves to ended without a
+    /// replacement child remaining alive" holds only by the slower lease-loss
+    /// path.
     pub async fn stop_session_for_request(
         &self,
         request_id: &str,
@@ -10256,7 +10582,69 @@ impl TranscodeManager {
                 |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
             )
         });
+        let matches = matches
+            || self
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .takeover
+                        .as_ref()
+                        .is_some_and(|takeover| takeover.incarnation_id == request_id)
+                });
         matches && self.stop_session(session_id, reason).await
+    }
+
+    /// `stop_session` with a ceiling on how long teardown may take.
+    ///
+    /// Retirement takes the child-transition gate, kills the process, and
+    /// recursively deletes the scratch tree — all unbounded, and all of it
+    /// serialized behind a hardware-to-software replacement that may itself be
+    /// respawning ffmpeg. A takeover's cleanup runs inside a bounded fan-out,
+    /// so it fences the session (making it immediately unservable, which is
+    /// the part that must not wait) and leaves the slow half to the detached
+    /// reaper rather than occupying a fan-out slot indefinitely.
+    ///
+    /// `hold` is anything the caller must not release until teardown has
+    /// really finished — in practice the cluster replacement guard. Dropping
+    /// that guard while the child is still alive lets the next start for the
+    /// same player through, and since a takeover deliberately supersedes
+    /// nothing, the result is two encoders for one player.
+    pub(crate) async fn stop_session_until<T: Send + 'static>(
+        self: &Arc<Self>,
+        session_id: &str,
+        reason: &'static str,
+        deadline: tokio::time::Instant,
+        hold: T,
+    ) -> bool {
+        // Fencing is the half that must be immediate and cannot block: every
+        // serving path reads this monotone bit.
+        self.fence_sessions(std::slice::from_ref(&session_id.to_owned()))
+            .await;
+        // Teardown itself runs detached, never cancelled. Dropping a
+        // half-finished retirement would leave the manager entry gone with the
+        // encoder still running, which is strictly worse than waiting.
+        let manager = Arc::clone(self);
+        let owned_id = session_id.to_owned();
+        let teardown = tokio::spawn(async move {
+            let stopped = manager.stop_session(&owned_id, reason).await;
+            drop(hold);
+            stopped
+        });
+        match tokio::time::timeout_at(deadline, teardown).await {
+            Ok(Ok(stopped)) => stopped,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!(
+                    session = %session_log_id(session_id),
+                    reason,
+                    "session teardown outlived its deadline; fenced, teardown continues detached"
+                );
+                false
+            }
+        }
     }
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
@@ -10453,7 +10841,16 @@ impl TranscodeManager {
                         return Ok(bytes);
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
-                    if let Some(first_retained_index) = first_retained.filter(|index| *index > 0) {
+                    // A successor begins numbering at its epoch floor, so
+                    // "has anything been pruned" is measured from that floor
+                    // and a fresh takeover does not report itself as sliding.
+                    let slide_baseline = session
+                        .takeover
+                        .as_ref()
+                        .map_or(0, |takeover| takeover.media_sequence);
+                    if let Some(first_retained_index) =
+                        first_retained.filter(|index| *index > slide_baseline)
+                    {
                         if !session.first_slide_logged.swap(true, Relaxed) {
                             let now_unix = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -10490,6 +10887,7 @@ impl TranscodeManager {
                         bytes,
                         first_retained,
                         session.typeless_sliding,
+                        session.takeover.as_ref(),
                     ));
                 }
             }
@@ -11190,8 +11588,8 @@ impl TranscodeManager {
 
 /// Only `segNNNNN.ts` names are valid segment requests.
 fn is_safe_segment(name: &str) -> bool {
-    // fMP4 (copy-video) HLS: a single shared init segment.
-    if name == "init.mp4" {
+    // fMP4 (copy-video) HLS: one init object per ownership generation.
+    if is_init_object(name) {
         return true;
     }
     // `segNNNNN.ts` (transcode) or `segNNNNN.m4s` (copy fMP4).
@@ -11824,6 +12222,7 @@ fn test_session(dir: PathBuf) -> Session {
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
         typeless_sliding: false,
+        takeover: None,
         first_slide_logged: AtomicBool::new(false),
     }
 }
@@ -12490,6 +12889,122 @@ mod tests {
         assert!(!is_safe_segment("index.m3u8"));
         assert!(!is_safe_segment("other.mp4"));
         assert!(!is_safe_segment("seg0/../../etc.ts"));
+    }
+
+    /// A fenced successor's `EXT-X-MAP` names its own init object. If the
+    /// serving allowlist does not know that shape, the very first thing a
+    /// taken-over copy session advertises is unretrievable and no fMP4
+    /// segment can be decoded for the rest of the session.
+    #[test]
+    fn every_generation_init_object_is_routable() {
+        assert_eq!(init_object_name(None), "init.mp4");
+        assert_eq!(init_object_name(Some(1)), "init.mp4");
+        assert_eq!(init_object_name(Some(2)), "init-e2.mp4");
+        assert_eq!(init_object_name(Some(37)), "init-e37.mp4");
+
+        for epoch in [None, Some(1), Some(2), Some(37), Some(2_000)] {
+            let name = init_object_name(epoch);
+            assert!(is_init_object(&name), "{name} is an init object");
+            assert!(is_safe_segment(&name), "{name} must be servable");
+            assert_eq!(segment_index(&name), None, "{name} is not a segment index");
+        }
+
+        // The shape is still an allowlist, not a prefix match.
+        assert!(!is_init_object("init-e.mp4"));
+        assert!(!is_init_object("init-ex.mp4"));
+        assert!(!is_init_object("init-e2.mp4.bak"));
+        assert!(!is_init_object("init-e2/../../etc.mp4"));
+        assert!(!is_safe_segment("init-e.mp4"));
+        assert!(!is_safe_segment("init-ex.mp4"));
+    }
+
+    /// A remux begins at the keyframe at or before its requested start, so
+    /// the offset a session records must come from the origin it *achieved*.
+    /// Recording the requested one over-reports this generation's frontier by
+    /// the pull-back, and the next successor resumes past a span no
+    /// generation ever produced.
+    #[tokio::test]
+    async fn a_session_measures_its_offset_from_the_origin_it_reached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 120_000,
+            frontier_offset_ms: 600_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+
+        // Asked to resume at 720.000s absolute — 600s past the row's origin —
+        // and an accurate seek lands exactly there.
+        let mut exact = test_session(dir.path().join("exact"));
+        exact.takeover = Some(takeover.clone());
+        exact.media_origin_seconds = 720.0;
+        assert_eq!(exact.frontier_offset_ms(), 600_000);
+
+        // The same request on a remux whose nearest keyframe is 9s earlier.
+        let mut pulled_back = test_session(dir.path().join("pulled-back"));
+        pulled_back.takeover = Some(takeover);
+        pulled_back.media_origin_seconds = 711.0;
+        assert_eq!(
+            pulled_back.frontier_offset_ms(),
+            591_000,
+            "the offset follows the media this generation really starts at"
+        );
+
+        let ordinary = test_session(dir.path().join("ordinary"));
+        assert_eq!(ordinary.frontier_offset_ms(), 0);
+    }
+
+    /// DELETE and the peer abort prove ownership from the process-local
+    /// request record. A fenced successor has none — nothing on this node
+    /// requested it — so without the incarnation carried on the session both
+    /// return success while the replacement encoder keeps running.
+    #[tokio::test]
+    async fn delete_reaches_a_taken_over_session_with_no_request_record() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        let mut session = test_session(dir.path().join("session"));
+        session.takeover = Some(SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 0,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        });
+        mgr.sessions
+            .lock()
+            .await
+            .insert("capability-a".into(), Arc::new(session));
+
+        assert!(
+            !mgr.stop_session_for_request("incarnation-b", "capability-a", "test")
+                .await,
+            "a different incarnation may not stop this worker"
+        );
+        assert!(
+            mgr.sessions.lock().await.contains_key("capability-a"),
+            "the refused abort left the worker alone"
+        );
+        assert!(
+            mgr.stop_session_for_request("incarnation-a", "capability-a", "test")
+                .await,
+            "the incarnation that owns the successor stops it"
+        );
+        assert!(
+            !mgr.sessions.lock().await.contains_key("capability-a"),
+            "the worker is gone, not merely reported as gone"
+        );
     }
 
     #[test]
@@ -13916,7 +14431,7 @@ mod tests {
                    #EXT-X-ENDLIST\n";
 
         assert_eq!(
-            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false),
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false, None),
             raw.as_bytes(),
             "before pruning the client sees the writer's EVENT playlist unchanged"
         );
@@ -13925,6 +14440,7 @@ mod tests {
             raw.as_bytes().to_vec(),
             Some(2),
             false,
+            None,
         ))
         .expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2"), "{served}");
@@ -13956,11 +14472,20 @@ mod tests {
                    seg00001.m4s\n\
                    #EXTINF:4.000,\n\
                    seg00002.m4s\n";
-        let before =
-            String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(0), true))
-                .expect("before utf8");
-        let after = String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(2), true))
-            .expect("after utf8");
+        let before = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(0),
+            true,
+            None,
+        ))
+        .expect("before utf8");
+        let after = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(2),
+            true,
+            None,
+        ))
+        .expect("after utf8");
 
         for playlist in [&before, &after] {
             assert!(
@@ -13986,6 +14511,109 @@ mod tests {
         assert!(before.contains("seg00000.m4s"), "{before}");
         assert!(!after.contains("seg00000.m4s"), "{after}");
         assert!(after.contains("seg00002.m4s"), "{after}");
+    }
+
+    #[test]
+    fn takeover_playlist_declares_one_monotone_discontinuity() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:4\n\
+                   #EXT-X-PLAYLIST-TYPE:EVENT\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg00004.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg00005.m4s\n";
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 8_000,
+            media_sequence: 4,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let first = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(4),
+            false,
+            Some(&takeover),
+        ))
+        .expect("takeover playlist");
+        assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
+        assert!(first.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"), "{first}");
+        assert_eq!(first.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(first.contains("#EXT-X-MAP:URI=\"init-e2.mp4\""));
+
+        let slid = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(5),
+            false,
+            Some(&takeover),
+        ))
+        .expect("slid takeover playlist");
+        assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
+        assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
+    }
+
+    /// A successor numbers from its epoch floor, so "nothing has been pruned
+    /// yet" is that floor and not zero. Measuring from zero made the first
+    /// response of every takeover claim it had already begun sliding, and
+    /// pinned MEDIA-SEQUENCE to 0 while the segments on disk were numbered in
+    /// the millions.
+    #[test]
+    fn an_untouched_takeover_playlist_reports_its_epoch_floor() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:2000000\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg2000000.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg2000001.m4s\n";
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 8_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let served = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            None,
+            false,
+            Some(&takeover),
+        ))
+        .expect("takeover playlist");
+
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2000000"), "{served}");
+        assert!(
+            served.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"),
+            "{served}"
+        );
+        assert_eq!(served.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(served.contains("seg2000000.m4s"), "{served}");
+        assert!(served.contains("seg2000001.m4s"), "{served}");
+
+        // Every URI the successor advertises must be one the serving path
+        // will actually hand back.
+        for line in served.lines() {
+            let line = line.trim();
+            if let Some(uri) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
+                let uri = uri.trim_end_matches('"');
+                assert!(
+                    is_safe_segment(uri),
+                    "advertised init {uri} must be servable"
+                );
+            } else if !line.starts_with('#') && !line.is_empty() {
+                assert!(
+                    is_safe_segment(line),
+                    "advertised segment {line} must be servable"
+                );
+            }
+        }
     }
 
     // ---- the append-oriented index (review §2.6) ----------------------------
@@ -16134,6 +16762,7 @@ mod tests {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })
     }

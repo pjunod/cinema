@@ -70,13 +70,13 @@ use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
     CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
     Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
-    User, WatchRollup, WatchState,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
+    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
+    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
+    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -152,6 +152,9 @@ pub mod keys {
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.
     pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
+    /// Opt in to automatic expired-session takeover after the web/proxy
+    /// interruption corpus passes. Kept separate from new-session placement.
+    pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -2033,6 +2036,22 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
         lease_expires_at_ms: i64,
     ) -> Result<Vec<String>, StoreError>;
+
+    /// Read a bounded, oldest-first inventory of expired active routes that a
+    /// survivor may independently prove it can reproduce.
+    async fn expired_media_sessions(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+
+    /// Atomically transfer an exact expired owner epoch and its lease fence.
+    /// A racing survivor, delete, renewal, or maintenance pass makes the CAS
+    /// return `None` rather than publishing a second owner.
+    async fn claim_media_session_takeover(
+        &self,
+        takeover: &MediaSessionTakeover,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     async fn end_media_session(
         &self,
