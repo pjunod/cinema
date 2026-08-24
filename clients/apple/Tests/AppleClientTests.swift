@@ -174,6 +174,123 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(session.origin, "http://primary.local:32400")
     }
 
+    /// A candidate becomes a request authority the moment it is used, and a
+    /// direct-play failover carries the account token in its query string.
+    /// These rules must match the Android client's `Session.canonicalOrigin`
+    /// case for case; there is no shared implementation to lean on.
+    func testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate() {
+        XCTAssertEqual(Session.canonicalOrigin("HTTP://H.Local:32400"), "http://h.local:32400")
+        XCTAssertEqual(Session.canonicalOrigin("http://h.local:80"), "http://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("https://h.local:443/"), "https://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("http://[::1]:32400"), "http://[::1]:32400")
+
+        for refused in [
+            "ftp://h.local:32400",
+            "http://user:pass@h.local:32400",
+            "http://h.local:32400/api",
+            "http://h.local:32400/?a=b",
+            "http://h.local:32400#f",
+            "//h.local:32400",
+            "",
+        ] {
+            XCTAssertNil(Session.canonicalOrigin(refused), "must refuse \(refused)")
+        }
+    }
+
+    /// The path is concatenated onto another origin verbatim. An absolute URL
+    /// or the scheme-relative `//host/x` form would silently retarget the
+    /// request, so neither may produce a candidate.
+    func testOnlyAServerRelativePathIsRebound() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+
+        XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+    }
+
+    /// An `https` household must not be moved onto an `http` sibling: a
+    /// direct-play failover puts the account token in the query string, and a
+    /// downgraded candidate would put it on the wire in cleartext.
+    func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
+        let session = Session()
+        session.origin = "https://primary.local"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "https://node-c.local"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: true)?.absoluteString,
+            "https://node-c.local/x?token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: true))
+    }
+
+    /// A fresh stream starts at the head of the node list. Without the reset
+    /// one film's failover leaves the index advanced for every film after it
+    /// in the same process, and the next one has no node left to try.
+    func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "http://node-c.local:32400"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        session.resetMediaFailover()
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-c.local:32400/x"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: false))
+    }
+
+    /// Only a transport failure can be answered by another node. A terminal
+    /// answer — an ended session's 404, a refused credential — is the same on
+    /// every ingress.
+    func testOnlyATransportFailureMovesToAnotherNode() {
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: NSURLErrorDomain,
+            eventStatus: 503
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: NSURLErrorDomain,
+            eventStatus: 404
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorUserCancelledAuthentication),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+    }
+
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
         XCTAssertEqual(
             PlayerController.recoveryTransport(hasOfflineAsset: true),

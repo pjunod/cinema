@@ -17,8 +17,15 @@ backend plurx_ready_voters
     balance leastconn
     option httpchk GET /readyz
     http-check expect status 200
-    cookie PLURX_NODE insert indirect nocache httponly
-    default-server inter 10s fall 3 rise 2 slowstart 10s
+    # `secure` assumes TLS terminates in front of this; drop it only for a
+    # plaintext LAN deployment, and know that you are then handing every
+    # browser a plaintext cookie naming which node serves it.
+    cookie PLURX_NODE insert indirect nocache httponly secure attr SameSite=Lax
+    # Two seconds, not ten: this is how long new sessions keep being handed to
+    # a dead voter. `slowstart` still ramps a recovered one back gently.
+    default-server inter 2s fall 3 rise 2 slowstart 10s
+    # A viewer's stickiness must not outlive the node it points at.
+    option redispatch
     server plurx-a 192.0.2.11:32400 check cookie a
     server plurx-b 192.0.2.12:32400 check cookie b
     server plurx-c 192.0.2.13:32400 check cookie c

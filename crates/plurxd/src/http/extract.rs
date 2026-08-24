@@ -190,30 +190,6 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-/// The same check, allowed to answer "nobody".
-///
-/// For a route that is public but says *more* to a signed-in caller. A
-/// rejection is not an error here — the handler decides what an anonymous
-/// caller may see — but the credential is still validated exactly as it is
-/// for [`AuthUser`], so nothing gains access by presenting a bad one.
-impl axum::extract::OptionalFromRequestParts<AppState> for AuthUser {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Option<Self>, Self::Rejection> {
-        if token_from_parts(parts).is_none() {
-            return Ok(None);
-        }
-        Ok(
-            <AuthUser as FromRequestParts<AppState>>::from_request_parts(parts, state)
-                .await
-                .ok(),
-        )
-    }
-}
-
 impl FromRequestParts<AppState> for RawToken {
     type Rejection = ApiError;
 

@@ -103,6 +103,7 @@ pub fn router(state: AppState) -> Router {
         // exception: their single-use token is its own narrow credential.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         .route(
             "/cluster/media/offers",
@@ -2679,19 +2680,6 @@ mod tests {
         let (_, info) = call(&app, get("/api/v1/server", None)).await;
         assert_eq!(info["setup_required"], false);
 
-        // The cluster's ingress list is the one thing this public endpoint
-        // withholds: an anonymous prober may not enumerate the topology, and
-        // the field is present either way so a client can read it uniformly.
-        assert_eq!(
-            info["node_urls"].as_array().map(Vec::len),
-            Some(0),
-            "an anonymous caller never receives the node list: {info}"
-        );
-        let (_, signed_in) = call(&app, get("/api/v1/server", Some(&token))).await;
-        assert!(
-            signed_in["node_urls"].is_array(),
-            "a signed-in caller reads the same field: {signed_in}"
-        );
         let (status, _) = call(
             &app,
             post(
@@ -2933,6 +2921,62 @@ mod tests {
             "the status payload must not grow user, media, path, token, or membership data"
         );
         assert_eq!(body["users"], 1);
+    }
+
+    /// The ingress list is the cluster's topology. It is not admin-only —
+    /// every household member's player needs it to retry a stream through
+    /// another node — but it is not public either, and it must never appear
+    /// on the credential-free identity endpoint the clients use to probe an
+    /// unknown candidate.
+    #[tokio::test]
+    async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
+        let app = test_app();
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", None)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an anonymous prober may not enumerate the cluster"
+        );
+
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let (status, body) = call(&app, get("/api/v1/cluster/ingress", Some(&viewer))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an ordinary viewer's player needs this list: {body}"
+        );
+        assert!(body["node_urls"].is_array(), "{body}");
+
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // And it is not smuggled back onto the public identity endpoint,
+        // which both clients deliberately call without a credential.
+        let (_, info) = call(&app, get("/api/v1/server", None)).await;
+        assert!(
+            info.get("node_urls").is_none(),
+            "the identity probe must not carry the cluster's addresses: {info}"
+        );
     }
 
     #[tokio::test]

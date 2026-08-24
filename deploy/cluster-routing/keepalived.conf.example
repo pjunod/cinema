@@ -6,7 +6,11 @@ global_defs {
 
 vrrp_script check_plurx_ready {
     script "/usr/bin/curl --fail --silent --max-time 2 http://127.0.0.1:32400/readyz"
-    interval 10
+    # Two seconds between checks, not ten: the VIP is the last thing between a
+    # dead node and every viewer on it, and a 10s/fall-3 gate spends thirty
+    # seconds before the address moves — on top of the fifteen to twenty a
+    # session takeover already needs.
+    interval 2
     timeout 3
     fall 3
     rise 2
@@ -18,6 +22,10 @@ vrrp_instance PLURX_VIP {
     virtual_router_id 42
     priority 110
     advert_int 1
+    # A recovered voter must not take the address back. Preemption moves every
+    # in-flight stream for no availability reason, and `/readyz` says nothing
+    # about whether this node is the one currently producing them.
+    nopreempt
     unicast_src_ip 192.0.2.11
     unicast_peer {
         192.0.2.12

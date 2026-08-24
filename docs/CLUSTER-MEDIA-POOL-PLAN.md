@@ -1176,9 +1176,10 @@ takeover work starts; add the two-second contest tick and the eight-second
 takeover deadline and the floor is above ten seconds by construction. P7 does
 not retune those constants — they govern every fenced singleton, not just
 media sessions, and moving them belongs with a measurement rather than with
-this milestone. Closing the budget is P8's first item: either §4.4's values
-are adopted and measured, or §8.8's number is amended to the one the
-constants permit.
+this milestone, which is operations and client consumption rather than lease
+tuning. It is the one acceptance clause this plan leaves open: either §4.4's
+values are adopted and measured, or §8.8's number is amended to the one the
+constants permit. Nothing else in P0-P8 depends on which.
 
 Four implementation facts the contract above does not fix, recorded because
 they constrain anything built on top:
@@ -1225,15 +1226,30 @@ codec-compatibility fallback ladders.
 mode retains the same routes and no peer polling; an operator can explain every
 placement, proxy, queue, fence rejection, and takeover from Settings/metrics.
 
-**Delivered:** `/api/v1/server` publishes bounded reachable node-specific
-origins and Apple/Android retry the unchanged media path through those origins
-only for transport failures, without moving the account origin or consuming a
-codec/HDR fallback. Cluster media diagnostics expose placement/takeover policy,
-effective readiness, active local sessions, and per-node capacity snapshots;
-takeover outcome counters and duration histograms are exported to Prometheus.
-Concrete HAProxy, keepalived, and Kubernetes routing examples use `/readyz`,
-and the operations runbook defines sticky routing, one-voter drain/re-admit,
-permanent-leave separation, and the exact backup/restore boundary.
+**Delivered:** `GET /api/v1/cluster/ingress` publishes at most eight reachable
+node-specific origins to a signed-in caller. It is its own route rather than a
+field on `/api/v1/server` because that endpoint is what a client uses to
+identify a server it has not decided to trust — it is probed without a
+credential, and the cluster's topology is not something an anonymous prober
+should enumerate. Apple and Android retry the unchanged media path through
+those origins on an explicit transport-failure allowlist, without moving the
+account origin and without consuming a codec/HDR fallback; a candidate whose
+scheme is weaker than the session's own is refused, because the account
+credential travels with the retry. Cluster media diagnostics expose
+placement/takeover policy, effective readiness, active local sessions, and
+per-node capacity snapshots; takeover outcome counters and duration histograms
+are exported to Prometheus. Concrete HAProxy, keepalived, and Kubernetes
+routing examples use `/readyz`, and the operations runbook defines sticky
+routing, one-voter drain/re-admit, permanent-leave separation, and the exact
+backup/restore boundary.
+
+**Not delivered:** the acceptance sentence's Settings surface — the operator
+reads placement, takeover and fence outcomes from the admin
+`/api/v1/cluster/media` JSON and from `/metrics`, not from the web UI. The
+named physical-device corpus and the eighty-session Raft budget remain
+unmeasured here; both need hardware this milestone did not run on. And
+`local_active_sessions` counts transcode and remux sessions only, so it is a
+drain signal for those and not for direct play.
 
 ## 9. Failure behavior — degraded must remain correct
 

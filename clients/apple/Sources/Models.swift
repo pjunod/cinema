@@ -13,6 +13,9 @@ struct ServerInfo: Codable {
     var version: String?
     var build: String?
     var instanceId: String?
+}
+
+struct ClusterIngress: Codable {
     var nodeUrls: [String]?
 }
 

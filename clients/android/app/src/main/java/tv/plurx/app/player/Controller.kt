@@ -355,7 +355,12 @@ class Controller(
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
-            if (!mediaCompatibilityFailure && retryMediaOnNextNode(error)) return
+            // Only a transport failure can be answered by another node. A
+            // terminal answer — an ended session's 404, a refused
+            // credential — is the same on every ingress, and walking the list
+            // for one costs a full player prepare per node before the viewer
+            // sees the error they were always going to see.
+            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -1025,7 +1030,7 @@ class Controller(
      * media recipe, session capability, and compatibility flags do not move. */
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
         val path = activeMediaPath ?: return false
-        val next = Session.nextMediaFailoverUrl(path, authenticated = false) ?: return false
+        val next = Session.nextMediaFailoverUrl(path) ?: return false
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
             event = "playback_transport_failover",
@@ -1034,6 +1039,15 @@ class Controller(
             code = error.errorCode,
             detail = "delivery=$deliveryMode compatibility_ladder=false",
         )
+        // A progressive remux answers its achieved origin in a response
+        // header, and the tracker only accepts a response whose URI it is
+        // expecting. Re-arming it here is what keeps every position after a
+        // failover honest: without it the tracker keeps the dead node's URI,
+        // discards the successor's origin, and every reported position stays
+        // off by the successor's keyframe snap for the rest of the stream.
+        if (progressiveTransport) {
+            progressiveMediaOrigin.begin(next, realPosition())
+        }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
         player.prepare()
         player.playWhenReady = true
@@ -1041,9 +1055,23 @@ class Controller(
         return true
     }
 
+    /**
+     * The server-relative form of a delivery URL, or null when it does not
+     * belong to this server.
+     *
+     * The origin check is the security half: whatever comes back here is
+     * concatenated onto another node's origin and requested with the account
+     * bearer attached, so a URL pointing anywhere else must not be reduced to
+     * a path and replayed against the cluster.
+     */
     private fun relativeMediaPath(value: String): String? {
         val uri = Uri.parse(value)
-        if (uri.scheme.isNullOrEmpty()) return value.takeIf { it.startsWith('/') && !it.startsWith("//") }
+        if (uri.scheme.isNullOrEmpty()) {
+            return value.takeIf { it.startsWith('/') && !it.startsWith("//") }
+        }
+        val primary = Session.canonicalPrimaryOrigin() ?: return null
+        val authority = uri.authority?.let { "${uri.scheme}://$it" } ?: return null
+        if (Session.canonicalOrigin(authority) != primary) return null
         val path = uri.encodedPath?.takeIf { it.startsWith('/') } ?: return null
         return uri.encodedQuery?.let { "$path?$it" } ?: path
     }

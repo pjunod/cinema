@@ -119,9 +119,11 @@ const TAKEOVER_BUCKETS_MS: [u64; 7] = [100, 250, 500, 1_000, 2_500, 5_000, 10_00
 /// counts the wrong thing.
 const TAKEOVER_METHOD_COPY: usize = 0;
 const TAKEOVER_METHOD_TRANSCODE: usize = 1;
+const TAKEOVER_METHOD_UNKNOWN: usize = 2;
 const TAKEOVER_WON: usize = 0;
 const TAKEOVER_LOST: usize = 1;
 const TAKEOVER_SKIPPED: usize = 2;
+const TAKEOVER_FAILED: usize = 3;
 
 struct TakeoverMetrics {
     outcomes: [[AtomicU64; 4]; 3],
@@ -144,8 +146,8 @@ struct TakeoverMetricGuard {
 impl TakeoverMetricGuard {
     fn new() -> Self {
         Self {
-            method: 2,
-            outcome: 3,
+            method: TAKEOVER_METHOD_UNKNOWN,
+            outcome: TAKEOVER_FAILED,
             started: Instant::now(),
         }
     }
@@ -1247,6 +1249,10 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         || envelope.incarnation_id != route.incarnation_id
         || envelope.user_id != route.user_id
     {
+        // A route whose recipe no longer describes it is stale, not broken —
+        // this node declines it. Counting it as a failure pages an operator
+        // for ordinary rollout skew.
+        metric.outcome = TAKEOVER_SKIPPED;
         return Err("persisted takeover recipe no longer matches its route".to_owned());
     }
     metric.method = match envelope.request.kind {
@@ -1270,6 +1276,9 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover source is missing".to_owned())?;
     if !takeover_source_matches(&envelope, file.size, file.mtime) {
+        // The library was rescanned under the session. Refusing is the
+        // correct behaviour, so it is a skip and not a failure.
+        metric.outcome = TAKEOVER_SKIPPED;
         return Err("takeover source revision changed".to_owned());
     }
     let (frontier_offset_ms, restart_ms) = takeover_resume(&route, &envelope.request.kind);

@@ -18,13 +18,20 @@ final class Session: @unchecked Sendable {
     private var mediaFailoverIndex = 0
 
     /// Install the server-advertised alternatives for this exact instance.
-    /// Origins are validated again client-side because they become request
-    /// authorities; userinfo, paths, queries, and non-HTTP schemes are refused.
+    ///
+    /// Every candidate is validated again here because it becomes a request
+    /// authority. A candidate whose scheme is weaker than the one this session
+    /// is already using is refused: a direct-play failover carries the account
+    /// token in the query string, and an `http` sibling in an `https`
+    /// household would put it on the wire in cleartext.
     func configureNodeOrigins(_ peers: [String], primary: String) {
         let primary = Self.canonicalOrigin(primary)
+        let requiresTLS = primary?.hasPrefix("https://") ?? false
         var seen = Set<String>()
         let origins = peers.compactMap(Self.canonicalOrigin).filter { candidate in
-            candidate != primary && seen.insert(candidate).inserted
+            candidate != primary
+                && (!requiresTLS || candidate.hasPrefix("https://"))
+                && seen.insert(candidate).inserted
         }
         nodeLock.lock()
         mediaFailoverOrigins = origins
@@ -60,18 +67,44 @@ final class Session: @unchecked Sendable {
         return components?.url ?? base
     }
 
-    private static func canonicalOrigin(_ raw: String) -> String? {
-        guard var components = URLComponents(string: raw),
-              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
-              components.host != nil,
+    /// This session's own origin in the same canonical form the failover list
+    /// uses, so `https://h` and `https://h:443` do not read as two servers.
+    var canonicalPrimaryOrigin: String? { Self.canonicalOrigin(origin) }
+
+    /// Scheme and host lowercased, a default port removed, an IPv6 literal
+    /// re-bracketed — so two spellings of one address compare equal. Userinfo,
+    /// a path, a query, a fragment, an out-of-range port, or a non-HTTP scheme
+    /// make it unusable: this string becomes a request authority.
+    ///
+    /// `internal` rather than `private` so the tests can state the rules
+    /// directly; the Android client's `Session.canonicalOrigin` must agree
+    /// case for case, and there is no shared implementation to lean on.
+    static func canonicalOrigin(_ raw: String) -> String? {
+        guard let components = URLComponents(string: raw),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host?
+                  .lowercased()
+                  .trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
+              !host.isEmpty,
               components.user == nil,
               components.password == nil,
               components.query == nil,
               components.fragment == nil,
               components.path.isEmpty || components.path == "/"
         else { return nil }
-        components.path = ""
-        return components.string?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let defaultPort = scheme == "https" ? 443 : 80
+        var port = ""
+        if let explicit = components.port {
+            guard explicit > 0, explicit <= 65_535 else { return nil }
+            if explicit != defaultPort { port = ":\(explicit)" }
+        }
+        // Foundation has returned an IPv6 literal both with and without its
+        // brackets depending on OS version, so they are stripped above and
+        // put back exactly once here — an origin missing them is
+        // unparseable, and one with two sets is a different string.
+        let authority = host.contains(":") ? "[\(host)]" : host
+        return "\(scheme)://\(authority)\(port)"
     }
 
     /// Absolute URL for a server-relative path.

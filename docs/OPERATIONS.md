@@ -754,9 +754,18 @@ Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
 live in [`deploy/cluster-routing/`](../deploy/cluster-routing/). All three use
 `/readyz`, not `/healthz`, for new traffic. Configure each voter's
 `cluster.artwork_url` as its node-specific public base even when
-`cluster.join_url` names the shared VIP or proxy; `/api/v1/server` returns the
-other currently reachable node bases to native clients as bounded media-only
-failover candidates.
+`cluster.join_url` names the shared VIP or proxy; `GET /api/v1/cluster/ingress`
+returns the other currently reachable node bases to signed-in native clients as
+bounded media-only failover candidates.
+
+**Upgrade note.** Before this release `cluster.artwork_url` was read only by
+other nodes, fetching artwork from each other. It is now handed to every
+signed-in household client. If a voter's value names an address only the
+cluster can reach — a container name, a private interface, a management VLAN —
+change it to that node's real public base before enabling the media pool, or
+clients will spend a failover attempt on an address they cannot resolve. It is
+never given to an unauthenticated caller: `/api/v1/server`, which clients probe
+without a credential to identify an unknown server, does not carry it.
 
 Inspect the media plane directly on each backend before and during a rollout:
 
@@ -769,7 +778,10 @@ curl -fsS "$PLURX_NODE/api/v1/cluster/media" \
 For a rolling restart, remove one voter from new load-balancer traffic without
 removing it from Raft membership. Keep its existing connections draining and
 wait for `local_active_sessions` to reach zero, then restart that same node and
-data directory. Re-admit it only after `/readyz` succeeds and the media status
+data directory. Note what that counter is: **transcode and remux sessions on
+this node only.** A direct-play viewer holds no session, so a node serving
+nothing but direct play reports zero while a dozen people are watching — drain
+those by connection count at the load balancer, not by this number. Re-admit it only after `/readyz` succeeds and the media status
 shows the current protocol. Advance to the next voter only then. The permanent
 leave endpoint is not a rolling-drain command; it refuses an active media owner
 and permanently changes quorum membership.

@@ -15,6 +15,10 @@ data class Server(
     val name: String? = null,
     val version: String? = null,
     val instance_id: String? = null,
+)
+
+@Serializable
+data class ClusterIngress(
     val node_urls: List<String> = emptyList(),
 )
 

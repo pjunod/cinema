@@ -146,7 +146,6 @@ final class AppModel: ObservableObject {
         let a = PlurxAPI(origin: normalized)
         do {
             let info = try await a.serverInfo()
-            Session.shared.configureNodeOrigins(info.nodeUrls ?? [], primary: normalized)
             origin = normalized
             api = a
             serverName = info.name
@@ -177,6 +176,8 @@ final class AppModel: ObservableObject {
             settings.userId = resp.user.id
             phase = .ready
             discovery.stop()
+            // Now, not at connect: the ingress list is signed-in only.
+            await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
             authError = "Wrong username or password"
@@ -341,7 +342,6 @@ final class AppModel: ObservableObject {
         api = PlurxAPI(origin: recovered.origin)
         Session.shared.origin = recovered.origin
         Session.shared.token = token
-        Session.shared.configureNodeOrigins(recovered.nodeUrls, primary: recovered.origin)
         // The same server instance at a new address: a move, not a change of
         // identity, so this token stays with it. `matchesSavedServer` already
         // proved the instance id matches before we got here.
@@ -359,6 +359,7 @@ final class AppModel: ObservableObject {
             settings.userId = me.id
             phase = .ready
             discovery.stop()
+            await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
             Session.shared.token = nil
@@ -385,8 +386,7 @@ final class AppModel: ObservableObject {
             return RecoveredServer(
                 origin: candidateOrigin,
                 instanceId: info.instanceId,
-                name: info.name,
-                nodeUrls: info.nodeUrls ?? []
+                name: info.name
             )
         }
         return nil
@@ -396,7 +396,18 @@ final class AppModel: ObservableObject {
         guard let info = try? await requireAPI().serverInfo() else { return }
         if settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
-        Session.shared.configureNodeOrigins(info.nodeUrls ?? [], primary: origin)
+        await refreshClusterIngress()
+    }
+
+    /// Ask the server which other ingresses may serve this household's media.
+    ///
+    /// A single-node server answers with an empty list and nothing downstream
+    /// ever fires. A failure is not worth surfacing: the only consequence is
+    /// that a stream cannot be retried elsewhere, which is exactly where the
+    /// app was before this existed.
+    private func refreshClusterIngress() async {
+        guard let ingress = try? await requireAPI().clusterIngress() else { return }
+        Session.shared.configureNodeOrigins(ingress.nodeUrls ?? [], primary: origin)
     }
 
     private func showReconnectFailure() {
@@ -930,5 +941,4 @@ private struct RecoveredServer {
     let origin: String
     let instanceId: String?
     let name: String?
-    let nodeUrls: [String]
 }

@@ -202,10 +202,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             val recovered = rediscoverSavedServer(saved.instanceId, saved.origin)
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
-                                Session.configureNodeOrigins(
-                                    recovered.info.node_urls,
-                                    recovered.origin,
-                                )
                                 serverName = recovered.info.name
                                 settings.saveServerIdentity(
                                     recovered.origin,
@@ -312,6 +308,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 username = resp.user.username
                 settings.saveSession(origin, resp.token, resp.user.username, resp.user.id)
                 _phase.value = Phase.Ready
+                // Now, not at connect: the ingress list is signed-in only.
+                refreshClusterIngress()
                 loadHome()
                 resumeOfflineProfile()
                 syncOfflineProgress()
@@ -764,7 +762,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.origin = normalized
         val candidate = Net.api(normalized)
         val info = candidate.server()
-        Session.configureNodeOrigins(info.node_urls, normalized)
         origin = normalized
         api = candidate
         serverName = info.name
@@ -814,7 +811,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         settings.saveServerIdentity(origin, info.instance_id)
-        Session.configureNodeOrigins(info.node_urls, origin)
+        refreshClusterIngress()
+    }
+
+    /**
+     * Ask the server which other ingresses may serve this household's media.
+     *
+     * Signed-in only, and deliberately not part of `/server`: that endpoint is
+     * how an unknown candidate is identified before anyone has decided to
+     * trust it, so it is probed without a credential and must not carry the
+     * cluster's addresses. A single-node server answers with an empty list and
+     * everything below simply never fires.
+     */
+    private suspend fun refreshClusterIngress() {
+        val ingress = catchingUnlessCancelled { api().clusterIngress() }.getOrNull() ?: return
+        Session.configureNodeOrigins(ingress.node_urls, origin)
     }
 }
 
