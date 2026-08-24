@@ -476,3 +476,11 @@ source = "clients/apple/Sources/ReaderView.swift"
 source_anchor = "IDs are quoted deliberately"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "clients.media-failover-origin-validation"
+commits = ["f5fb37af"]
+source = "clients/apple/Sources/Session.swift"
+source_anchor = "static func canonicalOrigin("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate"
