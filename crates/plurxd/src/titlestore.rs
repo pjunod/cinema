@@ -200,6 +200,59 @@ impl Manifest {
         true
     }
 
+    /// Stop claiming one segment's bytes, whatever this rendition's state.
+    ///
+    /// Distinct from [`Manifest::evict`] and deliberately not subject to its
+    /// refusal. Eviction is a *choice* — give up bytes to make room — and an
+    /// admitted rendition may not make it, because admission is the promise
+    /// that every member is present. This is the report of a fact: the bytes
+    /// are already gone. Refusing here would leave the manifest claiming a
+    /// segment that is not on disk, and that claim is served as a cache hit
+    /// and 404s a viewer mid-film.
+    ///
+    /// An admitted rendition that loses a member is a real event and the
+    /// caller is expected to say so out loud; see
+    /// [`crate::renditiondir::RenditionDir::reconcile`], which is the only
+    /// thing that calls this.
+    pub fn forget(&mut self, index: u32) -> bool {
+        let Some(slot) = self.states.get_mut(index as usize) else {
+            return false;
+        };
+        if !slot.is_materialized() {
+            return false;
+        }
+        *slot = SegState::Planned;
+        // Admission is the claim that every member is present, and one just
+        // stopped being. Leaving the flag set is review finding B3 arriving by
+        // the back door: a directory with holes still published as a cache
+        // hit, this time because the repair path did not demote it. The
+        // reservation goes with it — space held against the completed-cache
+        // budget for a rendition that is no longer complete is space nothing
+        // will ever return.
+        self.admitted = false;
+        self.reserved = false;
+        true
+    }
+
+    /// Is there anything here an eviction sweep could actually take?
+    ///
+    /// Distinct from asking [`Manifest::eviction_candidates`] for a non-empty
+    /// answer, because the caller that needs this has a *blocked* reader and
+    /// no window list: `owed` names segments somebody is waiting on, and the
+    /// question is whether any materialized segment outside that set could be
+    /// given up. An admitted rendition answers `false` by rule — it never
+    /// gives a member up — which is exactly the stall worth reporting rather
+    /// than retrying.
+    pub fn has_evictable(&self, owed: &[u32]) -> bool {
+        if self.admitted {
+            return false;
+        }
+        self.states
+            .iter()
+            .enumerate()
+            .any(|(index, state)| state.is_materialized() && !owed.contains(&(index as u32)))
+    }
+
     /// May this rendition ever be published as a cache hit?
     pub fn admissible(&self, budgets: &Budgets) -> Result<(), Inadmissible> {
         if self.states.is_empty() {
@@ -379,6 +432,75 @@ mod tests {
         for index in 0..manifest.len() as u32 {
             manifest.materialize(index, 1_000, index as i64);
         }
+    }
+
+    #[test]
+    fn losing_a_member_demotes_an_admitted_rendition() {
+        // B3 by the back door. Admission is the claim that every member is
+        // present; leaving the flag set after one stops being publishes a
+        // directory with a hole as a cache hit, which is the exact failure the
+        // three facts exist to prevent.
+        let mut manifest = manifest(6, 100_000);
+        fill(&mut manifest);
+        let budgets = Budgets {
+            completed_cache_bytes: 1 << 40,
+            admission_share: 1.0,
+            ..budgets()
+        };
+        manifest.reserve(&budgets).expect("reserve");
+        manifest.complete(&budgets).expect("complete");
+        assert!(manifest.is_admitted());
+        assert!(manifest.is_reserved());
+
+        assert!(manifest.forget(1), "a materialized member is forgotten");
+        assert!(
+            !manifest.is_admitted(),
+            "a rendition missing a member is not a cache hit"
+        );
+        assert!(
+            !manifest.is_reserved(),
+            "space held for a rendition that is no longer complete is space \
+             nothing will ever return"
+        );
+        // And it can now be evicted from again, which an admitted rendition
+        // rightly refuses.
+        assert!(manifest.evict(0));
+    }
+
+    #[test]
+    fn an_admitted_rendition_offers_nothing_to_an_eviction_sweep() {
+        let mut manifest = manifest(6, 100_000);
+        fill(&mut manifest);
+        assert!(manifest.has_evictable(&[]), "before admission");
+        let budgets = Budgets {
+            completed_cache_bytes: 1 << 40,
+            admission_share: 1.0,
+            ..budgets()
+        };
+        manifest.reserve(&budgets).expect("reserve");
+        manifest.complete(&budgets).expect("complete");
+        assert!(
+            !manifest.has_evictable(&[]),
+            "an admitted rendition never gives a member up, so a sweep that \
+             kept asking would spin"
+        );
+    }
+
+    #[test]
+    fn nothing_materialized_is_nothing_to_evict() {
+        let manifest = manifest(40, 100_000);
+        assert!(!manifest.has_evictable(&[]));
+    }
+
+    #[test]
+    fn a_segment_somebody_is_waiting_on_is_not_a_candidate() {
+        let mut manifest = manifest(40, 100_000);
+        manifest.materialize(3, 1_000, 0);
+        assert!(manifest.has_evictable(&[]));
+        assert!(
+            !manifest.has_evictable(&[3]),
+            "the only materialized segment is the one that is owed"
+        );
     }
 
     #[test]
