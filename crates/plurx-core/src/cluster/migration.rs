@@ -4217,6 +4217,28 @@ mod tests {
             .await
             .expect("and so must this one");
 
+        // A learner's preflight against the same unactivated cluster is
+        // refused, and the refusal is not dressed as a database problem. It
+        // reached operators as `schema migration failed: learner_protocol_
+        // inactive: …`, which sent them to look at the schema when the answer
+        // was "run the activation command".
+        let learner_refusal = HiqliteAuthStore::preflight_role(
+            &client,
+            crate::store::ClusterCompatibility::CURRENT,
+            true,
+        )
+        .await
+        .expect_err("an unactivated cluster must refuse a learner's preflight")
+        .to_string();
+        assert!(
+            learner_refusal.contains("learner_protocol_inactive"),
+            "{learner_refusal}"
+        );
+        assert!(
+            !learner_refusal.contains("migration"),
+            "a protocol refusal must not arrive as a migration failure: {learner_refusal}"
+        );
+
         // The node's own heartbeat is the proof; nothing else writes it.
         let status = membership
             .protocol_status()
@@ -4579,6 +4601,11 @@ mod tests {
     /// marker and no record is a cluster node whose one durable statement of
     /// what it was admitted as has been lost — and if that node was a learner,
     /// answering "voter" hands it `provider:artwork`.
+    ///
+    /// Gated like everything it calls. Without this, `cargo test -p plurx-core
+    /// --lib` does not compile — the same default-feature blind spot that hid
+    /// `local_cluster_role`'s own missing gate, one layer up.
+    #[cfg(feature = "hiqlite-store")]
     #[test]
     fn a_clustered_directory_with_no_admitted_role_record_refuses_instead_of_defaulting() {
         let dir = tempfile::tempdir().expect("data dir");
@@ -4619,8 +4646,7 @@ mod tests {
         std::fs::remove_file(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
             .expect("delete the learner's record");
         let refused = local_cluster_role(dir.path())
-            .err()
-            .expect("a clustered directory with no admitted-role record must refuse")
+            .expect_err("a clustered directory with no admitted-role record must refuse")
             .to_string();
         assert!(
             refused.contains(LOCAL_MEMBERSHIP_FILENAME),
@@ -4799,6 +4825,36 @@ mod tests {
                 crate::store::AUTH_LEARNER_PROTOCOL
             ),
             "a refused deactivation must not move the range"
+        );
+
+        // 6b. And the removal endpoint an operator reaches for next says the
+        //     same thing. It used to answer "not found" for this node — a 404
+        //     for a row the roster is printing, which reads as "you typed the
+        //     wrong id" rather than "this release cannot remove it". The
+        //     refusal has to name the node and be its own code.
+        let refused_removal = coordinator
+            .remove_voter(&learner.identity.node_id)
+            .await
+            .expect_err("this release has no removal path for a member with no vote");
+        assert_eq!(
+            refused_removal.code(),
+            "cluster_non_voter_removal_unsupported",
+            "a learner the roster lists must not be reported as missing: {refused_removal}"
+        );
+        assert!(
+            refused_removal
+                .to_string()
+                .contains(&learner.identity.node_id),
+            "the refusal must name the node the operator asked about: {refused_removal}"
+        );
+        assert_eq!(
+            coordinator
+                .remove_voter("a-node-id-that-was-never-in-this-cluster")
+                .await
+                .expect_err("an unknown node is still not found")
+                .code(),
+            "cluster_node_not_found",
+            "and the genuine 404 must keep answering 404"
         );
 
         // 7. A learner never advances replicated schema. Rewind the marker

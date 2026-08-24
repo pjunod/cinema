@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CStr;
 use std::future::Future;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1207,6 +1208,51 @@ fn capability_ready_predicate(capability: &str) -> String {
 /// a learner that appears in the voter set was not admitted by this protocol
 /// and finalizing it would record a learner admission for a voting node.
 ///
+/// How many times a clustered process declined leader-singleton work because
+/// it could not read committed membership at all.
+///
+/// The fail-closed branch below is unreachable for a real daemon today —
+/// `metrics_db()` borrows a local watch channel and cannot fail — so it had
+/// only a `tracing::warn!` and no way to notice if that ever changed. A counter
+/// that stays at zero is the evidence that the branch is still unreachable;
+/// one that moves is a cluster declining its own scheduled work in silence.
+static CLUSTER_JOB_AUTHORITY_UNREADABLE: AtomicU64 = AtomicU64::new(0);
+
+/// Render the fail-closed job-authority counter for `/metrics`.
+///
+/// Fixed cardinality, reads one atomic, and stays at `0` on an unclustered
+/// process because the question is never asked there.
+#[must_use]
+pub fn prometheus_cluster_job_authority() -> String {
+    format!(
+        "# HELP plurx_cluster_job_authority_unreadable_total Times this node declined \
+         leader-singleton work because committed cluster membership could not be read.\n\
+         # TYPE plurx_cluster_job_authority_unreadable_total counter\n\
+         plurx_cluster_job_authority_unreadable_total {}\n",
+        CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed)
+    )
+}
+
+/// Turn "what does committed membership say" into "may this process run the
+/// cluster's singleton work", counting the answer nobody can otherwise see.
+///
+/// A named function for the same reason [`role_is_admitted`] is one: the arm
+/// that matters is not reachable from any fixture, so leaving it inline left it
+/// both untested and unobservable.
+fn decide_cluster_job_authority(committed_voter: Result<bool, MembershipError>) -> bool {
+    match committed_voter {
+        Ok(is_voter) => is_voter,
+        Err(error) => {
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                code = error.code(),
+                "cannot read committed cluster membership; declining leader-singleton work"
+            );
+            false
+        }
+    }
+}
+
 /// A named function because neither refusal is reachable from a one-voter
 /// replicated fixture — one needs a member that is not a voter, the other a
 /// voter holding a learner token — and both survived mutation while the
@@ -3163,16 +3209,7 @@ impl MembershipManager {
         if self.inner.is_none() {
             return true;
         }
-        match self.local_node_is_committed_voter().await {
-            Ok(is_voter) => is_voter,
-            Err(error) => {
-                tracing::warn!(
-                    code = error.code(),
-                    "cannot read committed cluster membership; declining leader-singleton work"
-                );
-                false
-            }
-        }
+        decide_cluster_job_authority(self.local_node_is_committed_voter().await)
     }
 
     pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
@@ -6844,10 +6881,12 @@ mod tests {
             PROTOCOL_CHANGE_ABSENCE_WINDOW_MS as u128,
             HEARTBEAT_INTERVAL.as_millis() * 12
         );
-        assert!(
-            PROTOCOL_CHANGE_ABSENCE_WINDOW_MS > NODE_REACHABLE_WINDOW_MS,
-            "a node that is merely unreachable must not block activation"
-        );
+        const {
+            assert!(
+                PROTOCOL_CHANGE_ABSENCE_WINDOW_MS > NODE_REACHABLE_WINDOW_MS,
+                "a node that is merely unreachable must not block activation"
+            );
+        }
     }
 
     /// An abandoned learner redemption must not block rollback forever.
@@ -6979,8 +7018,7 @@ mod tests {
         // And the surface is not merely degraded — it will not prepare.
         let refused = connection
             .prepare("SELECT raft_id, expires_at, state, node_id, role FROM cluster_join_tokens")
-            .err()
-            .expect("the token read must not prepare against a half-applied schema")
+            .expect_err("the token read must not prepare against a half-applied schema")
             .to_string();
         assert!(refused.contains("role"), "{refused}");
 
@@ -6995,6 +7033,41 @@ mod tests {
         connection
             .prepare("SELECT node_id, role FROM cluster_join_tokens")
             .expect("the join surface prepares once every column exists");
+    }
+
+    /// The fail-closed branch of the job-authority decision: refuse, and say
+    /// so somewhere a machine can read.
+    ///
+    /// `metrics_db()` borrows a local watch channel and cannot fail, so no real
+    /// daemon reaches this arm today and no fixture can force it. That is the
+    /// reason it needs both a named function and a counter rather than only a
+    /// log line: a counter at zero is the standing evidence that the arm is
+    /// still unreachable, and one that moves is a node quietly declining the
+    /// cluster's scheduled work.
+    #[test]
+    fn unreadable_membership_declines_cluster_work_and_is_counted() {
+        let before = CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed);
+        assert!(
+            decide_cluster_job_authority(Ok(true)),
+            "a committed voter runs the cluster's singleton work"
+        );
+        assert!(!decide_cluster_job_authority(Ok(false)));
+        assert_eq!(
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed),
+            before,
+            "an answered question is not an unreadable one"
+        );
+
+        assert!(
+            !decide_cluster_job_authority(Err(MembershipError::Unavailable)),
+            "membership that cannot be read must fail closed"
+        );
+        assert_eq!(
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed),
+            before + 1
+        );
+        assert!(prometheus_cluster_job_authority()
+            .contains("plurx_cluster_job_authority_unreadable_total "));
     }
 
     /// `finalize`'s role assertion, in every state committed membership can
@@ -7056,7 +7129,7 @@ mod tests {
     /// activation, deactivation, and the status projection at it.
     #[test]
     fn the_learner_operations_name_the_learner_protocol_not_the_newest_one() {
-        let source = include_str!("membership.rs");
+        let source = production_source();
         let between = |from: &str, to: &str| {
             source
                 .split_once(from)
@@ -7216,7 +7289,7 @@ mod tests {
     /// belongs on all three or the transaction can half-commit.
     #[test]
     fn every_admitting_statement_carries_the_protocol_range_guard() {
-        let source = include_str!("membership.rs");
+        let source = production_source();
         let redeem = source
             .split_once("pub async fn redeem(")
             .expect("redeem")
@@ -7331,7 +7404,7 @@ mod tests {
     /// end to end; this pins both halves where they are decided.
     #[test]
     fn the_roster_projection_reads_locally_and_the_decisions_do_not() {
-        let source = include_str!("membership.rs");
+        let source = production_source();
         let between = |from: &str, to: &str| {
             source
                 .split_once(from)
@@ -7461,6 +7534,13 @@ mod tests {
     /// A lost compare-and-swap must not tell an operator to "upgrade these
     /// nodes: []". When the re-read roster comes back empty, what actually
     /// happened is that the range moved.
+    ///
+    /// The variant is asserted first, and then the two call sites that have to
+    /// reach it. The call sites are pinned as text because the branch is a lost
+    /// race between two linearizable writes on one leader: there is no fixture
+    /// that loses it on demand, and asserting the variant alone left the whole
+    /// finding revertible — putting `LearnerProtocolUpgradeRequired(Vec::new())`
+    /// back kept every test green.
     #[test]
     fn a_lost_protocol_race_names_the_race_rather_than_an_empty_roster() {
         let refusal = MembershipError::ProtocolRangeChanged;
@@ -7471,6 +7551,45 @@ mod tests {
             !message.contains("[]"),
             "an empty roster must never reach an operator: {message}"
         );
+
+        let source = production_source();
+        let between = |from: &str, to: &str| {
+            source
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} is missing"))
+                .1
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
+                .0
+                .to_owned()
+        };
+        for (name, body) in [
+            (
+                "activate_learner_protocol",
+                between(
+                    "pub async fn activate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+            (
+                "deactivate_learner_protocol",
+                between(
+                    "pub async fn deactivate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+        ] {
+            assert!(
+                body.contains("MembershipError::ProtocolRangeChanged"),
+                "{name} must say the range moved when its re-read names nobody: {body}"
+            );
+            assert!(
+                !body.contains("LearnerProtocolUpgradeRequired")
+                    && !body.contains("LearnerProtocolInUse"),
+                "{name} must build its named refusals in the read-only pass, never inline with \
+                 a roster it has not re-read: {body}"
+            );
+        }
     }
 
     /// Making the capability predicate generic must not have changed the
@@ -8510,7 +8629,7 @@ mod tests {
 
     #[test]
     fn repair_observation_cannot_cross_the_generation_cas_boundary() {
-        let source = include_str!("membership.rs");
+        let source = production_source();
         let observation = source
             .split_once("pub async fn observe_artwork_source_repair")
             .expect("observation method")
