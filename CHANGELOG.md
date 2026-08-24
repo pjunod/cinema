@@ -34,6 +34,21 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A rendition's segments now have bookkeeping and a scheduler of their own.**
+  `plurxd::titlestore` keeps three separate facts about every planned segment —
+  planned, materialized, admitted — because one bitmap cannot mean both "the
+  bytes are here now" and "the whole rendition is durably cached": eviction
+  clears the first while the second is still being assembled. A title too large
+  for the completed-cache budget is therefore not a failure but a
+  working-set-only rendition, still VOD-presented and honestly re-materialized
+  on a later watch, which is the ordinary case for the large remuxes this work
+  exists for. `plurxd::prodsched` decides what a producer does next as a pure
+  function of the manifest and the attached readers' open requests, with one
+  rule above the ahead window: a reader whose segment GET is blocked has a
+  first-byte deadline running against it and outranks everything else, so the
+  producer never walks backwards to refill a hole nobody has asked for. Neither
+  module is wired to a request path yet.
+
 - **A file's segmentation is now computed once and kept, instead of being
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
   from a fragment index — one row per fragment of the production-shaped
