@@ -483,25 +483,54 @@ distinct on purpose:
 
 | Code | HTTP | Meaning |
 |---|---|---|
-| `learner_protocol_upgrade_required` | 409 | Named nodes are not running a binary that supports protocol 5. Upgrade each, wait one heartbeat interval, retry. |
-| `learner_protocol_in_use` | 409 | Deactivation would strand the named committed members, which hold no vote. |
+| `learner_protocol_upgrade_required` | 409 | Named nodes are running a binary that has not proven protocol 5. Upgrade each, wait one heartbeat interval, retry. |
+| `learner_protocol_node_absent` | 409 | Named members have not heartbeated for over two minutes, so nothing current is known about the binary they would come back running. Start them, or remove them. |
+| `join_in_flight` | 409 | Named nodes have redeemed a join token and have not heartbeated yet. Wait for the join to finish, then retry. |
+| `cluster_protocol_range_changed` | 409 | The range moved while this call was committing. Re-read `GET /cluster/nodes` and retry. |
+| `learner_protocol_in_use` | 409 | Deactivation would strand the named members: those admitted as learners, and those that committed Raft membership currently lists as holding no vote. |
 | `cluster_leader_unavailable` | 503 | There is no elected leader to commit the change. Retry after the election. |
 
-**A node that is down blocks activation until it is removed.** Readiness is
-proven by a heartbeat, and a node that is not running does not heartbeat. A
-machine that has failed but has not been removed from membership therefore
-stays in `learner_protocol_pending` forever, and no amount of waiting clears
-it. There is no override: the predicate that names the node is also embedded in
-the committing statement, so activation cannot be forced past it. Either bring
-the node back on a binary from this release, or remove it with
-`DELETE /api/v1/cluster/nodes/{node_id}` first. A node that has already been
-removed is tombstoned and is not consulted.
+Activation asks three separate questions, because "can this cluster speak
+protocol 5" has three ways to be false and `learner_protocol_pending` answers
+only the first. Each is checked twice — once as a read that names nodes, and
+again inside the committing statement, so a leader that won the reads and then
+lost a race cannot commit anyway.
 
-**A node that heartbeats but was rolled back is the same case, and it recovers
-on its own.** The capability row carries the heartbeat's own timestamp, so an
-older binary's heartbeat advances `last_seen_at` without refreshing the proof
-and the node reappears in `learner_protocol_pending` within one interval.
-Upgrading it again clears it within one interval too.
+**`learner_protocol_pending` is a staleness rule, not a liveness one.** The
+capability row carries the heartbeat's own timestamp, and a node is "pending"
+when its capability row's timestamp no longer equals its `last_seen_at`. That
+is what catches a rollback: an older binary's heartbeat advances `last_seen_at`
+without refreshing the proof, so the node reappears in
+`learner_protocol_pending` within one interval, and upgrading it again clears it
+within one interval too.
+
+**A node that proved protocol 5 and then stopped stays "ready" forever, and is
+refused by the absence rule instead.** Both timestamps freeze together when a
+node dies, so the equality still holds and the node never appears in
+`learner_protocol_pending` — the pending roster alone would activate straight
+past a machine that is switched off, and a binary rolled back while that machine
+is down never writes the desynchronising heartbeat the rule above leans on.
+Activation therefore also refuses, with `learner_protocol_node_absent`, for any
+member that is not tombstoned and has not heartbeated in over two minutes
+(twelve heartbeat intervals). A node that died running the *previous* release is
+named by this rule too, and by this rule first: it is the one whose next step —
+start it or remove it — actually ends.
+
+The two exits are the two in that sentence. Bring the node back on a binary from
+this release and it clears itself within one heartbeat interval, or remove it
+with `DELETE /api/v1/cluster/nodes/{node_id}` first. A node that has already
+been removed is tombstoned and is not consulted by any of the three rules.
+
+**A node that is mid-join blocks activation too, and clears itself.** Between
+redeeming its join token and its first heartbeat a node is already a committed
+member with no capability row at all, which `learner_protocol_pending` is
+deliberately blind to — it has not heartbeated, so it is not "behind". Activating
+past it would leave a voter that counts toward quorum and can never open its
+store again; on a three-to-four growth that takes fault tolerance to zero. So the
+commit refuses with `join_in_flight` and names it. A join that finishes clears
+this within seconds. A join that was abandoned stops advancing its timestamp and
+is named by `learner_protocol_node_absent` instead once it goes stale, so an
+interrupted redemption cannot hold activation forever.
 
 **After activation, a binary that only implements protocol 4 can no longer
 boot, join, or rejoin this cluster.** Its refusal names the required protocol
@@ -525,10 +554,27 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 **Once a learner is admitted, rollback is unavailable, and this release has no
 way to make it available again.** Deactivation is refused with
 `learner_protocol_in_use` naming the member it would strand, and learner removal
-is not implemented — `DELETE /api/v1/cluster/nodes/{node_id}` is the voter
-removal path and does not resolve a learner. Plan for this before admitting the
-first learner, not after: the forward fix (upgrade the lagging node) is the only
-route out from that point, and there is no rehearsal that gets it back.
+is not implemented — `DELETE /api/v1/cluster/nodes/{node_id}` refuses a node
+that carries no vote with `cluster_non_voter_removal_unsupported`, naming it,
+rather than answering `cluster_node_not_found` for a node the roster plainly
+lists. Plan for this before admitting the first learner, not after: the forward
+fix (upgrade the lagging node) is the only route out from that point, and there
+is no rehearsal that gets it back.
+
+`learner_protocol_in_use` carries two labelled rosters, and they answer
+different questions. *Admitted as learners* comes from the durable role column
+and names nodes this cluster admitted under protocol 5, including one that is
+currently switched off. *Listed as non-voting* comes from committed Raft
+membership. An ordinary voter that is mid-join appears in the second for a
+moment — the join adds it as a Raft learner before promoting it — and settles on
+its own; it is not a learner and must not be removed. Wait for the join to
+finish and retry.
+
+An admission that was abandoned before the joiner ever started — a port
+conflict, a crash, a `^C` — leaves a `role='learner'` row for a node that never
+became a member. That row stops blocking rollback once it has been stale for the
+same two minutes the absence rule uses, so an aborted `plurxd join` does not
+permanently remove the rollback.
 
 The refusal is decided twice — once as a read that names what is in the way, and
 again inside the committing statement — so a learner admitted between the two
@@ -636,6 +682,35 @@ Refusals specific to admission:
 | `learner_protocol_inactive` | 409 | The cluster has not activated protocol 5. Activate it first. |
 | `join_incompatible` | 400 | The joining binary does not implement the cluster's whole active protocol range. |
 | `join_token_invalid` | 400 | Including a token framing this build does not implement — an older build reads `plxjoin:v2` this way, and refuses before it writes any cluster secret to disk. |
+
+On the joining node's own console the first of those reads `the cluster refused
+this join: learner_protocol_inactive: …`. It is deliberately not prefixed
+`schema migration failed`: nothing is being migrated and nothing is broken.
+
+#### Upgrade voters before learners
+
+A learner never proposes a replicated schema migration — that is the point of
+the role, and it is enforced at the boot path rather than merely intended. The
+consequence is an ordering rule for every future upgrade:
+
+**Upgrade the voters first, then the learners.** A voter migrates the
+replicated schema forward when it opens the store. A learner only checks it, so
+a learner running a *newer* binary than the cluster's replicated schema refuses
+to start, with
+
+```
+cluster schema 11 is incompatible with voter schema 12
+```
+
+("voter schema" there is the schema this binary implements — the name says which
+role is responsible for installing it, not which role is refusing.) There is no
+override and no self-repair: the learner will refuse for as long as the cluster
+sits behind it. Upgrade a voter and the learner starts on its next attempt.
+
+The reverse order is safe: a learner still on the old binary is refused by the
+same check the moment the voters move ahead of *it*, and the same fix applies —
+move the learner forward. Either way the fix is forward, so keep the voters at
+or ahead of every learner.
 
 ### Measuring page-route latency
 

@@ -988,9 +988,14 @@ cluster carries an active protocol *range*, a node participates only when its
 binary covers all of it, and narrowing that range is an explicit admin step that
 is refused while any active node's running binary is unproven. `make
 cluster-check` runs that drill as separate processes. Two rolling-upgrade rules
-follow and belong in the runbook rather than in a drill script: a node that is
-down never heartbeats and therefore blocks activation until it is removed, and
-once a learner is admitted the protocol rollback is unavailable because learner
+follow and belong in the runbook rather than in a drill script. First, a node
+that is down is refused by its own rule and not by the unproven-binary one: the
+capability row carries the heartbeat's own timestamp, so a node that proved the
+capability and then stopped keeps both timestamps frozen and equal and reads as
+proven forever. Activation therefore refuses separately for any member silent
+for over two minutes — start it or remove it — rather than leaving it to the
+unproven-binary roster, which would activate straight past it. Second, once a
+learner is admitted the protocol rollback is unavailable because learner
 removal does not exist yet.
 
 **Acceptance:** `make cluster-check` exercises the failure harness; a fresh

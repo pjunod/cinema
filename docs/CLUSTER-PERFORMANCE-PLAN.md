@@ -712,12 +712,24 @@ default because silently changing an existing token's role would alter
 availability.
 
 Learner admission is a new versioned protocol, not an optional field on the v1
-voter flow. Use a distinct endpoint plus v2 token prefix/AAD/payload and a v2
-`membership.json`; bind the role in the issued token record and derive it on
-redeem/finalize. An old coordinator or joiner must reject the v2 flow before it
-persists secrets or admits a voter. Effective role always comes from live
-committed membership: Hiqlite's `learner_only` startup hint is not a permanent
-leadership guard after promotion.
+voter flow. Version it at the layer that carries the secret: a v2 token
+prefix/AAD/payload and a v2 `membership.json`; bind the role in the issued token
+record and derive it on redeem/finalize. An old coordinator or joiner must
+reject the v2 flow before it persists secrets or admits a voter. Effective role
+always comes from live committed membership: Hiqlite's `learner_only` startup
+hint is not a permanent leadership guard after promotion.
+
+This clause originally also asked for a distinct *endpoint*. PR-1 does not add
+one, deliberately: `POST /cluster/join-tokens` takes an optional `role` and
+mints a `plxjoin:v2` token for a learner and a `plxjoin:v1` token for a voter,
+and the joiner's `POST /cluster/join/redeem` carries no role field at all — the
+coordinator reads the role back from the token record it wrote. A second
+admin-only route would be a second surface to gate and would version nothing
+that the token framing does not already version, while the request that must
+not be trusted with a role is the *joiner's*, which is where the versioning
+actually sits. The requirement the clause was protecting — an old coordinator or
+joiner rejects the v2 flow before persisting a secret — is met by the framing:
+a pre-P6 build reads `plxjoin:v2` as an unknown prefix and refuses.
 
 Publish one route/job eligibility matrix. Learners may run readiness-gated
 bounded catalogue reads and declared node-local media work, but never
@@ -947,7 +959,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly, but a *set* `[storage]` field is not ignored by an older binary — see below | move one non-leader only after its reverse path is proven | move bytes back, then delete `storage.cache_dir` and `storage.transcode_dir` from every config file before installing an older binary |
-| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role. Built and proven against a second real process in `plurx-cluster-check`: a live voter that heartbeats without the capability blocks activation and is named, and restarting it on a capability-writing binary clears it | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner. PR-1 stops there — there is no eligible learner traffic to enable. **A node that is down never heartbeats, so it never proves the capability and blocks activation until it is removed** | PR-1 delivers only the no-learner rollback: deactivation is refused, by its own committing statement, while any committed member holds no vote, and **learner removal does not exist**, so admitting a learner makes rollback permanently unavailable on this release. Plan for that before the first learner; the forward fix is then the only route |
+| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role. Built and proven against a second real process in `plurx-cluster-check`: a live voter that heartbeats without the capability blocks activation and is named, and restarting it on a capability-writing binary clears it | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner. PR-1 stops there — there is no eligible learner traffic to enable. **An empty `learner_protocol_pending` is not on its own permission to activate.** That roster is a staleness rule — it names a node whose capability row is older than its own `last_seen_at`, which is what catches a rollback — and a node that proved the capability and *then* stopped freezes both timestamps together, so it never appears there. Activation refuses separately for any member that has not heartbeated in over two minutes (`learner_protocol_node_absent`: start it or remove it) and for any member that has redeemed a join token and not yet heartbeated (`join_in_flight`: wait). See [OPERATIONS.md](OPERATIONS.md) | PR-1 delivers only the no-learner rollback: deactivation is refused, by its own committing statement, while any committed member holds no vote, and **learner removal does not exist**, so admitting a learner makes rollback permanently unavailable on this release. Plan for that before the first learner; the forward fix is then the only route |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or
