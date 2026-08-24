@@ -482,6 +482,58 @@ on protocol 5; once learners exist and hold state, removing them is a
 prerequisite and in some orderings the forward fix — upgrading the lagging
 node — is the only route.
 
+### Admitting a learner
+
+A learner receives replication and nothing else. It never becomes leader, never
+counts toward quorum, and runs none of the cluster's leader-singleton work — no
+scheduler, no schema migration, no provider or scan pass. Quorum size is
+unchanged by admitting one: three voters plus a learner still needs two voters
+to commit.
+
+Admission is a separate protocol, not a flag on the voter join, and it is
+available only after the activation above:
+
+1. Activate the learner protocol (previous section). Before that,
+   `POST /api/v1/cluster/join-tokens` with `{"role": "learner"}` is refused with
+   `learner_protocol_inactive` — at issuance, so nobody copies a token to
+   another machine first.
+2. Mint the token on a voter:
+
+```
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "learner", "expires_in_seconds": 600}' \
+  https://plurx.example.net/api/v1/cluster/join-tokens
+```
+
+   Voter remains the default: a request that omits `role` mints exactly the
+   token it always did. A learner token is prefixed `plxjoin:v2:`; a voter token
+   stays `plxjoin:v1:`.
+3. Put the token in the new node's `cluster.join_token_file` and start `plurxd`
+   on a **fresh data directory**, exactly as for a voter join.
+
+The role is bound to the coordinator's issued-token record, not to anything the
+joining node sends, so a joining process cannot ask to be admitted as something
+other than what the token was minted for. It is also recorded in replicated
+membership and in the node's own `membership.json`, which is written as
+**version 2** for a learner. That file is deliberately unreadable by releases
+that predate the learner role: such a build has no idea it must not campaign,
+so refusing to start is the correct outcome. A voter's `membership.json` stays
+version 1 and stays readable by the previous release, so rolling a voter back
+remains possible.
+
+Once a learner exists, `.../protocol/learner/deactivate` is refused with
+`learner_protocol_in_use` and names it. Removing a learner is not yet
+implemented; do not admit one to a cluster you may need to roll back.
+
+Refusals specific to admission:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `learner_protocol_inactive` | 409 | The cluster has not activated protocol 5. Activate it first. |
+| `join_incompatible` | 400 | The joining binary does not implement the cluster's whole active protocol range. |
+| `join_token_invalid` | 400 | Including a token framing this build does not implement — an older build reads `plxjoin:v2` this way, and refuses before it writes any cluster secret to disk. |
+
 ### Measuring page-route latency
 
 Use the page-latency runner against an already-running deployment. It does not

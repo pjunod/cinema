@@ -759,18 +759,48 @@ capability precondition is embedded in the committing statement, not only in a
 read-only preflight, so a stale leader cannot commit an activation that an older
 binary's heartbeat has already invalidated.
 
-Two proofs are deliberately **not** in that slice. The deactivation refusal for
-a committed non-voter is checked against Raft metrics rather than replicated
-SQL, because a node's role is decided by Raft and no learner role column exists
-yet; when the learner slice adds one, that check moves into the activation
-statement's guard as a SQL `NOT EXISTS` and the metrics read becomes the
-preflight that names them. And the mixed-version "an old voter blocks
-activation" scenario is proven against a real replicated cluster in
-`crates/plurx-core/src/cluster/migration.rs` rather than as a separate-process
-`plurx-cluster-check` arm: that arm needs a `NodeLaunch` emulation flag for a
-binary that heartbeats without the capability, which is the same flag the
-learner slice needs to prove an old joiner cannot reinterpret v2 admission as a
-voter. Both belong to one scenario, built once.
+One proof deliberately left out of that slice was the mixed-version "an old
+voter blocks activation" scenario as a separate-process `plurx-cluster-check`
+arm: that arm needs a `NodeLaunch` emulation flag for a binary that heartbeats
+without the capability, which is the same flag the separate-process learner
+scenario needs. Both belong to one scenario, built once, and neither is built
+yet. The scenario is proven against a real replicated cluster in
+`crates/plurx-core/src/cluster/migration.rs` instead.
+
+**Delivered (second slice).** Learner admission, the durable role, and
+committed-role enforcement. `cluster_nodes.role` and `cluster_join_tokens.role`
+are additive nullable columns applied by `MembershipManager::initialize`, so a
+`NULL` role is the voter every pre-existing row already was and an older binary
+in the same cluster keeps reading and writing its own six-column rows. The
+deactivation refusal moved out of the Raft-metrics read and into
+`narrow_protocol_range_sql`'s guard as a SQL `NOT EXISTS` over that column; the
+metrics read is now the preflight that names what is in the way.
+
+Admission is protocol v2 end to end — `plxjoin:v2` prefix, its own AEAD
+associated data, its own payload version, and a payload that carries the role
+plus the cluster's *active* protocol range rather than one scalar. A v1 token
+still carries one scalar because a peer that predates the range compares it for
+equality, but it now names the cluster's active floor instead of a constant, so
+an incompatible build is turned away by its own cheap local check. The role is
+bound in the issued-token record and derived on redeem and finalize; the redeem
+request has no role field at all. Learner admission is refused unless the active
+range includes protocol 5, at issuance, at the joiner's preflight, and at the
+coordinator.
+
+Effective role comes from live committed membership on every decision.
+`learner_only` is set as defence in depth only — the vendored source consults it
+once, at startup, to skip this node's own self-promotion, and `become_member` is
+a route on every node that never reads its target's hint. The live predicate
+gates `acquire_cluster_job` (which every leased singleton passes through), the
+scheduler and its startup arm, the Trakt sync, and the watched outbox; the
+learner boot path opens the store rather than migrating it, and `start_voter`
+waits for committed *membership* for a learner instead of the vote a learner was
+admitted specifically not to receive.
+
+Still open after this slice: route/job eligibility, learner readiness and
+bounded local reads, promotion, learner removal/drain/tombstones, the UI, and
+the separate-process harness scenario above. Until removal exists, admitting a
+learner makes the protocol rollback unavailable.
 
 **Acceptance:** a real separate-process three-voter-plus-learner cluster
 preserves quorum size three, distributes only bounded reads to the learner,
