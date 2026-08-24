@@ -1854,14 +1854,23 @@ HLS discontinuity before publishing new segments. Direct-play range requests
 remain stateless and continue through any healthy ingress without this worker
 replacement path.
 
-Two operator-visible consequences of enabling it. Sessions created while the
+Three operator-visible consequences of enabling it. Sessions created while the
 gate is on serve a playlist with no `EXT-X-PLAYLIST-TYPE`, because a
 replacement generation cannot satisfy EVENT semantics and the shape must not
 change under a player mid-film; this is the same shape the
-`hls.typeless_sliding` experiment serves. And a replacement's segment numbers
-jump — each ownership epoch owns a range a million wide, so a first failover
-begins at `seg2000000`. Both are expected, and neither indicates retention
-pressure or a renumbering bug.
+`hls.typeless_sliding` experiment serves. A replacement's segment numbers jump
+— each ownership epoch owns a range a million wide, so a first failover begins
+at `seg2000000`. And sessions that were already playing when the gate was
+turned on are **not** covered: they were created serving EVENT, so a takeover
+refuses them and those viewers restart exactly as they would have before. None
+of the three indicates retention pressure or a renumbering bug.
+
+Expect recovery on the order of **fifteen to twenty seconds**, not the ten the
+plan's acceptance names. Nothing contests a session until its lease expires,
+and the media-session lease is twelve seconds with a three-second renewal
+(`LEASE_TTL_MS`, `LEASE_INTERVAL`); the contest tick and the takeover deadline
+sit on top of that. Recovery is bounded and correct at these values, just not
+fast — closing the gap is tracked in `docs/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
 
 #### Optional verified shared cache
 

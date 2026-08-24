@@ -47,9 +47,14 @@ bump may break compatibility and a **patch** bump never does.
   discontinuity, an init object named for its own ownership epoch so it can
   never overwrite one a client cached, and segment numbers in a range no
   earlier generation could have used, so no URL in the session's life ever
-  names two different sets of bytes. This is off by default and gated
-  separately from remote placement; `docs/OPERATIONS.md` covers enabling it
-  and the two shape changes it makes visible.
+  names two different sets of bytes. It resumes a whole segment behind the
+  frontier rather than a fixed margin, because that frontier records what the
+  client asked for and not what it received — the viewer sees a moment
+  twice rather than losing a moment nobody produced. Recovery takes fifteen to
+  twenty seconds, most of it waiting out the dead owner's lease. This is off
+  by default and gated separately from remote placement, it does not apply to
+  sessions that were already playing when it was switched on, and
+  `docs/OPERATIONS.md` covers enabling it and what it makes visible.
 
 - **A file's segmentation is now computed once and kept, instead of being
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan

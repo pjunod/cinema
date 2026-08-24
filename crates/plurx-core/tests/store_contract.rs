@@ -1204,7 +1204,10 @@ async fn media_session_contract_runs_through_dyn_store() {
                         media_sequence: 1,
                     }],
                     201,
-                    401,
+                    // The same expiry the live renewal set: this fixture is
+                    // about the frontier columns, and must not disturb the
+                    // exact-expiry refusal asserted below.
+                    400,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: renew with a regressed frontier: {error}")),

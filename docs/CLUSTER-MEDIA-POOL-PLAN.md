@@ -1168,7 +1168,19 @@ default, requires effective P5 placement readiness, and disabling placement
 also disables takeover. Direct-play range delivery remains stateless through a
 healthy ingress.
 
-Three implementation facts the contract above does not fix, recorded because
+**Not delivered, and not claimed:** the ten-second budget above. Detection
+cannot begin before the owner's lease expires, and P5 shipped
+`LEASE_TTL_MS = 12_000` / `LEASE_INTERVAL = 3 s` rather than the 6 s/2 s §4.4
+specifies. Abrupt owner loss is therefore observed 9–12 s later, before any
+takeover work starts; add the two-second contest tick and the eight-second
+takeover deadline and the floor is above ten seconds by construction. P7 does
+not retune those constants — they govern every fenced singleton, not just
+media sessions, and moving them belongs with a measurement rather than with
+this milestone. Closing the budget is P8's first item: either §4.4's values
+are adopted and measured, or §8.8's number is amended to the one the
+constants permit.
+
+Four implementation facts the contract above does not fix, recorded because
 they constrain anything built on top:
 
 - **The epoch sequence range is a million wide, and bounded.** "Starts
@@ -1190,7 +1202,16 @@ they constrain anything built on top:
   predecessor's prefix, which RFC 8216 §6.2.1 forbids an EVENT playlist from
   doing. Changing shape at failover would break the invariant on exactly the
   client the acceptance corpus ends with, so the shape is chosen once, at
-  creation, from whether takeover is enabled.
+  creation, from whether takeover is enabled — and recorded on the recipe, so
+  a session that predates the switch being turned on is refused a takeover
+  rather than having its semantics changed underneath a running player.
+- **A successor overlaps one whole segment of its own shape, not a fixed
+  margin.** `fetched_through_ms` advances to a segment's end when the client
+  *requests* it, so an owner lost mid-response has published a frontier ahead
+  of what the viewer holds — by up to `COPY_SEGMENT_MAX_SECS` on a remux. The
+  overlap is that segment plus two seconds; the cost is media the viewer sees
+  twice across the discontinuity, which is the right side of the trade against
+  media nothing ever produces.
 
 ### 8.9 P8 — finish operations and native-client consumption
 

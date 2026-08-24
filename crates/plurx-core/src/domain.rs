@@ -845,7 +845,12 @@ pub struct MediaSessionRenewal {
     pub owner_epoch: i64,
     /// End of the newest complete object advertised by this owner.
     pub produced_playable_through_ms: i64,
-    /// End of the furthest object delivered to the client.
+    /// End of the furthest object the client has *asked for*.
+    ///
+    /// Not "delivered": it advances the moment a request arrives, so an owner
+    /// that dies mid-response has already published a frontier past what the
+    /// viewer holds. A successor must therefore overlap at least one whole
+    /// segment behind this, never a fixed margin.
     pub fetched_through_ms: i64,
     /// Next immutable HLS object number available to a successor.
     pub media_sequence: i64,
