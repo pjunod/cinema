@@ -4724,10 +4724,18 @@ mod tests {
             "exactly the joined node is durably a learner: {roles:?}"
         );
         match coordinator.deactivate_learner_protocol().await {
-            Err(super::super::membership::MembershipError::LearnerProtocolInUse(nodes)) => {
+            Err(super::super::membership::MembershipError::LearnerProtocolInUse {
+                admitted,
+                non_voting,
+            }) => {
                 assert!(
-                    nodes.contains(&learner.identity.node_id),
-                    "the refusal must name the learner it protects: {nodes:?}"
+                    admitted.contains(&learner.identity.node_id),
+                    "the refusal must name the learner it protects: {admitted:?}"
+                );
+                assert_eq!(
+                    non_voting,
+                    vec![learner.identity.raft_id.to_string()],
+                    "and must label the Raft-membership roster as its own claim"
                 );
             }
             other => panic!("deactivation must be refused while a learner exists: {other:?}"),

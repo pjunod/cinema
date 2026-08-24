@@ -1411,7 +1411,11 @@ impl HiqliteAuthStore {
                 StoreError::Migration("cluster compatibility marker is missing".to_owned())
             })?;
             if !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
-                return Err(StoreError::Migration(format!(
+                // Not a migration failure: nothing is being migrated and
+                // nothing is broken. The cluster has simply not activated the
+                // protocol that admits a learner, and prefixing this with
+                // "schema migration failed" sent operators to the wrong place.
+                return Err(StoreError::JoinRefused(format!(
                     "learner_protocol_inactive: this join token admits this node as a learner, \
                      but the cluster's active protocol range is {active_min}..={active_max} and \
                      does not include protocol {AUTH_LEARNER_PROTOCOL}; activate the learner \

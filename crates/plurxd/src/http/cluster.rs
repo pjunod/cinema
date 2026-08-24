@@ -229,7 +229,17 @@ fn api_error(error: MembershipError) -> ApiError {
         // Not "you asked the wrong node" and not "already active": a specific
         // set of nodes is behind, and the message names them.
         | MembershipError::LearnerProtocolUpgradeRequired(_)
-        | MembershipError::LearnerProtocolInUse(_)
+        | MembershipError::LearnerProtocolInUse { .. }
+        // Same shape: a named set of nodes is in the way, and none of them
+        // will be in the way forever.
+        | MembershipError::JoinInFlight(_)
+        | MembershipError::LearnerProtocolNodeAbsent { .. }
+        // A compare-and-swap this caller lost. Nothing is broken and the
+        // request is worth repeating against a re-read status.
+        | MembershipError::ProtocolRangeChanged
+        // The node is real and the roster lists it; this release has no
+        // removal path for a member with no vote. Not a 404.
+        | MembershipError::NonVoterRemovalUnsupported(_)
         // The cluster is fine and the request is well formed; the protocol
         // that admits a learner has simply not been activated yet.
         | MembershipError::LearnerProtocolInactive
