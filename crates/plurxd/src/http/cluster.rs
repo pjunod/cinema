@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::cluster::membership::{
-    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
-    RedeemJoinRequest,
+    ClusterRole, FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus,
+    ProtocolChange, RedeemJoinRequest,
 };
 use serde::Deserialize;
 
@@ -22,6 +22,11 @@ pub struct IssueJoinTokenRequest {
     /// enter the cluster. Bounds prevent a typo from minting a near-permanent
     /// credential or one that expires before it can be copied.
     pub expires_in_seconds: Option<u64>,
+    /// What the token admits. Voter is the default and stays the default: a
+    /// request that does not say changes nothing about how joining works, and
+    /// silently turning an existing caller's token into a learner's would
+    /// change the cluster's availability without anyone asking for it.
+    pub role: Option<ClusterRole>,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +45,10 @@ pub async fn issue_join_token(
     let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
     state
         .membership
-        .issue_token(Duration::from_secs(seconds))
+        .issue_token_for_role(
+            Duration::from_secs(seconds),
+            request.role.unwrap_or(ClusterRole::Voter),
+        )
         .await
         .map(Json)
         .map_err(api_error)
@@ -222,6 +230,9 @@ fn api_error(error: MembershipError) -> ApiError {
         // set of nodes is behind, and the message names them.
         | MembershipError::LearnerProtocolUpgradeRequired(_)
         | MembershipError::LearnerProtocolInUse(_)
+        // The cluster is fine and the request is well formed; the protocol
+        // that admits a learner has simply not been activated yet.
+        | MembershipError::LearnerProtocolInactive
         | MembershipError::RemovalPending(_)
         | MembershipError::LeaderRemoval
         | MembershipError::SelfRemovalRequiresLeave

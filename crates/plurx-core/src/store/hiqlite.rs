@@ -70,6 +70,13 @@ pub const AUTH_PROTOCOL_MAX: i64 = 5;
 /// it must keep naming the oldest protocol we support; otherwise every
 /// mixed-version join breaks before either side reads a range field.
 pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
+/// The protocol under which a cluster can admit a non-voting learner at all.
+///
+/// Named separately from [`AUTH_PROTOCOL_MAX`] because the two mean different
+/// things: `AUTH_PROTOCOL_MAX` is "the newest thing this build implements" and
+/// moves with every future protocol, while this is "the protocol that carries
+/// learner admission" and must not.
+pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -1373,13 +1380,46 @@ impl HiqliteAuthStore {
         remote: &Client,
         supported: ClusterCompatibility,
     ) -> Result<(), StoreError> {
+        Self::preflight_role(remote, supported, false).await
+    }
+
+    /// The same guard, plus the one extra thing a learner has to prove: that
+    /// the cluster has actually activated the protocol that admits one.
+    ///
+    /// The compatibility rule alone cannot catch this. A binary implementing
+    /// `4..=5` covers an unactivated `4..=4` cluster perfectly well, so a
+    /// learner would sail through the voter preflight and be refused later, by
+    /// the coordinator, after this process had already decided it was joining.
+    pub async fn preflight_role(
+        remote: &Client,
+        supported: ClusterCompatibility,
+        learner: bool,
+    ) -> Result<(), StoreError> {
         let sql = "SELECT schema_version, protocol_min, protocol_max \
                    FROM cluster_meta WHERE singleton = 1";
         validate_sql(sql)?;
         let meta =
             timeout_store(remote.query_consistent_map::<CompatibilityRow, _>(sql, params!()))
                 .await?;
-        verify_compatibility_rows(meta, supported)
+        let active = meta
+            .first()
+            .filter(|_| meta.len() == 1)
+            .map(|row| (row.protocol_min, row.protocol_max));
+        verify_compatibility_rows(meta, supported)?;
+        if learner {
+            let (active_min, active_max) = active.ok_or_else(|| {
+                StoreError::Migration("cluster compatibility marker is missing".to_owned())
+            })?;
+            if !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
+                return Err(StoreError::Migration(format!(
+                    "learner_protocol_inactive: this join token admits this node as a learner, \
+                     but the cluster's active protocol range is {active_min}..={active_max} and \
+                     does not include protocol {AUTH_LEARNER_PROTOCOL}; activate the learner \
+                     protocol on the cluster first, then retry this join"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub async fn verify_compatibility(

@@ -60,6 +60,32 @@ impl Lease {
     }
 }
 
+/// Whether this process may run cluster-wide leader-singleton work right now.
+///
+/// A lease makes two nodes take turns; it does not decide who is *allowed* a
+/// turn. A learner holds the same shared cluster credential as every voter and
+/// would win a lease exactly as often, so the refusal has to sit in front of
+/// the lease rather than inside it.
+///
+/// The answer must be re-derived on every call. Committed membership can move
+/// under a running process, so an authority that answered once at startup
+/// would be wrong for exactly the promotion this exists to allow.
+#[async_trait::async_trait]
+pub trait ClusterJobAuthority: Send + Sync {
+    async fn may_run_cluster_jobs(&self) -> bool;
+}
+
+/// The authority for a process that has no cluster membership handle: an
+/// unclustered daemon is the whole cluster and owns every job.
+pub struct UnclusteredJobAuthority;
+
+#[async_trait::async_trait]
+impl ClusterJobAuthority for UnclusteredJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LeaseClaim {
     Acquired(Lease),

@@ -3189,6 +3189,35 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // A learner is asked for by naming the role, and the role is the only
+        // thing the request may say about it: `redeem` derives what a token
+        // admits from the coordinator's own issued-token record, never from a
+        // joining node's request body, so there is nothing here to assert it
+        // with. An unknown role is a malformed request rather than a silently
+        // defaulted voter.
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/join-tokens",
+                Some(&admin),
+                json!({ "expires_in_seconds": 600, "role": "learner" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/cluster/join-tokens",
+                Some(&admin),
+                json!({ "expires_in_seconds": 600, "role": "observer" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// The storage numbers have to reach `/system`, and an unmeasured server

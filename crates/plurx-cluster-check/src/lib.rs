@@ -8963,6 +8963,7 @@ async fn membership_manager_with_identity_artwork_url(
             imported_rows: 0,
             table_hashes: Vec::new(),
         },
+        plurx_core::cluster::membership::ClusterRole::Voter,
     )
     .await
 }
