@@ -601,7 +601,9 @@ async fn refresh_metadata_with_store(
         acquire_cluster_job(&coordinator, authority, "provider:artwork".to_owned()).await?
     else {
         anyhow::bail!(
-            "the artwork provider pass is not available on this node: it is either active on              another cluster node, or this node was admitted as a learner and never runs              cluster-wide provider work"
+            "the artwork provider pass is not available on this node: it is either active on \
+             another cluster node, or this node was admitted as a learner and never runs \
+             cluster-wide provider work"
         );
     };
     let lost = lease.loss_token();
@@ -1437,9 +1439,24 @@ impl Drop for BackgroundLoopGuard {
 /// capability proof current; a learner that stopped heartbeating would read as
 /// unreachable. The offline source probe answers questions about this node's
 /// own files and has to run everywhere for any node's removal to be provable.
-/// The serving-fence, media-pool, shared-cache, transcode, media-session,
-/// artwork-materialization, offline-package and storage-probe loops all act on
-/// bytes, sessions, and hardware this process owns.
+/// The serving-fence, media-pool, shared-cache, transcode, artwork-
+/// materialization and storage-probe loops act on bytes and hardware this
+/// process owns.
+///
+/// Two of them are not node-local, and saying they were was wrong.
+/// `maintain_media_sessions` ends *any* node's expired sessions and prunes
+/// `job_leases`; `expire_offline_packages` expires the whole cluster's. Both
+/// are idempotent sweeps over rows that have already passed a deadline, both
+/// reach the same answer whoever runs them, and every voter already runs them
+/// concurrently today — so a learner running them too changes nothing. They
+/// stay ungated because a cluster where only voters swept would leave expired
+/// sessions and packages alive whenever the sweeping voter was down, and
+/// because gating them would buy nothing: a sweep is not a singleton.
+///
+/// The offline-package loop is the exception inside the exception, and it is
+/// gated: its expiry sweep is one of the two above, but claiming the next
+/// queued package is not a sweep at all — it pops from a cluster-wide queue
+/// and binds the work to this node. See `offline::prepare_loop`.
 fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
@@ -1479,7 +1496,12 @@ fn spawn_background_loops(
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
-    tokio::spawn(std::sync::Arc::clone(&state.offline).run());
+    // The expiry sweep in here is a cluster-wide idempotent sweep and stays
+    // ungated; claiming the next queued package is not, and takes the same
+    // live membership check the other cluster-wide loops do.
+    tokio::spawn(
+        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
+    );
 
     // What the libraries' storage reads at. Deliberately after the listener
     // would come up rather than inline with the encoder and tone-map probes:

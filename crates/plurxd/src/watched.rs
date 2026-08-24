@@ -681,4 +681,67 @@ mod tests {
         runner.abort();
         assert!(runner.await.expect_err("runner cancelled").is_cancelled());
     }
+
+    /// A node with no vote delivers nothing from the outbox, and a promoted
+    /// one starts without a restart.
+    ///
+    /// Like the Trakt sync, this gate *is* the mechanism: the outbox drain
+    /// takes no cluster lease anywhere, so deleting the three lines has every
+    /// learner delivering the whole cluster's watched notifications alongside
+    /// the voters — and left every test green.
+    ///
+    /// The observable is the outbox itself. With monarr unpaired a delivery
+    /// attempt is a permanent failure, so a row moving from pending to failed
+    /// is proof the drain ran and a row staying pending is proof it did not.
+    #[tokio::test]
+    async fn a_node_without_a_vote_delivers_nothing_from_the_outbox() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct MovableAuthority(AtomicBool);
+
+        #[async_trait::async_trait]
+        impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
+            async fn may_run_cluster_jobs(&self) -> bool {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        let (store, notifier, _user, _movie) = seeded_notifier().await;
+        store.enqueue_watched("{}").await.expect("enqueue");
+        assert_eq!(
+            store.watched_outbox_counts().await.expect("counts"),
+            (1, 0, 0)
+        );
+
+        let authority = Arc::new(MovableAuthority(AtomicBool::new(false)));
+        let runner = tokio::spawn(Arc::clone(&notifier).run(Arc::clone(&authority)
+            as Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>));
+
+        // The interval's first tick fires immediately, so this covers two.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(
+            store.watched_outbox_counts().await.expect("counts"),
+            (1, 0, 0),
+            "a node with no vote must not have delivered from the outbox"
+        );
+
+        authority.0.store(true, Ordering::SeqCst);
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if store.watched_outbox_counts().await.expect("counts") != (1, 0, 0) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        drained.expect("a promoted node drains without a restart");
+        assert_eq!(
+            store.watched_outbox_counts().await.expect("counts"),
+            (0, 0, 1),
+            "unpaired monarr is a permanent failure, which is what a real drain records"
+        );
+
+        runner.abort();
+    }
 }

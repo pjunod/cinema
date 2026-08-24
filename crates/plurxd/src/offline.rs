@@ -392,7 +392,28 @@ impl OfflineManager {
         self.metrics.prometheus()
     }
 
-    pub async fn run(self: Arc<Self>) {
+    /// Expire the cluster's lapsed packages, and prepare the ones queued for
+    /// this node.
+    ///
+    /// `authority` gates the *claim* and nothing else, and it is asked on
+    /// every pass so a promotion needs no restart. The two halves of this loop
+    /// are different kinds of work.
+    ///
+    /// The expiry sweep walks the whole cluster's packages and retires the
+    /// ones past their deadline. It is idempotent, reaches the same answer
+    /// whoever runs it, and every voter already runs it concurrently — so it
+    /// stays ungated, and a learner sweeping alongside them changes nothing.
+    ///
+    /// `claim_next_offline_package` is not a sweep. It pops from a
+    /// cluster-wide queue and binds that package to this node, creating
+    /// ownership where there was none. A learner that claimed one would take
+    /// work away from the voters and hold it on a node with no drain path:
+    /// this release ships no learner removal, so nothing can settle that
+    /// ownership afterwards.
+    pub async fn run(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+    ) {
         match self
             .store
             .reset_interrupted_offline_packages(&self.node_id)
@@ -420,6 +441,13 @@ impl OfflineManager {
                 next_expiry_sweep = Instant::now() + Duration::from_secs(60);
             }
             if !self.enabled().await {
+                tokio::time::sleep(IDLE_POLL).await;
+                continue;
+            }
+            if !authority.may_run_cluster_jobs().await {
+                // Not a duplicate-work concern: claiming binds cluster-wide
+                // work to this node, and a node with no vote has no way to
+                // hand it back.
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
@@ -904,6 +932,20 @@ mod tests {
             .expect("queued package")
     }
 
+    /// The gate's answer, movable while the loop that holds it keeps running.
+    struct MovableAuthority(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
+        async fn may_run_cluster_jobs(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    fn voter_authority() -> Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority> {
+        Arc::new(MovableAuthority(std::sync::atomic::AtomicBool::new(true)))
+    }
+
     async fn stored_package(fixture: &Fixture, id: &str) -> OfflinePackage {
         fixture
             .store
@@ -1066,6 +1108,103 @@ mod tests {
         assert!(second.is_cancelled());
     }
 
+    /// A node with no vote expires the cluster's packages but claims none of
+    /// them, and a promoted one starts claiming without a restart.
+    ///
+    /// The two halves of the loop are different kinds of work and only one is
+    /// gated. The expiry sweep is idempotent and cluster-wide by design —
+    /// every voter runs it concurrently already. `claim_next_offline_package`
+    /// pops from a cluster-wide queue and binds the package to this node,
+    /// creating ownership on a node that this release cannot remove.
+    #[tokio::test]
+    async fn a_node_without_a_vote_expires_packages_but_claims_none() {
+        let fixture = seeded_fixture().await;
+        let queued = claimed_package(&fixture, "gated", "none", None).await;
+        assert!(fixture
+            .store
+            .requeue_offline_package(&queued.id, "test-node")
+            .await
+            .expect("return it to the queue"));
+        assert_eq!(stored_package(&fixture, "gated").await.state, "queued");
+
+        // A second package, already past its deadline, so the ungated sweep
+        // has something to prove it still runs. Expiry deletes the row.
+        let lapsed = NewOfflinePackage {
+            id: "lapsed".into(),
+            request_id: "request-lapsed".into(),
+            user_id: fixture.user_id,
+            file_id: fixture.file.id,
+            node_id: "test-node".into(),
+            source_path: fixture.file.path.to_string_lossy().into_owned(),
+            source_size: fixture.file.size,
+            source_mtime: fixture.file.mtime,
+            effective_rate_control: EffectiveRateControl::Vbr.snapshot_value(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".into(),
+            estimated_bytes: 100,
+            reserved_bytes: 120,
+            expires_at: 1,
+        };
+        assert!(matches!(
+            fixture
+                .store
+                .create_offline_package(&lapsed, 10, 1_000, 2_000)
+                .await
+                .expect("create the second package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+
+        let authority = Arc::new(MovableAuthority(std::sync::atomic::AtomicBool::new(false)));
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(Arc::clone(&authority)
+            as Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>));
+
+        // The sweep runs on the first pass and is not gated.
+        let swept = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let present = fixture
+                    .store
+                    .offline_package_for_user("lapsed", fixture.user_id)
+                    .await
+                    .expect("package lookup")
+                    .is_some();
+                if !present {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        swept.expect("the expiry sweep is cluster-wide and stays ungated");
+
+        // The claim does not.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            stored_package(&fixture, "gated").await.state,
+            "queued",
+            "a node with no vote must not bind cluster-wide work to itself"
+        );
+
+        authority.0.store(true, Ordering::SeqCst);
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if stored_package(&fixture, "gated").await.state != "queued" {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        claimed.expect("a promoted node claims without a restart");
+
+        task.abort();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn restart_requeues_interrupted_work_even_while_offline_is_disabled() {
         let fixture = seeded_fixture().await;
@@ -1077,7 +1216,7 @@ mod tests {
             .await
             .expect("disable offline");
 
-        let task = tokio::spawn(Arc::clone(&fixture.manager).run());
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
         for _ in 0..20 {
             tokio::task::yield_now().await;
             if stored_package(&fixture, "restart").await.state == "queued" {
@@ -1132,7 +1271,7 @@ mod tests {
             .await
             .expect("replace package");
 
-        let task = tokio::spawn(Arc::clone(&fixture.manager).run());
+        let task = tokio::spawn(Arc::clone(&fixture.manager).run(voter_authority()));
         for _ in 0..40 {
             tokio::task::yield_now().await;
             if stored_package(&fixture, "changed-source").await.state == "failed" {
