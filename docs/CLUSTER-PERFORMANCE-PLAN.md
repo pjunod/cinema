@@ -1,6 +1,10 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P5 implementation and deterministic acceptance delivered; M4 singleton and serving-partition proofs delivered; P0c/P2f/P5 physical evidence and P6–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P5 implementation and deterministic acceptance delivered; M4
+singleton and serving-partition proofs delivered; P5 storage-pressure behavior
+revised after adversarial review (§6.6), with four of its storage guards still
+design intent rather than pinned behavior; P0c/P2f/P5 physical evidence and
+P6–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -619,25 +623,53 @@ durable target. The chosen read-pool value has a retained benchmark artifact.
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
 only persistent cache, artwork, subtitle, and offline bytes, while
-`storage.transcode_dir` names disposable live-transcode scratch. Omitting both
-new roots preserves every legacy path byte-for-byte. Explicit roots are
-canonicalized and rejected when they overlap a protected durable identity,
-credential key, another configured root, or a Linux mount-source ancestor.
-Scratch cleanup begins only after the daemon lock is held, uses descriptor-
-relative bounded traversal, refuses foreign owners, devices, links, and unsafe
-permissions, and publishes a crash-safe ownership claim before deleting
-anything. Cache and offline content are never restart cleanup targets. An
-available shared-cache mount is a separately protected persistent root; a
-missing mount keeps the existing node-local fallback and is not created by this
-preflight.
+`storage.transcode_dir` names disposable live-transcode scratch, which must sit
+outside `data_dir`; naming `<data_dir>/transcode` explicitly is refused, and
+omitting the key is the supported way to run the legacy layout. Omitting both
+new roots preserves every legacy path byte-for-byte, and setting `cache_dir` on
+an existing install migrates nothing: the daemon warns while the legacy trees
+still hold bytes and starts anyway, so OPERATIONS.md carries the old→new path
+table an operator has to apply by hand. Explicit roots are canonicalized and
+rejected when they overlap a protected durable identity, credential key,
+another configured root, or a Linux mount-source ancestor.
+
+Scratch cleanup begins only after the daemon lock is held and uses
+descriptor-relative traversal. Ownership is the discriminator: the root itself
+must belong to the daemon uid, a foreign-owned root refuses startup, and a
+daemon-owned root that is group- or world-writable is repaired to `0700` with a
+warning. Entries inside a daemon-owned root are the daemon's own leftovers, so
+their modes and owners no longer refuse — they are deleted. Links, devices,
+sockets, and FIFOs inside scratch still abort startup without touching
+anything, and a mount point inside scratch is reported as one. The entry-count
+and depth bounds guard an unknown directory: in an owned root, exceeding one
+leaves that scratch untouched for the boot with a warning and the next boot
+retries; in an unowned root it is still a refusal. A crash-safe ownership claim
+is published before anything is deleted, and a `.claiming` marker truncated by
+a crash is retried as an interrupted claim. The marker names the durable root
+it was claimed for, so moving `data_dir` under an existing scratch root gives an
+explicit "claimed by another durable root" error rather than silent reuse. Cache
+and offline content are never restart cleanup targets. An available shared-cache
+mount is a separately protected persistent root; a missing mount keeps the
+existing node-local fallback and is not created by this preflight.
+
+The delivered coverage is narrower than that contract. Mutation runs found the
+cross-device bound, the depth and entry-count bounds, and the credential-key
+inode protection implemented but unreached by any test, and the only real
+bind-mount exercise is opt-in and privileged (`make bind-mount-check`). Read
+those four as design intent, not as pinned behavior, and do not restate them as
+proven in operator-facing text.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
-setting with the previous value, `4`, as its default. The code and deterministic
-configuration/storage proofs are delivered, but the retained physical
-`4 · 8 · 16` named-host artifact is not: it remains grouped with P0c/P2f and
-requires operator authorization to transfer the private runner image to the
-four named machines. Until that artifact exists, production keeps `4`; this
-milestone does not claim that a larger pool improves the measured workload.
+setting with the previous value, `4`, as its default, and it now reaches the
+named-host runner's node configuration — before that the runner built its own
+config and a 4/8/16 sweep would have measured the default three times. The code
+and deterministic configuration/storage proofs are delivered, but the retained
+physical `4 · 8 · 16` named-host artifact is not: it remains grouped with
+P0c/P2f and requires operator authorization to transfer the private runner
+image to the four named machines. Until that artifact exists, production keeps
+`4`; this milestone does not claim that a larger pool improves the measured
+workload, and no earlier deferred artifact should be read as having measured
+one.
 
 ### 6.7 P6 — make the fourth machine useful without adding a vote
 
@@ -769,7 +801,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 |---|---|---|---|
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
-| P5 | new paths are node-local config; an omitted field preserves the old root exactly | move one non-leader only after its reverse path is proven | move bytes back and restore old config before downgrade |
+| P5 | new paths are node-local config; an omitted field preserves the old root exactly, but a *set* `[storage]` field is not ignored by an older binary — see below | move one non-leader only after its reverse path is proven | move bytes back, then delete `storage.cache_dir` and `storage.transcode_dir` from every config file before installing an older binary |
 | P6 | v2 learner admission is refused until an active challenge proves every voter runs the `[4,5]` bridge; old endpoints/joiners reject rather than ignore the role, then activation commits `5..5` | upgrade all voters, prove capability, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; if activation is irreversible, rollback is a forward fix |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
@@ -777,6 +809,19 @@ Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or
 refusal, feature negotiation, upgrade order, and rollback outcome. An older
 node may never promote a learner or opt another node into bounded reads by
 accident.
+
+**P5 ships two different downgrade behaviors for one feature.** `[storage]`
+carries `#[serde(deny_unknown_fields)]` and `[cluster]` deliberately does not.
+An operator who sets `storage.cache_dir` or `storage.transcode_dir` and then
+installs an older binary gets a hard TOML parse failure on the whole file: the
+node does not start, mid-rollback, and the message names an unknown field rather
+than a downgrade. Both keys MUST be deleted from every config file — not
+emptied, not commented past — before an older binary is installed. Setting
+`cluster.read_pool_size` has no such effect, because the lenient `[cluster]`
+section already exists to let an older clustering release ignore keys it does
+not know. The asymmetry is intentional in the config code but is a rollback
+trap in practice, so the reverse-move checklist in
+[OPERATIONS.md](OPERATIONS.md) treats key removal as a step, not a tidy-up.
 
 Each behavior PR contains its tests and updates the authoritative operations or
 architecture text in the same commit. A branch is cut from current `main` in a
