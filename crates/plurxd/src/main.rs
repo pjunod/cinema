@@ -579,6 +579,19 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
     .await
 }
 
+/// What an operator sees when `plurxd refresh-metadata` cannot take the
+/// cluster-wide artwork lease.
+///
+/// A named constant rather than an inline literal because the sentence is the
+/// deliverable — it is the only thing the operator gets — and it shipped once
+/// with two runs of fourteen spaces in it, from continuation lines that had
+/// lost their trailing `\`. Nothing could assert on it while it was inline, so
+/// nothing did; [`the_cluster_refusals_read_as_sentences`] asserts on it here.
+const ARTWORK_PASS_UNAVAILABLE: &str =
+    "the artwork provider pass is not available on this node: it is either active on \
+     another cluster node, or this node was admitted as a learner and never runs \
+     cluster-wide provider work";
+
 async fn refresh_metadata_with_store(
     store: Arc<dyn Store>,
     artwork_dir: &std::path::Path,
@@ -600,11 +613,7 @@ async fn refresh_metadata_with_store(
     let Some(lease) =
         acquire_cluster_job(&coordinator, authority, "provider:artwork".to_owned()).await?
     else {
-        anyhow::bail!(
-            "the artwork provider pass is not available on this node: it is either active on \
-             another cluster node, or this node was admitted as a learner and never runs \
-             cluster-wide provider work"
-        );
+        anyhow::bail!(ARTWORK_PASS_UNAVAILABLE);
     };
     let lost = lease.loss_token();
     let publisher = lease.publisher(store.as_ref());
@@ -2299,6 +2308,28 @@ mod startup_tests {
 
     use plurx_core::domain::Library;
     use plurx_core::store::Store;
+
+    /// The operator-facing cluster refusal is a sentence, not a paragraph with
+    /// the indentation baked in.
+    ///
+    /// It shipped reading `... active on              another cluster node`:
+    /// two continuation lines inside the literal had lost their trailing `\`,
+    /// so fourteen columns of Rust source indentation became fourteen spaces
+    /// in the message. Nothing asserted on it, so `cargo fmt` kept it aligned
+    /// and every test stayed green. A run of two spaces is the whole tell.
+    #[test]
+    fn the_cluster_refusals_read_as_sentences() {
+        assert!(
+            !ARTWORK_PASS_UNAVAILABLE.contains("  "),
+            "source indentation leaked into an operator message: \
+             {ARTWORK_PASS_UNAVAILABLE:?}"
+        );
+        // And it is still the whole sentence, so the assertion above cannot be
+        // satisfied by shortening the message instead of fixing it.
+        assert!(ARTWORK_PASS_UNAVAILABLE.starts_with("the artwork provider pass is not available"));
+        assert!(ARTWORK_PASS_UNAVAILABLE.ends_with("never runs cluster-wide provider work"));
+        assert!(ARTWORK_PASS_UNAVAILABLE.contains("admitted as a learner"));
+    }
 
     fn config_in(dir: &std::path::Path) -> Config {
         let mut config = Config::default();
