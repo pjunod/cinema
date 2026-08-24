@@ -447,7 +447,8 @@ impl NodeLocalTelemetry {
             }
             // v4: fragment indexes. Node-local for the same reason as the
             // rows above, and additive, so a v3 sidecar upgrades in place.
-            if !table_exists(&conn, "fragment_indexes")? {
+            let creating_indexes = !table_exists(&conn, "fragment_indexes")?;
+            if creating_indexes {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA);
                 migration.push('\n');
             }
@@ -457,14 +458,19 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::renditionplan::RENDITION_PLANS_SCHEMA);
                 migration.push('\n');
             }
-            // v6: the promotion columns. Guarded on the column rather than
-            // the table, because a sidecar that just created `fragment_indexes`
-            // above got the v4 shape and needs them too — the create constant
-            // is deliberately frozen so both backends reach one shape by one
-            // route.
-            if table_exists(&conn, "fragment_indexes")?
-                && !column_exists(&conn, "fragment_indexes", "promotion")?
-            {
+            // v6: the promotion columns.
+            //
+            // `creating_indexes` is the whole subtlety. Every guard here is
+            // evaluated against the connection *before* the batch runs, so a
+            // sidecar that is creating `fragment_indexes` in this same batch
+            // still reports the table absent — and a guard that asked
+            // `table_exists && !column_exists` skipped the ALTER for exactly
+            // the case that needs it most, leaving a brand-new sidecar at the
+            // v4 shape with a v6 stamp. The create constant is deliberately
+            // frozen at its v27 shape so both backends reach one table by one
+            // route, which means a fresh sidecar needs this ALTER just as much
+            // as an upgraded one.
+            if creating_indexes || !column_exists(&conn, "fragment_indexes", "promotion")? {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS);
                 migration.push('\n');
             }
@@ -916,6 +922,49 @@ mod tests {
             .await
             .expect("read second")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_brand_new_sidecar_gets_every_column_the_reader_asks_for() {
+        // The guard's whole subtlety, pinned. Every migration guard is
+        // evaluated against the connection *before* the batch runs, so a
+        // sidecar creating `fragment_indexes` in that same batch still reports
+        // the table absent -- and a guard that asked `table_exists &&
+        // !column_exists` skipped the ALTER for exactly the case that needs it
+        // most, leaving a brand-new sidecar at the old shape carrying a
+        // current stamp. Nothing noticed until the first read of a v6 column
+        // on a fresh cluster node.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        let fresh = NodeLocalTelemetry::open(&path).expect("a brand-new sidecar");
+
+        // A round trip through the columns the create constant does not carry.
+        // `put` writes them and `get` selects them by name, so either half
+        // missing is a hard error rather than a wrong answer.
+        let index = crate::segplan::FragmentIndex::new(
+            16_000,
+            vec![crate::segplan::IndexRow {
+                dts: 0,
+                duration: 28_016,
+                bytes: 104_452,
+                video_bytes: 103_836,
+                class: crate::fmp4::CutClass::CleanIdr,
+            }],
+            "abc123",
+            crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+        );
+        fresh
+            .put_fragment_index(42, index, 1_700_000_000_000)
+            .await
+            .expect("a fresh sidecar must accept an index");
+        assert!(fresh
+            .fragment_index(
+                42,
+                crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+            )
+            .await
+            .expect("a fresh sidecar must be able to read one back")
+            .is_some());
     }
 
     #[test]

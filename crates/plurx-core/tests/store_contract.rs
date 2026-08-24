@@ -331,6 +331,11 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // The orphan sweep's two halves. Node-local on one side and replicated on
+    // the other, which is the reason the sweep exists rather than a hook in
+    // `delete_files`.
+    "vod_row_file_ids",
+    "surviving_file_ids",
 ];
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
