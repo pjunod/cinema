@@ -38,13 +38,15 @@ bump may break compatibility and a **patch** bump never does.
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
   from a fragment index — one row per fragment of the production-shaped
   video-only copy pipe — and a repositioned producer finds its place in that
-  index by matching three consecutive output byte counts, because M0 measured
-  that a repositioned generation's timestamps carry no film time at all. The
-  index is node-local on both backends, packed at twenty bytes a row, and
-  invalidated by mismatch rather than by deletion: a changed file or a changed
-  video pipeline simply stops matching. The background job that builds them is
-  bounded and ships off, because M0-P1 has not yet priced a full read of a
-  library over NFS. Nothing serves from any of this yet; a file without an
+  index by matching three consecutive fragments' video sample bytes — the
+  summed `trun` sizes, which are copied and so come out identical whatever
+  audio a generation carries, where the wire length does not — because M0
+  measured that a repositioned generation's timestamps carry no film time at
+  all. The index is node-local on both backends, packed at twenty-four bytes a
+  row, and invalidated by mismatch rather than by deletion: a changed file or a
+  changed video pipeline simply stops matching. The background job that builds
+  them is bounded and ships off, because M0-P1 has not yet priced a full read
+  of a library over NFS. Nothing serves from any of this yet; a file without an
   index keeps today's presentation.
 
 - **The VOD presentation plan's feasibility spike ran, and it stopped the
