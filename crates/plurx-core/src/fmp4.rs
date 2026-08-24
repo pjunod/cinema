@@ -2239,10 +2239,15 @@ fn scale_ticks(ticks: u64, from_timescale: u32, to_timescale: u32) -> u64 {
 
 /// Scale a signed interval between track clocks.
 ///
-/// The magnitude goes through [`scale_ticks`], so a positive shift rounds away
-/// from zero and a negative one towards it. Either way the error is under one
-/// destination tick and it is applied *once* per generation, not per fragment,
-/// so it cannot accumulate.
+/// The magnitude goes through [`scale_ticks`], which rounds up, so the result
+/// rounds *away from zero in both directions* — not towards zero on the
+/// negative side. That asymmetry is deliberate and it is why the video track
+/// is anchored exactly rather than scaled: video's source and destination
+/// timescales are the same, so its shift is exact, and every other track's is
+/// off by under one of its own ticks — about 20 µs at 48 kHz. The shift is
+/// applied once per generation rather than per fragment, so it cannot
+/// accumulate, but it is a real constant offset and calling it zero would be
+/// wrong.
 fn scale_signed(ticks: i64, from_timescale: u32, to_timescale: u32) -> i64 {
     let magnitude = scale_ticks(ticks.unsigned_abs(), from_timescale, to_timescale);
     let magnitude = magnitude.min(i64::MAX as u64) as i64;
@@ -2261,7 +2266,19 @@ fn scale_signed(ticks: i64, from_timescale: u32, to_timescale: u32) -> i64 {
 /// why the landing matcher exists at all. But the producer *knows* the film
 /// time of what it is about to receive: it is the plan entry it repositioned
 /// to, discarded forward to. So the shift is learned once, from the first
-/// fragment, and applied to every fragment for the life of the generation.
+/// fragment that carries video, and applied to every fragment for the life of
+/// the generation — including the ones that arrived before the anchor did.
+///
+/// Those leading fragments are the case worth spelling out. ffmpeg writes a
+/// `traf` only for tracks with buffered samples, so a generation can open with
+/// audio-only fragments. Letting those through unshifted would publish a
+/// segment whose audio sits on ffmpeg's clock and whose video sits on the
+/// film's — five seconds apart in the fixture this was measured on — and
+/// [`merge`]'s discontinuity repair would absorb the difference into a sample
+/// duration without always counting it. So they wait in `pending` and are
+/// rebased with everything else. Nothing can be published before the anchor
+/// arrives, because a cut requires `pending_ticks` past the floor and
+/// `pending_ticks` only counts video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MediaTime {
     /// The plan entry's start, in video ticks from t=0.
@@ -2317,19 +2334,33 @@ impl Segmenter {
     /// real name rather than `seg00000`, and the first-segment floor — which
     /// exists to get a *session* started quickly — is not spent again on a
     /// segment that is nobody's first.
+    ///
+    /// Refused for an init with no video track, because there is then nothing
+    /// to anchor a film time against and every alternative is a guess: an
+    /// audio clock says where in *its own* stream a sample is, never where in
+    /// the film. A repositioned audio-only rendition is not supported, and
+    /// saying so is better than placing one wherever the guess landed. A
+    /// video-bearing init reaches this refusal never.
     pub fn resuming_at(
         init: Init,
         policy: CutPolicy,
         start_index: u64,
         start_ticks: u64,
-    ) -> Segmenter {
+    ) -> Result<Segmenter, Fmp4Error> {
+        if init.video().is_none() {
+            return Err(Fmp4Error::Unsupported(
+                "a repositioned generation needs a video track to anchor film \
+                 time against; this init declares none"
+                    .into(),
+            ));
+        }
         let mut segmenter = Segmenter::new(init, policy);
         segmenter.next_index = start_index;
         segmenter.media_time = Some(MediaTime {
             start_ticks,
             delta: None,
         });
-        segmenter
+        Ok(segmenter)
     }
 
     pub fn init(&self) -> &Init {
@@ -2395,7 +2426,8 @@ impl Segmenter {
     /// new fragment, which is the whole trick: a boundary can only be judged
     /// once you can see what comes after it.
     pub fn push(&mut self, fragment: Fragment) -> Result<Option<Published>, Fmp4Error> {
-        let fragment = self.on_film_time(fragment);
+        let mut fragment = fragment;
+        self.on_film_time(&mut fragment)?;
         let class = classify(&fragment, &self.init);
         self.counts.fragments += 1;
         if class == CutClass::Unparseable {
@@ -2576,48 +2608,126 @@ impl Segmenter {
         Ok(chunks)
     }
 
-    /// Put one fragment of a repositioned generation back on the film's
-    /// timeline, or hand it back untouched when this generation started at
-    /// t = 0 and is already on it.
+    /// Put a repositioned generation's fragments back on the film's timeline.
+    ///
+    /// Hands `fragment` straight back when this generation started at t = 0
+    /// and is already on that timeline.
     ///
     /// The shift is computed once, in video ticks, and converted into each
-    /// track's own clock. Every track keeps its exact offset from video within
-    /// the fragment, because the shift is added to what is already there
-    /// rather than substituted for it — so nothing here can move audio
-    /// relative to picture, whatever the two timescales are.
+    /// track's own clock. Every track keeps its offset from video, because the
+    /// shift is added to what is already there rather than substituted for it.
+    /// It is not preserved *exactly*: [`scale_signed`] rounds, so a track
+    /// whose timescale differs from video's moves by under one of its own
+    /// ticks. Once, for the generation, not per fragment.
     ///
-    /// A leading fragment with no video track at all leaves the shift
-    /// unlearned and passes through: there is nothing to anchor against yet,
-    /// and guessing an anchor from an audio clock would put the whole
-    /// generation wherever that guess landed.
-    fn on_film_time(&mut self, mut fragment: Fragment) -> Fragment {
-        let Some(media) = self.media_time.as_mut() else {
-            return fragment;
+    /// Until a fragment carrying video arrives there is nothing to anchor
+    /// against, so nothing is shifted — an audio clock says where in its own
+    /// stream a sample is, never where in the film. When the anchor does
+    /// arrive, everything already accumulated is shifted with it, which is why
+    /// this takes `&mut self` rather than returning a fragment: leaving the
+    /// leading audio-only fragments on ffmpeg's clock inside a segment whose
+    /// video is on the film's is a multi-second A/V split that [`merge`]'s
+    /// discontinuity repair would partly absorb and partly not count.
+    fn on_film_time(&mut self, fragment: &mut Fragment) -> Result<(), Fmp4Error> {
+        let Some(media) = self.media_time else {
+            return Ok(());
         };
-        if media.delta.is_none() {
-            let Some(video) = self.init.video() else {
-                return fragment;
-            };
-            let Some(base) = fragment.track(video.id).map(|t| t.base_decode_time) else {
-                return fragment;
-            };
-            media.delta = Some(media.start_ticks as i64 - base as i64);
-        }
-        let Some(delta) = media.delta else {
-            return fragment;
+        let learned = match media.delta {
+            Some(delta) => delta,
+            None => {
+                let video = self
+                    .init
+                    .video()
+                    .ok_or_else(|| Fmp4Error::Unsupported("no video track to anchor".into()))?;
+                let Some(base) = fragment.track(video.id).map(|t| t.base_decode_time) else {
+                    // No anchor yet. This fragment waits with the rest.
+                    return Ok(());
+                };
+                // In i128 because a `tfdt` is a 64-bit field read straight off
+                // the wire: a source whose decode times sit above 2^63 would
+                // otherwise overflow the subtraction and place the whole
+                // generation at a time of the wrong sign.
+                let delta = i128::from(media.start_ticks) - i128::from(base);
+                let delta = i64::try_from(delta).map_err(|_| {
+                    Fmp4Error::Unsupported(format!(
+                        "this generation's first decode time is {base}, which is \
+                         {} ticks from the plan's {} — too far to place",
+                        delta.unsigned_abs(),
+                        media.start_ticks
+                    ))
+                })?;
+                self.refuse_if_any_track_lands_before_zero(fragment, delta)?;
+                if let Some(media) = self.media_time.as_mut() {
+                    media.delta = Some(delta);
+                }
+                // Everything that arrived before the anchor moves with it.
+                let mut pending = std::mem::take(&mut self.pending);
+                for earlier in &mut pending {
+                    self.shift(earlier, delta);
+                }
+                self.pending = pending;
+                delta
+            }
         };
+        self.shift(fragment, learned);
+        Ok(())
+    }
+
+    /// Add one generation's shift to every track of one fragment.
+    fn shift(&self, fragment: &mut Fragment, delta: i64) {
         for track in &mut fragment.tracks {
-            let timescale = self
-                .init
-                .tracks
-                .iter()
-                .find(|candidate| candidate.id == track.track_id)
-                .map(|candidate| candidate.timescale.max(1))
-                .unwrap_or(self.video_timescale);
-            let shift = scale_signed(delta, self.video_timescale, timescale);
+            let shift = scale_signed(
+                delta,
+                self.video_timescale,
+                self.timescale_of(track.track_id),
+            );
             track.base_decode_time = track.base_decode_time.saturating_add_signed(shift);
         }
-        fragment
+    }
+
+    fn timescale_of(&self, track_id: u32) -> u32 {
+        self.init
+            .tracks
+            .iter()
+            .find(|candidate| candidate.id == track_id)
+            .map(|candidate| candidate.timescale.max(1))
+            .unwrap_or(self.video_timescale)
+    }
+
+    /// A shift that would take any track below zero is refused, not clamped.
+    ///
+    /// `-avoid_negative_ts make_zero` puts the *earliest* track at zero, which
+    /// on a muxed stream is usually audio, so video's first decode time is
+    /// already some way above it. Rebasing video onto a small `start_ticks`
+    /// therefore asks audio to start before the film does, and there is no
+    /// such time to write: `tfdt` is unsigned. Saturating at zero would answer
+    /// by silently moving audio away from picture by exactly the amount that
+    /// did not fit — the one thing this whole function exists to prevent — and
+    /// [`merge`]'s repair would not always count it, because a negative join
+    /// leaves the range it checks. So the generation is refused and the caller
+    /// is told which track could not be placed.
+    fn refuse_if_any_track_lands_before_zero(
+        &self,
+        fragment: &Fragment,
+        delta: i64,
+    ) -> Result<(), Fmp4Error> {
+        for track in &fragment.tracks {
+            let shift = scale_signed(
+                delta,
+                self.video_timescale,
+                self.timescale_of(track.track_id),
+            );
+            if i128::from(track.base_decode_time) + i128::from(shift) < 0 {
+                return Err(Fmp4Error::Unsupported(format!(
+                    "track {} starts {} ticks before the film time this \
+                     generation was placed at, and a decode time cannot be \
+                     negative",
+                    track.track_id,
+                    -(i128::from(track.base_decode_time) + i128::from(shift)),
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn flush(&mut self, reason: CutReason) -> Result<Published, Fmp4Error> {
@@ -3226,6 +3336,181 @@ mod tests {
     // two generations, one film timeline
     // -----------------------------------------------------------------------
 
+    /// A synthetic fragment: one track, one run, `count` samples of `duration`
+    /// ticks and `size` bytes each, starting at `base`.
+    fn synthetic(track_id: u32, base: u64, duration: u32, count: usize, size: u32) -> Fragment {
+        let samples = vec![
+            Sample {
+                duration,
+                size,
+                flags: 0,
+                cto: 0,
+            };
+            count
+        ];
+        // Sized like a real one, so the byte ceiling sees what it would see on
+        // the wire rather than a placeholder.
+        let payload = count * size as usize;
+        Fragment {
+            bytes: vec![0u8; 8 + payload],
+            mdat_payload: 8..8 + payload,
+            tracks: vec![TrackFragment {
+                track_id,
+                base_decode_time: base,
+                runs: vec![Run {
+                    data_offset: 8,
+                    samples,
+                }],
+            }],
+        }
+    }
+
+    /// Two tracks in one fragment, so a rebase has something to keep in step.
+    fn synthetic_muxed(video_base: u64, audio_base: u64) -> Fragment {
+        let mut fragment = synthetic(1, video_base, 1_000, 24, 4_000);
+        let audio = synthetic(2, audio_base, 1_024, 40, 300);
+        fragment.tracks.extend(audio.tracks);
+        fragment
+    }
+
+    /// A 24 000-tick video track and a 48 000-tick audio track, so a rebase
+    /// cannot pass by treating one timescale as the other.
+    fn muxed_init() -> Init {
+        let track = |id: u32, kind: TrackKind, timescale: u32| Track {
+            id,
+            kind,
+            timescale,
+            codec: None,
+            dolby_vision_config: false,
+            nal_length_size: 4,
+            default_sample_duration: 0,
+            default_sample_size: 0,
+            default_sample_flags: 0,
+        };
+        Init {
+            bytes: Vec::new(),
+            tracks: vec![
+                track(1, TrackKind::Video, 24_000),
+                track(2, TrackKind::Audio, 48_000),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_leading_audio_only_fragment_is_rebased_with_the_anchor_not_left_behind() {
+        // ffmpeg writes a `traf` only for tracks with buffered samples, so a
+        // generation can open with audio and no picture. Leaving those on the
+        // source's clock while the video that follows is on the film's is a
+        // multi-second split inside one segment.
+        let init = muxed_init();
+        let policy = CutPolicy::new(1, 1, 64 * 1024 * 1024, 15, 24_000);
+        let mut segmenter =
+            Segmenter::resuming_at(init, policy, 7, 240_000).expect("video-bearing init");
+
+        // Audio first, alone, on the source's clock.
+        assert!(segmenter
+            .push(synthetic(2, 96_000, 1_024, 40, 300))
+            .expect("audio-only fragment")
+            .is_none());
+        // Then the anchor: video at 48 000 source ticks, audio continuing.
+        segmenter
+            .push(synthetic_muxed(48_000, 136_960))
+            .expect("the anchor fragment");
+
+        let delta = 240_000i64 - 48_000;
+        let audio_shift = scale_signed(delta, 24_000, 48_000);
+        assert_eq!(
+            segmenter.pending[0]
+                .track(2)
+                .expect("audio")
+                .base_decode_time,
+            96_000u64.saturating_add_signed(audio_shift),
+            "the fragment that arrived before the anchor must move with it"
+        );
+        assert_eq!(
+            segmenter.pending[1]
+                .track(1)
+                .expect("video")
+                .base_decode_time,
+            240_000,
+            "and the anchor itself lands exactly on the plan's start"
+        );
+    }
+
+    #[test]
+    fn a_generation_that_would_start_before_the_film_is_refused_not_clamped() {
+        // `-avoid_negative_ts make_zero` zeroes the earliest track, which on a
+        // muxed stream is usually audio, so video's first decode time sits
+        // above it. Placing video at a small film time therefore asks audio to
+        // start before the film does, and `tfdt` is unsigned. Saturating at
+        // zero would move audio away from picture by exactly the amount that
+        // did not fit — silently.
+        let init = muxed_init();
+        let policy = CutPolicy::new(1, 1, 64 * 1024 * 1024, 15, 24_000);
+        let mut segmenter = Segmenter::resuming_at(init, policy, 0, 0).expect("video-bearing init");
+        let error = segmenter
+            .push(synthetic_muxed(12_000, 0))
+            .expect_err("audio cannot start before the film");
+        let message = error.to_string();
+        assert!(message.contains("track 2"), "{message}");
+        assert!(message.contains("negative"), "{message}");
+    }
+
+    #[test]
+    fn a_repositioned_generation_needs_a_video_track_to_anchor_against() {
+        let mut init = muxed_init();
+        init.tracks.retain(|track| track.kind != TrackKind::Video);
+        let policy = CutPolicy::new(1, 1, 64 * 1024 * 1024, 15, 48_000);
+        assert!(
+            Segmenter::resuming_at(init, policy, 4, 100_000).is_err(),
+            "an audio clock says where in its own stream a sample is, never \
+             where in the film"
+        );
+    }
+
+    #[test]
+    fn a_resumed_generation_does_not_spend_the_first_segment_floor_again() {
+        // The lower first floor exists to get a *session* playing quickly. A
+        // generation resuming at index 7 is nobody's first segment, so it must
+        // use the ordinary floor — otherwise every seek publishes one short
+        // segment that the plan does not contain.
+        let init = muxed_init();
+        // First floor 1 s, ordinary floor 4 s, at 24 000 ticks, with a byte
+        // ceiling one fragment's payload can cross.
+        let policy = CutPolicy::new(4, 1, 150_000, 15, 24_000);
+
+        let mut fresh = Segmenter::new(init.clone(), policy);
+        let mut resumed =
+            Segmenter::resuming_at(init, policy, 7, 240_000).expect("video-bearing init");
+
+        // Two seconds of video and 192 KB of it. The fresh segmenter is past
+        // its 1 s floor, so the byte ceiling is free to act; the resumed one
+        // is short of 4 s, and the floor gates the ceilings.
+        assert!(fresh
+            .push(synthetic(1, 0, 1_000, 48, 4_000))
+            .expect("fresh, first")
+            .is_none());
+        assert!(resumed
+            .push(synthetic(1, 48_000, 1_000, 48, 4_000))
+            .expect("resumed, first")
+            .is_none());
+
+        let fresh_cut = fresh
+            .push(synthetic(1, 48_000, 1_000, 24, 4_000))
+            .expect("fresh");
+        let resumed_cut = resumed
+            .push(synthetic(1, 96_000, 1_000, 24, 4_000))
+            .expect("resumed");
+        assert!(
+            fresh_cut.is_some(),
+            "a session's first segment may cut once past the 1 s first floor"
+        );
+        assert!(
+            resumed_cut.is_none(),
+            "a resumed generation is nobody's first segment and waits for 4 s"
+        );
+    }
+
     /// The video `tfdt` a published segment actually carries, read back off
     /// the bytes rather than off whatever the segmenter believed.
     fn published_video_tfdt(init: &Init, published: &Published) -> u64 {
@@ -3385,9 +3670,24 @@ mod tests {
         };
         let original = bytes_of(&fragments, video.id);
         let reopened_bytes = bytes_of(&second_fragments, second_video);
-        let landing = (0..original.len().saturating_sub(3))
-            .find(|&start| original[start..start + 3] == reopened_bytes[..3])
-            .expect("the repositioned generation must be somewhere in the file");
+        assert!(
+            reopened_bytes.len() >= 3 && original.len() >= 3,
+            "a landing is matched over three fragments and there are {} / {}",
+            reopened_bytes.len(),
+            original.len()
+        );
+        // Inclusive of the last valid start, the way `match_landing` is: a
+        // reposition into the final three fragments is a legitimate landing.
+        let matches: Vec<usize> = (0..=original.len() - 3)
+            .filter(|&start| original[start..start + 3] == reopened_bytes[..3])
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the landing must be unique — `match_landing` calls more than one \
+             Ambiguous rather than taking the first"
+        );
+        let landing = matches[0];
         assert!(
             landing <= boundary_fragment,
             "-noaccurate_seek landed at fragment {landing}, past the boundary \
@@ -3396,7 +3696,8 @@ mod tests {
         let discard = boundary_fragment - landing;
 
         let mut second =
-            Segmenter::resuming_at(second_init.clone(), policy, boundary_index, boundary_ticks);
+            Segmenter::resuming_at(second_init.clone(), policy, boundary_index, boundary_ticks)
+                .expect("a video-bearing init resumes");
         let mut generation_two = Vec::new();
         for fragment in second_fragments.iter().skip(discard) {
             if let Some(published) = second.push(fragment.clone()).expect("segmenting") {
@@ -3415,6 +3716,11 @@ mod tests {
             .expect("video in the landing fragment")
             .base_decode_time;
 
+        assert_ne!(
+            raw, boundary_ticks,
+            "ffmpeg happened to hand this generation the film's own time, so \
+             the rebase is not being exercised at all"
+        );
         assert_eq!(
             published_video_tfdt(&second_init, &generation_two[0]),
             boundary_ticks,
@@ -3422,15 +3728,26 @@ mod tests {
              plan entry's film time, not at the {raw} ticks ffmpeg gave it"
         );
         assert_eq!(
-            generation_two[0].index, boundary_index,
-            "and it must be published under the plan's index, not seg00000"
+            generation_two[0].name(),
+            segment_name(boundary_index),
+            "and under the plan's name, not seg00000"
         );
 
         // The join, from both sides: every segment generation two publishes
         // lands exactly where generation one's did.
+        //
+        // The first one is the weakest of these — its time is the anchor by
+        // construction, whatever fragment the discard happened to leave at the
+        // front. It is the *second* that can catch a wrong landing, so demand
+        // one.
         let overlap = generation_two
             .len()
             .min(generation_one.len() - boundary_index as usize);
+        assert!(
+            overlap >= 2,
+            "only {overlap} segment(s) overlap, so nothing here compares two \
+             generations at a boundary neither of them chose"
+        );
         for offset in 0..overlap {
             let one = &generation_one[boundary_index as usize + offset];
             let two = &generation_two[offset];
@@ -3440,7 +3757,12 @@ mod tests {
                 "segment {} of the two generations starts at different times",
                 two.index
             );
-            assert_eq!(one.index, two.index, "and under different names");
+            assert_eq!(
+                two.seconds.round(),
+                one.seconds.round(),
+                "segment {} runs for a different length in the two generations",
+                two.index
+            );
         }
 
         // Contiguous within generation two as well, so nothing above is
