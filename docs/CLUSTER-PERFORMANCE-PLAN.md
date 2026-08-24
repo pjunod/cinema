@@ -3,8 +3,10 @@
 **Status:** P0–P5 implementation and deterministic acceptance delivered; M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
 revised after adversarial review (§6.6), with four of its storage guards still
-design intent rather than pinned behavior; P0c/P2f/P5 physical evidence and
-P6–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+design intent rather than pinned behavior; P6 PR-1 delivered — a learner is
+admitted, harmless, and proven on real processes, with eligible traffic,
+promotion, and removal left to PR-2 (§6.7); P0c/P2f/P5 physical evidence and
+P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -743,6 +745,19 @@ routes directly. Either retain and state that all cluster nodes are trusted, or
 vendor a separate membership-mutation credential that learners never receive;
 the public UI alone is not an authorization boundary.
 
+**Decided in PR-1: retain, and state it.** `secret_api` is simultaneously the
+Raft membership-mutation credential, the full replicated read/write client
+credential, and the artwork HMAC key, and it ships whole inside the join token
+before the joiner starts. A learner holding it can `POST /cluster/become_member`
+to the leader and promote itself, bypassing every plurx-side refusal, because
+that route lives in vendored Hiqlite and honours only `validate_secret`. A
+learner is therefore a **capacity role, not a security boundary**, and the job
+gate is not authorization — it prevents duplicated work. This is stated in
+[OPERATIONS.md](OPERATIONS.md) under *A learner is inside the trust boundary*.
+The separate membership-mutation credential is its own milestone, designed in
+[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md), and
+is not a prerequisite for PR-2.
+
 Activation uses a bridge protocol rather than a one-step version bump: deploy
 binaries that support `[4,5]`, actively prove every current voter supports the
 learner protocol, commit activation to `5..5`, and only then admit learner
@@ -763,9 +778,8 @@ One proof deliberately left out of that slice was the mixed-version "an old
 voter blocks activation" scenario as a separate-process `plurx-cluster-check`
 arm: that arm needs a `NodeLaunch` emulation flag for a binary that heartbeats
 without the capability, which is the same flag the separate-process learner
-scenario needs. Both belong to one scenario, built once, and neither is built
-yet. The scenario is proven against a real replicated cluster in
-`crates/plurx-core/src/cluster/migration.rs` instead.
+scenario needs. Both belong to one scenario, built once. The third slice built
+it; see *Delivered (third slice)* below.
 
 **Delivered (second slice).** Learner admission, the durable role, and
 committed-role enforcement. `cluster_nodes.role` and `cluster_join_tokens.role`
@@ -802,6 +816,47 @@ bounded local reads, promotion, learner removal/drain/tombstones, the UI, and
 the separate-process harness scenario above. Until removal exists, admitting a
 learner makes the protocol rollback unavailable.
 
+**Delivered (third slice).** The separate-process scenario both earlier slices
+deferred, the operations and plan text, and the minimum honest UI correction.
+
+`NodeLaunch` carries a role, threaded into `node_config` as Hiqlite's
+`learner_only` hint exactly as the daemon sets it, plus an env-plumbed
+`emulate_pre_learner_heartbeat` flag whose far side is a `cluster-validation`
+function in `plurx-core`; a production build compiles a constant `false` in its
+place and has no variable to read. `controller()` now runs a three-real-voter
+plus one-real-learner scenario that proves, on processes: a live voter that
+heartbeats without `learner_protocol_v5` blocks activation and the refusal names
+it; restarting it on a binary that writes the capability unblocks activation;
+the admitted learner enters committed Raft membership and never the voter set,
+with every process including the learner agreeing quorum is three; the learner
+takes no lease through plurxd's own `acquire_cluster_job` while the row is
+absent, and a voter then takes the same resource; the learner applies a write
+committed while its process was dead, read as absent beforehand; and
+deactivation is refused by name while it is a member.
+
+Each clause was checked against its own mutation rather than assumed. Dropping
+`learner_only` makes the fourth process a voter and quorum four. Making
+`may_run_cluster_jobs` answer `true` has the learner win `provider:artwork`
+outright — the claim the second slice could only argue, now demonstrated. The
+UI no longer describes a learner as a transient join state.
+
+**Delivered by PR-1 as a whole.** A cluster on this release can be moved onto
+protocol 5 by an explicit, twice-checked admin operation that refuses while any
+active node's *running* binary is unproven; it can then admit a non-voting
+learner through a versioned protocol whose role no joining node can assert; that
+learner is a committed member with a durable role, holds no vote, changes no
+quorum, runs no leader-singleton work, survives its own restart, and cannot be
+rolled back away. The trust boundary is stated rather than moved.
+
+**Remaining for PR-2.** Everything that makes a learner *useful* or *reversible*:
+the route and job eligibility matrix; learner readiness and readiness-gated
+bounded local reads; separate reporting of voter replication health and learner
+catch-up; promotion, with its watermark/apply catch-up proof, replication
+barrier, and voter-grade storage preflight; learner removal with routing
+ejection, admission fence, drain, node-local settlement, durable removal fence,
+and data-directory tombstone; and the fuller capacity-versus-redundancy UI. The
+acceptance clauses below that PR-1 does not meet are named in §7.3.
+
 **Acceptance:** a real separate-process three-voter-plus-learner cluster
 preserves quorum size three, distributes only bounded reads to the learner,
 refuses learner leadership and singleton work, catches up after restart and
@@ -810,6 +865,18 @@ storage preflight. Mixed-version tests prove an old voter blocks activation and
 cannot reinterpret v2 admission as a voter. The UI and operations text
 distinguish compute/read capacity, a non-quorum replicated copy, and voting
 redundancy.
+
+| Acceptance clause | PR-1 |
+|---|---|
+| Real separate-process three-voter-plus-learner cluster preserves quorum size three | met |
+| Refuses learner leadership and singleton work | met for singleton work, through the production `acquire_cluster_job`; leadership is refused only by `learner_only` plus the absence of a vote, which the scenario asserts rather than attacks |
+| Catches up after restart | met for process restart; **snapshot install is not exercised** |
+| Distributes only bounded reads to the learner | not met — no traffic is routed to a learner at all |
+| Removes/drains safely | not met — learner removal does not exist |
+| Promotes only after catch-up and storage preflight | not met — promotion does not exist |
+| Mixed-version: an old voter blocks activation | met, against a second real process |
+| Mixed-version: an old joiner cannot reinterpret v2 admission as a voter | met, against a transcription of the shipped v1 decoder rather than a v1 binary |
+| UI and operations text distinguish the three shapes | partly — the UI and docs no longer call a learner a join state and name what it is not, but the capacity-versus-redundancy presentation is PR-2's |
 
 ### 6.8 P7 — close the loop with load-balancer and failure drills
 
@@ -880,7 +947,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly, but a *set* `[storage]` field is not ignored by an older binary — see below | move one non-leader only after its reverse path is proven | move bytes back, then delete `storage.cache_dir` and `storage.transcode_dir` from every config file before installing an older binary |
-| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner, then enable only its eligible traffic | remove every learner and verify voter-only membership from every voter before marker deactivation/downgrade; deactivation is refused while any committed member holds no vote; if activation is irreversible, rollback is a forward fix |
+| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role. Built and proven against a second real process in `plurx-cluster-check`: a live voter that heartbeats without the capability blocks activation and is named, and restarting it on a capability-writing binary clears it | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner. PR-1 stops there — there is no eligible learner traffic to enable. **A node that is down never heartbeats, so it never proves the capability and blocks activation until it is removed** | PR-1 delivers only the no-learner rollback: deactivation is refused, by its own committing statement, while any committed member holds no vote, and **learner removal does not exist**, so admitting a learner makes rollback permanently unavailable on this release. Plan for that before the first learner; the forward fix is then the only route |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or
