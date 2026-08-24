@@ -3008,7 +3008,12 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["code"], "conflict");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("remote placement")),
+            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
+        );
         let (status, body) = call(
             &app,
             put(
