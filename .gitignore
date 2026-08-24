@@ -41,3 +41,4 @@ __pycache__/
 
 # Project swarm configuration is source; ad-hoc nested clones are not.
 swarm/*/
+crates/*/pipe:1

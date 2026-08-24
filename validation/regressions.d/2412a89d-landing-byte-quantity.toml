@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "2412a89d",
+]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The landing matcher's byte comparison is asserted against the two pipes it actually spans: `the_index_records_the_quantity_a_production_generation_reproduces` builds an index from the video-only pipe and a full production generation from the same fixture, and asserts over four fixtures that the video sample sums are equal fragment for fragment while the wire lengths are not -- so a fixture that quietly stopped carrying audio would fail rather than pass vacuously. `match_landing`'s short-probe rule is covered by `a_short_observation_is_accepted_only_at_the_tail` and its ambiguity by `a_repeated_byte_sequence_is_ambiguous_rather_than_guessed`, both of which fail against the pre-fix loop. The stored form is covered by the store contract's round trip on every backend at the new 24-byte stride."

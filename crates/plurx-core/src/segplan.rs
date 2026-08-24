@@ -37,7 +37,11 @@ use crate::fmp4::{CutClass, CutPolicy, CutReason};
 /// Bumped when a stored index or plan stops being readable by this binary.
 /// A persisted row from a newer version is discarded and rebuilt rather than
 /// misinterpreted — an index is always cheaper to rebuild than to get wrong.
-pub const SEGPLAN_VERSION: u32 = 1;
+///
+/// v2 added `IndexRow::video_bytes`. v1 rows stored only the wire length of
+/// the video-only pipe, which a production generation never reproduces, so
+/// every v1 index is discarded rather than matched against.
+pub const SEGPLAN_VERSION: u32 = 2;
 
 /// How many consecutive fragments a landing match compares.
 ///
@@ -135,8 +139,21 @@ pub struct IndexRow {
     pub duration: u64,
     /// Output bytes on the wire — `moof` + `mdat`, exactly what
     /// [`crate::fmp4::Fragment::len`] counts and what the segmenter's byte
-    /// ceiling accumulates. Also what the landing matcher compares.
+    /// ceiling accumulates. **Not** what the landing matcher compares: this is
+    /// the VIDEO-ONLY pipe's wire length, and a production generation carries
+    /// audio, so its `moof` and `mdat` are tens of kilobytes larger and vary
+    /// with the audio track.
     pub bytes: u32,
+    /// The video track's sample sizes, summed — the payload bytes of the video
+    /// `traf`'s `trun` entries, with no container overhead at all.
+    ///
+    /// This is what the landing matcher compares, and it is the only quantity
+    /// here that survives the trip: video samples are copied, so a production
+    /// generation emits byte-for-byte the same ones. M0 measured the
+    /// difference and it is total — over four fixtures, the video-only pipe's
+    /// wire length matched the production pipe's on 0 of 28 fragments while
+    /// this sum matched on 28 of 28.
+    pub video_bytes: u32,
     /// [`CutClass`] stored by label, because a segment may only begin in front
     /// of a clean fragment and the policy asks the real type.
     #[serde(with = "cut_class_serde")]
@@ -536,8 +553,10 @@ impl std::error::Error for LandingError {}
 
 /// Where in the index a repositioned producer landed.
 ///
-/// `observed` is the output byte count of each fragment the repositioned
-/// generation emitted, in order, starting with the first. The producer then
+/// `observed` is the summed VIDEO SAMPLE bytes of each fragment the
+/// repositioned generation emitted, in order, starting with the first — not
+/// its wire length, which carries audio and container overhead the index has
+/// never seen. The producer then
 /// discards forward from the returned row to the row that begins its target
 /// entry — always forward, because `-noaccurate_seek -ss` lands at the RAP
 /// at-or-before the boundary by design.
@@ -568,16 +587,13 @@ pub fn match_landing(index: &FragmentIndex, observed: &[u32]) -> Result<usize, L
         let matches = rows[start..start + window]
             .iter()
             .zip(probe)
-            .all(|(row, bytes)| row.bytes == *bytes);
+            .all(|(row, bytes)| row.video_bytes == *bytes);
         if !matches {
             continue;
         }
-        if window < LANDING_WINDOW && rows.len() - start > LANDING_WINDOW {
-            // A short probe matched somewhere with plenty of index left after
-            // it. The generation should have produced more fragments, so this
-            // is not the tail — refuse rather than guess.
-            continue;
-        }
+        // Every match counts toward ambiguity, including ones the tail rule
+        // below will reject. Skipping them silently was how a byte count that
+        // appeared twice could still return a confident answer.
         match found {
             None => found = Some(start),
             Some(first) => {
@@ -588,7 +604,14 @@ pub fn match_landing(index: &FragmentIndex, observed: &[u32]) -> Result<usize, L
             }
         }
     }
-    found.ok_or(LandingError::NoMatch)
+    let start = found.ok_or(LandingError::NoMatch)?;
+    // A probe shorter than the window is only believable when the generation
+    // genuinely ran out of fragments — that is, when the match lands exactly
+    // at the end of the index. Anywhere else it should have produced more.
+    if window < LANDING_WINDOW && start + window != rows.len() {
+        return Err(LandingError::NoMatch);
+    }
+    Ok(start)
 }
 
 /// How many fragments to discard to reach `entry` from a landing at `row`.
@@ -613,6 +636,10 @@ mod tests {
             dts,
             duration,
             bytes,
+            // The fixtures make the two differ so nothing can pass by
+            // comparing the wrong one: a real production generation's wire
+            // length never equals the video-only pipe's.
+            video_bytes: bytes.saturating_sub(600),
             class,
         }
     }
@@ -819,7 +846,10 @@ mod tests {
     #[test]
     fn a_landing_is_found_by_its_byte_sequence() {
         let index = gop_index(30, CutClass::CleanIdr);
-        let observed: Vec<u32> = index.rows[11..14].iter().map(|row| row.bytes).collect();
+        let observed: Vec<u32> = index.rows[11..14]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
         assert_eq!(match_landing(&index, &observed), Ok(11));
     }
 
@@ -841,9 +871,12 @@ mod tests {
         // constructed rather than sampled.
         let mut index = gop_index(30, CutClass::CleanIdr);
         for offset in 0..3 {
-            index.rows[20 + offset].bytes = index.rows[11 + offset].bytes;
+            index.rows[20 + offset].video_bytes = index.rows[11 + offset].video_bytes;
         }
-        let observed: Vec<u32> = index.rows[11..14].iter().map(|row| row.bytes).collect();
+        let observed: Vec<u32> = index.rows[11..14]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
         assert_eq!(
             match_landing(&index, &observed),
             Err(LandingError::Ambiguous {
@@ -857,12 +890,18 @@ mod tests {
     fn a_short_observation_is_accepted_only_at_the_tail() {
         let index = gop_index(30, CutClass::CleanIdr);
         // Two fragments from the very end: acceptable, the stream ran out.
-        let tail: Vec<u32> = index.rows[28..30].iter().map(|row| row.bytes).collect();
+        let tail: Vec<u32> = index.rows[28..30]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
         assert_eq!(match_landing(&index, &tail), Ok(28));
 
         // Two fragments from the middle: the generation should have produced a
         // third, so refuse rather than accept a weaker claim.
-        let middle: Vec<u32> = index.rows[10..12].iter().map(|row| row.bytes).collect();
+        let middle: Vec<u32> = index.rows[10..12]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
         assert_eq!(match_landing(&index, &middle), Err(LandingError::NoMatch));
     }
 

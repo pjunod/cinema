@@ -56,17 +56,65 @@ bump may break compatibility and a **patch** bump never does.
   sessions that were already playing when it was switched on, and
   `docs/OPERATIONS.md` covers enabling it and what it makes visible.
 
+- **A rendition's segment boundaries are now obeyed, not re-derived.** The
+  segment plan has always been normative — a producer cuts *at* its boundaries
+  and never re-decides them — but the segmenter had never seen a plan, so every
+  boundary after the first came from re-running the cut policy live. The two
+  derivations cannot agree: the plan runs that policy over the video-only index
+  pipe's byte counts plus a deliberately generous audio estimate, while a live
+  generation accumulates the real production wire length. They pick the same
+  keyframe on a clean cut and different fragments on a byte-ceiling cut, which
+  on a 69 Mb/s remux with no clean point in reach is the ordinary case — and
+  every segment after such a disagreement would have been published under an
+  index naming a different part of the film, in a playlist the client already
+  held. `Segmenter::following` takes the boundaries instead. A generation whose
+  media steps over a planned boundary is refused rather than publishing an
+  empty segment under an index somebody will request. Sessions without a plan
+  cut by policy exactly as before.
+
+- **A producer that seeks now publishes on the film's timeline rather than on
+  ffmpeg's.** Reopening a file partway in with `-noaccurate_seek -ss` yields
+  decode times that are not film time — measured in every configuration tried,
+  `-copyts` included — so the segments a repositioned generation published
+  carried ffmpeg's clock into a playlist claiming to be the film's.
+  `Segmenter::resuming_at` takes the plan entry the producer landed on and
+  rebases the whole generation onto it: the shift is learned once from the
+  first fragment carrying video, converted into each track's own clock, and
+  added to what is already there, so nothing can move audio relative to
+  picture. The segment also gets its plan name instead of restarting the
+  numbering, and the first-segment duration floor, which exists to start a
+  session quickly, is not spent again on a segment that is nobody's first. Two
+  real generations of the same fixture are now required to publish one
+  continuous timeline under one set of indexes. Nothing calls this yet.
+
+- **A rendition's segments now have bookkeeping and a scheduler of their own.**
+  `plurxd::titlestore` keeps three separate facts about every planned segment —
+  planned, materialized, admitted — because one bitmap cannot mean both "the
+  bytes are here now" and "the whole rendition is durably cached": eviction
+  clears the first while the second is still being assembled. A title too large
+  for the completed-cache budget is therefore not a failure but a
+  working-set-only rendition, still VOD-presented and honestly re-materialized
+  on a later watch, which is the ordinary case for the large remuxes this work
+  exists for. `plurxd::prodsched` decides what a producer does next as a pure
+  function of the manifest and the attached readers' open requests, with one
+  rule above the ahead window: a reader whose segment GET is blocked has a
+  first-byte deadline running against it and outranks everything else, so the
+  producer never walks backwards to refill a hole nobody has asked for. Neither
+  module is wired to a request path yet.
+
 - **A file's segmentation is now computed once and kept, instead of being
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
   from a fragment index — one row per fragment of the production-shaped
   video-only copy pipe — and a repositioned producer finds its place in that
-  index by matching three consecutive output byte counts, because M0 measured
-  that a repositioned generation's timestamps carry no film time at all. The
-  index is node-local on both backends, packed at twenty bytes a row, and
-  invalidated by mismatch rather than by deletion: a changed file or a changed
-  video pipeline simply stops matching. The background job that builds them is
-  bounded and ships off, because M0-P1 has not yet priced a full read of a
-  library over NFS. Nothing serves from any of this yet; a file without an
+  index by matching three consecutive fragments' video sample bytes — the
+  summed `trun` sizes, which are copied and so come out identical whatever
+  audio a generation carries, where the wire length does not — because M0
+  measured that a repositioned generation's timestamps carry no film time at
+  all. The index is node-local on both backends, packed at twenty-four bytes a
+  row, and invalidated by mismatch rather than by deletion: a changed file or a
+  changed video pipeline simply stops matching. The background job that builds
+  them is bounded and ships off, because M0-P1 has not yet priced a full read
+  of a library over NFS. Nothing serves from any of this yet; a file without an
   index keeps today's presentation.
 
 - **The VOD presentation plan's feasibility spike ran, and it stopped the
