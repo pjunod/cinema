@@ -60,15 +60,17 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 ci-rust-gate: fmt-check ## CI Rust gate: format + workspace tests minus the cluster member
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 
-# The real mount-namespace regression for scratch/durable bind aliasing. It
-# calls `mount --bind`, so it needs CAP_SYS_ADMIN and is not part of `check`:
-# a developer without privileges would get a failing baseline for a machine
-# capability rather than for the code. The test itself returns immediately
-# unless PLURX_RUN_BIND_MOUNT_TEST is set, so it is inert everywhere else.
-# Run it on a privileged Linux host before shipping a change to fs_secure.
+# The real mount-namespace exercises for scratch aliasing and mount points
+# inside scratch. They call `mount --bind`, so they need CAP_SYS_ADMIN and are
+# not part of `check`: a developer without privileges would get a failing
+# baseline for a machine capability rather than for the code. Both tests return
+# immediately unless PLURX_RUN_BIND_MOUNT_TEST is set, so they are inert
+# everywhere else — which is exactly why they need a target that sets it. Run
+# this on a privileged Linux host before shipping a change to fs_secure.
 .PHONY: bind-mount-check
-bind-mount-check: ## Privileged Linux: prove a durable bind source is refused as scratch
-	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core real_bind -- --nocapture
+bind-mount-check: ## Privileged Linux: run the opt-in mount-namespace scratch tests
+	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core \
+	  fs_secure::tests:: -- --nocapture
 
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence

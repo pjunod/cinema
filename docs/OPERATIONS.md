@@ -646,8 +646,12 @@ children, and fails startup on an incomplete cleanup. First ownership uses a
 durable non-authorizing `.plurx-transcode-scratch.claiming` state; restart
 promotes it only when the directory is still otherwise empty. A `.claiming`
 marker left empty or truncated by a crash is an interrupted claim and is
-retried instead of wedging startup. A populated root plurx does not own refuses
-startup and is left untouched, byte for byte.
+retried instead of wedging startup; a truncated *published*
+`.plurx-transcode-scratch` still fails closed, because that one authorizes
+deletion. A populated root plurx does not own refuses startup and is left
+untouched, byte for byte. A scratch directory that cannot be read — an EIO from
+a FUSE, NFS, or mergerfs backing store — is that error, never an empty
+directory.
 
 Inside a root plurx owns, the entries are its own leftovers. Their permission
 bits and owning uid are not refusal conditions; they are removed. A symbolic
@@ -657,18 +661,20 @@ one. Traversal is also bounded by entry count and depth, as a safety device for
 a directory plurx does not already own: exceeding a bound in an owned root
 leaves that scratch untouched for the boot, logs a warning, and lets startup
 continue, and the next boot retries. In an unowned root a bound is a refusal.
+The depth ceiling has a test in the owned-root direction; the entry-count
+ceiling does not, so read that half as design intent.
 
 Startup requires scratch, authority, and every resolved persistent-cache child
 to be disjoint in both directions and to have distinct device/inode identities;
 symlink aliases are refused before cleanup. Cleanup retains no-follow directory
 and marker descriptors throughout, so a concurrent rename, mount replacement,
 or marker swap aborts startup without touching the replacement.
-Do not mount another filesystem below the scratch root. Cross-device children
-and same-device bind-mount children are both intended to fail startup rather
-than have the mounted tree traversed. Both guards exist in the code, but only
-the bind-mount half has a real mount-namespace exercise, and that one is the
-privileged opt-in `make bind-mount-check` rather than a default gate. Treat the
-pair as design intent and mount elsewhere.
+Do not mount another filesystem below the scratch root. A mount point inside
+scratch is named in the startup error, and a cross-device child is refused.
+Neither is covered by a default gate: the mount-point error and the
+bind-alias refusal are exercised only by `make bind-mount-check`, which calls
+`mount --bind` and therefore needs a privileged Linux host, and the cross-device
+bound has no test at all. Treat the group as design intent and mount elsewhere.
 
 An available `cluster.shared_cache_dir` is a fourth persistent root. It must be
 disjoint from authority, the local cache, and scratch; its verified identity is
@@ -699,9 +705,10 @@ that exact owner-only file is authoritative and belongs in the same backup and
 move procedure. Its canonical path must remain outside scratch and every
 managed cache root; startup refuses a key inside either. Startup also passes the
 selected key inode into post-lock scratch cleanup as a protected identity, which
-is meant to stop a bind alias erasing it — that path is implemented but has no
-test of its own, so read it as design intent and place the key outside the
-managed roots rather than relying on it. Each voter owns its own Hiqlite storage: sharing that directory
+is meant to stop a bind alias erasing it. The cleanup half of that is tested —
+a protected identity found at any depth aborts cleanup with its bytes intact —
+but nothing tests that the credential key is the identity handed in, so place
+the key outside the managed roots rather than relying on the belt. Each voter owns its own Hiqlite storage: sharing that directory
 between machines defeats Raft's independent failure model.
 
 Create every configured root with the daemon uid/gid and monitor space and
@@ -2235,12 +2242,13 @@ legacy path.
 
 ### Offline package storage and quotas
 
-Phone downloads are prepared under `<data_dir>/cache` beside finished
-content-addressed transcodes. Ready and in-progress offline recipes are pinned:
+Phone downloads are prepared beside finished content-addressed transcodes:
+under `<data_dir>/cache/transcode`, or `<cache_dir>/transcode` when
+`storage.cache_dir` is set. Ready and in-progress offline recipes are pinned:
 ordinary playback-cache cleanup cannot evict them, and their bytes do not
-consume `cache_max_gb`. Give the data directory enough local space for both
-budgets; unlike session scratch, this cache must survive a daemon restart and
-must not live on tmpfs.
+consume `cache_max_gb`. Give whichever root holds that tree enough local space
+for both budgets; unlike session scratch, this cache must survive a daemon
+restart and must not live on tmpfs.
 
 The authenticated settings API exposes four operator controls:
 

@@ -655,9 +655,18 @@ existing node-local fallback and is not created by this preflight.
 The delivered coverage is narrower than that contract. Mutation runs found the
 cross-device bound, the depth and entry-count bounds, and the credential-key
 inode protection implemented but unreached by any test, and the only real
-bind-mount exercise is opt-in and privileged (`make bind-mount-check`). Read
-those four as design intent, not as pinned behavior, and do not restate them as
-proven in operator-facing text.
+mount-namespace exercises are opt-in and privileged. The follow-up work added
+tests for root repair, the foreign-uid root refusal, permissive-mode and
+foreign-uid children, a faulting readdir, the interrupted pending claim, the
+truncated published marker, the foreign-durable-root marker message, and the
+depth ceiling in the owned-root direction. Three gaps remain, and operator-facing
+text must not restate them as proven: the entry-count ceiling, the cross-device
+bound, and the wiring that makes the credential key one of the protected
+identities cleanup receives — the preflight that honours a protected identity is
+tested, the choice of that identity is not. The mount-point error and the
+bind-source-ancestry refusal now have real exercises, but only under
+`make bind-mount-check` (`PLURX_RUN_BIND_MOUNT_TEST=1`), which needs
+CAP_SYS_ADMIN and is deliberately outside `check` and CI.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the
