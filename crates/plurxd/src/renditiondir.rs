@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use plurx_core::fmp4::segment_name;
 
-use crate::titlestore::{Manifest, ReaderWindow};
+use crate::titlestore::{Manifest, ReaderWindow, SegState};
 
 /// The initialization segment's name, as every other producer writes it.
 pub const INIT_NAME: &str = "init.mp4";
@@ -119,6 +119,9 @@ impl RenditionDir {
     /// them is present. Nothing is unlinked in that case, so a refusal cannot
     /// take the bytes with it.
     pub async fn evict(&self, manifest: &mut Manifest, index: u32) -> io::Result<bool> {
+        let Some(state) = manifest.state(index) else {
+            return Ok(false);
+        };
         if !manifest.evict(index) {
             return Ok(false);
         }
@@ -127,7 +130,19 @@ impl RenditionDir {
             // Already gone is the state eviction wanted. The manifest is now
             // right about it either way.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(error),
+            Err(error) => {
+                // The record is already cleared and the bytes are still there.
+                // Put the claim back: the manifest's job is to be right about
+                // the disk, and the disk still has them. Leaving it cleared
+                // walks the node's accounting down toward zero on a read-only
+                // or failing filesystem while the disk stays full — and a
+                // scheduler reading that accounting stops asking for room and
+                // resumes producing into a disk that has none.
+                if let SegState::Materialized { bytes, at_ms } = state {
+                    manifest.materialize(index, bytes, at_ms);
+                }
+                Err(error)
+            }
         }
     }
 
@@ -144,15 +159,24 @@ impl RenditionDir {
         manifest: &mut Manifest,
         readers: &[ReaderWindow],
         wanted: u64,
-    ) -> io::Result<u64> {
-        let mut freed = 0u64;
+    ) -> io::Result<Freed> {
+        let mut freed = Freed::default();
         for index in manifest.eviction_candidates(readers, wanted) {
             let bytes = manifest
                 .state(index)
                 .map(|state| state.bytes())
                 .unwrap_or(0);
-            if self.evict(manifest, index).await? {
-                freed += bytes;
+            match self.evict(manifest, index).await {
+                Ok(true) => freed.bytes += bytes,
+                Ok(false) => {}
+                // Report what was released rather than losing it to the error.
+                // A caller that cannot tell 0 from 400 MB has to assume the
+                // worst, and the worst assumption on a full disk is to keep
+                // evicting.
+                Err(error) => {
+                    freed.error = Some(error);
+                    return Ok(freed);
+                }
             }
         }
         Ok(freed)
@@ -175,9 +199,24 @@ impl RenditionDir {
     /// Files that are not planned segments are left alone. This owns the
     /// rendition's own names, not the directory.
     pub async fn reconcile(&self, manifest: &mut Manifest, at_ms: i64) -> io::Result<Reconciled> {
-        let mut report = Reconciled::default();
+        // A rendition with no init is unplayable whatever else survived: every
+        // segment under it decodes with parameter sets that are not there.
+        // Saying so is the difference between one clear failure and a client
+        // fetching a hundred segments that each produce nothing.
+        let mut report = Reconciled {
+            init_present: self.has_init().await,
+            ..Reconciled::default()
+        };
         for index in 0..manifest.len() as u32 {
-            let on_disk = tokio::fs::metadata(self.segment_path(index)).await.ok();
+            // Zero length is not a segment. `publish_file` renames a complete
+            // file into place, so a zero-length one is the residue of
+            // something else — a truncated restore, a filesystem that
+            // journalled the rename and not the data — and adopting it
+            // publishes an unplayable segment as a cache hit.
+            let on_disk = tokio::fs::metadata(self.segment_path(index))
+                .await
+                .ok()
+                .filter(|meta| meta.len() > 0);
             let claimed = manifest
                 .state(index)
                 .map(|state| state.is_materialized())
@@ -205,19 +244,52 @@ impl RenditionDir {
     ///
     /// For a rendition being given up whole. Record-then-unlink is not needed
     /// here because nothing survives to be wrong.
-    pub async fn purge(&self, manifest: &mut Manifest) -> io::Result<u64> {
-        let mut freed = 0u64;
+    pub async fn purge(&self, manifest: &mut Manifest) -> Freed {
+        let mut freed = Freed::default();
         for index in 0..manifest.len() as u32 {
-            if let Some(state) = manifest.state(index) {
-                freed += state.bytes();
-            }
-            manifest.forget(index);
+            let bytes = manifest
+                .state(index)
+                .map(|state| state.bytes())
+                .unwrap_or(0);
             match tokio::fs::remove_file(self.segment_path(index)).await {
-                Ok(()) | Err(_) => {}
+                // Only bytes that actually went are bytes that were freed. A
+                // caller decrementing a node-wide working set by this number
+                // would otherwise over-credit itself by the whole size of a
+                // rendition whose directory it could not write to.
+                Ok(()) => {
+                    manifest.forget(index);
+                    freed.bytes += bytes;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    manifest.forget(index);
+                }
+                Err(error) => freed.error = Some(error),
             }
         }
-        let _ = tokio::fs::remove_file(self.dir.join(INIT_NAME)).await;
-        Ok(freed)
+        if let Err(error) = tokio::fs::remove_file(self.dir.join(INIT_NAME)).await {
+            if error.kind() != io::ErrorKind::NotFound && freed.error.is_none() {
+                freed.error = Some(error);
+            }
+        }
+        freed
+    }
+}
+
+/// Bytes actually released, and the error that stopped the sweep if one did.
+///
+/// One type rather than `io::Result<u64>` because the two facts are both
+/// needed: a caller that cannot tell "freed nothing" from "freed 400 MB and
+/// then hit EROFS" has to assume the worst, and on a full disk the worst
+/// assumption is to keep evicting.
+#[derive(Debug, Default)]
+pub struct Freed {
+    pub bytes: u64,
+    pub error: Option<io::Error>,
+}
+
+impl Freed {
+    pub fn is_complete(&self) -> bool {
+        self.error.is_none()
     }
 }
 
@@ -227,15 +299,30 @@ impl RenditionDir {
 /// non-empty is worth a log line: `adopted` means a producer died between
 /// writing and recording, `forgotten` means bytes went missing under a live
 /// manifest, and the second is the one that would have 404'd a viewer.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciled {
     pub adopted: Vec<u32>,
     pub forgotten: Vec<u32>,
+    /// Whether `init.mp4` is there. `false` means the rendition is unplayable
+    /// however many segments survived, so it is not a repair — it is a reason
+    /// to give the whole thing up and produce it again.
+    pub init_present: bool,
+}
+
+impl Default for Reconciled {
+    fn default() -> Reconciled {
+        Reconciled {
+            adopted: Vec::new(),
+            forgotten: Vec::new(),
+            init_present: true,
+        }
+    }
 }
 
 impl Reconciled {
+    /// Nothing to repair *and* the rendition is playable.
     pub fn is_clean(&self) -> bool {
-        self.adopted.is_empty() && self.forgotten.is_empty()
+        self.adopted.is_empty() && self.forgotten.is_empty() && self.init_present
     }
 }
 
@@ -417,7 +504,8 @@ mod tests {
             .await
             .expect("make room");
 
-        assert!(freed > 0, "something must have been given up");
+        assert!(freed.is_complete(), "the sweep hit an error");
+        assert!(freed.bytes > 0, "something must have been given up");
         for index in 0..count {
             if reader.covers(index) {
                 assert!(
@@ -509,6 +597,7 @@ mod tests {
     async fn reconciling_a_directory_that_agrees_changes_nothing() {
         let (_temp, rendition) = dir().await;
         let mut manifest = manifest(24);
+        rendition.write_init(b"moov").await.expect("init");
         for index in 0..4 {
             rendition
                 .materialize(&mut manifest, index, b"bytes", 10)

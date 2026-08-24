@@ -159,6 +159,11 @@ fn cut_from_code(code: u8) -> Option<PlanCut> {
 /// change gets a new key — that is what a key is for.
 ///
 /// Returns whether this call is the one that stored it.
+///
+/// An empty plan is refused rather than stored. `get` treats an empty entry
+/// list as a miss -- a playlist with no segments is not a rendition -- so
+/// storing one strands the key forever: every read misses, and every later
+/// write is declined because the row exists.
 pub(crate) fn put_if_absent(
     conn: &Connection,
     rendition_key: &str,
@@ -167,6 +172,12 @@ pub(crate) fn put_if_absent(
     source: &SourceIdentity,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
+    if plan.entries.is_empty() {
+        return Err(StoreError::Migration(format!(
+            "refusing to store an empty segment plan under {rendition_key}: a \
+             stored empty plan reads back as a miss and cannot be replaced"
+        )));
+    }
     let affected = conn.execute(
         "INSERT INTO rendition_plans (
              rendition_key, file_id, source_size, source_mtime,
@@ -208,7 +219,7 @@ pub(crate) fn get(
     let row = conn
         .query_row(
             "SELECT source_size, source_mtime, argv_fingerprint, segplan_version,
-                    timescale, target_duration, entries_packed
+                    timescale, target_duration, entries, entries_packed
                FROM rendition_plans
               WHERE rendition_key = ?1",
             params![rendition_key],
@@ -220,12 +231,15 @@ pub(crate) fn get(
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((size, mtime, fingerprint, version, timescale, target, packed)) = row else {
+    let Some((size, mtime, fingerprint, version, timescale, target, declared_entries, packed)) =
+        row
+    else {
         return Ok(None);
     };
     if version != i64::from(SEGPLAN_VERSION) {
@@ -235,6 +249,18 @@ pub(crate) fn get(
         return Ok(None);
     }
     let entries = unpack(&packed)?;
+    // The count column earns its place here. `unpack` only rejects a blob that
+    // is not a whole number of entries, so a blob truncated on an entry
+    // boundary -- 1,200 stored, 1,100 readable -- comes back as a shorter
+    // plan, and a shorter plan renders a VOD playlist with an ENDLIST for a
+    // film that ends early. Nothing downstream could tell.
+    if entries.len() as i64 != declared_entries {
+        return Err(StoreError::Migration(format!(
+            "a stored segment plan declares {declared_entries} entries and \
+             carries {}",
+            entries.len()
+        )));
+    }
     if entries.is_empty() {
         return Ok(None);
     }
@@ -376,6 +402,40 @@ mod tests {
         )
         .expect("bump");
         assert!(get(&conn, "rk", &identity()).expect("get").is_none());
+    }
+
+    #[test]
+    fn an_empty_plan_is_refused_rather_than_stranding_the_key() {
+        // `get` treats an empty entry list as a miss, so a stored empty plan
+        // is a key that reads as absent forever and refuses every replacement.
+        let conn = conn();
+        let empty = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 16_000,
+            entries: Vec::new(),
+            target_duration: 0,
+        };
+        assert!(put_if_absent(&conn, "rk", 7, &empty, &identity(), 1_000).is_err());
+        // And the key is still free for a real plan.
+        assert!(put_if_absent(&conn, "rk", 7, &plan(), &identity(), 2_000).expect("put"));
+        assert!(get(&conn, "rk", &identity()).expect("get").is_some());
+    }
+
+    #[test]
+    fn a_plan_truncated_on_an_entry_boundary_is_caught_by_the_count() {
+        // The dangerous truncation: a whole number of entries, so the blob's
+        // length tells you nothing. A short plan renders a VOD playlist with
+        // an ENDLIST for a film that ends early, and nothing downstream could
+        // tell.
+        let conn = conn();
+        put_if_absent(&conn, "rk", 7, &plan(), &identity(), 1_000).expect("put");
+        conn.execute(
+            "UPDATE rendition_plans SET entries_packed = ?1",
+            params![pack(&plan().entries[..2])],
+        )
+        .expect("truncate on a boundary");
+        let error = get(&conn, "rk", &identity()).expect_err("a short plan is refused");
+        assert!(error.to_string().contains("declares 4"), "{error}");
     }
 
     #[test]

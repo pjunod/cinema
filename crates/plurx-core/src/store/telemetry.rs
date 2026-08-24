@@ -529,6 +529,13 @@ impl NodeLocalTelemetry {
             conn.execute("DELETE FROM playback_events", [])?;
             conn.execute("DELETE FROM network_priors", [])?;
             conn.execute("DELETE FROM fragment_indexes", [])?;
+            // Every table this sidecar holds, or the promise that each
+            // contract scenario starts empty is only true of the tables
+            // somebody remembered. A case that stored a plan under a key a
+            // later case reuses would pass on SQLite and fail on hiqlite --
+            // backend divergence manufactured by the harness meant to catch
+            // it.
+            conn.execute("DELETE FROM rendition_plans", [])?;
             Ok(())
         })
         .await
