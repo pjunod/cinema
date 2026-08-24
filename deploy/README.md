@@ -99,18 +99,32 @@ services:
       - /srv/plurx-scratch:/var/tmp/plurx-transcode
 ```
 
+The same block is commented out in `docker-compose.override.example.yml`;
+uncomment it rather than retyping it.
+
 Create both with the daemon uid/gid. Cache survives restarts. Scratch must be
-empty on first start; plurx claims it with `.plurx-transcode-scratch`, then
-removes only its verified children at later starts and fails startup if cleanup
-is incomplete. The scratch mount must be owned by the container uid and not
-group/world-writable; do not bind the same host directory at a persistent path
-and the scratch path. If `PLURX_SHARED_CACHE_DIR` is configured, keep that mount
+empty on first start and must not be a path under `PLURX_DATA`; plurx claims it
+with `.plurx-transcode-scratch`, then removes only its verified children at
+later starts and fails startup if cleanup is incomplete. The scratch mount must
+be owned by the container uid — another uid refuses startup, while a
+container-uid-owned mount that is group/world-writable is repaired to `0700`
+with a warning. Do not bind the same host directory at a persistent path and
+the scratch path. If `PLURX_SHARED_CACHE_DIR` is configured, keep that mount
 separate from all three paths too; a missing shared mount retains node-local
 fallback and is not created by storage preflight. Neither local path is searched
-for a database. Roll back by
+for a database.
+
+Setting `PLURX_CACHE_DIR` on an existing install moves nothing — the daemon
+warns while the legacy trees still hold bytes and starts anyway. Copy
+`<data>/artwork`, `<data>/cache/transcode`, and `<data>/cache/subs` to
+`<cache>/artwork`, `<cache>/transcode`, and `<cache>/subs`; `cp -a <data>/cache
+<cache>` lands the finished transcodes and every completed offline package at
+`<cache>/cache/transcode`, where nothing reads them. Roll back by
 stopping one non-leader, copying persistent bytes to the legacy data-root
 children, removing these settings/mounts, and proving `/readyz` before moving
-the next voter.
+the next voter. Delete the two keys before installing an older image: `[storage]`
+rejects unknown fields, so an older binary fails to parse the config rather than
+ignoring them.
 
 **Why a bind mount and not a named volume.** A named volume lives at a path
 Docker chose, and pointing a container at one that does not exist yet is not an
