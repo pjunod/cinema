@@ -6,9 +6,7 @@
 
 use std::time::Duration;
 
-use plurx_core::cluster::coordination::{
-    ClusterJobAuthority, Lease, LeaseClaim, StoreCoordinator,
-};
+use plurx_core::cluster::coordination::{ClusterJobAuthority, Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::error::StoreError;
 use plurx_core::store::{PublicationFence, PublicationStore, Store};
 

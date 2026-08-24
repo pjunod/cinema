@@ -1335,9 +1335,7 @@ async fn open_active_store_with_key(
     // vote has no business proposing one. It also cannot help — a learner is
     // by construction the node most likely to be behind.
     let store = match role {
-        ClusterRole::Voter => {
-            HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?
-        }
+        ClusterRole::Voter => HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?,
         ClusterRole::Learner => HiqliteAuthStore::open(client.clone(), &telemetry).await?,
     };
     if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
@@ -4327,7 +4325,6 @@ mod tests {
 
         selected.shutdown().await.expect("stop the voter");
     }
-
 
     /// The replicated schema marker, read through the leader.
     #[cfg(feature = "hiqlite-store")]

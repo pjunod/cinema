@@ -1771,13 +1771,7 @@ impl MembershipManager {
                        SELECT 1 FROM cluster_join_tokens \
                        WHERE raft_id = $2 AND state IN ('issued', 'redeeming') AND expires_at > $4\
                      )",
-                    params!(
-                        token_hash,
-                        raft_id as i64,
-                        expires_at,
-                        now,
-                        role.as_str()
-                    ),
+                    params!(token_hash, raft_id as i64, expires_at, now, role.as_str()),
                 )
                 .await?;
             if inserted == 1 {
@@ -5976,7 +5970,10 @@ mod tests {
             admitted_learners(&connection).is_empty(),
             "a NULL role must not be read as a learner"
         );
-        assert_eq!(ClusterRole::from_stored(None).expect("null role"), ClusterRole::Voter);
+        assert_eq!(
+            ClusterRole::from_stored(None).expect("null role"),
+            ClusterRole::Voter
+        );
         assert_eq!(
             ClusterRole::from_stored(Some("voter")).expect("voter role"),
             ClusterRole::Voter
@@ -6004,7 +6001,10 @@ mod tests {
                 [],
             )
             .expect("admit a learner");
-        assert_eq!(admitted_learners(&connection), vec!["node-learner".to_owned()]);
+        assert_eq!(
+            admitted_learners(&connection),
+            vec!["node-learner".to_owned()]
+        );
         assert_eq!(
             deactivate(&connection),
             0,
@@ -6022,7 +6022,11 @@ mod tests {
             )
             .expect("remove the learner");
         assert!(admitted_learners(&connection).is_empty());
-        assert_eq!(deactivate(&connection), 1, "a removed learner strands nothing");
+        assert_eq!(
+            deactivate(&connection),
+            1,
+            "a removed learner strands nothing"
+        );
         assert_eq!(active_range(&connection), (4, 4));
     }
 
@@ -7018,7 +7022,10 @@ mod tests {
         );
 
         let learner = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
-        assert!(!learner.contains("learner"), "the role must not be plaintext");
+        assert!(
+            !learner.contains("learner"),
+            "the role must not be plaintext"
+        );
         let learner = decode_join_token(&learner).expect("decode the v2 token");
         assert_eq!(learner.role(), ClusterRole::Learner);
         assert_eq!(
@@ -7058,8 +7065,14 @@ mod tests {
             1,
             ClusterRole::Learner
         ));
-        assert!(!local_membership_version_matches_role(2, ClusterRole::Voter));
-        assert!(!local_membership_version_matches_role(3, ClusterRole::Voter));
+        assert!(!local_membership_version_matches_role(
+            2,
+            ClusterRole::Voter
+        ));
+        assert!(!local_membership_version_matches_role(
+            3,
+            ClusterRole::Voter
+        ));
     }
 
     #[test]

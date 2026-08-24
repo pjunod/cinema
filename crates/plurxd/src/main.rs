@@ -1506,8 +1506,7 @@ fn spawn_background_loops(
     // out has no request to wake it, and a monarr that is down must not stall
     // anything a viewer is waiting on.
     tokio::spawn(
-        std::sync::Arc::clone(&state.watched)
-            .run(std::sync::Arc::new(state.membership.clone())),
+        std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),
     );
 }
 
@@ -3734,9 +3733,15 @@ mod startup_tests {
         add_library(&store, "Books", LibraryKind::Books, false).await;
         add_library(&store, "Home", LibraryKind::Home, false).await;
         let artwork = tmp.path().join("artwork");
-        refresh_metadata_with_store(store, &artwork, None, "test-refresh", &plurx_core::cluster::coordination::UnclusteredJobAuthority)
-            .await
-            .expect("a provider-less refresh must succeed");
+        refresh_metadata_with_store(
+            store,
+            &artwork,
+            None,
+            "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        )
+        .await
+        .expect("a provider-less refresh must succeed");
     }
 
     /// Naming a library that does not exist is a mistake worth reporting: the
@@ -3757,8 +3762,8 @@ mod startup_tests {
                 "test-refresh",
                 &plurx_core::cluster::coordination::UnclusteredJobAuthority,
             )
-                .await
-                .expect_err("no such library")
+            .await
+            .expect_err("no such library")
         );
         assert!(error.contains("no library with id 4242"), "{error}");
     }
@@ -3774,9 +3779,15 @@ mod startup_tests {
 
         let error = format!(
             "{:#}",
-            refresh_metadata_with_store(store, &artwork, None, "test-refresh", &plurx_core::cluster::coordination::UnclusteredJobAuthority)
-                .await
-                .expect_err("no TMDB key")
+            refresh_metadata_with_store(
+                store,
+                &artwork,
+                None,
+                "test-refresh",
+                &plurx_core::cluster::coordination::UnclusteredJobAuthority
+            )
+            .await
+            .expect_err("no TMDB key")
         );
         assert!(error.contains("TMDB API key is not configured"), "{error}");
     }
@@ -3813,8 +3824,8 @@ mod startup_tests {
             "test-refresh",
             &plurx_core::cluster::coordination::UnclusteredJobAuthority,
         )
-            .await
-            .expect("empty AniList refresh");
+        .await
+        .expect("empty AniList refresh");
     }
 
     /// Everything a request needs, assembled the way `run` assembles it.
