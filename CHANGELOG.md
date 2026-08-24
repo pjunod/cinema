@@ -56,6 +56,26 @@ bump may break compatibility and a **patch** bump never does.
   sessions that were already playing when it was switched on, and
   `docs/OPERATIONS.md` covers enabling it and what it makes visible.
 
+- **A decision about a producer is now turned into exactly one thing done to
+  the process.** Two facts the scheduler cannot see decide most of it. A
+  stopped encoder still holds its hardware codec session, so stopping is only
+  right for a hold that clears on its own and soon — a reader advancing does,
+  and the disk filling up does not, since only another title releasing space
+  will clear that, on no schedule this one controls. Those give the process
+  back rather than sitting on a scarce session indefinitely. And because a
+  signal goes to a process id, and ids get reused, every transition refuses to
+  repeat itself: what is already stopped is never stopped again.
+
+  Building it surfaced a fault in the scheduler that could not be seen without
+  it. "Where the producer has got to" and "where the producer was sent" were
+  one fact, so a producer dispatched to the middle of a film — having made
+  nothing there yet — was indistinguishable from one that had never started,
+  and was dispatched to the same place again. The result was a tight loop of
+  starting and killing an encoder while the viewer who asked for that part of
+  the film waited on a segment nobody was making. The two facts are now
+  separate, and a producer already sitting where it was sent is left alone to
+  get on with it.
+
 - **A title's whole playlist can now be rendered before a byte of its media
   exists.** This is the artifact the rest of the work is for, and the
   difference between it and what the daemon serves today is the entire point: a

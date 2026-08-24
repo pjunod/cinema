@@ -150,9 +150,20 @@ pub enum Hold {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position {
     /// The highest index this producer has materialized in its current run.
-    /// `None` before it has produced anything, which is also what a freshly
-    /// repositioned producer looks like.
+    /// `None` before it has produced anything.
     pub produced_through: Option<u32>,
+    /// Where the current process was started or repositioned to, if there is
+    /// one at all.
+    ///
+    /// Not the same fact as `produced_through`, and conflating the two is an
+    /// infinite loop rather than an inaccuracy. A producer repositioned to 300
+    /// has produced nothing *yet*, so a scheduler reading only
+    /// `produced_through` sees a producer that has never made anything, tells
+    /// it to reposition to 300, and gets back a producer that has produced
+    /// nothing and is positioned at 300 — forever, killing and respawning
+    /// ffmpeg in a tight loop while a reader waits on a segment nobody is
+    /// making.
+    pub positioned_at: Option<u32>,
     /// Segments per second of film, used only to turn the two horizons from
     /// seconds into indexes. Taken from the plan rather than assumed, because
     /// a copy rendition's segments are 6–15 s and a transcode rendition's are
@@ -209,6 +220,19 @@ impl WorkingSet {
 }
 
 impl Position {
+    /// The next index this process will write if it is simply left alone.
+    ///
+    /// `None` means there is no process. This is the quantity every
+    /// reposition decision is actually about: whether the segment that is
+    /// wanted can be arrived at by carrying on, or whether the pipeline has to
+    /// move.
+    fn reach(&self) -> Option<u32> {
+        match self.produced_through {
+            Some(through) => Some(through.saturating_add(1)),
+            None => self.positioned_at,
+        }
+    }
+
     fn horizon_segments(&self, seconds: u32) -> u32 {
         let per = if self.seconds_per_segment > 0.0 {
             self.seconds_per_segment
@@ -274,7 +298,7 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
                 }
             };
         }
-        return serve_blocked(manifest, &owed, position.produced_through, reposition);
+        return serve_blocked(manifest, &owed, position, reposition);
     }
 
     // Nothing is blocked, so this is ahead-fill, and it runs *forward from the
@@ -283,10 +307,7 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
     // blocking GETs turn that hole into a request the instant anybody wants
     // it, and running backwards for it on spec is exactly what starved the
     // reader above.
-    let from = match position.produced_through {
-        Some(through) => through.saturating_add(1),
-        None => furthest,
-    };
+    let from = position.reach().unwrap_or(furthest);
     let Some(gap) = manifest.next_gap(from) else {
         // Everything in front of every reader exists. Whether to stop depends
         // on how far past the furthest demand the producer has already run —
@@ -318,9 +339,9 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
         };
     }
 
-    match position.produced_through {
-        // Never produced anything: it starts where it is needed, and starting
-        // is a reposition whenever that is not the beginning.
+    match position.reach() {
+        // No process at all: it starts where it is needed, and starting is a
+        // reposition whenever that is not the beginning.
         None => {
             if gap == 0 {
                 Action::Produce { next: 0 }
@@ -328,10 +349,11 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
                 Action::Reposition { to: gap }
             }
         }
-        Some(through) => {
-            // `from` put the gap strictly ahead of the producer, so the only
-            // question left is whether reading to it beats restarting there.
-            if gap > through.saturating_add(reposition) {
+        Some(reach) => {
+            // `from` put the gap at or ahead of where this process will write
+            // next, so the only question left is whether reading to it beats
+            // restarting there.
+            if gap > reach.saturating_add(reposition) {
                 Action::Reposition { to: gap }
             } else {
                 Action::Produce { next: gap }
@@ -352,32 +374,24 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
 /// one producer to close is a signal to admission (ledger D12) that the
 /// rendition needs a second one — it is not a reason for this one to thrash
 /// between two readers, serving neither.
-fn serve_blocked(
-    manifest: &Manifest,
-    owed: &[u32],
-    produced_through: Option<u32>,
-    reposition: u32,
-) -> Action {
+fn serve_blocked(manifest: &Manifest, owed: &[u32], position: Position, reposition: u32) -> Action {
     let lowest = owed[0];
-    let Some(through) = produced_through else {
-        // Nothing produced yet: start where the work is. Starting anywhere but
-        // the beginning is itself a reposition.
+    let Some(reach) = position.reach() else {
+        // No process at all. Starting anywhere but the beginning is itself a
+        // reposition.
         return if lowest == 0 {
             Action::Produce { next: 0 }
         } else {
             Action::Reposition { to: lowest }
         };
     };
-    match owed.iter().copied().find(|index| *index > through) {
+    match owed.iter().copied().find(|index| *index >= reach) {
         // Near enough ahead that a copy pipe at several times realtime gets
         // there before a new process finishes starting. What it produces
         // *next* is still its own next gap — reading forward to the target
         // means making everything on the way, minus whatever already exists.
-        Some(target) if target <= through.saturating_add(reposition) => {
-            let next = manifest
-                .next_gap(through.saturating_add(1))
-                .unwrap_or(target)
-                .min(target);
+        Some(target) if target <= reach.saturating_add(reposition) => {
+            let next = manifest.next_gap(reach).unwrap_or(target).min(target);
             Action::Produce { next }
         }
         // Everything owed is behind the producer, or further ahead than a
@@ -443,8 +457,22 @@ mod tests {
     fn position(through: Option<u32>) -> Position {
         Position {
             produced_through: through,
+            // A producer that has produced something is positioned where it
+            // started; the tests that care about the distinction set this
+            // themselves.
+            positioned_at: through.map(|_| 0),
             seconds_per_segment: 7.0,
             working_set: WorkingSet::default(),
+        }
+    }
+
+    /// A process that exists and is positioned at `at`, having produced
+    /// nothing yet — what a freshly repositioned producer actually looks like.
+    fn positioned(at: u32) -> Position {
+        Position {
+            produced_through: None,
+            positioned_at: Some(at),
+            ..position(None)
         }
     }
 
@@ -528,6 +556,35 @@ mod tests {
             }
             other => panic!("expected suspension, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_repositioned_producer_is_not_told_to_reposition_again() {
+        // The respawn loop from the scheduler's side. A producer sent to 34
+        // has produced nothing yet, and a `Position` that cannot tell that
+        // from "never started" answers `Reposition { to: 34 }` to a producer
+        // already sitting at 34 -- so the executor kills it, spawns an
+        // identical one, and asks again. Forever, while the reader that
+        // triggered the seek waits on a segment nobody is making.
+        let mut manifest = manifest(80);
+        for index in 0..30 {
+            manifest.materialize(index, 1_000, i64::from(index));
+        }
+        assert_eq!(
+            decide(&manifest, &[Demand::waiting_on(34)], positioned(34)),
+            Action::Produce { next: 34 }
+        );
+    }
+
+    #[test]
+    fn a_producer_positioned_short_of_what_is_owed_still_moves() {
+        // The other half: `positioned_at` must not become a reason to leave a
+        // producer where it cannot reach what is owed.
+        let manifest = manifest(80);
+        assert_eq!(
+            decide(&manifest, &[Demand::waiting_on(70)], positioned(4)),
+            Action::Reposition { to: 70 }
+        );
     }
 
     #[test]
@@ -824,11 +881,13 @@ mod tests {
         // two different things on the two paths.
         let short = Position {
             produced_through: Some(0),
+            positioned_at: Some(0),
             seconds_per_segment: 2.0,
             working_set: WorkingSet::default(),
         };
         let long = Position {
             produced_through: Some(0),
+            positioned_at: Some(0),
             seconds_per_segment: 7.0,
             working_set: WorkingSet::default(),
         };
@@ -842,6 +901,7 @@ mod tests {
     fn a_zero_length_segment_never_divides_by_zero() {
         let broken = Position {
             produced_through: Some(0),
+            positioned_at: Some(0),
             seconds_per_segment: 0.0,
             working_set: WorkingSet::default(),
         };
