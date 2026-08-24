@@ -34,6 +34,52 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A title's whole playlist can now be rendered before a byte of its media
+  exists.** This is the artifact the rest of the work is for, and the
+  difference between it and what the daemon serves today is the entire point: a
+  live playlist grows, so a client can only ever see as far as the server has
+  produced, and every seek past that edge is a seek into a timeline the player
+  does not believe exists. The plan renders one that lists every segment of the
+  film up front, declared `VOD` rather than `EVENT` — `EVENT` promises only
+  that segments are appended, where `VOD` promises the playlist is final, which
+  is what makes the whole duration seekable — and closed with `EXT-X-ENDLIST`
+  so the end is not provisional. Target duration counts audio-tail entries as
+  well as video ones, because a title whose audio outlives its picture has an
+  honest target duration of fifteen seconds where a video-only reading emits
+  eight, and understating it is a spec violation players act on. Durations are
+  the plan's own and nominal, since measurement showed players preferring the
+  media's own timestamps over the declared ones.
+
+- **A rendition's segments on disk and the manifest that describes them can no
+  longer drift apart.** The bookkeeping was pure and testable and the bytes were
+  nowhere, which left the dangerous half unwritten: a manifest claiming a
+  segment that is not on disk is a cache *hit* that 404s a viewer mid-film,
+  which is worse than a miss in every case. Materializing now writes the bytes
+  before it records them, and evicting clears the record before it unlinks, so
+  whichever half a crash interrupts the residue is an unclaimed byte rather
+  than a phantom row. Adopting a directory this process did not write repairs
+  both directions and says what it found: a segment on disk nothing claimed is
+  adopted rather than deleted, because it cost a read of the source and is
+  exactly what the plan asked for, and a claim on bytes that are gone is
+  dropped even on a completed rendition, where refusing to notice would be
+  worst of all. Names and tmp-then-rename semantics are the copy segmenter's
+  exactly, so the serving layer and the GC need no changes.
+
+- **A rendition's plan is now kept, because it is a decision and not a
+  measurement.** Segment boundaries are computed once and a producer cuts at
+  them for the life of the file, but nothing was storing them — the plan was
+  re-derived on demand, which sounds like a cheaper route to the same answer
+  and is not. The cut policy is built from tuning constants, and any release
+  may move one; nothing in the plan version or the source identity covers that,
+  so the file, the pipeline and the index can all be unchanged while the plan
+  comes out cut somewhere else. A client holding the old playlist then asks for
+  segment 412 and is handed a different part of the film. Plans are now stored
+  node-local beside the fragment index, packed at 32 bytes an entry, and the
+  first plan written under a rendition key is the plan: a second write is
+  refused rather than silently re-cutting a rendition somebody is mid-seek
+  against. SQLite migration v28 and sidecar v5, both additive, both held to one
+  behaviour across the two durable backends.
+
 - **A rendition's segment boundaries are now obeyed, not re-derived.** The
   segment plan has always been normative — a producer cuts *at* its boundaries
   and never re-decides them — but the segmenter had never seen a plan, so every

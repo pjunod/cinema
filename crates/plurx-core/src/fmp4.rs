@@ -2644,7 +2644,29 @@ impl Segmenter {
             .max(1);
             let video_limit =
                 scale_ticks(video_ticks, self.video_timescale, track.timescale.max(1));
-            let first_limit = ceiling.max(video_limit);
+            // How much audio the FINAL VIDEO segment is allowed to absorb, and
+            // the one place the planned and unplanned paths part company.
+            //
+            // Without a plan this is `ceiling.max(video_limit)`: the last video
+            // segment may keep audio out to the whole duration ceiling, which
+            // is the `c58a4307` rule and is what a live session wants — fewer
+            // boundaries, and nobody is holding a playlist that says otherwise.
+            //
+            // With a plan it is `video_limit` exactly. `segplan`'s
+            // `append_audio_tail` models the tail as beginning where video
+            // ends and splitting at the ceiling from there, so a segmenter
+            // that let the last video segment swallow up to a ceiling of audio
+            // produces a different number of segments than the plan named —
+            // and the plan is already in a playlist the client holds, declared
+            // VOD and closed with ENDLIST. The reader then blocks on a segment
+            // no producer will ever emit and burns its first-byte deadline at
+            // the end of every affected film. That is ledger D10 again: the
+            // plan decides, here as everywhere.
+            let first_limit = if self.boundaries.is_some() {
+                video_limit.max(1)
+            } else {
+                ceiling.max(video_limit)
+            };
             let allow_boundary_sample = video_ticks > 0;
             let mut chunk_index = 0usize;
             let mut chunk_ticks = 0u64;
@@ -3692,6 +3714,66 @@ mod tests {
             .push(synthetic(1, 96_000, 1_000, 96, 4_000))
             .expect_err("a fragment that steps over two boundaries");
         assert!(error.to_string().contains("does not match the plan"));
+    }
+
+    #[test]
+    fn a_planned_generation_emits_exactly_the_tail_entries_the_plan_named() {
+        // The dangerous band: a tail long enough to be planned as its own
+        // entry but short enough that the unplanned rule lets the last video
+        // segment swallow it whole. The playlist is already published, VOD and
+        // closed with ENDLIST, so a segment the plan names and the producer
+        // never emits is a reader blocked on it until its deadline fires --
+        // at the end of every affected film, forever.
+        let init = muxed_init();
+        // 15 s ceiling, 24 000-tick video.
+        let policy = CutPolicy::new(4, 4, 64 * 1024 * 1024, 15, 24_000);
+
+        // 6 s of video, then 5 s of audio alone: 11 s total, under the 15 s
+        // ceiling the unplanned rule would allow the first chunk.
+        let mut fragments = Vec::new();
+        for second in 0..6u64 {
+            let mut fragment = synthetic(1, second * 24_000, 1_000, 24, 4_000);
+            let audio = synthetic(2, second * 48_000, 1_024, 47, 300);
+            fragment.tracks.extend(audio.tracks);
+            fragments.push(fragment);
+        }
+        // Audio only, past the end of video.
+        for second in 6..11u64 {
+            fragments.push(synthetic(2, second * 48_000, 1_024, 47, 300));
+        }
+
+        // The plan says video ends at 6 s and the tail is its own entries.
+        let starts = vec![0, 144_000, 288_000, 432_000];
+        let mut planned =
+            Segmenter::following(init, policy, 0, starts).expect("a planned generation");
+        let mut published = Vec::new();
+        for fragment in &fragments {
+            if let Some(segment) = planned.push(fragment.clone()).expect("segmenting") {
+                published.push(segment);
+            }
+        }
+        published.extend(planned.finish().expect("finishing"));
+
+        // Two chunks out of `finish`: the video segment, and the tail. Not
+        // one, which is what the ceiling rule gives.
+        assert!(
+            published.len() >= 2,
+            "the tail must be its own segment, got {} in total",
+            published.len()
+        );
+        let last = published.last().expect("a last segment");
+        assert!(
+            last.seconds > 0.0,
+            "the tail segment has to carry real audio"
+        );
+        // And the video segment must stop where video stops, not carry five
+        // seconds of audio the playlist attributed to a later index.
+        let video_segment = &published[published.len() - 2];
+        assert!(
+            video_segment.seconds <= 6.5,
+            "the last video segment ran {:.3}s; the plan said six",
+            video_segment.seconds
+        );
     }
 
     #[test]

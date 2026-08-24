@@ -16,6 +16,7 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 mod fragindex;
+mod renditionplan;
 mod sqlite;
 mod telemetry;
 
@@ -2081,6 +2082,43 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
 }
 
+/// Node-local rendition plans.
+///
+/// Node-local for [`FragmentIndexStore`]'s reason, and persisted for a
+/// different one. An index is a measurement: lose it and it is rebuilt from
+/// the file. A plan is a *decision* — ledger D10 makes it normative, and a
+/// client holds a playlist naming its boundaries by index. Re-deriving one is
+/// not a cheaper way to the same answer, because [`crate::fmp4::CutPolicy`] is
+/// built from tuning constants a release may change while the file, the
+/// pipeline and the index all stay identical. See
+/// [`crate::store::renditionplan`].
+#[async_trait]
+pub trait RenditionPlanStore: Send + Sync + 'static {
+    /// Store a plan unless the key already has one. `true` when this call is
+    /// the one that stored it.
+    ///
+    /// Not an upsert, and that is the point: the first plan written under a
+    /// key is the plan. A rendition whose boundaries must genuinely differ
+    /// gets a different key.
+    async fn put_rendition_plan(
+        &self,
+        rendition_key: &str,
+        file_id: i64,
+        plan: &crate::segplan::SegmentPlan,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<bool, StoreError>;
+
+    /// The stored plan, but only when it still describes this source.
+    async fn rendition_plan(
+        &self,
+        rendition_key: &str,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError>;
+
+    /// Drop every rendition plan for a file. Answers how many went.
+    async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -2100,6 +2138,7 @@ pub trait Store:
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
+    + RenditionPlanStore
     + CoordinationStore
     + FencedPublicationStore
     + MediaSessionStore
@@ -2127,6 +2166,8 @@ impl<T> Store for T where
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
+        + RenditionPlanStore
+        + RenditionPlanStore
         + CoordinationStore
         + FencedPublicationStore
         + MediaSessionStore
