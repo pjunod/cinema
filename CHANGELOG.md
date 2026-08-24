@@ -34,6 +34,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **A rendition's segment boundaries are now obeyed, not re-derived.** The
+  segment plan has always been normative — a producer cuts *at* its boundaries
+  and never re-decides them — but the segmenter had never seen a plan, so every
+  boundary after the first came from re-running the cut policy live. The two
+  derivations cannot agree: the plan runs that policy over the video-only index
+  pipe's byte counts plus a deliberately generous audio estimate, while a live
+  generation accumulates the real production wire length. They pick the same
+  keyframe on a clean cut and different fragments on a byte-ceiling cut, which
+  on a 69 Mb/s remux with no clean point in reach is the ordinary case — and
+  every segment after such a disagreement would have been published under an
+  index naming a different part of the film, in a playlist the client already
+  held. `Segmenter::following` takes the boundaries instead. A generation whose
+  media steps over a planned boundary is refused rather than publishing an
+  empty segment under an index somebody will request. Sessions without a plan
+  cut by policy exactly as before.
+
 - **A producer that seeks now publishes on the film's timeline rather than on
   ffmpeg's.** Reopening a file partway in with `-noaccurate_seek -ss` yields
   decode times that are not film time — measured in every configuration tried,

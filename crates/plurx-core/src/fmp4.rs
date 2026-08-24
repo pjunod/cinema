@@ -2288,6 +2288,18 @@ struct MediaTime {
     delta: Option<i64>,
 }
 
+/// The boundaries a plan already decided, in film time.
+///
+/// `starts[0]` is where `first_index` begins, `starts[1]` where the next entry
+/// begins, and so on. Only video entries appear: an audio tail has no video
+/// boundary to cut on, and [`Segmenter::finish`] splits it by the same rule
+/// the plan used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Boundaries {
+    first_index: u64,
+    starts: Vec<u64>,
+}
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -2303,6 +2315,7 @@ pub struct Segmenter {
     pending_ticks: u64,
     next_index: u64,
     media_time: Option<MediaTime>,
+    boundaries: Option<Boundaries>,
     counts: SegmentCounts,
 }
 
@@ -2318,8 +2331,48 @@ impl Segmenter {
             pending_ticks: 0,
             next_index: 0,
             media_time: None,
+            boundaries: None,
             counts: SegmentCounts::default(),
         }
+    }
+
+    /// A segmenter that cuts where a plan already decided, rather than
+    /// deciding again.
+    ///
+    /// `starts` is the film time, in video ticks, at which each of this
+    /// generation's segments begins, in order, starting with `start_index` —
+    /// exactly `PlanEntry::start_ticks` for the video entries from
+    /// `start_index` onward. `starts[0]` is also where the generation is
+    /// rebased to, so a caller cannot supply an index and a time that
+    /// disagree.
+    ///
+    /// This is what ledger D10 means by the plan being normative. Every
+    /// boundary here is one a client already has in a playlist it fetched, and
+    /// a generation that re-derived them would eventually pick a different
+    /// one — see [`Segmenter::cut_before`] for why the two derivations cannot
+    /// agree. The [`CutPolicy`] is still carried, because
+    /// [`Segmenter::finish`] uses its ceiling to split an audio tail, but it
+    /// no longer chooses a video boundary.
+    ///
+    /// Refused for an empty `starts`, and for an init with no video track, for
+    /// the same reason [`Segmenter::resuming_at`] is.
+    pub fn following(
+        init: Init,
+        policy: CutPolicy,
+        start_index: u64,
+        starts: Vec<u64>,
+    ) -> Result<Segmenter, Fmp4Error> {
+        let Some(&first) = starts.first() else {
+            return Err(Fmp4Error::Unsupported(
+                "a planned generation needs at least one boundary".into(),
+            ));
+        };
+        let mut segmenter = Segmenter::resuming_at(init, policy, start_index, first)?;
+        segmenter.boundaries = Some(Boundaries {
+            first_index: start_index,
+            starts,
+        });
+        Ok(segmenter)
     }
 
     /// A segmenter for a generation that starts partway into the film.
@@ -2433,12 +2486,7 @@ impl Segmenter {
         if class == CutClass::Unparseable {
             self.counts.unparseable += 1;
         }
-        let published = match self.policy.cut_before(
-            self.pending_ticks,
-            self.pending_bytes,
-            class,
-            self.next_index == 0,
-        ) {
+        let published = match self.cut_before(&fragment, class)? {
             Some(reason) => Some(self.flush(reason)?),
             None => None,
         };
@@ -2446,6 +2494,96 @@ impl Segmenter {
         self.pending_bytes += fragment.len();
         self.pending.push(fragment);
         Ok(published)
+    }
+
+    /// Should the pending run be published in front of this fragment?
+    ///
+    /// Two answers, and which one applies is the difference between a session
+    /// and a rendition.
+    ///
+    /// **With a plan**, the boundaries were decided once, are persisted, and
+    /// are already in a playlist the client holds — ledger D10 makes the plan
+    /// normative, so this is a lookup and not a decision. Re-running the
+    /// policy here would not reproduce it: [`crate::segplan::plan_copy`] runs
+    /// the same policy over the *video-only* index pipe's wire lengths plus a
+    /// deliberately generous audio estimate, while this segmenter accumulates
+    /// the real production wire length. Those agree on a clean cut, where the
+    /// keyframe decides, and disagree on a byte-ceiling cut, where the bytes
+    /// do — which on a 69 Mb/s remux with no clean point in reach is the
+    /// ordinary case, not an edge. Every index after such a disagreement would
+    /// name the wrong plan entry, silently.
+    ///
+    /// **Without one**, this is a live session cutting as it goes, and the
+    /// policy is the whole answer — unchanged.
+    fn cut_before(
+        &self,
+        fragment: &Fragment,
+        class: CutClass,
+    ) -> Result<Option<CutReason>, Fmp4Error> {
+        let Some(plan) = self.boundaries.as_ref() else {
+            return Ok(self.policy.cut_before(
+                self.pending_ticks,
+                self.pending_bytes,
+                class,
+                self.next_index == 0,
+            ));
+        };
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        let Some(next) = plan.starts.get(self.entry_after(plan)) else {
+            // Past the last planned boundary. Everything left belongs to the
+            // final entry, and `finish` publishes it.
+            return Ok(None);
+        };
+        // A fragment carrying no video says nothing about where a video
+        // boundary is. It joins whatever run is open.
+        let Some(dts) = self.film_time_of(fragment) else {
+            return Ok(None);
+        };
+        if dts < *next {
+            return Ok(None);
+        }
+        // A fragment that reaches past *two* boundaries would leave an entry
+        // with no media in it, and publishing an empty segment under an index
+        // a client will request is worse than refusing to produce it. It means
+        // this generation is not the one that was planned.
+        if let Some(after) = plan.starts.get(self.entry_after(plan) + 1) {
+            if dts >= *after {
+                return Err(Fmp4Error::Unsupported(format!(
+                    "a fragment at film time {dts} steps over the planned \
+                     boundaries at {next} and {after}; this generation does \
+                     not match the plan that named it"
+                )));
+            }
+        }
+        Ok(Some(if class.is_clean() {
+            CutReason::Clean
+        } else {
+            // The plan already recorded why it cut here; what this segmenter
+            // knows is only whether the fragment it is cutting in front of is
+            // a clean point. Saying `TimeCeiling` for anything else would
+            // slander a boundary the byte ceiling chose, so the counters treat
+            // both the same way and only `clean_cuts` is a claim.
+            CutReason::TimeCeiling
+        }))
+    }
+
+    /// The plan entry this segmenter is about to finish, as an offset into the
+    /// plan's boundary list.
+    fn entry_after(&self, plan: &Boundaries) -> usize {
+        (self.next_index - plan.first_index) as usize + 1
+    }
+
+    /// A fragment's video decode time, on the film's timeline.
+    ///
+    /// After [`Segmenter::on_film_time`] the fragment already carries it; this
+    /// only picks the video track out.
+    fn film_time_of(&self, fragment: &Fragment) -> Option<u64> {
+        self.init
+            .video()
+            .and_then(|video| fragment.track(video.id))
+            .map(|track| track.base_decode_time)
     }
 
     /// End of stream: whatever is still pending becomes the final segment(s).
@@ -3466,6 +3604,109 @@ mod tests {
             "an audio clock says where in its own stream a sample is, never \
              where in the film"
         );
+    }
+
+    /// Feed a run of equal video fragments and collect what comes out.
+    fn run_fragments(segmenter: &mut Segmenter, count: usize, size: u32) -> Vec<Published> {
+        let mut out = Vec::new();
+        for i in 0..count {
+            let base = 48_000 + (i as u64) * 24_000;
+            if let Some(published) = segmenter
+                .push(synthetic(1, base, 1_000, 24, size))
+                .expect("segmenting")
+            {
+                out.push(published);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_planned_generation_cuts_where_the_plan_said_not_where_the_policy_would() {
+        // The disagreement is not hypothetical. `plan_copy` runs the policy
+        // over the video-only index pipe's wire lengths plus a generous audio
+        // estimate; a live generation accumulates the real production wire
+        // length. On a byte-ceiling cut those cross the ceiling at different
+        // fragments, and every index after that names the wrong plan entry.
+        let init = muxed_init();
+        // Floor 1 s, byte ceiling 250 KB. Each fragment is 1 s of video and
+        // 120 KB, so the policy alone would cut in front of the third.
+        let policy = CutPolicy::new(1, 1, 250_000, 15, 24_000);
+
+        let mut freeform =
+            Segmenter::resuming_at(init.clone(), policy, 7, 48_000).expect("video-bearing init");
+        let loose = run_fragments(&mut freeform, 12, 5_000);
+        assert!(
+            !loose.is_empty(),
+            "the policy must cut somewhere, or this proves nothing"
+        );
+        let policy_first_len = loose[0].seconds.round() as u64;
+
+        // The plan says four seconds a segment, which the policy would never
+        // have chosen against this byte ceiling.
+        let starts = vec![48_000, 144_000, 240_000, 336_000];
+        let mut planned =
+            Segmenter::following(init, policy, 7, starts.clone()).expect("a planned generation");
+        let published = run_fragments(&mut planned, 12, 5_000);
+
+        assert!(
+            published.len() >= 2,
+            "expected the plan's boundaries to be reached, got {}",
+            published.len()
+        );
+        assert_ne!(
+            published[0].seconds.round() as u64,
+            policy_first_len,
+            "the plan and the policy chose the same first boundary, so this \
+             fixture does not exercise the difference"
+        );
+        for (offset, segment) in published.iter().enumerate() {
+            assert_eq!(
+                segment.index,
+                7 + offset as u64,
+                "segments must be published under the plan's own indexes"
+            );
+            assert_eq!(
+                published_video_tfdt(planned.init(), segment),
+                starts[offset],
+                "segment {} must begin at the film time the plan named",
+                segment.index
+            );
+        }
+    }
+
+    #[test]
+    fn a_generation_that_steps_over_a_planned_boundary_is_refused() {
+        // An empty segment under an index a client will request is worse than
+        // refusing to produce it: it means this generation is not the one the
+        // plan named.
+        let init = muxed_init();
+        let policy = CutPolicy::new(1, 1, 64 * 1024 * 1024, 15, 24_000);
+        // Boundaries a second apart, fed four-second fragments.
+        let starts = vec![0, 24_000, 48_000, 72_000];
+        let mut segmenter = Segmenter::following(init, policy, 0, starts).expect("planned");
+        segmenter
+            .push(synthetic(1, 0, 1_000, 96, 4_000))
+            .expect("the first fragment");
+        let error = segmenter
+            .push(synthetic(1, 96_000, 1_000, 96, 4_000))
+            .expect_err("a fragment that steps over two boundaries");
+        assert!(error.to_string().contains("does not match the plan"));
+    }
+
+    #[test]
+    fn a_planless_segmenter_still_decides_for_itself() {
+        // A live session has no plan and must keep cutting by policy — this is
+        // the path every existing caller is on.
+        let init = muxed_init();
+        let policy = CutPolicy::new(1, 1, 250_000, 15, 24_000);
+        let mut segmenter = Segmenter::new(init, policy);
+        let published = run_fragments(&mut segmenter, 12, 5_000);
+        assert!(
+            !published.is_empty(),
+            "a segmenter with no plan cuts by policy as it always has"
+        );
+        assert_eq!(published[0].index, 0);
     }
 
     #[test]
