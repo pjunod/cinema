@@ -1183,6 +1183,32 @@ fn capability_ready_predicate(capability: &str) -> String {
     )
 }
 
+/// Whether committed Raft membership shows that `role` was actually admitted.
+///
+/// What "admitted" means depends on what the token admits, and both arms are
+/// load-bearing in a way that `is_member` alone is not.
+///
+/// A voter has to have committed a *vote*. The vendored client joins a voter
+/// with `add_learner` and only then `become_member`, so a voter that finalized
+/// on membership alone would finalize while it was still Raft's intermediate
+/// learner — before it had a vote at all, and while the cluster was counting
+/// on it for one.
+///
+/// A learner has to be a committed member and must *not* have a vote, because
+/// a learner that appears in the voter set was not admitted by this protocol
+/// and finalizing it would record a learner admission for a voting node.
+///
+/// A named function because neither refusal is reachable from a one-voter
+/// replicated fixture — one needs a member that is not a voter, the other a
+/// voter holding a learner token — and both survived mutation while the
+/// decision was inline.
+fn role_is_admitted(role: ClusterRole, is_member: bool, is_voter: bool) -> bool {
+    match role {
+        ClusterRole::Voter => is_voter,
+        ClusterRole::Learner => is_member && !is_voter,
+    }
+}
+
 /// "`cluster_meta` still holds the range this operation was authorized
 /// against", with the min and max supplied as `$min` and `$max`.
 ///
@@ -2462,10 +2488,7 @@ impl MembershipManager {
             .membership_config
             .nodes()
             .any(|(id, _)| *id == request.raft_id);
-        let admitted = match record.role()? {
-            ClusterRole::Voter => is_voter,
-            ClusterRole::Learner => is_member && !is_voter,
-        };
+        let admitted = role_is_admitted(record.role()?, is_member, is_voter);
         if !admitted {
             return Err(MembershipError::Internal(format!(
                 "joining node has not committed {} membership",
@@ -6900,6 +6923,54 @@ mod tests {
             .expect("the join surface prepares once every column exists");
     }
 
+    /// `finalize`'s role assertion, in every state committed membership can
+    /// be in.
+    ///
+    /// Both arms survived mutation before this existed. Weakening the learner
+    /// arm to `is_member` let a *voter* finalize a learner token; weakening
+    /// the voter arm to `is_member` let a voter finalize while it was still
+    /// Raft's intermediate learner — before it had the vote the cluster was
+    /// already counting on. Neither state is reachable from a one-voter
+    /// replicated fixture, which is exactly why both survived: the live test
+    /// only ever produces the two states that pass.
+    #[test]
+    fn finalizing_requires_the_membership_the_token_actually_admits() {
+        // (is_member, is_voter) → what each role may finalize on.
+        let cases = [
+            // Not in committed membership at all: nothing finalizes.
+            (false, false, false, false),
+            // A committed member with no vote: a learner, and only a learner.
+            (true, false, false, true),
+            // A committed voter: a voter, and only a voter. `is_member` is
+            // true here too, which is what made the weakened arms pass.
+            (true, true, true, false),
+        ];
+        for (is_member, is_voter, voter_ok, learner_ok) in cases {
+            assert_eq!(
+                role_is_admitted(ClusterRole::Voter, is_member, is_voter),
+                voter_ok,
+                "voter token with member={is_member} voter={is_voter}"
+            );
+            assert_eq!(
+                role_is_admitted(ClusterRole::Learner, is_member, is_voter),
+                learner_ok,
+                "learner token with member={is_member} voter={is_voter}"
+            );
+        }
+
+        // Stated as the two mutations rather than only as a table, so the
+        // failure message names what went wrong.
+        assert!(
+            !role_is_admitted(ClusterRole::Voter, true, false),
+            "a voter must not finalize while it is still Raft's intermediate \
+             learner and carries no vote"
+        );
+        assert!(
+            !role_is_admitted(ClusterRole::Learner, true, true),
+            "a node in the voter set was not admitted by the learner protocol"
+        );
+    }
+
     /// The learner operations act on the learner protocol, named as itself.
     ///
     /// `AUTH_PROTOCOL_MAX` and `AUTH_LEARNER_PROTOCOL` are the same number
@@ -8072,13 +8143,43 @@ mod tests {
         Ok(payload)
     }
 
-    /// Three independent refusals, each asserted on its own.
+    /// Decrypt a token's payload under an explicit associated data, so a test
+    /// can assert on the *layer* that refused rather than on a code every
+    /// layer shares.
+    ///
+    /// Every refusal in `decode_join_token` is `join_token_invalid`, which is
+    /// the right thing for an attacker to see and useless for telling three
+    /// independent defences apart. This reaches past the decoder and asks the
+    /// AEAD directly.
+    fn aead_opens(token: &str, aad: &[u8]) -> bool {
+        let parts = token.split(':').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4, "token framing changed: {token}");
+        let key_bytes = hex::decode(parts[2]).expect("token key");
+        let encrypted = hex::decode(parts[3]).expect("token ciphertext");
+        XChaCha20Poly1305::new(Key::from_slice(&key_bytes))
+            .decrypt(
+                XNonce::from_slice(&encrypted[..24]),
+                chacha20poly1305::aead::Payload {
+                    msg: &encrypted[24..],
+                    aad,
+                },
+            )
+            .is_ok()
+    }
+
+    /// Three independent refusals, each asserted at the layer that produces
+    /// it.
     ///
     /// The prefix stops the ordinary case. Rewriting the prefix defeats that
     /// check and the AEAD's associated data stops it instead. Re-sealing the
     /// same payload under v1's key derivation defeats *that*, and the version
     /// field stops it. An old build has to fail all three ways, because a
     /// single one of them could be lost to a future refactor.
+    ///
+    /// Asserting `.code() == "join_token_invalid"` three times cannot tell
+    /// which layer fired — every layer returns it — so collapsing
+    /// `JOIN_TOKEN_V2_AAD` onto v1's value left this test green while the
+    /// second defence no longer existed. The AEAD is now asked directly.
     #[test]
     fn a_previous_release_refuses_a_v2_token_three_separate_ways() {
         let token = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
@@ -8093,6 +8194,22 @@ mod tests {
         // 2. Prefix relabelled to v1: the associated data no longer matches,
         //    so the payload cannot even be decrypted.
         let relabelled = token.replacen(JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_PREFIX, 1);
+        // The layer itself, not the shared code the decoder returns: a v2
+        // token's ciphertext does not open under v1's associated data, and
+        // does open under its own. Two assertions, because only the pair
+        // proves the difference is the AAD rather than a broken token.
+        assert!(
+            !aead_opens(&relabelled, JOIN_TOKEN_AAD),
+            "a v2 token must not decrypt under v1's associated data"
+        );
+        assert!(
+            aead_opens(&relabelled, JOIN_TOKEN_V2_AAD),
+            "and it must decrypt under its own, or the test above proves nothing"
+        );
+        assert_ne!(
+            JOIN_TOKEN_AAD, JOIN_TOKEN_V2_AAD,
+            "the two framings must not share associated data"
+        );
         assert_eq!(
             decode_join_token_as_the_previous_release(&relabelled)
                 .expect_err("a relabelled v2 token must fail its AEAD check")
@@ -8129,6 +8246,53 @@ mod tests {
         let decoded = decode_join_token_as_the_previous_release(&voter)
             .expect("the previous release still reads a voter token");
         assert_eq!(decoded, payload());
+    }
+
+    /// The v2 frame's own version gate, reached through the production
+    /// decoder.
+    ///
+    /// Every v2-version assertion above goes through the v1 arm — a payload
+    /// re-sealed under v1 framing is read by v1's rules — so the production v2
+    /// arm's `payload.version != JOIN_TOKEN_V2_VERSION` was never executed and
+    /// deleting it kept everything green. A payload sealed with the *v2*
+    /// prefix and the *v2* associated data is the only thing that reaches it:
+    /// framing and AEAD both pass, and the version field is all that is left.
+    #[test]
+    fn the_v2_frame_refuses_a_payload_that_is_not_version_two() {
+        let mut wrong_version = learner_payload();
+        wrong_version.version = JOIN_TOKEN_V2_VERSION + 1;
+        let token = seal_join_token(&wrong_version, JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_V2_AAD)
+            .expect("seal a v2-framed payload carrying the wrong version");
+
+        // The two layers before the version gate both pass, so the refusal
+        // below can only come from the gate itself.
+        assert!(token.starts_with(JOIN_TOKEN_V2_PREFIX));
+        assert!(
+            aead_opens(&token, JOIN_TOKEN_V2_AAD),
+            "the AEAD must accept this token, or the version gate is unreached"
+        );
+        assert_eq!(
+            decode_join_token(&token)
+                .expect_err("a v2 frame must refuse a payload that is not version 2")
+                .code(),
+            "join_token_invalid"
+        );
+
+        // The same shape one version below, so the gate is equality and not a
+        // minimum that a future v3 payload would sail through.
+        let mut older = learner_payload();
+        older.version = JOIN_TOKEN_V2_VERSION - 1;
+        let token = seal_join_token(&older, JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_V2_AAD)
+            .expect("seal a v2-framed payload carrying an older version");
+        assert!(decode_join_token(&token).is_err());
+
+        // And the honest payload still decodes, so none of the above is
+        // passing for an unrelated reason.
+        let good = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
+        assert_eq!(
+            decode_join_token(&good).expect("a real v2 token decodes"),
+            JoinToken::V2(learner_payload())
+        );
     }
 
     /// A token says what it admits, and a v1 token can only ever say "voter".

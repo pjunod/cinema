@@ -1329,15 +1329,7 @@ async fn open_active_store_with_key(
     )
     .await?;
     let telemetry = active.join("telemetry.db");
-    // Replicated schema migration is voter work. A learner opens the store and
-    // refuses a version it does not implement, but never advances one: a
-    // migration is a cluster-wide state change, and a node that carries no
-    // vote has no business proposing one. It also cannot help — a learner is
-    // by construction the node most likely to be behind.
-    let store = match role {
-        ClusterRole::Voter => HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?,
-        ClusterRole::Learner => HiqliteAuthStore::open(client.clone(), &telemetry).await?,
-    };
+    let store = open_store_for_role(role, client.clone(), &telemetry).await?;
     if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
         marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
         write_activation_marker(&active, &marker)?;
@@ -1682,6 +1674,32 @@ fn boot_cluster_role(local_membership: Option<&LocalMembership>) -> ClusterRole 
     local_membership
         .map(|membership| membership.role)
         .unwrap_or_default()
+}
+
+/// Open the replicated store the way this node's role is allowed to.
+///
+/// Replicated schema migration is voter work. A learner opens the store and
+/// refuses a version it does not implement, but never advances one: a
+/// migration is a cluster-wide state change, and a node that carries no vote
+/// has no business proposing one. It also cannot help — a learner is by
+/// construction the node most likely to be behind, so the version it would
+/// migrate *to* is the one it happens to ship rather than the one the cluster
+/// agreed on.
+///
+/// A named function rather than a `match` inline in the boot path, because
+/// this is the whole of "a learner never proposes a schema migration" and the
+/// boot path around it needs a real cluster, a real join, and a real data
+/// directory to reach.
+#[cfg(feature = "hiqlite-store")]
+async fn open_store_for_role(
+    role: ClusterRole,
+    client: Client,
+    telemetry: &Path,
+) -> Result<HiqliteAuthStore, StoreError> {
+    match role {
+        ClusterRole::Voter => HiqliteAuthStore::open_or_migrate(client, telemetry).await,
+        ClusterRole::Learner => HiqliteAuthStore::open(client, telemetry).await,
+    }
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4826,6 +4844,113 @@ mod tests {
 
         http_task.abort();
         source.shutdown().await.expect("drain the source voter");
+    }
+
+    /// A learner never proposes a replicated schema migration.
+    ///
+    /// The boot path picks how to open the store from the role this node was
+    /// admitted with, and swapping the learner arm to `open_or_migrate`
+    /// survived everywhere — including the separate-process harness, which
+    /// never sets up a learner joining a cluster whose replicated schema is
+    /// behind. Nothing looked at the one thing that distinguishes the arms.
+    ///
+    /// So construct exactly that: rewind the cluster's replicated schema
+    /// marker, then open the store both ways against the same live cluster.
+    /// The learner has to refuse and leave the marker where it found it; the
+    /// voter has to advance it. Either arm collapsing onto the other fails
+    /// one of the two halves.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("schema role data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster");
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        let current = replicated_schema_version(&client).await;
+        assert_eq!(current, crate::store::AUTH_SCHEMA_VERSION);
+        let behind = current - 1;
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(behind),
+            )
+            .await
+            .expect("rewind the replicated schema marker");
+
+        // The learner arm: refuse, and change nothing. The refusal is asserted
+        // in full, because that is what distinguishes the arms — swapping this
+        // to `open_or_migrate` also fails here, but on a migration step rather
+        // than on the compatibility check, and an operator reading "duplicate
+        // column name" learns nothing about what their learner is waiting for.
+        let refused = open_store_for_role(
+            ClusterRole::Learner,
+            client.clone(),
+            &dir.path().join("learner-probe.db"),
+        )
+        .await
+        .err()
+        .expect("a learner must refuse a replicated schema it does not implement")
+        .to_string();
+        assert!(
+            refused.contains(&format!(
+                "cluster schema {behind} is incompatible with voter schema {}",
+                crate::store::AUTH_SCHEMA_VERSION
+            )),
+            "the learner must refuse on the compatibility check, not inside a migration: \
+             {refused}"
+        );
+        assert_eq!(
+            replicated_schema_version(&client).await,
+            behind,
+            "a learner must not advance replicated schema"
+        );
+
+        // And the refusal was about the schema, not about learners: put the
+        // marker back and the same arm opens the same cluster.
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+            )
+            .await
+            .expect("restore the replicated schema marker");
+        drop(
+            open_store_for_role(
+                ClusterRole::Learner,
+                client.clone(),
+                &dir.path().join("learner-probe.db"),
+            )
+            .await
+            .expect("a learner opens a schema it does implement"),
+        );
+
+        // The voter arm is the one that may migrate, and it opens the same
+        // cluster through `open_or_migrate`.
+        drop(
+            open_store_for_role(
+                ClusterRole::Voter,
+                client.clone(),
+                &dir.path().join("voter-probe.db"),
+            )
+            .await
+            .expect("a voter opens the cluster it is responsible for migrating"),
+        );
+        assert_eq!(
+            replicated_schema_version(&client).await,
+            crate::store::AUTH_SCHEMA_VERSION
+        );
+
+        selected.shutdown().await.expect("stop the voter");
     }
 
     /// Activation is decided on the binary each voter is running *now*.
