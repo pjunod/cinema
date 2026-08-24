@@ -1,7 +1,16 @@
 version = 1
 
 [[coverage]]
-commits = ["547a332a", "8834388e", "bb88545e", "2befdeee"]
+commits = [
+  "547a332a",
+  "8834388e",
+  "bb88545e",
+  "2befdeee",
+  "45dc54f1",
+  "daf61eca",
+  "984730a9",
+  "1c0d5093",
+]
 points = ["core.media", "persistence.upgrades", "server.api", "operations.packaging", "validation.framework"]
 checks = ["rust-gate", "database-upgrades", "cluster-auth", "catalog-contract", "history-regressions"]
 reason = "The retained configuration and startup tests pin exactly this much: omitted cache and scratch roots select every legacy path unchanged; a restart empties only the declared scratch while the artwork, transcode, and subtitle caches survive it; an explicit root that aliases or nests inside the authoritative data root, another managed root, or the credential key is refused by canonical path and by device/inode identity before any cleanup runs; a scratch entry that is a symbolic link, device, socket, or FIFO aborts startup without unlinking it or its target; cleanup holds no-follow directory and marker descriptors, so a rename or marker swap aborts instead of deleting the replacement; an incomplete .claiming state never authorizes deletion; the scratch marker names the durable root it was claimed for, so a changed storage.data_dir is refused rather than silently adopting another install's scratch; and cluster.read_pool_size is validated to 1..=16 and carried into the node's Hiqlite defaults without changing the WAL, snapshot, sync, or election defaults. The startup-guard follow-up on this milestone adds tests for the daemon-owned root repaired instead of refused, the foreign-uid root still refused, permissive-mode and foreign-uid children cleared, a faulting readdir reported as an error rather than an empty directory, an interrupted pending claim redone, a truncated published marker still failing closed, the marker naming another durable root, and the depth ceiling leaving an owned tree untouched for one boot. Three guards in the same code path are deliberately not claimed as pinned, because no test reaches them: the entry-count ceiling, the cross-device bound, and the wiring that hands the credential key to cleanup as a protected identity — the preflight that honours a protected identity is tested, the selection of that identity is not. Mount-source ancestry has a parser-level coordinate test only; the real mount-namespace exercises for bind-source ancestry and for a mount point inside scratch run solely under the privileged opt-in `make bind-mount-check` (PLURX_RUN_BIND_MOUNT_TEST=1), which is in no default target and no CI job. The mapped macOS snapshot experiment and its mapping were explicitly superseded by the ownership-reconciliation commit once active issue #550 claimed that independent correction; their net tree change is empty, and #543 retains only the shared-cache topology regression."
