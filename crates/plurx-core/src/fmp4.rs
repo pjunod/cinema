@@ -2237,6 +2237,40 @@ fn scale_ticks(ticks: u64, from_timescale: u32, to_timescale: u32) -> u64 {
     scaled.min(u64::MAX as u128) as u64
 }
 
+/// Scale a signed interval between track clocks.
+///
+/// The magnitude goes through [`scale_ticks`], so a positive shift rounds away
+/// from zero and a negative one towards it. Either way the error is under one
+/// destination tick and it is applied *once* per generation, not per fragment,
+/// so it cannot accumulate.
+fn scale_signed(ticks: i64, from_timescale: u32, to_timescale: u32) -> i64 {
+    let magnitude = scale_ticks(ticks.unsigned_abs(), from_timescale, to_timescale);
+    let magnitude = magnitude.min(i64::MAX as u64) as i64;
+    if ticks < 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Where a generation's media belongs on the film's own timeline.
+///
+/// A producer that repositioned opens ffmpeg with `-noaccurate_seek -ss` and
+/// gets decode times that are not film time in any configuration M0 tested
+/// (plan §12.4) — they are whatever the source's timestamps imply, which is
+/// why the landing matcher exists at all. But the producer *knows* the film
+/// time of what it is about to receive: it is the plan entry it repositioned
+/// to, discarded forward to. So the shift is learned once, from the first
+/// fragment, and applied to every fragment for the life of the generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaTime {
+    /// The plan entry's start, in video ticks from t=0.
+    start_ticks: u64,
+    /// Video ticks to add to every `tfdt`. Learned from the first fragment
+    /// that carries video; `None` until one arrives.
+    delta: Option<i64>,
+}
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -2251,6 +2285,7 @@ pub struct Segmenter {
     pending_bytes: usize,
     pending_ticks: u64,
     next_index: u64,
+    media_time: Option<MediaTime>,
     counts: SegmentCounts,
 }
 
@@ -2265,8 +2300,36 @@ impl Segmenter {
             pending_bytes: 0,
             pending_ticks: 0,
             next_index: 0,
+            media_time: None,
             counts: SegmentCounts::default(),
         }
+    }
+
+    /// A segmenter for a generation that starts partway into the film.
+    ///
+    /// `start_index` is the plan index of the first segment this generation
+    /// will publish, and `start_ticks` is that entry's start in video ticks
+    /// from t=0. Both come from the plan, never from the media: the whole
+    /// point is that this generation's own timestamps cannot be trusted to say
+    /// where in the film it is.
+    ///
+    /// Two things follow from the index, and both matter. The segment gets its
+    /// real name rather than `seg00000`, and the first-segment floor — which
+    /// exists to get a *session* started quickly — is not spent again on a
+    /// segment that is nobody's first.
+    pub fn resuming_at(
+        init: Init,
+        policy: CutPolicy,
+        start_index: u64,
+        start_ticks: u64,
+    ) -> Segmenter {
+        let mut segmenter = Segmenter::new(init, policy);
+        segmenter.next_index = start_index;
+        segmenter.media_time = Some(MediaTime {
+            start_ticks,
+            delta: None,
+        });
+        segmenter
     }
 
     pub fn init(&self) -> &Init {
@@ -2332,6 +2395,7 @@ impl Segmenter {
     /// new fragment, which is the whole trick: a boundary can only be judged
     /// once you can see what comes after it.
     pub fn push(&mut self, fragment: Fragment) -> Result<Option<Published>, Fmp4Error> {
+        let fragment = self.on_film_time(fragment);
         let class = classify(&fragment, &self.init);
         self.counts.fragments += 1;
         if class == CutClass::Unparseable {
@@ -2510,6 +2574,50 @@ impl Segmenter {
             return malformed("no track survived the end-of-stream split");
         }
         Ok(chunks)
+    }
+
+    /// Put one fragment of a repositioned generation back on the film's
+    /// timeline, or hand it back untouched when this generation started at
+    /// t = 0 and is already on it.
+    ///
+    /// The shift is computed once, in video ticks, and converted into each
+    /// track's own clock. Every track keeps its exact offset from video within
+    /// the fragment, because the shift is added to what is already there
+    /// rather than substituted for it — so nothing here can move audio
+    /// relative to picture, whatever the two timescales are.
+    ///
+    /// A leading fragment with no video track at all leaves the shift
+    /// unlearned and passes through: there is nothing to anchor against yet,
+    /// and guessing an anchor from an audio clock would put the whole
+    /// generation wherever that guess landed.
+    fn on_film_time(&mut self, mut fragment: Fragment) -> Fragment {
+        let Some(media) = self.media_time.as_mut() else {
+            return fragment;
+        };
+        if media.delta.is_none() {
+            let Some(video) = self.init.video() else {
+                return fragment;
+            };
+            let Some(base) = fragment.track(video.id).map(|t| t.base_decode_time) else {
+                return fragment;
+            };
+            media.delta = Some(media.start_ticks as i64 - base as i64);
+        }
+        let Some(delta) = media.delta else {
+            return fragment;
+        };
+        for track in &mut fragment.tracks {
+            let timescale = self
+                .init
+                .tracks
+                .iter()
+                .find(|candidate| candidate.id == track.track_id)
+                .map(|candidate| candidate.timescale.max(1))
+                .unwrap_or(self.video_timescale);
+            let shift = scale_signed(delta, self.video_timescale, timescale);
+            track.base_decode_time = track.base_decode_time.saturating_add_signed(shift);
+        }
+        fragment
     }
 
     fn flush(&mut self, reason: CutReason) -> Result<Published, Fmp4Error> {
@@ -3112,6 +3220,241 @@ mod tests {
             p.cut_before(15_000, 48_000_000, CutClass::CleanIdr, false),
             Some(CutReason::Clean)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // two generations, one film timeline
+    // -----------------------------------------------------------------------
+
+    /// The video `tfdt` a published segment actually carries, read back off
+    /// the bytes rather than off whatever the segmenter believed.
+    fn published_video_tfdt(init: &Init, published: &Published) -> u64 {
+        let video_id = init.video().expect("a video track").id;
+        let bytes = &published.segment.bytes;
+        // Walk the segment as boxes rather than through `FragmentReader`,
+        // which reads a pipe and has never been asked to step over the `styp`
+        // and `sidx` a published segment carries.
+        let boxes = |region: &[u8], visit: &mut dyn FnMut(&[u8; 4], &[u8])| {
+            let mut at = 0usize;
+            while at + 8 <= region.len() {
+                let size = u32::from_be_bytes(region[at..at + 4].try_into().expect("4")) as usize;
+                let name: [u8; 4] = region[at + 4..at + 8].try_into().expect("4");
+                if size < 8 || at + size > region.len() {
+                    break;
+                }
+                visit(&name, &region[at + 8..at + size]);
+                at += size;
+            }
+        };
+        let mut moof: Option<Vec<u8>> = None;
+        boxes(bytes, &mut |name, body| {
+            if name == b"moof" && moof.is_none() {
+                moof = Some(body.to_vec());
+            }
+        });
+        let moof = moof.expect("a published segment carries a moof");
+        let mut trafs: Vec<Vec<u8>> = Vec::new();
+        boxes(&moof, &mut |name, body| {
+            if name == b"traf" {
+                trafs.push(body.to_vec());
+            }
+        });
+        for traf in trafs {
+            let mut id = None;
+            let mut tfdt = None;
+            boxes(&traf, &mut |name, body| match name {
+                b"tfhd" if body.len() >= 8 => {
+                    id = Some(u32::from_be_bytes(body[4..8].try_into().expect("4")));
+                }
+                b"tfdt" if body.len() >= 12 => {
+                    tfdt = Some(u64::from_be_bytes(body[4..12].try_into().expect("8")));
+                }
+                _ => {}
+            });
+            if id == Some(video_id) {
+                return tfdt.expect("the video traf carries a tfdt");
+            }
+        }
+        panic!("a published segment carried no video traf");
+    }
+
+    /// The production pipe reopened partway in, the way a repositioned
+    /// producer opens it: land on the random-access point at or before the
+    /// boundary and keep the source's own timestamps.
+    fn repositioned_pipe(kind: &str, seconds: f64) -> Vec<u8> {
+        let source = crate::testfixtures::source(kind);
+        let mut cmd = Command::new(ffmpeg());
+        cmd.args(["-hide_banner", "-loglevel", "error"])
+            .args(["-noaccurate_seek", "-ss"])
+            .arg(format!("{seconds:.3}"))
+            .arg("-i")
+            .arg(&source)
+            .args(["-copyts"])
+            .args(["-map_chapters", "-1", "-map", "0:v:0", "-map", "0:a:0?"])
+            .args(["-sn", "-c:v", "copy"])
+            .args(["-tag:v", "hvc1"])
+            .args(["-bsf:v", "filter_units=remove_types=32-34"])
+            .args(["-c:a", "aac", "-b:a", "256k"])
+            .args([
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            ])
+            .args(["-use_editlist", "0", "-f", "mp4", "pipe:1"]);
+        run(&mut cmd)
+    }
+
+    /// The one property the whole VOD presentation rests on: a generation that
+    /// started partway into the film publishes segments on the *film's*
+    /// timeline, not on ffmpeg's.
+    ///
+    /// M0 §12.4 measured that a repositioned generation's timestamps carry no
+    /// film time in any configuration tested, which is why the producer cannot
+    /// read its position out of the media and why `segplan::match_landing`
+    /// exists. This is the other half of that finding: once the producer knows
+    /// where it landed, the segmenter has to be *told*, and what it publishes
+    /// has to join the earlier generation's timeline exactly — same `tfdt`,
+    /// same index, no gap and no overlap. A client that seeks is handed
+    /// segments from both generations in one playlist and must not be able to
+    /// tell which came from which.
+    #[test]
+    fn two_generations_publish_one_continuous_film_timeline() {
+        let kind = "closed-gop";
+        let feed = pipe(kind);
+        let (init, fragments, _) = read_all(&feed);
+        let video = init.video().expect("a video track");
+        let timescale = video.timescale;
+        // Equal floors, so the boundaries a generation picks cannot depend on
+        // whether it thinks it is the first one. That is a separate property
+        // and it would mask this one.
+        let policy = CutPolicy::new(3, 3, 300_000, 15, timescale);
+
+        let mut first = Segmenter::new(init.clone(), policy);
+        let mut generation_one = Vec::new();
+        // Where each published segment starts, counted in fragments, so the
+        // boundary can be expressed as a place in the *stream* and not only as
+        // a time.
+        let mut segment_starts = vec![0usize];
+        for (offset, fragment) in fragments.iter().enumerate() {
+            if let Some(published) = first.push(fragment.clone()).expect("segmenting") {
+                generation_one.push(published);
+                segment_starts.push(offset);
+            }
+        }
+        generation_one.extend(first.finish().expect("finishing"));
+        assert!(
+            generation_one.len() >= 4 && segment_starts.len() >= 4,
+            "the fixture produced {} segments; this test needs a boundary with \
+             film in front of it and behind it",
+            generation_one.len()
+        );
+
+        // The boundary: where generation one's third segment starts.
+        let boundary_index = 2u64;
+        let boundary_fragment = segment_starts[boundary_index as usize];
+        let boundary_ticks = published_video_tfdt(&init, &generation_one[boundary_index as usize]);
+        assert!(
+            boundary_ticks > 0,
+            "the boundary is not the start of the film"
+        );
+        let boundary_seconds = boundary_ticks as f64 / f64::from(timescale);
+
+        // Generation two: the same file, opened at that boundary.
+        let reopened = repositioned_pipe(kind, boundary_seconds);
+        let (second_init, second_fragments, _) = read_all(&reopened);
+        let second_video = second_init.video().expect("a video track").id;
+        assert!(
+            !second_fragments.is_empty(),
+            "the repositioned pipe carried no fragments"
+        );
+
+        // `-noaccurate_seek` lands at the random-access point at or *before*
+        // the boundary, so the producer finds its place by byte sequence and
+        // discards forward. Exactly what `segplan::match_landing` and
+        // `discard_to` do, done here by hand so this test depends on the
+        // segmenter and on ffmpeg, not on another module's answer.
+        let bytes_of = |frags: &[Fragment], id: u32| -> Vec<usize> {
+            frags
+                .iter()
+                .map(|fragment| {
+                    fragment
+                        .track(id)
+                        .map(TrackFragment::byte_len)
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+        let original = bytes_of(&fragments, video.id);
+        let reopened_bytes = bytes_of(&second_fragments, second_video);
+        let landing = (0..original.len().saturating_sub(3))
+            .find(|&start| original[start..start + 3] == reopened_bytes[..3])
+            .expect("the repositioned generation must be somewhere in the file");
+        assert!(
+            landing <= boundary_fragment,
+            "-noaccurate_seek landed at fragment {landing}, past the boundary \
+             at {boundary_fragment}; it is supposed to land at or before"
+        );
+        let discard = boundary_fragment - landing;
+
+        let mut second =
+            Segmenter::resuming_at(second_init.clone(), policy, boundary_index, boundary_ticks);
+        let mut generation_two = Vec::new();
+        for fragment in second_fragments.iter().skip(discard) {
+            if let Some(published) = second.push(fragment.clone()).expect("segmenting") {
+                generation_two.push(published);
+            }
+        }
+        generation_two.extend(second.finish().expect("finishing"));
+        assert!(
+            !generation_two.is_empty(),
+            "the repositioned generation published nothing"
+        );
+
+        // What ffmpeg handed generation two, before anything was done to it.
+        let raw = second_fragments[discard]
+            .track(second_video)
+            .expect("video in the landing fragment")
+            .base_decode_time;
+
+        assert_eq!(
+            published_video_tfdt(&second_init, &generation_two[0]),
+            boundary_ticks,
+            "the repositioned generation's first segment must start at the \
+             plan entry's film time, not at the {raw} ticks ffmpeg gave it"
+        );
+        assert_eq!(
+            generation_two[0].index, boundary_index,
+            "and it must be published under the plan's index, not seg00000"
+        );
+
+        // The join, from both sides: every segment generation two publishes
+        // lands exactly where generation one's did.
+        let overlap = generation_two
+            .len()
+            .min(generation_one.len() - boundary_index as usize);
+        for offset in 0..overlap {
+            let one = &generation_one[boundary_index as usize + offset];
+            let two = &generation_two[offset];
+            assert_eq!(
+                published_video_tfdt(&second_init, two),
+                published_video_tfdt(&init, one),
+                "segment {} of the two generations starts at different times",
+                two.index
+            );
+            assert_eq!(one.index, two.index, "and under different names");
+        }
+
+        // Contiguous within generation two as well, so nothing above is
+        // passing on a single lucky first segment.
+        for pair in generation_two.windows(2) {
+            let start = published_video_tfdt(&second_init, &pair[0]);
+            let next = published_video_tfdt(&second_init, &pair[1]);
+            assert!(
+                next > start,
+                "segment {} does not start after segment {}",
+                pair[1].index,
+                pair[0].index
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
