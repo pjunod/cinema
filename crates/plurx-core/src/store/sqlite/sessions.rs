@@ -1001,12 +1001,16 @@ impl MediaSessionStore for SqliteStore {
                     params![route.user_id, route.playback_id, route.incarnation_id],
                 )?;
                 tx.execute(
+                    // Every epoch's pin, matching the replicated backend: the
+                    // incarnation is over, so no generation of it may keep a
+                    // shared-cache root alive. `consumer_id` is the
+                    // incarnation, which §7.1 forbids reusing, so this can
+                    // never reach a different live session's pin.
                     "DELETE FROM cache_consumer_pins
                       WHERE consumer_kind = 'media_session' AND consumer_id = ?1
-                        AND consumer_epoch = ?2
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = ?1 AND state = 'ended')",
-                    params![route.incarnation_id, route.owner_epoch],
+                    params![route.incarnation_id],
                 )?;
             }
             tx.commit()?;

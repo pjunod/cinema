@@ -1715,9 +1715,6 @@ struct Session {
     typeless_sliding: bool,
     /// Fenced successor coordinates for URI and playlist continuity.
     takeover: Option<SessionTakeoverStart>,
-    /// Position of this worker's session-relative zero on the durable
-    /// incarnation timeline.
-    frontier_offset_ms: i64,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
     /// transition is evidence about the EVENT/sliding experiment.
@@ -1761,6 +1758,23 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// Where this generation's session-relative zero sits on the durable
+    /// incarnation timeline.
+    ///
+    /// Derived, never stored, and derived from `media_origin_seconds` — the
+    /// origin this session *achieved*. A remux cannot start anywhere but a
+    /// keyframe, so it begins at or before the position it was asked for;
+    /// recording the requested offset instead would report a frontier ahead
+    /// of the media actually produced, and the next successor would resume
+    /// past a span no generation ever fills. Because there is one field to
+    /// read, no construction site can pick the wrong one.
+    fn frontier_offset_ms(&self) -> i64 {
+        self.takeover.as_ref().map_or(0, |takeover| {
+            ((self.media_origin_seconds * 1_000.0).round() as i64)
+                .saturating_sub(takeover.origin_base_ms)
+        })
+    }
+
     /// Fail this session *and say why*, in one step.
     ///
     /// The pairing is the point: a bare `failed.store(true)` is how a cause
@@ -2845,23 +2859,6 @@ pub(crate) struct SessionTakeoverStart {
     pub media_sequence: i64,
     pub discontinuity_sequence: i64,
     pub owner_epoch: i64,
-}
-
-/// Where this generation's session-relative zero sits on the durable
-/// incarnation timeline.
-///
-/// Measured from the origin the session *achieved*, never the one it asked
-/// for. A remux cannot start anywhere but a keyframe, so it begins at or
-/// before its requested start; recording the requested offset would report a
-/// frontier ahead of the media actually produced, and the next successor
-/// would resume past a gap no generation ever fills.
-fn takeover_frontier_offset(
-    takeover: Option<&SessionTakeoverStart>,
-    achieved_origin_seconds: f64,
-) -> i64 {
-    takeover.map_or(0, |takeover| {
-        ((achieved_origin_seconds * 1_000.0).round() as i64).saturating_sub(takeover.origin_base_ms)
-    })
 }
 
 /// The fMP4 init object a given ownership generation publishes.
@@ -6560,7 +6557,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
             takeover: None,
-            frontier_offset_ms: 0,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -8257,6 +8253,13 @@ impl TranscodeManager {
     /// forbids an EVENT playlist from doing. A URL a successor may republish
     /// therefore serves the stable shape from its *first* response instead of
     /// changing shape under the client at failover.
+    /// The shape a cluster-published session will serve, asked before the
+    /// session exists so the recipe can record it. A successor may only
+    /// replace a session that was already serving this shape.
+    pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
+        self.stable_playlist_shape(true, false).await
+    }
+
     async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
         if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
             return true;
@@ -9286,9 +9289,6 @@ impl TranscodeManager {
             encoder = encoder.label(), "started transcode session"
         );
 
-        // A transcode seeks accurately, so the origin it achieves is the one
-        // it was asked for and this offset is exactly the requested one.
-        let frontier_offset_ms = takeover_frontier_offset(takeover.as_ref(), start_seconds);
         let session = Arc::new(Session {
             dir: dir.clone(),
             child: Mutex::new(Some(child)),
@@ -9361,7 +9361,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
             takeover,
-            frontier_offset_ms,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9860,12 +9859,6 @@ impl TranscodeManager {
 
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, options, probe_json.as_deref());
-        // A remux cannot start anywhere but a keyframe, so the origin it
-        // achieves is at or before the one it asked for. Recording the offset
-        // it was *asked* for would over-report this generation's frontier by
-        // that pull-back, and the next successor would resume past media no
-        // generation ever produced. Measure from the origin actually achieved.
-        let frontier_offset_ms = takeover_frontier_offset(takeover.as_ref(), media_origin_seconds);
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -9935,7 +9928,6 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
             takeover,
-            frontier_offset_ms,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -10180,11 +10172,9 @@ impl TranscodeManager {
                 .fetched_end_ms
                 .load(Relaxed)
                 .clamp(0, local_produced_through_ms);
-            let produced_playable_through_ms = session
-                .frontier_offset_ms
-                .saturating_add(local_produced_through_ms);
-            let fetched_through_ms = session
-                .frontier_offset_ms
+            let offset = session.frontier_offset_ms();
+            let produced_playable_through_ms = offset.saturating_add(local_produced_through_ms);
+            let fetched_through_ms = offset
                 .saturating_add(local_fetched_through_ms)
                 .min(produced_playable_through_ms);
             frontiers.insert(
@@ -10616,11 +10606,18 @@ impl TranscodeManager {
     /// so it fences the session (making it immediately unservable, which is
     /// the part that must not wait) and leaves the slow half to the detached
     /// reaper rather than occupying a fan-out slot indefinitely.
-    pub(crate) async fn stop_session_until(
+    ///
+    /// `hold` is anything the caller must not release until teardown has
+    /// really finished — in practice the cluster replacement guard. Dropping
+    /// that guard while the child is still alive lets the next start for the
+    /// same player through, and since a takeover deliberately supersedes
+    /// nothing, the result is two encoders for one player.
+    pub(crate) async fn stop_session_until<T: Send + 'static>(
         self: &Arc<Self>,
         session_id: &str,
         reason: &'static str,
         deadline: tokio::time::Instant,
+        hold: T,
     ) -> bool {
         // Fencing is the half that must be immediate and cannot block: every
         // serving path reads this monotone bit.
@@ -10631,7 +10628,11 @@ impl TranscodeManager {
         // encoder still running, which is strictly worse than waiting.
         let manager = Arc::clone(self);
         let owned_id = session_id.to_owned();
-        let teardown = tokio::spawn(async move { manager.stop_session(&owned_id, reason).await });
+        let teardown = tokio::spawn(async move {
+            let stopped = manager.stop_session(&owned_id, reason).await;
+            drop(hold);
+            stopped
+        });
         match tokio::time::timeout_at(deadline, teardown).await {
             Ok(Ok(stopped)) => stopped,
             Ok(Err(_)) => false,
@@ -12222,7 +12223,6 @@ fn test_session(dir: PathBuf) -> Session {
         suspend_count: AtomicU64::new(0),
         typeless_sliding: false,
         takeover: None,
-        frontier_offset_ms: 0,
         first_slide_logged: AtomicBool::new(false),
     }
 }
@@ -12918,12 +12918,14 @@ mod tests {
         assert!(!is_safe_segment("init-ex.mp4"));
     }
 
-    /// A remux begins at the keyframe at or before its requested start. The
-    /// offset the session records is therefore the origin it *achieved*: the
-    /// requested one would report a frontier ahead of the media produced, and
-    /// the next successor would resume past a gap nobody fills.
-    #[test]
-    fn takeover_offset_follows_the_origin_the_session_achieved() {
+    /// A remux begins at the keyframe at or before its requested start, so
+    /// the offset a session records must come from the origin it *achieved*.
+    /// Recording the requested one over-reports this generation's frontier by
+    /// the pull-back, and the next successor resumes past a span no
+    /// generation ever produced.
+    #[tokio::test]
+    async fn a_session_measures_its_offset_from_the_origin_it_reached() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let takeover = SessionTakeoverStart {
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 120_000,
@@ -12933,20 +12935,25 @@ mod tests {
             owner_epoch: 2,
         };
 
-        // Asked to resume at 720.000s absolute — 600s past the origin.
+        // Asked to resume at 720.000s absolute — 600s past the row's origin —
+        // and an accurate seek lands exactly there.
+        let mut exact = test_session(dir.path().join("exact"));
+        exact.takeover = Some(takeover.clone());
+        exact.media_origin_seconds = 720.0;
+        assert_eq!(exact.frontier_offset_ms(), 600_000);
+
+        // The same request on a remux whose nearest keyframe is 9s earlier.
+        let mut pulled_back = test_session(dir.path().join("pulled-back"));
+        pulled_back.takeover = Some(takeover);
+        pulled_back.media_origin_seconds = 711.0;
         assert_eq!(
-            takeover_frontier_offset(Some(&takeover), 720.0),
-            600_000,
-            "an accurate seek records exactly the requested offset"
-        );
-        // A 9s keyframe pull-back means this generation really starts at
-        // 711.000s, and its offset must say so.
-        assert_eq!(
-            takeover_frontier_offset(Some(&takeover), 711.0),
+            pulled_back.frontier_offset_ms(),
             591_000,
-            "a remux records the origin it reached, not the one it asked for"
+            "the offset follows the media this generation really starts at"
         );
-        assert_eq!(takeover_frontier_offset(None, 711.0), 0);
+
+        let ordinary = test_session(dir.path().join("ordinary"));
+        assert_eq!(ordinary.frontier_offset_ms(), 0);
     }
 
     /// DELETE and the peer abort prove ownership from the process-local
@@ -16756,7 +16763,6 @@ mod tests {
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
             takeover: None,
-            frontier_offset_ms: 0,
             first_slide_logged: AtomicBool::new(false),
         })
     }

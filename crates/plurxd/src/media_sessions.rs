@@ -68,7 +68,7 @@ const TAKEOVER_INTERVAL: Duration = Duration::from_secs(2);
 const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
-const TAKEOVER_OVERLAP_MS: i64 = 2_000;
+const TAKEOVER_OVERLAP_MARGIN_MS: i64 = 2_000;
 const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
 /// Width of the HLS sequence range each ownership epoch gets to itself.
 ///
@@ -79,8 +79,15 @@ const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
 /// which is far more failovers than one playback session can survive.
 const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000;
 
-static TAKEOVER_SETTLING: LazyLock<StdMutex<HashSet<String>>> =
-    LazyLock::new(|| StdMutex::new(HashSet::new()));
+/// Session ids currently mid-takeover, counted rather than set-valued.
+///
+/// Overlapping attempts for one route are ordinary — a route stays expired
+/// and claimable until somebody's CAS lands, and two ticks can be in flight
+/// at once. A plain set would let the *loser*'s guard drop un-protect the
+/// winner mid-settlement, which is the exact race this registry exists to
+/// close, so protection is released only when the last holder leaves.
+static TAKEOVER_SETTLING: LazyLock<StdMutex<HashMap<String, usize>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Marks a session id as mid-takeover: claimed, or about to be, but not yet
 /// published locally. The lease loop must neither reap it as an owned route
@@ -94,10 +101,11 @@ impl TakeoverSettlementGuard {
     /// turn this protection off — failing open here silently re-enables the
     /// races the guard exists to close, for the rest of the process.
     fn begin(session_id: &str) -> Self {
-        TAKEOVER_SETTLING
+        *TAKEOVER_SETTLING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session_id.to_owned());
+            .entry(session_id.to_owned())
+            .or_insert(0) += 1;
         Self {
             session_id: session_id.to_owned(),
         }
@@ -106,10 +114,15 @@ impl TakeoverSettlementGuard {
 
 impl Drop for TakeoverSettlementGuard {
     fn drop(&mut self) {
-        TAKEOVER_SETTLING
+        let mut settling = TAKEOVER_SETTLING
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.session_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holders) = settling.get_mut(&self.session_id) {
+            *holders = holders.saturating_sub(1);
+            if *holders == 0 {
+                settling.remove(&self.session_id);
+            }
+        }
     }
 }
 
@@ -117,7 +130,9 @@ fn settling_takeover_ids() -> HashSet<String> {
     TAKEOVER_SETTLING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .keys()
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +155,15 @@ pub(crate) struct RemoteStartRequest {
     pub user_id: i64,
     pub source_size: i64,
     pub source_mtime: i64,
+    /// Whether this session serves the typeless sliding playlist shape.
+    ///
+    /// A successor renumbers from its epoch floor and advertises none of the
+    /// predecessor's segments, which RFC 8216 §6.2.1 forbids an EVENT
+    /// playlist from doing. A session that was serving EVENT therefore cannot
+    /// be taken over at all — and a recipe written before this field existed
+    /// defaults to `false`, so it is refused rather than guessed at.
+    #[serde(default)]
+    pub typeless_playlist: bool,
     pub request: SessionRequest,
 }
 
@@ -774,14 +798,7 @@ pub(crate) async fn lease_loop(state: AppState) {
             }
         }
         let now_ms = unix_ms();
-        let settling_takeovers = settling_takeover_ids();
-        let mut live = state
-            .transcode
-            .renewable_session_ids()
-            .await
-            .into_iter()
-            .collect::<HashSet<_>>();
-        live.extend(settling_takeovers.iter().cloned());
+        let live = lease_tick_live(state.transcode.renewable_session_ids().await);
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
         let routes = match tokio::time::timeout(
@@ -851,14 +868,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                 (route.session_id.clone(), route.lease_expires_at_ms),
             );
         }
-        // A settling takeover has already won the replicated CAS but has not
-        // finished publishing its local worker, so `owned_media_sessions`
-        // returns it while `session_frontiers` still cannot see it. Renewing
-        // it is impossible (there is no frontier to report) and treating the
-        // missing frontier as lost ownership would fence the session this
-        // node just won. It stays in `live` — so the stale-settlement sweep
-        // leaves it alone — and out of `active` until its guard drops.
-        let active = renewable_routes(&routes, &live, &settling_takeovers);
+        let active = lease_tick_active(&routes, &live);
         let active_session_ids = active
             .iter()
             .map(|route| route.session_id.clone())
@@ -1091,14 +1101,24 @@ pub(crate) async fn takeover_loop(state: AppState) {
             }
             Err(_) => continue,
         };
-        stream::iter(routes.into_iter().map(|route| {
-            let state = state.clone();
-            async move {
-                if let Err(error) = attempt_takeover(&state, route).await {
-                    tracing::debug!(%error, "media-session takeover candidate refused");
-                }
-            }
-        }))
+        // A route stays expired-and-claimable until somebody's CAS lands, so
+        // it reappears on every tick until then. Contesting it again while
+        // this node's own attempt is still in flight buys nothing and costs an
+        // offers round trip, an ffmpeg spawn and an admission slot each time.
+        let in_flight = settling_takeover_ids();
+        stream::iter(
+            routes
+                .into_iter()
+                .filter(|route| !in_flight.contains(&route.session_id))
+                .map(|route| {
+                    let state = state.clone();
+                    async move {
+                        if let Err(error) = attempt_takeover(&state, route).await {
+                            tracing::debug!(%error, "media-session takeover candidate refused");
+                        }
+                    }
+                }),
+        )
         .buffer_unordered(TAKEOVER_FANOUT)
         .collect::<Vec<_>>()
         .await;
@@ -1117,7 +1137,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         .owner_epoch
         .checked_add(1)
         .ok_or_else(|| "media-session takeover epoch space exhausted".to_owned())?;
-    let epoch_floor = takeover_sequence_floor(next_epoch)
+    let start_number = takeover_start_number(route.media_sequence, next_epoch)
         .ok_or_else(|| "media-session takeover sequence space exhausted".to_owned())?;
     let mut envelope = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json)
         .map_err(|error| format!("invalid persisted takeover recipe: {error}"))?;
@@ -1127,19 +1147,25 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     {
         return Err("persisted takeover recipe no longer matches its route".to_owned());
     }
+    // The rollout OPERATIONS.md prescribes turns this gate on while sessions
+    // are already playing. Those sessions were created before the gate and
+    // are serving `EXT-X-PLAYLIST-TYPE:EVENT`; a replacement generation
+    // cannot satisfy EVENT semantics, and changing one URL's shape mid-film
+    // is the failure this whole mechanism is supposed to avoid. Refusing is
+    // the graceful degradation — the viewer restarts, which they would have
+    // had to do before P7 anyway.
+    if !envelope.typeless_playlist {
+        return Err("takeover cannot replace a session serving an EVENT playlist".to_owned());
+    }
     let file = tokio::time::timeout_at(deadline, state.store.get_file(envelope.request.file_id))
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover source is missing".to_owned())?;
-    if file.size != envelope.source_size || file.mtime != envelope.source_mtime {
+    if !takeover_source_matches(&envelope, file.size, file.mtime) {
         return Err("takeover source revision changed".to_owned());
     }
-    let frontier_offset_ms = route
-        .fetched_through_ms
-        .saturating_sub(TAKEOVER_OVERLAP_MS)
-        .clamp(0, route.produced_playable_through_ms);
-    let restart_ms = route.media_origin_ms.saturating_add(frontier_offset_ms);
+    let (frontier_offset_ms, restart_ms) = takeover_resume(&route, &envelope.request.kind);
     envelope.request.start_seconds = restart_ms as f64 / 1_000.0;
     envelope.request.request_id = None;
     envelope.request.previous_session_id = None;
@@ -1164,10 +1190,6 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     if offers.selected_node_id.as_deref() != Some(state.node_id.as_str()) {
         return Ok(());
     }
-    // Each ownership epoch receives a disjoint HLS sequence range, so the
-    // successor can publish no URI the expired owner ever used — even one
-    // that owner produced after its last successful heartbeat.
-    let start_number = route.media_sequence.max(epoch_floor);
     let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?
@@ -1227,6 +1249,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                     &provisional_id,
                     "media-session takeover claim failed",
                     cleanup_deadline,
+                    started.replacement,
                 )
                 .await;
             return Err(error.to_string());
@@ -1238,6 +1261,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                     &provisional_id,
                     "media-session takeover timed out",
                     cleanup_deadline,
+                    started.replacement,
                 )
                 .await;
             return Err("media-session takeover timed out".to_owned());
@@ -1250,6 +1274,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                 &provisional_id,
                 "media-session takeover lost",
                 cleanup_deadline,
+                started.replacement,
             )
             .await;
         return Ok(());
@@ -1296,6 +1321,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                 local_id,
                 "media-session takeover settlement failed",
                 cleanup_deadline,
+                started.replacement,
             )
             .await;
         return Err("takeover winner could not publish its local worker".to_owned());
@@ -1317,6 +1343,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                     &claimed.session_id,
                     "media-session takeover settlement unreadable",
                     cleanup_deadline,
+                    started.replacement,
                 )
                 .await;
             return Err(error.to_string());
@@ -1328,6 +1355,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                     &claimed.session_id,
                     "media-session takeover settlement timed out",
                     cleanup_deadline,
+                    started.replacement,
                 )
                 .await;
             return Err("media-session takeover settlement timed out".to_owned());
@@ -1351,6 +1379,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                 &claimed.session_id,
                 "media-session takeover lease changed",
                 cleanup_deadline,
+                started.replacement,
             )
             .await;
         return Err("takeover lease changed before publication".to_owned());
@@ -1365,31 +1394,83 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
 ///
 /// Each epoch owns a disjoint range, so a successor can never name a URI its
 /// predecessor used — including segments the predecessor produced after its
-/// last successful heartbeat. `None` once the floor would leave the range
-/// ffmpeg can represent: the HLS muxer carries the segment number through a
-/// C `int`, so anything past `i32::MAX` is truncated into a negative filename
-/// that no allowlist accepts, and refusing the takeover beats publishing a
-/// playlist whose every segment 404s.
-fn takeover_sequence_floor(next_epoch: i64) -> Option<i64> {
+/// last successful heartbeat, which the replicated `media_sequence` cannot
+/// have seen. That is why the epoch floor and not the replicated sequence is
+/// what the successor starts from.
+///
+/// `None` once the number would leave the range ffmpeg can represent: the HLS
+/// muxer carries the segment number through a C `int`, so anything past
+/// `i32::MAX` is truncated into a negative filename that no allowlist
+/// accepts. Refusing the takeover beats publishing a playlist whose every
+/// segment 404s. The check is on the number actually handed to the muxer, not
+/// on the floor alone — a replicated sequence above the floor is what gets
+/// published.
+fn takeover_start_number(media_sequence: i64, next_epoch: i64) -> Option<i64> {
     next_epoch
         .checked_mul(TAKEOVER_SEQUENCE_STRIDE)
-        .filter(|floor| *floor <= i64::from(i32::MAX))
+        .map(|floor| floor.max(media_sequence))
+        .filter(|start| *start <= i64::from(i32::MAX))
 }
 
-/// The owned routes this tick may renew.
+/// How far behind the client's fetched frontier a successor restarts, and
+/// where that lands on the source timeline.
 ///
-/// `live` is the set of session ids this node can actually produce for, so a
-/// route missing from it has no worker and is fenced. A settling takeover is
-/// the one case that is neither: it owns the replicated row already, but its
-/// worker is still registered under the provisional id, so it can report no
-/// frontier and must not be mistaken for lost ownership. It stays in `live`,
-/// where the stale-settlement sweep leaves it alone, and out of here until
-/// its guard drops.
-fn renewable_routes<'a>(
+/// The overlap is one whole segment of this session's own shape plus a
+/// margin, never a fixed two seconds: `fetched_through_ms` advances to the
+/// *end* of a segment as soon as the client requests it, so an owner that
+/// dies during a fifteen-second copy segment has published a frontier well
+/// past what the client holds. Anything less than a full segment of overlap
+/// leaves media that no generation ever produces.
+fn takeover_resume(route: &MediaSessionRoute, kind: &SessionKind) -> (i64, i64) {
+    let segment_ms = match kind {
+        SessionKind::Copy { .. } => i64::from(plurx_core::transcode::COPY_SEGMENT_MAX_SECS) * 1_000,
+        SessionKind::Transcode { .. } => i64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000,
+    };
+    let overlap_ms = segment_ms.saturating_add(TAKEOVER_OVERLAP_MARGIN_MS);
+    let frontier_offset_ms = route
+        .fetched_through_ms
+        .saturating_sub(overlap_ms)
+        .clamp(0, route.produced_playable_through_ms);
+    (
+        frontier_offset_ms,
+        route.media_origin_ms.saturating_add(frontier_offset_ms),
+    )
+}
+
+/// Whether the persisted recipe still describes the file on this node's disk.
+///
+/// §7.3 requires an eligible candidate to prove the source snapshot, not to
+/// assume a replicated row implies a mount. A row that could not be read when
+/// the session started records an impossible `0/0` snapshot, so this is also
+/// what refuses a takeover whose original placement never saw the file.
+fn takeover_source_matches(envelope: &RemoteStartRequest, size: i64, mtime: i64) -> bool {
+    size == envelope.source_size && mtime == envelope.source_mtime
+}
+
+/// What one lease tick may touch.
+///
+/// `live` is every session id this node is answerable for: the workers it can
+/// produce for, plus the takeovers it is settling. `active` is the subset it
+/// can actually renew.
+///
+/// A settling takeover is the one id that belongs to the first and not the
+/// second. It owns the replicated row already, but its worker is still
+/// registered under the provisional id, so it can report no frontier: leaving
+/// it out of `live` would let the stale-settlement sweep end the session this
+/// node just won, and leaving it in `active` would let the missing frontier
+/// read as lost ownership and fence it. Both halves of that decision are made
+/// here, from one read of the registry, so no caller can supply the wrong set.
+fn lease_tick_live(renewable_session_ids: Vec<String>) -> HashSet<String> {
+    let mut live = renewable_session_ids.into_iter().collect::<HashSet<_>>();
+    live.extend(settling_takeover_ids());
+    live
+}
+
+fn lease_tick_active<'a>(
     routes: &'a [OwnedMediaSessionLease],
     live: &HashSet<String>,
-    settling: &HashSet<String>,
 ) -> Vec<&'a OwnedMediaSessionLease> {
+    let settling = settling_takeover_ids();
     routes
         .iter()
         .filter(|route| live.contains(&route.session_id) && !settling.contains(&route.session_id))
@@ -1479,6 +1560,7 @@ mod tests {
             user_id: 7,
             source_size: 123_456,
             source_mtime: 1_700_000_000,
+            typeless_playlist: true,
             request: SessionRequest {
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -1544,55 +1626,144 @@ mod tests {
     }
 
     /// ffmpeg's HLS muxer carries the segment number through a C `int`. A
-    /// floor past `i32::MAX` is truncated into a negative filename that no
+    /// number past `i32::MAX` is truncated into a negative filename that no
     /// allowlist accepts, so every segment of that generation 404s — reached
     /// by an ordinary second failover during one long film.
     #[test]
-    fn the_epoch_sequence_floor_stays_inside_what_ffmpeg_can_name() {
-        let first = takeover_sequence_floor(2).expect("first successor");
-        let second = takeover_sequence_floor(3).expect("second successor");
-        assert!(second > first, "each epoch owns a strictly higher range");
-        assert_eq!(second - first, TAKEOVER_SEQUENCE_STRIDE);
-
-        let ceiling = i64::from(i32::MAX);
-        for epoch in [2, 3, 8, 64, 2_000] {
-            let floor = takeover_sequence_floor(epoch)
-                .unwrap_or_else(|| panic!("epoch {epoch} must still be reachable"));
-            assert!(
-                floor <= ceiling,
-                "epoch {epoch} floor {floor} overflows i32"
-            );
-        }
+    fn the_published_start_number_stays_inside_what_ffmpeg_can_name() {
+        // The floor, not the replicated sequence, is what a successor starts
+        // from: the predecessor's frontier is seconds stale by design, so
+        // segments it produced after its last heartbeat are numbered above
+        // the sequence anyone replicated.
         assert_eq!(
-            takeover_sequence_floor(i64::MAX / 2),
-            None,
-            "an unrepresentable floor refuses the takeover instead of publishing dead URIs"
+            takeover_start_number(41, 2),
+            Some(TAKEOVER_SEQUENCE_STRIDE * 2)
         );
-        assert_eq!(takeover_sequence_floor(i64::MAX), None);
+        assert_eq!(
+            takeover_start_number(TAKEOVER_SEQUENCE_STRIDE * 2 - 1, 2),
+            Some(TAKEOVER_SEQUENCE_STRIDE * 2),
+            "a predecessor sequence anywhere inside the prior epoch's range \
+             cannot pull the successor below its own floor"
+        );
+        assert_eq!(
+            takeover_start_number(3, 3).expect("second successor")
+                - takeover_start_number(3, 2).expect("first successor"),
+            TAKEOVER_SEQUENCE_STRIDE,
+            "each epoch owns a strictly higher, equally wide range"
+        );
+
+        // The boundary is the whole point of the check: the epoch either side
+        // of it must be decided differently.
+        let ceiling = i64::from(i32::MAX);
+        let last_epoch = ceiling / TAKEOVER_SEQUENCE_STRIDE;
+        assert!(
+            takeover_start_number(0, last_epoch).is_some_and(|start| start <= ceiling),
+            "epoch {last_epoch} is the last representable one and must be allowed"
+        );
+        assert_eq!(
+            takeover_start_number(0, last_epoch + 1),
+            None,
+            "the first epoch past the ceiling is refused, not truncated"
+        );
+        assert_eq!(takeover_start_number(i64::MAX, 2), None);
+        assert_eq!(takeover_start_number(0, i64::MAX), None);
+    }
+
+    /// `fetched_through_ms` advances to the END of a segment as soon as the
+    /// client requests it, so an owner that dies mid-response has published a
+    /// frontier well past what the viewer holds. Overlapping by less than one
+    /// whole segment of this session's own shape leaves a span of media that
+    /// no generation produces, and the viewer sees a hard cut at the
+    /// discontinuity.
+    #[test]
+    fn a_successor_overlaps_a_whole_segment_of_its_own_shape() {
+        let mut route = media_route("session-resume");
+        route.media_origin_ms = 90_000;
+        route.produced_playable_through_ms = 600_000;
+        route.fetched_through_ms = 600_000;
+
+        let copy = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+        };
+        let (copy_offset, copy_restart) = takeover_resume(&route, &copy);
+        let copy_overlap = route.fetched_through_ms - copy_offset;
+        assert!(
+            copy_overlap >= i64::from(plurx_core::transcode::COPY_SEGMENT_MAX_SECS) * 1_000,
+            "a remux must re-cover the longest segment it could have been \
+             serving when its owner died, not a fixed two seconds: {copy_overlap}"
+        );
+        assert_eq!(
+            copy_restart,
+            route.media_origin_ms + copy_offset,
+            "the restart is measured from the row's write-once origin"
+        );
+
+        let transcode = SessionKind::Transcode { height: 1080 };
+        let (transcode_offset, _) = takeover_resume(&route, &transcode);
+        assert!(
+            route.fetched_through_ms - transcode_offset
+                >= i64::from(plurx_core::transcode::SEGMENT_SECONDS) * 1_000
+        );
+        assert!(
+            transcode_offset > copy_offset,
+            "a two-second segment does not pay a fifteen-second segment's overlap"
+        );
+
+        // Never behind the start of the film, and never past what was made.
+        route.fetched_through_ms = 1_000;
+        route.produced_playable_through_ms = 1_000;
+        assert_eq!(takeover_resume(&route, &copy), (0, route.media_origin_ms));
+        route.produced_playable_through_ms = 0;
+        route.fetched_through_ms = 0;
+        assert_eq!(takeover_resume(&route, &transcode).0, 0);
+    }
+
+    /// §7.3 requires a candidate to prove the source snapshot rather than
+    /// assume a replicated row implies a mount. A session whose file row could
+    /// not be read at creation records an impossible `0/0` snapshot, so it is
+    /// refused too.
+    #[test]
+    fn only_an_unchanged_source_admits_a_takeover() {
+        let envelope = valid_start_request();
+        let (size, mtime) = (envelope.source_size, envelope.source_mtime);
+        assert!(takeover_source_matches(&envelope, size, mtime));
+        assert!(!takeover_source_matches(&envelope, size + 1, mtime));
+        assert!(!takeover_source_matches(&envelope, size, mtime + 1));
+
+        let unread = RemoteStartRequest {
+            source_size: 0,
+            source_mtime: 0,
+            ..envelope
+        };
+        assert!(
+            !takeover_source_matches(&unread, size, mtime),
+            "a session started against a file the placement never read is not recoverable"
+        );
     }
 
     /// A settling takeover owns the replicated row before its worker is
     /// republished under the durable id, so it can report no frontier. Left
     /// in the renewal batch, that missing frontier reads as lost ownership
-    /// and the node fences the session it has just won.
+    /// and the node fences the session it has just won; left out of `live`
+    /// entirely, the stale-settlement sweep ends it instead. It must be in
+    /// exactly one of the two sets, and the guard — not a caller-supplied
+    /// set — is what decides.
     #[test]
-    fn a_settling_takeover_is_neither_renewed_nor_fenced() {
+    fn a_settling_takeover_is_live_but_not_renewable() {
         let routes = vec![
             owned_lease("session-live"),
             owned_lease("session-settling"),
             owned_lease("session-gone"),
         ];
-        let live = ["session-live", "session-settling"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<HashSet<_>>();
-        let settling = ["session-settling"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<HashSet<_>>();
+        let renewable = vec!["session-live".to_owned()];
 
-        let active = renewable_routes(&routes, &live, &settling);
-        let ids = active
+        let settling = TakeoverSettlementGuard::begin("session-settling");
+        let live = lease_tick_live(renewable.clone());
+        assert!(live.contains("session-settling"), "{live:?}");
+        assert!(live.contains("session-live"), "{live:?}");
+        assert!(!live.contains("session-gone"), "{live:?}");
+        let ids = lease_tick_active(&routes, &live)
             .iter()
             .map(|route| route.session_id.as_str())
             .collect::<Vec<_>>();
@@ -1602,13 +1773,38 @@ mod tests {
             "only a route with a reportable frontier may be renewed or fenced"
         );
 
-        // Once the guard drops the same route renews normally.
-        let active = renewable_routes(&routes, &live, &HashSet::new());
-        let ids = active
+        // A second attempt for the same route is ordinary; the loser's guard
+        // must not un-protect the winner.
+        let overlapping = TakeoverSettlementGuard::begin("session-settling");
+        drop(overlapping);
+        let live = lease_tick_live(renewable);
+        assert!(
+            live.contains("session-settling"),
+            "an overlapping attempt's guard must not release the winner's protection"
+        );
+        assert!(
+            lease_tick_active(&routes, &live)
+                .iter()
+                .all(|route| route.session_id != "session-settling"),
+            "the settling route is still excluded while any holder remains"
+        );
+
+        // Adoption completes: the worker is now registered under the durable
+        // id, so it is renewable on its own and the guard is released.
+        drop(settling);
+        let live = lease_tick_live(vec![
+            "session-live".to_owned(),
+            "session-settling".to_owned(),
+        ]);
+        let ids = lease_tick_active(&routes, &live)
             .iter()
             .map(|route| route.session_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["session-live", "session-settling"]);
+        assert_eq!(
+            ids,
+            vec!["session-live", "session-settling"],
+            "once the last guard drops the route renews normally"
+        );
     }
 
     #[test]

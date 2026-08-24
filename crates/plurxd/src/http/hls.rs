@@ -514,6 +514,10 @@ pub async fn create(
         // against a file it never verified.
         source_size: source.as_ref().map_or(0, |f| f.size),
         source_mtime: source.as_ref().map_or(0, |f| f.mtime),
+        // Recorded from the same decision the worker will make, so a later
+        // takeover can tell whether this URL was ever serving a shape a
+        // successor is allowed to continue.
+        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;

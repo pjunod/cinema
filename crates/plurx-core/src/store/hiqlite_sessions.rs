@@ -1393,3 +1393,129 @@ impl MediaSessionStore for HiqliteAuthStore {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    const SOURCE: &str = include_str!("hiqlite_sessions.rs");
+
+    fn method_source(method: &str) -> &'static str {
+        let declaration = format!("    async fn {method}(");
+        let start = SOURCE
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("missing {declaration} in hiqlite_sessions.rs"));
+        let rest = &SOURCE[start..];
+        let end = rest[1..]
+            .find("\n    async fn ")
+            .map_or(rest.len(), |offset| offset + 1);
+        &rest[..end]
+    }
+
+    /// Every `$N` placeholder in a replicated statement must be introduced in
+    /// numeric order.
+    ///
+    /// SQLite resolves `$N` as a *named* parameter and assigns its index by
+    /// first appearance, not by the number after the sigil, while `params!`
+    /// binds positionally. A statement that introduces `$7` before `$3`
+    /// therefore compiles, runs, affects rows, and writes every value into
+    /// the wrong column — silently. This is a whole-file scan rather than a
+    /// per-statement one because the failure mode is invisible at the call
+    /// site and cost this module four statements at once.
+    #[test]
+    fn every_replicated_placeholder_is_introduced_in_order() {
+        let mut statement = String::new();
+        let mut in_statement = false;
+        let mut offenders = Vec::new();
+        for (number, line) in SOURCE.lines().enumerate() {
+            let quotes = line.matches('"').count();
+            if !in_statement && quotes == 1 {
+                in_statement = true;
+                statement.clear();
+                statement.push_str(line);
+                statement.push(' ');
+                continue;
+            }
+            if in_statement {
+                statement.push_str(line);
+                statement.push(' ');
+                if quotes >= 1 {
+                    in_statement = false;
+                    if let Some(first) = first_out_of_order(&statement) {
+                        offenders.push(format!("line {}: introduces {first} early", number + 1));
+                    }
+                }
+                continue;
+            }
+            if quotes >= 2 {
+                if let Some(first) = first_out_of_order(line) {
+                    offenders.push(format!("line {}: introduces {first} early", number + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "replicated statements bind by first appearance: {offenders:?}"
+        );
+    }
+
+    fn first_out_of_order(text: &str) -> Option<String> {
+        let mut seen: Vec<u32> = Vec::new();
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'$' {
+                index += 1;
+                continue;
+            }
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end == index + 1 {
+                index += 1;
+                continue;
+            }
+            let ordinal: u32 = text[index + 1..end].parse().unwrap_or(0);
+            if !seen.contains(&ordinal) {
+                if ordinal as usize != seen.len() + 1 {
+                    return Some(format!("${ordinal}"));
+                }
+                seen.push(ordinal);
+            }
+            index = end;
+        }
+        None
+    }
+
+    /// Ending a session must act on the owner the row has at commit time, not
+    /// on the snapshot the pre-transaction read returned.
+    ///
+    /// The read that drives `end_media_session` is outside its transaction, so
+    /// a takeover can commit between the two. If the dependent statements are
+    /// driven by Rust-side `route.owner_node_id` / `route.owner_epoch`, the
+    /// end clamps a lease the dead node no longer holds and leaves the
+    /// successor's pin behind. That interleaving is not reproducible through
+    /// the public store API, so the property is asserted where it lives: the
+    /// statements read owner and fence back out of `media_sessions`.
+    #[test]
+    fn ending_a_session_reads_its_owner_inside_the_transaction() {
+        let source = method_source("end_media_session");
+        assert!(
+            source.contains("media_sessions.owner_node_id = job_leases.owner_node_id")
+                && source.contains("media_sessions.owner_epoch = job_leases.fence"),
+            "the lease clamp must correlate against the row, not a pre-read snapshot"
+        );
+        assert!(
+            !source.contains("route.owner_node_id.as_str()")
+                && !source.contains("route.owner_epoch"),
+            "no statement in this transaction may bind the pre-read owner or fence"
+        );
+        assert!(
+            !source.contains("consumer_epoch = $"),
+            "the pin delete covers every epoch of the ended incarnation"
+        );
+        assert!(
+            source.contains("Ok(route_by(self, \"incarnation_id\", &route.incarnation_id)"),
+            "the returned route must be re-read after the transaction commits"
+        );
+    }
+}

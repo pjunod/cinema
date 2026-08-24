@@ -1188,6 +1188,41 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
         assert_eq!(renewed_route.media_sequence, 5, "{backend}");
+
+        // Monotone progress (§8.8). A generation that restarts its local
+        // encoder resets its own index and will heartbeat a lower frontier;
+        // the replicated high-water mark must absorb that, not follow it.
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "node-a",
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_a2.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 4_000,
+                        fetched_through_ms: 1_000,
+                        media_sequence: 1,
+                    }],
+                    201,
+                    401,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew with a regressed frontier: {error}")),
+            vec![incarnation_a2.to_owned()],
+            "{backend}: a regressed frontier still renews the lease"
+        );
+        let held = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect held frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(held.produced_playable_through_ms, 20_000, "{backend}");
+        assert_eq!(held.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(
+            held.media_sequence, 5,
+            "{backend}: the sequence high-water mark is what a successor \
+             starts above; it may never move backwards"
+        );
         // P6's guarantee, restored: renewing the session renews its typed
         // reader pin, so the generation it is reading cannot be retired out
         // from under it. The renewal batch's placeholder scramble broke this
@@ -1527,6 +1562,24 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             "{backend}: the successor must not still own an ended incarnation"
         );
 
+        // The ended incarnation's coordination lease is clamped, not merely
+        // its session row: nothing may still hold `session:<incarnation>` at
+        // the successor's fence. A third node acquiring it cleanly is what
+        // proves the clamp landed on the owner the end actually had.
+        let reacquired = store
+            .acquire_lease(
+                &format!("session:{incarnation}"),
+                "node-third",
+                3_200,
+                9_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reacquire ended lease: {error}"));
+        assert!(
+            matches!(reacquired, LeaseClaim::Acquired(_)),
+            "{backend}: an ended incarnation leaves no live lease behind: {reacquired:?}"
+        );
+
         // Idempotent, and still reporting the same owner.
         let again = store
             .end_media_session(session, 3_100)
@@ -1534,6 +1587,33 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
             .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
         assert_eq!(again.owner_node_id, "node-new", "{backend}");
+
+        // §7.2: a delete racing a takeover resolves to ended. Once ended, no
+        // survivor may claim the incarnation back into life.
+        assert!(
+            store
+                .expired_media_sessions(4_000, 64)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
+                .iter()
+                .all(|route| route.incarnation_id != incarnation),
+            "{backend}: an ended incarnation is not offered for takeover"
+        );
+        assert!(
+            store
+                .claim_media_session_takeover(&MediaSessionTakeover {
+                    incarnation_id: incarnation.to_owned(),
+                    expected_owner_node_id: "node-new".to_owned(),
+                    expected_owner_epoch: 2,
+                    next_owner_node_id: "node-third".to_owned(),
+                    now_ms: 4_000,
+                    lease_expires_at_ms: 16_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim an ended incarnation: {error}"))
+                .is_none(),
+            "{backend}: no replacement child may be created for an ended incarnation"
+        );
     })
     .await;
 }
