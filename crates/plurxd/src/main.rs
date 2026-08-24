@@ -33,6 +33,7 @@ mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
+mod waitpool;
 mod watched;
 
 use std::future::IntoFuture;
