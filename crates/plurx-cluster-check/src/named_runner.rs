@@ -23,8 +23,8 @@ use tokio::process::Command;
 use super::topology::{exercise_topology, unix_ms, ResourceIdentity, RunEvidence};
 use super::{
     default_read_pool_size, validate_topology_artifact, ClusterProcesses, ClusterTopologyArtifact,
-    NodeLaunch, NodeProcess,
-    NodeSpec, TopologyRun, TopologyWorkload, CONVERGENCE_TIMEOUT, TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
+    NodeLaunch, NodeProcess, NodeSpec, TopologyRun, TopologyWorkload, CONVERGENCE_TIMEOUT,
+    TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
 };
 
 pub const NAMED_CAMPAIGN_SCHEMA_VERSION: u32 = 1;

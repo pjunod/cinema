@@ -42,7 +42,7 @@ use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
 };
 use plurx_core::cluster::migration::{
-    production_hiqlite_defaults_with_read_pool, ActivationMarker, HIQLITE_WAL_SIZE_BYTES,
+    production_hiqlite_defaults_with_read_pool, ActivationMarker,
 };
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
@@ -10193,6 +10193,8 @@ pub fn install_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
+    use plurx_core::cluster::migration::HIQLITE_WAL_SIZE_BYTES;
+
     use super::*;
 
     #[test]

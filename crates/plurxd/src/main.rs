@@ -2839,7 +2839,14 @@ mod startup_tests {
         let logs = captured(|| {
             create_dirs_for_storage(&storage).expect("split boot");
         });
-        assert!(logs.tail("warn", 16).is_empty(), "{:?}", logs.tail("warn", 16));
+        // Scoped to this warning rather than to "no warnings at all": under a
+        // umask that makes the scratch root group-writable the boot also warns
+        // about repairing it, which is a different and correct report.
+        let warned = logs.tail("warn", 16);
+        assert!(
+            !format!("{warned:?}").contains("still holds entries"),
+            "{warned:?}"
+        );
     }
 
     #[test]

@@ -449,10 +449,7 @@ impl SecureDirectory {
             let entries = independent_directory_stream(&directory)?;
             let result = (|| {
                 let mut names = Vec::new();
-                loop {
-                    let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                        break;
-                    };
+                while let Some(entry) = (unsafe { readdir_checked(entries) })? {
                     let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
                     if child.to_bytes() == b"." || child.to_bytes() == b".." {
                         continue;
@@ -922,10 +919,7 @@ fn clear_directory_capability(
 ) -> io::Result<()> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
-        loop {
-            let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                break;
-            };
+        while let Some(entry) = (unsafe { readdir_checked(entries) })? {
             let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             if child.to_bytes() == b"." || child.to_bytes() == b".." {
                 continue;
@@ -1002,10 +996,7 @@ fn count_directory_capability(
 ) -> io::Result<()> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
-        loop {
-            let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                break;
-            };
+        while let Some(entry) = (unsafe { readdir_checked(entries) })? {
             let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             if child.to_bytes() == b"." || child.to_bytes() == b".." {
                 continue;
@@ -1641,11 +1632,8 @@ pub async fn remove_flat_directory_child(
         let entries = independent_directory_stream(&directory)?;
         let result = (|| {
             let mut removed = 0usize;
-            loop {
-                // SAFETY: entries remains a live DIR pointer until closed.
-                let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                    break;
-                };
+            // SAFETY: entries remains a live DIR pointer until closed.
+            while let Some(entry) = (unsafe { readdir_checked(entries) })? {
                 // SAFETY: a returned dirent has a NUL-terminated name.
                 let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
                 if child.to_bytes() == b"." || child.to_bytes() == b".." {
@@ -1726,11 +1714,8 @@ pub async fn remove_bounded_directory_tree_child(
         ) -> io::Result<()> {
             let entries = independent_directory_stream(directory)?;
             let result = (|| {
-                loop {
-                    // SAFETY: entries remains live until closed below.
-                    let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                        break;
-                    };
+                // SAFETY: entries remains live until closed below.
+                while let Some(entry) = (unsafe { readdir_checked(entries) })? {
                     // SAFETY: dirent names are NUL terminated.
                     let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
                     if child.to_bytes() == b"." || child.to_bytes() == b".." {
@@ -1949,9 +1934,7 @@ fn scratch_marker_state(
         scratch_marker_owner(&actual),
         scratch_marker_owner(expected),
     ) {
-        (Some(found), Some(wanted)) if found != wanted => {
-            Ok(ScratchMarkerState::OtherOwner(found))
-        }
+        (Some(found), Some(wanted)) if found != wanted => Ok(ScratchMarkerState::OtherOwner(found)),
         _ => Ok(ScratchMarkerState::Mismatch),
     }
 }
@@ -2103,10 +2086,7 @@ fn count_scratch_capability(
 ) -> io::Result<Option<ScratchBound>> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
-        loop {
-            let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                break;
-            };
+        while let Some(entry) = (unsafe { readdir_checked(entries) })? {
             let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             if child.to_bytes() == b"."
                 || child.to_bytes() == b".."
@@ -2199,10 +2179,7 @@ fn clear_scratch_capability(
 ) -> io::Result<()> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
-        loop {
-            let Some(entry) = (unsafe { readdir_checked(entries) })? else {
-                break;
-            };
+        while let Some(entry) = (unsafe { readdir_checked(entries) })? {
             let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             if child.to_bytes() == b"."
                 || child.to_bytes() == b".."
@@ -2493,77 +2470,78 @@ fn claim_and_clear_scratch_inner(
             marker_name.expect("marker CString came from marker name")
         ))?;
         match scratch_marker_identity(path, &directory, marker, expected_marker) {
-            Ok(identity) => match scratch_marker_identity(path, &directory, &pending, expected_marker)
-            {
-                Ok(pending_identity) => {
-                    if !pending_identity.same_inode(identity)
-                        || !scratch_has_only_preserved(
-                            &directory,
-                            &[pending.as_c_str(), marker.as_c_str()],
-                        )?
-                    {
-                        return Err(io::Error::other(
+            Ok(identity) => {
+                match scratch_marker_identity(path, &directory, &pending, expected_marker) {
+                    Ok(pending_identity) => {
+                        if !pending_identity.same_inode(identity)
+                            || !scratch_has_only_preserved(
+                                &directory,
+                                &[pending.as_c_str(), marker.as_c_str()],
+                            )?
+                        {
+                            return Err(io::Error::other(
                             "scratch ownership claim is incomplete; refusing destructive cleanup",
                         ));
-                    }
-                    if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) } != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    directory.sync_all()?;
-                    identity
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => identity,
-                Err(error) => return Err(error),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let pending_identity = match scratch_marker_state(
-                    &directory,
-                    &pending,
-                    expected_marker,
-                ) {
-                    Ok(ScratchMarkerState::Match(identity)) => identity,
-                    Ok(ScratchMarkerState::Interrupted) => {
-                        // A crash between `openat(O_CREAT|O_EXCL)` and
-                        // `write_all` leaves a zero-length — or partly
-                        // written — pending marker. That is an interrupted
-                        // claim, not corruption: only this daemon can have
-                        // created it (the file is regular, daemon-owned and
-                        // 0600, checked above), and the published marker is
-                        // absent, so nothing ever trusted it. Treating it as
-                        // permanent corruption bricked the scratch root on
-                        // every later boot. Remove it and redo the claim,
-                        // which still requires the root to be otherwise
-                        // empty.
-                        tracing::warn!(
-                            scratch = %path.display(),
-                            marker = %marker_path(path, &pending).display(),
-                            "found an interrupted transcode scratch ownership claim; redoing it"
-                        );
-                        if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) } != 0
+                        }
+                        if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) }
+                            != 0
                         {
                             return Err(io::Error::last_os_error());
                         }
                         directory.sync_all()?;
-                        create_pending_scratch_marker(
-                            path,
-                            &directory,
-                            &pending,
-                            expected_marker,
-                            hook,
-                        )?
+                        identity
                     }
-                    Ok(state) => return Err(scratch_marker_error(path, &pending, state)),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        create_pending_scratch_marker(
-                            path,
-                            &directory,
-                            &pending,
-                            expected_marker,
-                            hook,
-                        )?
-                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => identity,
                     Err(error) => return Err(error),
-                };
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let pending_identity =
+                    match scratch_marker_state(&directory, &pending, expected_marker) {
+                        Ok(ScratchMarkerState::Match(identity)) => identity,
+                        Ok(ScratchMarkerState::Interrupted) => {
+                            // A crash between `openat(O_CREAT|O_EXCL)` and
+                            // `write_all` leaves a zero-length — or partly
+                            // written — pending marker. That is an interrupted
+                            // claim, not corruption: only this daemon can have
+                            // created it (the file is regular, daemon-owned and
+                            // 0600, checked above), and the published marker is
+                            // absent, so nothing ever trusted it. Treating it as
+                            // permanent corruption bricked the scratch root on
+                            // every later boot. Remove it and redo the claim,
+                            // which still requires the root to be otherwise
+                            // empty.
+                            tracing::warn!(
+                                scratch = %path.display(),
+                                marker = %marker_path(path, &pending).display(),
+                                "found an interrupted transcode scratch ownership claim; redoing it"
+                            );
+                            if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) }
+                                != 0
+                            {
+                                return Err(io::Error::last_os_error());
+                            }
+                            directory.sync_all()?;
+                            create_pending_scratch_marker(
+                                path,
+                                &directory,
+                                &pending,
+                                expected_marker,
+                                hook,
+                            )?
+                        }
+                        Ok(state) => return Err(scratch_marker_error(path, &pending, state)),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            create_pending_scratch_marker(
+                                path,
+                                &directory,
+                                &pending,
+                                expected_marker,
+                                hook,
+                            )?
+                        }
+                        Err(error) => return Err(error),
+                    };
                 if !scratch_has_only_preserved(&directory, &[pending.as_c_str()])? {
                     return Err(io::Error::other(
                         "explicit scratch root was populated before ownership could be claimed",
@@ -2886,7 +2864,10 @@ mod tests {
 
         let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
             .expect_err("a foreign-owned scratch root must fail closed");
-        assert!(error.to_string().contains("owned by the daemon uid"), "{error}");
+        assert!(
+            error.to_string().contains("owned by the daemon uid"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read(scratch.join("stranger-data")).expect("stranger data survives"),
             b"must survive"
@@ -3330,10 +3311,7 @@ mod tests {
         let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
             .expect_err("a torn published marker is not an interrupted claim");
         assert!(error.to_string().contains(".owner"), "{error}");
-        assert!(
-            error.to_string().contains("empty or truncated"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("empty or truncated"), "{error}");
     }
 
     /// After OPERATIONS.md's own "set the new paths and restart" move, the
