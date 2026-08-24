@@ -620,6 +620,12 @@ restart tests preserve cache/offline content and discard only declared scratch;
 disk-pressure tests on the cache/scratch device do not corrupt or relocate the
 durable target. The chosen read-pool value has a retained benchmark artifact.
 
+Two of those acceptance clauses are not met as written. The disk-pressure clause
+is satisfied by an ENOTDIR proxy rather than by a device that actually fills, and
+a real out-of-space exercise looks privilege-gated wherever it lands; the
+read-pool artifact is deferred with P0c/P2f. Both are stated as such below and
+in [OPERATIONS.md](OPERATIONS.md) rather than quietly counted as delivered.
+
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
 only persistent cache, artwork, subtitle, and offline bytes, while
