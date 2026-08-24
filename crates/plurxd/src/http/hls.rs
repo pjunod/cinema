@@ -1747,7 +1747,15 @@ async fn exact_hls_context(
     else {
         return context;
     };
-    let Ok(Some(opened)) = state.transcode.segment(session, "init.mp4").await else {
+    // A fenced successor names its init after its ownership epoch, so the
+    // object to probe comes from the session, not from a literal. Asking for
+    // the wrong name does not fail fast: `segment` waits for a segment that
+    // will never be produced, stalling every playlist request for the full
+    // production wait before falling back to the scanner's guessed tier.
+    let Some(init_object) = state.transcode.session_init_object(session).await else {
+        return context;
+    };
+    let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
         return context;
     };
     // Initialization segments are a few KiB. Bound malformed input so a
@@ -2682,7 +2690,7 @@ async fn segment_local(
                 .into_response());
         }
     };
-    if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(&seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -2738,7 +2746,7 @@ async fn segment_local(
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()));
     }
-    if seg == "init.mp4" && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(&seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
             session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,

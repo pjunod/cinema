@@ -69,40 +69,55 @@ const TAKEOVER_DEADLINE: Duration = Duration::from_secs(8);
 const TAKEOVER_BATCH: usize = 16;
 const TAKEOVER_FANOUT: usize = 4;
 const TAKEOVER_OVERLAP_MS: i64 = 2_000;
-const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000_000;
+const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
+/// Width of the HLS sequence range each ownership epoch gets to itself.
+///
+/// ffmpeg's HLS muxer carries the segment number through a C `int`, so any
+/// floor above `i32::MAX` is silently truncated and the muxer writes a
+/// negative filename that no allowlist accepts — every segment 404s. A
+/// million-wide range keeps roughly two thousand epochs inside that ceiling,
+/// which is far more failovers than one playback session can survive.
+const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000;
 
 static TAKEOVER_SETTLING: LazyLock<StdMutex<HashSet<String>>> =
     LazyLock::new(|| StdMutex::new(HashSet::new()));
 
+/// Marks a session id as mid-takeover: claimed, or about to be, but not yet
+/// published locally. The lease loop must neither reap it as an owned route
+/// with no worker nor fence it for failing to report a frontier.
 struct TakeoverSettlementGuard {
     session_id: String,
 }
 
 impl TakeoverSettlementGuard {
-    fn begin(session_id: &str) -> Result<Self, String> {
+    /// Infallible by construction. A poisoned registry must not be able to
+    /// turn this protection off — failing open here silently re-enables the
+    /// races the guard exists to close, for the rest of the process.
+    fn begin(session_id: &str) -> Self {
         TAKEOVER_SETTLING
             .lock()
-            .map_err(|_| "takeover settlement registry was poisoned".to_owned())?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.to_owned());
-        Ok(Self {
+        Self {
             session_id: session_id.to_owned(),
-        })
+        }
     }
 }
 
 impl Drop for TakeoverSettlementGuard {
     fn drop(&mut self) {
-        if let Ok(mut settling) = TAKEOVER_SETTLING.lock() {
-            settling.remove(&self.session_id);
-        }
+        TAKEOVER_SETTLING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session_id);
     }
 }
 
 fn settling_takeover_ids() -> HashSet<String> {
     TAKEOVER_SETTLING
         .lock()
-        .map(|settling| settling.clone())
-        .unwrap_or_default()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -759,13 +774,14 @@ pub(crate) async fn lease_loop(state: AppState) {
             }
         }
         let now_ms = unix_ms();
+        let settling_takeovers = settling_takeover_ids();
         let mut live = state
             .transcode
             .renewable_session_ids()
             .await
             .into_iter()
             .collect::<HashSet<_>>();
-        live.extend(settling_takeover_ids());
+        live.extend(settling_takeovers.iter().cloned());
         known.extend(state.media_sessions.take_lease_seeds().await);
         known.retain(|_, (session_id, _)| live.contains(session_id));
         let routes = match tokio::time::timeout(
@@ -835,9 +851,19 @@ pub(crate) async fn lease_loop(state: AppState) {
                 (route.session_id.clone(), route.lease_expires_at_ms),
             );
         }
+        // A settling takeover has already won the replicated CAS but has not
+        // finished publishing its local worker, so `owned_media_sessions`
+        // returns it while `session_frontiers` still cannot see it. Renewing
+        // it is impossible (there is no frontier to report) and treating the
+        // missing frontier as lost ownership would fence the session this
+        // node just won. It stays in `live` — so the stale-settlement sweep
+        // leaves it alone — and out of `active` until its guard drops.
         let active = routes
             .iter()
-            .filter(|route| live.contains(&route.session_id))
+            .filter(|route| {
+                live.contains(&route.session_id)
+                    && !settling_takeovers.contains(&route.session_id)
+            })
             .collect::<Vec<_>>();
         let active_session_ids = active
             .iter()
@@ -1138,9 +1164,13 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     let next_epoch = route.owner_epoch + 1;
     // Each ownership epoch receives a disjoint HLS sequence range. The
     // successor can therefore publish no URI the expired owner ever used,
-    // even if that owner produced after its last successful heartbeat.
+    // even if that owner produced after its last successful heartbeat. The
+    // ceiling is ffmpeg's, not ours: the muxer carries the segment number
+    // through a C `int`, so a floor past `i32::MAX` is truncated into a
+    // negative filename and every segment 404s. Refuse instead.
     let epoch_floor = next_epoch
         .checked_mul(TAKEOVER_SEQUENCE_STRIDE)
+        .filter(|floor| *floor <= i64::from(i32::MAX))
         .ok_or_else(|| "media-session takeover sequence space exhausted".to_owned())?;
     let start_number = route.media_sequence.max(epoch_floor);
     let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
@@ -1148,6 +1178,10 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         .map_err(|_| "media-session takeover timed out".to_owned())?
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover user is missing".to_owned())?;
+    // Held from before the local worker exists until after the route is
+    // published, so no window between those two points can be read as "this
+    // node owns a session it is not producing".
+    let _settlement = TakeoverSettlementGuard::begin(&route.session_id);
     let started = tokio::time::timeout_at(
         deadline,
         state.transcode.create_cluster_takeover_session(
@@ -1156,6 +1190,8 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             &user.username,
             deadline,
             SessionTakeoverStart {
+                incarnation_id: route.incarnation_id.clone(),
+                origin_base_ms: route.media_origin_ms,
                 frontier_offset_ms,
                 media_sequence: start_number,
                 discontinuity_sequence: route.discontinuity_sequence.saturating_add(1),
@@ -1166,7 +1202,6 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     .await
     .map_err(|_| "media-session takeover timed out".to_owned())??;
     let provisional_id = started.info.session_id.clone();
-    let _settlement = TakeoverSettlementGuard::begin(&route.session_id)?;
     let claim_now_ms = unix_ms();
     let claim = tokio::time::timeout_at(
         deadline,
@@ -1182,19 +1217,33 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             }),
     )
     .await;
+    // Cleanup gets its own budget. `deadline` is routinely already spent by
+    // the time a takeover fails, and teardown is unbounded work behind a
+    // child-transition gate; awaiting it inside the fan-out would let one
+    // slow scratch delete stop this node contesting every other expired
+    // session.
+    let cleanup_deadline = tokio::time::Instant::now() + TAKEOVER_CLEANUP_DEADLINE;
     let claimed = match claim {
         Ok(Ok(claimed)) => claimed,
         Ok(Err(error)) => {
             state
                 .transcode
-                .stop_session(&provisional_id, "media-session takeover claim failed")
+                .stop_session_until(
+                    &provisional_id,
+                    "media-session takeover claim failed",
+                    cleanup_deadline,
+                )
                 .await;
             return Err(error.to_string());
         }
         Err(_) => {
             state
                 .transcode
-                .stop_session(&provisional_id, "media-session takeover timed out")
+                .stop_session_until(
+                    &provisional_id,
+                    "media-session takeover timed out",
+                    cleanup_deadline,
+                )
                 .await;
             return Err("media-session takeover timed out".to_owned());
         }
@@ -1202,7 +1251,11 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     let Some(claimed) = claimed else {
         state
             .transcode
-            .stop_session(&provisional_id, "media-session takeover lost")
+            .stop_session_until(
+                &provisional_id,
+                "media-session takeover lost",
+                cleanup_deadline,
+            )
             .await;
         return Ok(());
     };
@@ -1244,27 +1297,66 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         };
         state
             .transcode
-            .stop_session(local_id, "media-session takeover settlement failed")
+            .stop_session_until(
+                local_id,
+                "media-session takeover settlement failed",
+                cleanup_deadline,
+            )
             .await;
         return Err("takeover winner could not publish its local worker".to_owned());
     }
-    let current = tokio::time::timeout_at(
+    let current = match tokio::time::timeout_at(
         deadline,
         state.store.media_session_route(&claimed.session_id),
     )
     .await
-    .map_err(|_| "media-session takeover settlement timed out".to_owned())?
-    .map_err(|error| error.to_string())?;
+    {
+        Ok(Ok(current)) => current,
+        // A store hiccup at the last step is still an unpublished session.
+        // Retire it here rather than leaving a live worker that only the next
+        // lease tick would notice.
+        Ok(Err(error)) => {
+            state
+                .transcode
+                .stop_session_until(
+                    &claimed.session_id,
+                    "media-session takeover settlement unreadable",
+                    cleanup_deadline,
+                )
+                .await;
+            return Err(error.to_string());
+        }
+        Err(_) => {
+            state
+                .transcode
+                .stop_session_until(
+                    &claimed.session_id,
+                    "media-session takeover settlement timed out",
+                    cleanup_deadline,
+                )
+                .await;
+            return Err("media-session takeover settlement timed out".to_owned());
+        }
+    };
+    // `state` is checked explicitly rather than inferred from the lease
+    // timestamp: a DELETE that lands between the claim and this read ends the
+    // incarnation, and nothing should make that outcome depend on the
+    // unrelated fact that ending also rewrites `lease_expires_at_ms`.
     if !matches!(current, Some(ref exact)
         if exact.incarnation_id == claimed.incarnation_id
             && exact.owner_node_id == state.node_id
             && exact.owner_epoch == claimed.owner_epoch
+            && exact.state == "active"
             && exact.lease_expires_at_ms == claimed.lease_expires_at_ms
             && exact.lease_expires_at_ms > unix_ms())
     {
         state
             .transcode
-            .stop_session(&claimed.session_id, "media-session takeover lease changed")
+            .stop_session_until(
+                &claimed.session_id,
+                "media-session takeover lease changed",
+                cleanup_deadline,
+            )
             .await;
         return Err("takeover lease changed before publication".to_owned());
     }

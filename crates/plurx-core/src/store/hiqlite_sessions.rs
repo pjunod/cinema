@@ -1146,6 +1146,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         let lease_resource = format!("session:{}", route.incarnation_id);
+        // The route read above is outside this transaction, so a takeover may
+        // commit between the two and move ownership to a different node at a
+        // higher fence. Every dependent statement therefore reads the owner
+        // and epoch back out of `media_sessions` inside the transaction
+        // instead of trusting that snapshot: otherwise ending a session that
+        // has just been taken over clamps a lease nobody holds, leaves the
+        // successor's cache pin behind, and hands the caller a route naming
+        // the dead node — so the abort is sent to a host that is gone while
+        // the replacement encoder keeps running.
         self.client()
             .txn([
                 (
@@ -1158,15 +1167,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                         SET expires_at_ms = CASE
                               WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                             revision = revision + 1, updated_at_ms = $1
-                      WHERE resource = $2 AND owner_node_id = $3 AND fence = $4
+                      WHERE resource = $2
                         AND revision < 9223372036854775807
                         AND EXISTS (SELECT 1 FROM media_sessions
-                          WHERE incarnation_id = $5 AND state = 'ended')",
+                          WHERE incarnation_id = $3 AND state = 'ended'
+                            AND media_sessions.owner_node_id = job_leases.owner_node_id
+                            AND media_sessions.owner_epoch = job_leases.fence)",
                     params!(
                         now_ms,
                         lease_resource.as_str(),
-                        route.owner_node_id.as_str(),
-                        route.owner_epoch,
                         route.incarnation_id.as_str()
                     ),
                 ),
@@ -1180,19 +1189,26 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ),
                 ),
                 (
+                    // Every epoch's pin, not just the epoch the pre-read saw:
+                    // the incarnation is over, so no generation of it may keep
+                    // a shared-cache root alive.
                     "DELETE FROM cache_consumer_pins
                       WHERE consumer_kind = 'media_session' AND consumer_id = $1
-                        AND consumer_epoch = $2
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $1 AND state = 'ended')",
-                    params!(route.incarnation_id.as_str(), route.owner_epoch),
+                    params!(route.incarnation_id.as_str()),
                 ),
             ])
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(Some(route))
+        // Report what the caller must act on — the owner as of the end, not as
+        // of the pre-read. `stop_owned_session` picks local teardown or a peer
+        // abort from this field.
+        Ok(route_by(self, "incarnation_id", &route.incarnation_id)
+            .await?
+            .or(Some(route)))
     }
 
     async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError> {

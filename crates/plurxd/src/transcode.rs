@@ -702,9 +702,14 @@ fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
     typeless_sliding: bool,
-    takeover: Option<SessionTakeoverStart>,
+    takeover: Option<&SessionTakeoverStart>,
 ) -> Vec<u8> {
-    let first_retained = first_retained.filter(|index| *index > 0).unwrap_or(0);
+    // A successor's numbering starts at its epoch floor, not at zero, so the
+    // "nothing has been pruned yet" baseline is that floor.
+    let baseline = takeover.map_or(0, |takeover| takeover.media_sequence);
+    let first_retained = first_retained
+        .filter(|index| *index > baseline)
+        .unwrap_or(baseline);
     if first_retained == 0 && !typeless_sliding && takeover.is_none() {
         return raw;
     }
@@ -2823,12 +2828,49 @@ pub(crate) struct SessionFrontier {
 }
 
 /// Coordinates selected before an expired incarnation is reproduced locally.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionTakeoverStart {
+    /// The durable incarnation this generation continues. Teardown keys off
+    /// the incarnation rather than the process-local request record, because
+    /// a successor is not created by any request on this node.
+    pub incarnation_id: String,
+    /// The replicated row's `media_origin_ms`: the fixed zero every
+    /// generation's frontier is measured from. The offset a session finally
+    /// records is the difference between the origin it *achieved* and this
+    /// base, so a copy session's keyframe pull-back cannot over-report
+    /// progress and strand media no generation ever produces.
+    pub origin_base_ms: i64,
+    /// Where this generation was asked to resume, relative to `origin_base_ms`.
     pub frontier_offset_ms: i64,
     pub media_sequence: i64,
     pub discontinuity_sequence: i64,
     pub owner_epoch: i64,
+}
+
+/// The fMP4 init object a given ownership generation publishes.
+///
+/// Epoch 1 — every session that has never been taken over — keeps the
+/// historical `init.mp4`, so no existing URL changes meaning. A fenced
+/// successor names its own object: §7.3 forbids overwriting an init a client
+/// may already have cached, and requires every URI in a newly served playlist
+/// to stay retrievable once the old disk is gone.
+pub(crate) fn init_object_name(owner_epoch: Option<i64>) -> String {
+    match owner_epoch {
+        Some(epoch) if epoch > 1 => format!("init-e{epoch}.mp4"),
+        _ => "init.mp4".to_owned(),
+    }
+}
+
+/// True for the init object of any generation. Every filename allowlist,
+/// codec probe, and Apple tier rewrite compares through this, so a
+/// generation-specific init is never mistaken for an arbitrary file.
+pub(crate) fn is_init_object(name: &str) -> bool {
+    if name == "init.mp4" {
+        return true;
+    }
+    name.strip_prefix("init-e")
+        .and_then(|rest| rest.strip_suffix(".mp4"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Cheap identity used to choose the globally newest activity before walking
@@ -8181,6 +8223,25 @@ impl TranscodeManager {
         }
     }
 
+    /// Whether this session must serve the typeless sliding playlist shape.
+    ///
+    /// The standing answer is the `HLS_TYPELESS_SLIDING` experiment. Session
+    /// takeover adds a second, non-negotiable reason: a fenced successor
+    /// renumbers from its epoch floor and advertises none of the
+    /// predecessor's segments (§7.3), which is exactly what RFC 8216 §6.2.1
+    /// forbids an EVENT playlist from doing. A URL a successor may republish
+    /// therefore serves the stable shape from its *first* response instead of
+    /// changing shape under the client at failover.
+    async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
+        if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
+            return true;
+        }
+        cluster_published
+            && self
+                .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+                .await
+    }
+
     /// A feature switch stored in the ordinary settings table. Only the
     /// literal value `1` enables an experiment; absent, malformed, and every
     /// other value stay on the established path.
@@ -8994,8 +9055,16 @@ impl TranscodeManager {
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
-            .await?;
+        //
+        // A takeover is a continuation of an existing incarnation, not a new
+        // player start, so it supersedes nothing. Reaping here would retire
+        // whatever this viewer and player id are already running on THIS
+        // node — including a session the client legitimately started here
+        // while the old owner's lease was still expiring.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -9048,7 +9117,7 @@ impl TranscodeManager {
             None,
             grade,
         );
-        if let Some(takeover) = takeover {
+        if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
         if takeover.is_none() {
@@ -9140,11 +9209,13 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
-        if let Some(takeover) = takeover {
+        if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
         let pacing = self.pacing(false).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let args = transcode::hls_args(&file, encoder, &opts, pacing, &dir.to_string_lossy());
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
@@ -9190,6 +9261,11 @@ impl TranscodeManager {
             encoder = encoder.label(), "started transcode session"
         );
 
+        // A transcode seeks accurately, so the origin it achieves is the one
+        // it was asked for and this offset is exactly the requested one.
+        let frontier_offset_ms = takeover.as_ref().map_or(0, |takeover| {
+            ((start_seconds * 1_000.0).round() as i64).saturating_sub(takeover.origin_base_ms)
+        });
         let session = Arc::new(Session {
             dir: dir.clone(),
             child: Mutex::new(Some(child)),
@@ -9262,7 +9338,7 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
             takeover,
-            frontier_offset_ms: takeover.map_or(0, |value| value.frontier_offset_ms),
+            frontier_offset_ms,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9602,8 +9678,11 @@ impl TranscodeManager {
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
-            .await?;
+        // A takeover continues an existing incarnation and supersedes nothing.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -9649,11 +9728,13 @@ impl TranscodeManager {
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
         let pacing = self.pacing(true).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let legacy_args = || {
             let dolby_vision =
                 transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision);
-            match takeover {
+            match takeover.as_ref() {
                 Some(takeover) => transcode::hls_copy_args_with_sequence(
                     &file,
                     start_seconds,
@@ -9662,7 +9743,7 @@ impl TranscodeManager {
                     pacing,
                     dolby_vision,
                     takeover.media_sequence,
-                    &format!("init-e{}.mp4", takeover.owner_epoch),
+                    &init_object_name(Some(takeover.owner_epoch)),
                     &dir.to_string_lossy(),
                 ),
                 None => transcode::hls_copy_args_with_dolby_vision(
@@ -9756,6 +9837,15 @@ impl TranscodeManager {
 
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, options, probe_json.as_deref());
+        // A remux cannot start anywhere but a keyframe, so the origin it
+        // achieves is at or before the one it asked for. Recording the offset
+        // it was *asked* for would over-report this generation's frontier by
+        // that pull-back, and the next successor would resume past media no
+        // generation ever produced. Measure from the origin actually achieved.
+        let frontier_offset_ms = takeover.as_ref().map_or(0, |takeover| {
+            ((media_origin_seconds * 1_000.0).round() as i64)
+                .saturating_sub(takeover.origin_base_ms)
+        });
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -9825,7 +9915,7 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
             takeover,
-            frontier_offset_ms: takeover.map_or(0, |value| value.frontier_offset_ms),
+            frontier_offset_ms,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -10020,6 +10110,19 @@ impl TranscodeManager {
             }
         }
         true
+    }
+
+    /// The fMP4 init object this session actually publishes.
+    ///
+    /// Anything that opens the init by name — the exact-codec probe, the
+    /// Apple High-tier rewrite — must ask, because a fenced successor names
+    /// its init after its ownership epoch. `None` for an unknown session.
+    pub(crate) async fn session_init_object(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        Some(init_object_name(
+            session.takeover.as_ref().map(|takeover| takeover.owner_epoch),
+        ))
     }
 
     /// Snapshot only the monotone coordinates needed by the replicated owner
@@ -10443,8 +10546,18 @@ impl TranscodeManager {
         }
     }
 
-    /// Abort a remote start only when the worker's process-local idempotency
-    /// record proves that this exact internal incarnation created the session.
+    /// Abort a remote start only when this process can prove it owns the
+    /// worker behind that incarnation.
+    ///
+    /// The ordinary proof is the process-local idempotency record left by the
+    /// start request. A fenced successor has no such record — nothing on this
+    /// node requested it — so it carries the incarnation on the session
+    /// itself. Without the second proof DELETE and the peer abort endpoint are
+    /// permanent no-ops against every taken-over session: they return success
+    /// while the replacement encoder keeps running and keeps its admission
+    /// slot, and §7.2's "a delete racing takeover resolves to ended without a
+    /// replacement child remaining alive" holds only by the slower lease-loss
+    /// path.
     pub async fn stop_session_for_request(
         &self,
         request_id: &str,
@@ -10456,7 +10569,53 @@ impl TranscodeManager {
                 |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
             )
         });
+        let matches = matches
+            || self.sessions.lock().await.get(session_id).is_some_and(|session| {
+                session
+                    .takeover
+                    .as_ref()
+                    .is_some_and(|takeover| takeover.incarnation_id == request_id)
+            });
         matches && self.stop_session(session_id, reason).await
+    }
+
+    /// `stop_session` with a ceiling on how long teardown may take.
+    ///
+    /// Retirement takes the child-transition gate, kills the process, and
+    /// recursively deletes the scratch tree — all unbounded, and all of it
+    /// serialized behind a hardware-to-software replacement that may itself be
+    /// respawning ffmpeg. A takeover's cleanup runs inside a bounded fan-out,
+    /// so it fences the session (making it immediately unservable, which is
+    /// the part that must not wait) and leaves the slow half to the detached
+    /// reaper rather than occupying a fan-out slot indefinitely.
+    pub(crate) async fn stop_session_until(
+        self: &Arc<Self>,
+        session_id: &str,
+        reason: &'static str,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        // Fencing is the half that must be immediate and cannot block: every
+        // serving path reads this monotone bit.
+        self.fence_sessions(std::slice::from_ref(&session_id.to_owned()))
+            .await;
+        // Teardown itself runs detached, never cancelled. Dropping a
+        // half-finished retirement would leave the manager entry gone with the
+        // encoder still running, which is strictly worse than waiting.
+        let manager = Arc::clone(self);
+        let owned_id = session_id.to_owned();
+        let teardown = tokio::spawn(async move { manager.stop_session(&owned_id, reason).await });
+        match tokio::time::timeout_at(deadline, teardown).await {
+            Ok(Ok(stopped)) => stopped,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!(
+                    session = %session_log_id(session_id),
+                    reason,
+                    "session teardown outlived its deadline; fenced, teardown continues detached"
+                );
+                false
+            }
+        }
     }
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
@@ -10653,7 +10812,16 @@ impl TranscodeManager {
                         return Ok(bytes);
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
-                    if let Some(first_retained_index) = first_retained.filter(|index| *index > 0) {
+                    // A successor begins numbering at its epoch floor, so
+                    // "has anything been pruned" is measured from that floor
+                    // and a fresh takeover does not report itself as sliding.
+                    let slide_baseline = session
+                        .takeover
+                        .as_ref()
+                        .map_or(0, |takeover| takeover.media_sequence);
+                    if let Some(first_retained_index) =
+                        first_retained.filter(|index| *index > slide_baseline)
+                    {
                         if !session.first_slide_logged.swap(true, Relaxed) {
                             let now_unix = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -10690,7 +10858,7 @@ impl TranscodeManager {
                         bytes,
                         first_retained,
                         session.typeless_sliding,
-                        session.takeover,
+                        session.takeover.as_ref(),
                     ));
                 }
             }
@@ -11391,8 +11559,8 @@ impl TranscodeManager {
 
 /// Only `segNNNNN.ts` names are valid segment requests.
 fn is_safe_segment(name: &str) -> bool {
-    // fMP4 (copy-video) HLS: a single shared init segment.
-    if name == "init.mp4" {
+    // fMP4 (copy-video) HLS: one init object per ownership generation.
+    if is_init_object(name) {
         return true;
     }
     // `segNNNNN.ts` (transcode) or `segNNNNN.m4s` (copy fMP4).
@@ -14214,6 +14382,8 @@ mod tests {
                    #EXTINF:2.000,\n\
                    seg00005.m4s\n";
         let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
             frontier_offset_ms: 8_000,
             media_sequence: 4,
             discontinuity_sequence: 1,
@@ -14223,7 +14393,7 @@ mod tests {
             raw.as_bytes().to_vec(),
             Some(4),
             false,
-            Some(takeover),
+            Some(&takeover),
         ))
         .expect("takeover playlist");
         assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
@@ -14235,7 +14405,7 @@ mod tests {
             raw.as_bytes().to_vec(),
             Some(5),
             false,
-            Some(takeover),
+            Some(&takeover),
         ))
         .expect("slid takeover playlist");
         assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
