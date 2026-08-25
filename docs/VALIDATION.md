@@ -191,6 +191,11 @@ or failed hosted job on the other pool automatically. That is deliberate: an
 automatic fallback can run privileged repository code on a trust boundary you
 did not select.
 
+GitHub-hosted mode also requires an account with usable Actions billing and
+spending limits. If GitHub refuses the job before assigning a runner, repair
+the account billing limit or switch back to `self-hosted`; workflow code cannot
+fall back from that account-level refusal.
+
 Disposable GitHub runners install the pinned ffmpeg, Playwright, XcodeGen, KVM,
 and cross-compiler prerequisites in the job. Persistent lab runners verify the
 same dependencies but do not mutate themselves; Ansible remains the source of
