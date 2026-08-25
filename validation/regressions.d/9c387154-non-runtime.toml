@@ -1,8 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["9c387154"]
-points = []
-checks = []
-reason = "This commit only corrects operator documentation — OPERATIONS.md, CLUSTER-PERFORMANCE-PLAN.md and CLUSTERING-PLAN.md each claimed in bold that a node which is down blocks learner-protocol activation until it is removed, which is false and sends an operator to remove a healthy voter — and refreshes dc592644's own registry reason, which still said the three-voters-plus-a-learner scenario was not built. It changes no executable application behavior; the runtime rule it describes is pinned by the tests mapped under ee9aabfe."
-ignore = true
