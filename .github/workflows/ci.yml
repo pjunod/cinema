@@ -192,11 +192,11 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # A cold runner currently spends about fourteen minutes compiling the
-    # isolated harness before its three-voter proof completes. Keep enough
-    # headroom for the already-passing proof and artifact cleanup instead of
-    # cancelling a successful run at the job boundary.
-    timeout-minutes: 25
+    # The first cold lab run reached the final three-voter proof but crossed
+    # the old 25-minute guard while building the command-profile dependency
+    # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
+    # persistent-runner caches make subsequent runs substantially faster.
+    timeout-minutes: 40
     env:
       # The M0 proof has its own manifest, but not its own dependency build.
       # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph that
