@@ -20,7 +20,7 @@ jobs:
     # The deep tier is the gate's own evidence run one level further, so it uses
     # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
     # gets covered. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +52,7 @@ jobs:
 
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

@@ -16,7 +16,7 @@ jobs:
     name: current version is ready to tag
     # Readiness answers "would the gate pass if we tagged now", so it has to run
     # the gate's ffmpeg rather than the week's. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
