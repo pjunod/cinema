@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["56171cba"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This validation-only correction adds persistence.upgrades to the runtime fix's evidence map so database-upgrades is a valid owning check; history-regressions parses and enforces that relationship."

@@ -5,9 +5,3 @@ commits = ["caec4ed1"]
 points = ["persistence.upgrades", "cluster.membership", "web.experience"]
 checks = ["rust-gate", "database-upgrades", "cluster-auth", "security-boundaries", "web-membership"]
 reason = "The whole P6 PR-1 adversarial review found four admission-boundary defects and this commit closes them together. `join_activation_crash_after_membership_never_restarts_a_learner_as_a_voter` injects the crash between the durable role and activation marker, retries it, and proves both restart and later record loss fail closed; activation markers now retain each joined directory's admission role while old initial-voter markers preserve their upgrade path. `a_staged_learner_redemption_blocks_rollback_regardless_of_age` proves wall-clock age can no longer strand a paused authorized joiner. `malformed_redeem_fields_are_rejected_before_any_cluster_lookup` bounds every public redemption field and pins cheap validation, token possession, then protocol-range lookup in that order. The membership projection now exposes durable admission role separately from committed voting state, the real-process learner scenario asserts both, and `a voter catching up is not rendered as a permanent learner` reads the shipped web UI wording. The listed gates cover the Rust crash/schema/protocol paths, separate-process cluster contract, public authorization boundary, and operator-visible roster state."
-
-[[coverage]]
-commits = ["56171cba"]
-points = ["validation.framework"]
-checks = ["history-regressions"]
-reason = "This validation-only correction adds persistence.upgrades to the runtime fix's evidence map so database-upgrades is a valid owning check; history-regressions parses and enforces that relationship."
