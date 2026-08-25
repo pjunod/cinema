@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["dbc32e9d"]
+commits = ["808f1bf4"]
 points = ["cluster.membership"]
 checks = ["rust-gate"]
 reason = "The correction and its evidence landed together. `may_run_cluster_jobs` fails closed when committed membership cannot be read and reported that only in a log line; `metrics_db()` borrows a local watch channel and cannot fail, so no daemon reaches that arm and no fixture can force it, which is why it needed a named function and a counter rather than a warning — a counter at zero is the standing evidence the arm is still unreachable, and one that moves is a node quietly declining the cluster's scheduled work. `unreadable_membership_declines_cluster_work_and_is_counted` pins both answers and the counter, and `/metrics` exposes it. The same commit pins three reverts the suite could not see: the lost-protocol-race refusal was asserted only as a variant, so restoring `LearnerProtocolUpgradeRequired(Vec::new())` at either call site stayed green and both call sites are now pinned as text; the learner's preflight refusal is asserted not to arrive dressed as `schema migration failed`; and `remove_voter` is asserted to refuse a learner the roster is printing with `cluster_non_voter_removal_unsupported`, naming the node, while an unknown node still answers 404. Each fails under `cargo test -p plurx-core`, which `rust-gate` runs."
