@@ -667,6 +667,7 @@ mod tests {
             (Method::GET, "/api/v1/settings"),
             (Method::POST, "/api/v1/libraries"),
             (Method::POST, "/api/v1/cluster/join-tokens"),
+            (Method::POST, "/api/v1/cluster/learner-join-tokens"),
             (Method::POST, "/api/v1/cluster/nodes/node-b/promote"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/trakt/sync"),

@@ -323,7 +323,7 @@ test("two learners are named the same way the one-learner sentence is", () => {
   assert.match(view.body, /2 nodes are learners/i);
   assert.match(view.body, /hold no vote/i);
   assert.match(view.body, /not counted toward quorum/i);
-  assert.match(view.body, /1 is currently ready for bounded reads/i);
+  assert.match(view.body, /one is currently ready for bounded reads/i);
 });
 
 // The roster pill repeats the promise in a `title` attribute, and that is the
@@ -708,7 +708,10 @@ test("clearing the token removes it from the rendered panel", () => {
 test("learner issuance and promotion are wired to their admin APIs", () => {
   const mint = shippedSource("mintJoinToken");
   assert.match(mint, /clrole/);
-  assert.match(mint, /body:\{expires_in_seconds,role\}/);
+  assert.match(mint, /role==="learner"/);
+  assert.match(mint, /\/cluster\/learner-join-tokens/);
+  assert.match(mint, /\/cluster\/join-tokens/);
+  assert.equal(mint.includes("body:{expires_in_seconds,role}"), false);
   assert.match(mint, /CLUSTER_TOKEN=\{\.\.\.token,role\}/);
 
   const promote = shippedSource("promoteNode");
@@ -760,7 +763,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   }
 });
 
-test("this panel calls only the four cluster endpoints the node API ships", () => {
+test("this panel calls only the six cluster endpoints the node API ships", () => {
   const called = new Set();
   const CALL = /api\(\s*([`"'])(\/cluster[^`"']*)\1/g;
   for (const [, , route] of SHIPPED_UI.matchAll(CALL)) {
@@ -772,9 +775,11 @@ test("this panel calls only the four cluster endpoints the node API ships", () =
     [...called].sort(),
     [
       "/cluster/join-tokens",
+      "/cluster/learner-join-tokens",
       "/cluster/leave",
       "/cluster/nodes",
       "/cluster/nodes/<id>",
+      "/cluster/nodes/<id>/promote",
     ],
   );
 });

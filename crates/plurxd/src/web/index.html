@@ -10223,7 +10223,7 @@ function clusterStateView(cluster){
   const catching=learners?` ${learners===1?"One node is":`${learners} nodes are`} `+
     `${learners===1?"a learner":"learners"}: ${learners===1?"it receives":"they receive"} `+
     `replication, ${learners===1?"holds":"hold"} no vote, and ${learners===1?"is":"are"} `+
-    `not counted toward quorum. ${readyLearners} ${readyLearners===1?"is":"are"} currently ready for `+
+    `not counted toward quorum. ${readyLearners===1?"One":readyLearners} ${readyLearners===1?"is":"are"} currently ready for `+
     `bounded reads and declared node-local media work.`:"";
   const joining=joiningVoters?` ${joiningVoters===1?"One voter is":`${joiningVoters} voters are`} `+
     `joining and catching up: ${joiningVoters===1?"it has":"they have"} no committed vote yet and `+
@@ -10446,7 +10446,9 @@ async function mintJoinToken(btn){
   const role=document.getElementById("clrole")?.value||"voter";
   const was=btn.textContent; btn.disabled=true; btn.textContent="Creating…";
   try{
-    const token=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds,role}});
+    const token=role==="learner"
+      ?await api("/cluster/learner-join-tokens",{method:"POST",body:{expires_in_seconds}})
+      :await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
     if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_TOKEN={...token,role};
     CLUSTER_REFUSAL=null;

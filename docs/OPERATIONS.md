@@ -307,14 +307,16 @@ in its own 2,000-line process-local ring. Those events do not consume the
 general Settings → System log ring; cluster warnings and errors still reach
 stdout/journald so a startup failure remains visible without the web UI.
 
-**Add a node** mints one token through `POST /api/v1/cluster/join-tokens` and
-displays it exactly once, with a lifetime you pick between 10 minutes and 1
-hour. plurx keeps only its digest, so the browser is the only copy: the panel
-never writes it to browser storage, a URL, or a log, and it is dropped when you
-leave the tab. Everything after that — the owner-only file, `join_token_file`,
-the fresh data directory — is the terminal procedure below, unchanged. Treat the
-displayed token exactly as the runbook treats the `curl` response: anyone
-holding it can join a node to this cluster until it is redeemed or expires.
+**Add a node** mints one token through the role's distinct endpoint: voters use
+`POST /api/v1/cluster/join-tokens`, while read workers use
+`POST /api/v1/cluster/learner-join-tokens`. The panel displays it exactly once,
+with a lifetime you pick between 10 minutes and 1 hour. plurx keeps only its
+digest, so the browser is the only copy: the panel never writes it to browser
+storage, a URL, or a log, and it is dropped when you leave the tab. Everything
+after that — the owner-only file, `join_token_file`, the fresh data directory —
+is the terminal procedure below, unchanged. Treat the displayed token exactly
+as the runbook treats the `curl` response: anyone holding it can join a node to
+this cluster until it is redeemed or expires.
 
 **Remove** calls the removal endpoint and renders its refusal as a sentence with
 a next step rather than a code. `node_owns_offline_work` tells you to let active
