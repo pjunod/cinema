@@ -253,10 +253,12 @@ but does not affect Bonjour.
 
 ## TrueNAS SCALE / Kubernetes
 
-Use the Docker image with a `hostPath`/PVC for `/var/lib/plurx` and a
-read-only mount for media. A Helm chart with the 3-node HA StatefulSet lands
-in Phase 4 (see [../docs/ROADMAP.md](../docs/ROADMAP.md)); until then run a
-single replica.
+Use the Docker image with stable per-voter storage for `/var/lib/plurx` and a
+read-only mount for media. The Service/Ingress routing pattern is in
+[`cluster-routing/`](cluster-routing/); it deliberately does not pretend that
+the workload, Raft storage, GPU scheduling, or media mounts are stateless.
+Follow the cluster bootstrap and rolling-drain rules in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#cluster-ingress-drain-and-recovery).
 
 ## Ports
 

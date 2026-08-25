@@ -42,6 +42,11 @@ pub struct ServerInfo {
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
+///
+/// It stays credential-free in both directions: a client probing an unknown
+/// candidate must not attach a saved token, and this response must not carry
+/// anything a stranger should not read. The cluster's other ingress origins
+/// are therefore not here — see `GET /api/v1/cluster/ingress`.
 pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
     let instance_id = state.store.instance_id().await?;
     let setup_required = state.store.count_users().await? == 0;
@@ -2555,9 +2560,10 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{raft_metrics}{process_metrics}{playback_metrics}",
+         {scans}{store_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
+        takeover_metrics = crate::media_sessions::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
     );
     (
@@ -2571,8 +2577,9 @@ pub(crate) async fn metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{Duration, Instant};
+
+    use super::*;
 
     #[test]
     fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {

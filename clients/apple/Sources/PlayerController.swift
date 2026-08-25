@@ -1366,6 +1366,13 @@ final class PlayerController: ObservableObject {
     private var playbackNoticeTask: Task<Void, Never>?
     private var started = false
     private var sessionId: String?
+    private var activeMediaPath: String?
+    private var activeMediaAuthenticated = false
+    /// The native subtitle selection the *current item* was opened with. When
+    /// the viewer's choice is burned into the transcode this is nil, and a
+    /// failover that re-applied the viewer-facing selection instead would
+    /// select the source's text track on top of the burned-in one.
+    private var activeNativeSubtitle: Int?
     private var lastReportedMs = 0
     private var usesDirectTimeline = false
     private var canRetryCurrentItemWithHDRBase = false
@@ -1866,6 +1873,7 @@ final class PlayerController: ObservableObject {
     private func reloadOffline(at positionMs: Int) async {
         guard let offlineAssetURL, started else { return }
         isChangingStream = true
+        Session.shared.resetMediaFailover()
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
         await loadOffline(url: offlineAssetURL, startMs: positionMs)
@@ -2125,6 +2133,9 @@ final class PlayerController: ObservableObject {
         // a replacement item after this teardown.
         openGeneration &+= 1
         reopenQueue.clear()
+        activeMediaPath = nil
+        activeNativeSubtitle = nil
+        Session.shared.resetMediaFailover()
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
@@ -2322,6 +2333,10 @@ final class PlayerController: ObservableObject {
         guard let model, started else { return }
         openGeneration &+= 1
         let generation = openGeneration
+        // A fresh stream starts at the head of the node list. Without this,
+        // one film's failover leaves the index advanced for every film after
+        // it in the same process, and the second one has no node left to try.
+        Session.shared.resetMediaFailover()
         let attemptId = UUID().uuidString
         finished = false
         attachmentRecovery.opened(at: startMs)
@@ -2410,7 +2425,11 @@ final class PlayerController: ObservableObject {
             // Direct play has no session, so the decision's answer stands for
             // the whole playback (MEDIA-BADGES-PLAN.md §3.2).
             deliveredRange = decision.deliveredDynamicRange
-            url = Session.shared.mediaURL(decision.delivery?.url ?? decision.playUrl)
+            let deliveryPath = decision.delivery?.url ?? decision.playUrl
+            activeMediaPath = clusterRelativeMediaPath(deliveryPath)
+            activeMediaAuthenticated = true
+            activeNativeSubtitle = nativeSubtitle
+            url = Session.shared.mediaURL(deliveryPath)
             if startMs > 0 { seekAfterAttach = startMs }
         } else {
             let copy = !forceTranscode
@@ -2513,6 +2532,9 @@ final class PlayerController: ObservableObject {
                 )
             }
             sessionId = hls.sessionId
+            activeMediaPath = clusterRelativeMediaPath(hls.playlistUrl)
+            activeMediaAuthenticated = false
+            activeNativeSubtitle = nativeSubtitle
             // The authoritative normalized answer for this session, and the
             // rung the next stall reopen is measured against.
             sessionHeight = hls.height
@@ -3539,6 +3561,32 @@ final class PlayerController: ObservableObject {
             eventStatus: event?.errorStatusCode,
             eventComment: event?.errorComment
         )
+        // Only a transport failure can be answered by another node; see
+        // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
+        // same question and would walk the whole list for a terminal 404.
+        let isTransportFailure = Self.isTransportPlaybackFailure(
+            error: item.error as NSError?,
+            eventDomain: event?.errorDomain,
+            eventStatus: event?.errorStatusCode
+        )
+        var reportedFailure = false
+        if started, !isCompatibilityFailure, isTransportFailure {
+            // The log goes out before the retry, not after it: a successful
+            // node failover replaces this item and returns, so reporting
+            // afterwards lost the telemetry for exactly the case the failover
+            // exists to handle. Moving to another node buys no compatibility
+            // rung, so the step names none — and `isCompatibilityFailure` is
+            // false here, which is the same fallback the block below computes.
+            reportPlaybackFailure(
+                item,
+                step: PlaybackCompatibilityLadderStep(
+                    cause: .itemFailure,
+                    fallback: PlaybackCompatibilityFallback.none
+                )
+            )
+            reportedFailure = true
+            if await retryMediaOnNextNode(item) { return }
+        }
         // Evaluated before anything recovers, because the log has to go out
         // before the ladder's own reopen replaces this item. An established
         // HDR delivery reconnects itself instead of descending, so it buys no
@@ -3551,10 +3599,12 @@ final class PlayerController: ObservableObject {
             started && isCompatibilityFailure && !reconnectsEstablishedHDR
                 ? plannedCompatibilityFallback
                 : PlaybackCompatibilityFallback.none
-        reportPlaybackFailure(
-            item,
-            step: PlaybackCompatibilityLadderStep(cause: .itemFailure, fallback: fallback)
-        )
+        if !reportedFailure {
+            reportPlaybackFailure(
+                item,
+                step: PlaybackCompatibilityLadderStep(cause: .itemFailure, fallback: fallback)
+            )
+        }
         if started {
             // P2-6: this item is already dead, so its `currentTime()`
             // is 0 or invalid and a VOD/direct retry would silently
@@ -3577,6 +3627,108 @@ final class PlayerController: ObservableObject {
             : Self.playbackStartFailureTitle
         playbackError = item.error?.localizedDescription
             ?? PlaybackPreparationError.failed.localizedDescription
+    }
+
+    /// Reattach the exact media path through another ingress. The existing
+    /// session capability and delivery mode stay intact, so this path never
+    /// consumes the HDR/codec compatibility ladder.
+    ///
+    /// It attaches an item, so it takes the same generation fence `open()`
+    /// takes. Without it a `stop()` landing during one of the awaits below
+    /// resurrects a player nobody is watching — audible, with background audio
+    /// on — and a status callback in `open()`'s own post-`isChangingStream`
+    /// window can clobber the item that open is still configuring.
+    private func retryMediaOnNextNode(_ failedItem: AVPlayerItem) async -> Bool {
+        #if os(iOS)
+        if offlineId != nil { return false }
+        #endif
+        guard player.currentItem === failedItem,
+              let path = activeMediaPath,
+              let url = Session.shared.nextMediaFailoverURL(
+                path,
+                authenticated: activeMediaAuthenticated
+              ) else { return false }
+        openGeneration &+= 1
+        let generation = openGeneration
+        // A growing session's playlist cannot be resumed by seeking to a film
+        // position — the successor renumbers — but an item-local position is
+        // exactly what a replacement generation understands, and dropping it
+        // would throw a viewer twenty minutes in back to the session origin.
+        let resume = usesDirectTimeline ? currentMs : max(currentMs - baseMs, 0)
+        let resumesPlayback = wantsPlayback
+        isChangingStream = true
+        let item = AVPlayerItem(url: url)
+        Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
+        #if os(iOS)
+        item.externalMetadata = [titleMetadata(title)]
+        #endif
+        observeEnd(of: item)
+        observeStatus(of: item)
+        pgsOverlayItemGeneration &+= 1
+        pgsOverlayWindowTask?.cancel()
+        pgsOverlayWindow = nil
+        player.replaceCurrentItem(with: item)
+        player.play()
+        // The overlay is per-item and was just torn down; `open()` rebuilds it
+        // at this point and so must this, or a PGS-subtitled film loses its
+        // subtitles at the first failover and never gets them back. It wants
+        // SOURCE time — `resume` is deliberately item-local for a growing
+        // session, and passing it would load the window for the wrong part of
+        // the film whenever `baseMs` is nonzero.
+        refreshPGSOverlayWindow(at: currentMs, force: true)
+        do { try await seekWhenReady(item, ms: resume) }
+        catch {
+            // The status observer will drive the next node or terminal
+            // surface after this transition leaves its suppression window.
+        }
+        // A newer `open()` owns the transition now, and with it
+        // `isChangingStream` — clearing it here would un-suppress the status
+        // observer while that open is still configuring its item, which is
+        // the race this fence exists to prevent.
+        guard !isSuperseded(generation) else { return true }
+        guard started else {
+            isChangingStream = false
+            return true
+        }
+        await applyPreferredAudioSelection(to: item)
+        // The selection this item was opened with, not the viewer-facing one:
+        // when the choice is burned into the transcode `nativeSubtitle` is nil,
+        // and selecting the source's text track on top of a burned-in one puts
+        // two sets of subtitles on screen.
+        await applyNativeSubtitleSelection(activeNativeSubtitle, to: item)
+        guard !isSuperseded(generation) else { return true }
+        guard started else {
+            isChangingStream = false
+            return true
+        }
+        if resumesPlayback { player.play() } else { player.pause() }
+        isPlaying = resumesPlayback
+        isChangingStream = false
+        if item.status == .failed {
+            await handleItemFailure(item)
+        }
+        return true
+    }
+
+    /// The server-relative form of a delivery URL, or nil when it does not
+    /// belong to this server.
+    ///
+    /// Compared on the canonical origin, so `https://h` and `https://h:443`
+    /// do not read as two servers — that mismatch silently disabled failover
+    /// for the whole playback, with nothing in the log to say why.
+    private func clusterRelativeMediaPath(_ value: String) -> String? {
+        if value.hasPrefix("/"), !value.hasPrefix("//") { return value }
+        guard let candidate = URLComponents(string: value),
+              let scheme = candidate.scheme,
+              let host = candidate.host,
+              let current = Session.shared.canonicalPrimaryOrigin else { return nil }
+        var authority = "\(scheme)://\(host)"
+        if let port = candidate.port { authority += ":\(port)" }
+        guard Session.canonicalOrigin(authority) == current else { return nil }
+        var path = candidate.percentEncodedPath
+        if path.isEmpty { path = "/" }
+        if let query = candidate.percentEncodedQuery { path += "?\(query)" }
+        return path
     }
 
     private func reportPlaybackFailure(
@@ -3868,6 +4020,63 @@ final class PlayerController: ObservableObject {
         timeControlStatus: AVPlayer.TimeControlStatus
     ) -> Bool {
         timeControlStatus == .waitingToPlayAtSpecifiedRate
+    }
+
+    /// Failures a *different node* could plausibly answer differently.
+    ///
+    /// Deliberately an allowlist, because "not a codec failure" is a much
+    /// larger set: an ended session's 404, a refused credential, and a DRM
+    /// error are all reproducible on every ingress, and walking the node list
+    /// for one of those costs a full item attach per node before the viewer
+    /// sees the error they were always going to see. Only a transport
+    /// failure — the connection, not the answer — moves.
+    static func isTransportPlaybackFailure(
+        error: NSError?,
+        eventDomain: String?,
+        eventStatus: Int?
+    ) -> Bool {
+        var chain: [NSError] = []
+        var next = error
+        while let current = next, chain.count < 8 {
+            chain.append(current)
+            next = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let transportURLErrors: Set<Int> = [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorResourceUnavailable,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorBadServerResponse,
+            NSURLErrorSecureConnectionFailed,
+        ]
+        if chain.contains(where: {
+            $0.domain == NSURLErrorDomain && transportURLErrors.contains($0.code)
+        }) {
+            return true
+        }
+        // Deliberately no `AVFoundationErrorDomain` case here. Every AVError
+        // that reaches this path is a verdict about the media, which the next
+        // node gives too; the transport failures AVFoundation sees arrive as
+        // the `NSURLErrorDomain` chain above or as an access-log status below.
+        //
+        // An access-log event carries the HTTP status the media stack saw. A
+        // 5xx is the node; a 4xx is the answer, and every node gives it.
+        //
+        // The status is read without regard to `eventDomain`, exactly as
+        // `isCompatibilityPlaybackFailure` reads its decoder codes below. An
+        // `AVPlayerItemErrorLogEvent` reports the transfer's HTTP status while
+        // naming `CoreMediaErrorDomain`, so requiring `NSURLErrorDomain` here
+        // made this branch unreachable outside its own fixture and a 5xx on a
+        // segment never moved off the failing node. HTTP statuses are positive
+        // and three-digit; the CoreMedia codes the sibling matches are
+        // negative, so the two ranges cannot collide.
+        if let status = eventStatus, (500..<600).contains(status) {
+            return true
+        }
+        return false
     }
 
     /// Only a media/container/decoder rejection may advance the compatibility

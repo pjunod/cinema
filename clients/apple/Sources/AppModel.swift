@@ -176,6 +176,8 @@ final class AppModel: ObservableObject {
             settings.userId = resp.user.id
             phase = .ready
             discovery.stop()
+            // Now, not at connect: the ingress list is signed-in only.
+            await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
             authError = "Wrong username or password"
@@ -357,6 +359,7 @@ final class AppModel: ObservableObject {
             settings.userId = me.id
             phase = .ready
             discovery.stop()
+            await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
             Session.shared.token = nil
@@ -390,10 +393,21 @@ final class AppModel: ObservableObject {
     }
 
     private func backfillServerIdentityIfNeeded() async {
-        guard settings.instanceId == nil,
-              let info = try? await requireAPI().serverInfo() else { return }
-        settings.instanceId = info.instanceId
+        guard let info = try? await requireAPI().serverInfo() else { return }
+        if settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
+        await refreshClusterIngress()
+    }
+
+    /// Ask the server which other ingresses may serve this household's media.
+    ///
+    /// A single-node server answers with an empty list and nothing downstream
+    /// ever fires. A failure is not worth surfacing: the only consequence is
+    /// that a stream cannot be retried elsewhere, which is exactly where the
+    /// app was before this existed.
+    private func refreshClusterIngress() async {
+        guard let ingress = try? await requireAPI().clusterIngress() else { return }
+        Session.shared.configureNodeOrigins(ingress.nodeUrls ?? [], primary: origin)
     }
 
     private func showReconnectFailure() {
