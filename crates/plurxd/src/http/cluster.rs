@@ -182,6 +182,7 @@ pub async fn leave(
     })))
 }
 
+#[cfg(test)]
 async fn require_no_owned_media_sessions(state: &AppState, node_id: &str) -> Result<(), ApiError> {
     let now_ms = crate::media_sessions::unix_ms();
     state.store.maintain_media_sessions(now_ms).await?;
