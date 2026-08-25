@@ -2951,11 +2951,11 @@ pub struct SessionRequest {
     /// a subtitle burn — falls back to the live presentation with one log
     /// line saying why, never to an error: the opt-in is a request, not a
     /// promise.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Presentation::is_live")]
     pub presentation: Presentation,
     /// Client's ceiling for one blocking segment GET, in seconds. Clamped to
     /// the server's own cap; `None` takes the server default. VOD only.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_budget_secs: Option<f64>,
 }
 
@@ -2968,6 +2968,17 @@ pub enum Presentation {
     Live,
     /// The film-addressed immutable playlist served from a segment plan.
     Vod,
+}
+
+impl Presentation {
+    /// Serialization skips the default so every legacy request and stored
+    /// recipe stays byte-identical to what an older binary wrote — a rolling
+    /// upgrade's old workers and a rollback's takeover parses both read
+    /// `deny_unknown_fields` envelopes, and only a genuine VOD request should
+    /// ever be new to them.
+    fn is_live(&self) -> bool {
+        *self == Presentation::Live
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8259,6 +8270,11 @@ impl TranscodeManager {
         self.vod.session_file_id(session_id).await
     }
 
+    /// Live (un-tombstoned) VOD session ids, for operator surfaces.
+    pub async fn vod_live_session_ids(&self) -> Vec<String> {
+        self.vod.live_session_ids().await
+    }
+
     /// Rebuild a reaped VOD session from its durable route's recipe (plan
     /// §2.5: sessions are handles, and a handle whose durable route is still
     /// active resurrects instead of failing the viewer). The caller has
@@ -8445,6 +8461,26 @@ impl TranscodeManager {
         let Some(ReopenReason::Stall) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
         };
+        // A stall reopen bound to a VOD predecessor: validate the binding
+        // against the VOD registry and pass the request through untouched. A
+        // VOD session has no persisted rung to inherit — the reopen decides
+        // its own presentation, so a client falling back to the live one
+        // simply omits the flag.
+        if let Some(facts) = self.vod.reopen_facts(previous_session_id).await {
+            if facts.supersession_user != supersession_user
+                || facts.playback_id != request.playback_id
+                || facts.file_id != request.file_id
+            {
+                return Err(invalid_reopen_error(
+                    "the previous session does not belong to this user, playback, and file",
+                ));
+            }
+            let target_height = match request.kind {
+                SessionKind::Transcode { height } if !request.automatic => Some(height),
+                _ => None,
+            };
+            return Ok((request.clone(), target_height));
+        }
         let (previous_user, previous_playback, previous_file, previous_height, automatic, kind) = {
             let sessions = self.sessions.lock().await;
             let previous = sessions
@@ -9159,9 +9195,6 @@ impl TranscodeManager {
         supersession_user: &str,
         playback_id: &str,
     ) -> Result<(), String> {
-        // A player replacing its stream supersedes whichever presentation it
-        // was on — a legacy create must end this viewer's VOD session too.
-        self.vod.supersede(supersession_user, playback_id, "").await;
         let doomed: Vec<(String, Arc<Session>)> = {
             let sessions = match deadline {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
@@ -9172,6 +9205,12 @@ impl TranscodeManager {
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return Err(replacement_deadline_error());
             }
+            // A player replacing its stream supersedes whichever presentation
+            // it was on — a legacy create ends this viewer's VOD session too.
+            // AFTER the deadline check: a start with no budget left must not
+            // tombstone a still-playing predecessor and then fail to replace
+            // it (the sweep itself is in-memory and costs nothing).
+            self.vod.supersede(supersession_user, playback_id, "").await;
             sessions
                 .iter()
                 .filter(|(_, s)| {
@@ -10464,6 +10503,25 @@ impl TranscodeManager {
                 .collect::<Vec<_>>()
         };
         let mut frontiers = HashMap::with_capacity(selected.len());
+        // A VOD session's frontier is film-addressed: the end of the last
+        // segment it was served. The renewal batch drops any route without a
+        // frontier entry and fences it as "cluster lease lost", so a missing
+        // arm here is a kill, not a default.
+        for session_id in session_ids {
+            if selected.iter().any(|(id, _)| id == session_id) {
+                continue;
+            }
+            if let Some(ms) = self.vod.frontier_ms(session_id).await {
+                frontiers.insert(
+                    session_id.clone(),
+                    SessionFrontier {
+                        produced_playable_through_ms: ms,
+                        fetched_through_ms: ms,
+                        media_sequence: 0,
+                    },
+                );
+            }
+        }
         for (session_id, session) in selected {
             let (local_produced_through_ms, media_sequence) = {
                 let segments = session.segments.lock().await;
@@ -10806,13 +10864,20 @@ impl TranscodeManager {
     /// fenced worker remains in the map until teardown acquires its child
     /// transition, but its lease authority must stop at the fencing verdict.
     pub async fn renewable_session_ids(&self) -> Vec<String> {
-        self.sessions
+        let mut ids: Vec<String> = self
+            .sessions
             .lock()
             .await
             .iter()
             .filter(|(_, session)| !session.retired.load(Acquire))
             .map(|(session_id, _)| session_id.clone())
-            .collect()
+            .collect();
+        // VOD sessions hold durable routes too; invisible here, the lease
+        // loop settles their routes as stale ~3 s after create and every
+        // request answers 410. Tombstoned ones are deliberately absent —
+        // dropping out of the live set is how their routes get ended.
+        ids.extend(self.vod.live_session_ids().await);
+        ids
     }
 
     /// Make a set of sessions immediately unservable without waiting for

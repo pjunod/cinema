@@ -1154,6 +1154,14 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     // is the failure this whole mechanism is supposed to avoid. Refusing is
     // the graceful degradation — the viewer restarts, which they would have
     // had to do before P7 anyway.
+    if envelope.request.presentation == crate::transcode::Presentation::Vod {
+        // A VOD session's continuation path is resurrection-on-demand at the
+        // node a request lands on — its playlist is immutable and its
+        // segments film-addressed, so a live successor under the same URL
+        // would 404 every fetch the client's plan playlist makes. Refuse,
+        // exactly like the EVENT refusal below.
+        return Err("takeover cannot replace a VOD-presented session".to_owned());
+    }
     if !envelope.typeless_playlist {
         return Err("takeover cannot replace a session serving an EVENT playlist".to_owned());
     }

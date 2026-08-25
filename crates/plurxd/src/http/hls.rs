@@ -429,7 +429,18 @@ pub async fn create(
         Some(h) => crate::transcode::snap_height(h),
     }
     .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let mut req = req;
     let native_subtitles = req.native_subtitles == Some(true);
+    if native_subtitles && req.presentation.as_deref() == Some("vod") {
+        // The multivariant playlist has no VOD arm yet (M4/M5 work beside
+        // the client flags); honoring both would hand the client a
+        // master.m3u8 URL that 404s on its first fetch.
+        tracing::info!(
+            file = id,
+            "vod presentation requested with native subtitles; keeping the live presentation"
+        );
+        req.presentation = None;
+    }
     let native_subtitle = req.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
         if let Some(index) = native_subtitle {
@@ -1047,15 +1058,21 @@ async fn abort_started_session(
 }
 
 async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
+    stop_owned_session_because(state, route, "superseded by cluster session").await
+}
+
+/// Same teardown with an honest reason: a client DELETE is a release, not a
+/// supersession, and the VOD tombstone cause keys off this string.
+async fn stop_owned_session_because(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    reason: &'static str,
+) {
     state.media_sessions.cache_miss(&route.session_id).await;
     if route.owner_node_id == state.node_id {
         state
             .transcode
-            .stop_session_for_request(
-                &route.incarnation_id,
-                &route.session_id,
-                "superseded by cluster session",
-            )
+            .stop_session_for_request(&route.incarnation_id, &route.session_id, reason)
             .await;
     } else {
         state
@@ -1225,7 +1242,7 @@ pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<Strin
     match route {
         Some(route) => {
             state.media_sessions.cache_route(route.clone()).await;
-            stop_owned_session(&state, &route).await;
+            stop_owned_session_because(&state, &route, "released by client").await;
         }
         None => {
             state.media_sessions.cache_miss(&session).await;

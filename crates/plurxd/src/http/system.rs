@@ -1556,7 +1556,11 @@ pub async fn update_settings(
             .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
             .await?;
     }
-    if let Some(raw) = &req.vod_working_set_bytes {
+    if let Some(raw) = req
+        .vod_working_set_bytes
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
         let parsed: u64 = raw
             .trim()
             .parse()
@@ -1583,7 +1587,23 @@ pub async fn update_settings(
             .put_setting(keys::VOD_WORKING_SET_BYTES, &parsed.to_string())
             .await?;
     }
-    if let Some(raw) = &req.vod_block_budget_secs {
+    if req
+        .vod_working_set_bytes
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        // Empty resets to the built-in default — this is the one numeric
+        // setting that refuses 0, so it needs an explicit way back.
+        state
+            .store
+            .put_setting(keys::VOD_WORKING_SET_BYTES, "")
+            .await?;
+    }
+    if let Some(raw) = req
+        .vod_block_budget_secs
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
         let parsed: f64 = raw
             .trim()
             .parse()
@@ -1596,6 +1616,16 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_BLOCK_BUDGET_SECS, &parsed.to_string())
+            .await?;
+    }
+    if req
+        .vod_block_budget_secs
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        state
+            .store
+            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, "")
             .await?;
     }
     if let Some(on) = req.cluster_media_pool_enabled {
@@ -2298,10 +2328,11 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session_id = state
-        .transcode
-        .active_session_ids()
-        .await
+    let mut candidates = state.transcode.active_session_ids().await;
+    // VOD sessions live in their own registry; without them here the
+    // Terminal::AdminStop arm is unreachable from its only intended caller.
+    candidates.extend(state.transcode.vod_live_session_ids().await);
+    let session_id = candidates
         .into_iter()
         .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
     let stopped = match session_id {
