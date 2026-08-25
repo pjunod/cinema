@@ -51,7 +51,7 @@ use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
     connect_activated_store, select_daemon_store, SelectedBackend,
 };
-use plurx_core::config::Config;
+use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
 use plurx_core::metadata::{self, AniListClient, TmdbClient};
 #[cfg(test)]
@@ -134,11 +134,15 @@ async fn main() -> anyhow::Result<()> {
 /// Route a parsed command, separated from `main` so every subcommand but the
 /// server itself is reachable without a process launch.
 async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
-    if matches!(
-        &command,
-        Command::Run | Command::ResetPassword { .. } | Command::RefreshMetadata { .. }
-    ) {
-        canonicalize_data_dir(&mut config)?;
+    match &command {
+        Command::Run => {
+            canonicalize_storage_roots(&mut config)?;
+        }
+        Command::ResetPassword { .. } => {
+            canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
+        }
+        Command::RefreshMetadata { .. } => {}
+        Command::Healthcheck | Command::Advertise { .. } => {}
     }
     match command {
         Command::Run => run(config).await,
@@ -154,7 +158,7 @@ async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
         Command::ResetPassword { username, password } => {
             reset_password(&config, &username, password).await
         }
-        Command::RefreshMetadata { library } => refresh_metadata(&config, library).await,
+        Command::RefreshMetadata { library } => refresh_metadata(&mut config, library).await,
     }
 }
 
@@ -163,27 +167,384 @@ async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
 /// components; anchoring every daemon path to this canonical trusted root
 /// preserves the common "data directory on another disk" deployment without
 /// reopening per-request path traversal races.
-fn canonicalize_data_dir(config: &mut Config) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&config.storage.data_dir).with_context(|| {
+fn canonicalize_configured_dir(path: &mut PathBuf, label: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&*path)
+        .with_context(|| format!("creating configured {label} directory {}", path.display()))?;
+    *path = std::fs::canonicalize(&*path).with_context(|| {
         format!(
-            "creating configured data directory {}",
-            config.storage.data_dir.display()
+            "canonicalizing configured {label} directory {}",
+            path.display()
         )
     })?;
-    config.storage.data_dir =
-        std::fs::canonicalize(&config.storage.data_dir).with_context(|| {
+    Ok(())
+}
+
+/// Resolve the optional shared-cache mount only when it is presently
+/// available. A missing or failed shared mount must retain #538's node-local
+/// fallback instead of preventing the daemon from serving.
+fn canonicalize_available_shared_cache(config: &mut Config) {
+    let path = &config.cluster.shared_cache_dir;
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return;
+    };
+    if std::fs::metadata(&canonical).is_ok_and(|metadata| metadata.is_dir()) {
+        config.cluster.shared_cache_dir = canonical;
+    }
+}
+
+fn existing_shared_cache_roots(config: &Config) -> Vec<(&'static str, &std::path::Path)> {
+    let path = config.cluster.shared_cache_dir.as_path();
+    if !path.as_os_str().is_empty()
+        && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    {
+        vec![("verified shared cache root", path)]
+    } else {
+        Vec::new()
+    }
+}
+
+const TRANSCODE_SCRATCH_MARKER: &str = ".plurx-transcode-scratch";
+const TRANSCODE_SCRATCH_MARKER_VERSION: &str = "plurx-transcode-scratch-v1";
+
+fn canonicalize_storage_roots(config: &mut Config) -> anyhow::Result<crate::state::Dirs> {
+    canonicalize_persistent_roots(config)?;
+    canonicalize_available_shared_cache(config);
+    if !config.storage.transcode_dir.as_os_str().is_empty() {
+        canonicalize_configured_dir(&mut config.storage.transcode_dir, "transcode scratch")?;
+    }
+    // This dispatch preflight runs before `select_daemon_store` owns the
+    // authoritative daemon lock. It may create/resolve roots and reject unsafe
+    // overlap, but must not clear a live daemon's scratch.
+    let shared_cache = existing_shared_cache_roots(config);
+    let (dirs, _) = prepare_storage_dirs(&config.storage, false, &shared_cache, &[])?;
+    if let Some((shared_label, shared_root)) = shared_cache.first().copied() {
+        ensure_configured_roots_disjoint(
+            "authoritative data root",
+            &config.storage.data_dir,
+            shared_label,
+            shared_root,
+        )?;
+        if !config.storage.cache_dir.as_os_str().is_empty() {
+            ensure_configured_roots_disjoint(
+                "configured persistent cache root",
+                &config.storage.cache_dir,
+                shared_label,
+                shared_root,
+            )?;
+        }
+    }
+    canonicalize_and_validate_credential_key(config, &dirs)?;
+    Ok(dirs)
+}
+
+fn scratch_marker_contents(storage: &StorageConfig) -> String {
+    format!(
+        "{TRANSCODE_SCRATCH_MARKER_VERSION}\nowner={:?}\n",
+        storage.data_dir.as_os_str()
+    )
+}
+
+fn claim_explicit_scratch(
+    storage: &StorageConfig,
+    scratch: &std::path::Path,
+    protected: &[plurx_core::fs_secure::FileIdentity],
+) -> anyhow::Result<()> {
+    let expected = scratch_marker_contents(storage);
+    plurx_core::fs_secure::claim_and_clear_owned_scratch_with_protected_blocking(
+        scratch,
+        TRANSCODE_SCRATCH_MARKER,
+        expected.as_bytes(),
+        protected,
+    )
+    .with_context(|| {
+        format!(
+            "claiming and securely clearing transcode scratch {}",
+            scratch.display()
+        )
+    })
+}
+
+fn canonicalized_managed_dir(path: &std::path::Path, label: &str) -> anyhow::Result<PathBuf> {
+    let mut path = path.to_owned();
+    canonicalize_configured_dir(&mut path, label)?;
+    Ok(path)
+}
+
+fn ensure_configured_roots_disjoint(
+    first_label: &str,
+    first: &std::path::Path,
+    second_label: &str,
+    second: &std::path::Path,
+) -> anyhow::Result<()> {
+    let first_identity = plurx_core::fs_secure::directory_identity_nofollow_blocking(first)
+        .with_context(|| format!("opening {first_label} identity {}", first.display()))?;
+    let second_identity = plurx_core::fs_secure::directory_identity_nofollow_blocking(second)
+        .with_context(|| format!("opening {second_label} identity {}", second.display()))?;
+    let source_alias =
+        plurx_core::fs_secure::directory_source_ancestry_alias_blocking(first, second)
+            .with_context(|| {
+                format!(
+                    "proving {first_label} {} is source-disjoint from {second_label} {}",
+                    first.display(),
+                    second.display()
+                )
+            })?;
+    anyhow::ensure!(
+        !first.starts_with(second)
+            && !second.starts_with(first)
+            && !first_identity.same_inode(second_identity)
+            && !source_alias,
+        "{first_label} {} overlaps {second_label} {}; configured storage roots must be disjoint",
+        first.display(),
+        second.display()
+    );
+    Ok(())
+}
+
+fn ensure_distinct_storage_identities(
+    scratch: &std::path::Path,
+    persistent: &[(&str, &std::path::Path)],
+    allow_scratch_inside_authority: bool,
+) -> anyhow::Result<Vec<plurx_core::fs_secure::FileIdentity>> {
+    let scratch_identity = plurx_core::fs_secure::directory_identity_nofollow_blocking(scratch)
+        .with_context(|| format!("opening transcode scratch identity {}", scratch.display()))?;
+    let mut identities = Vec::with_capacity(persistent.len());
+    for (label, path) in persistent {
+        let identity = plurx_core::fs_secure::directory_identity_nofollow_blocking(path)
+            .with_context(|| format!("opening {label} identity {}", path.display()))?;
+        anyhow::ensure!(
+            !identity.same_inode(scratch_identity),
+            "transcode scratch {} aliases {label} {}; cleanup roots must have distinct filesystem identities",
+            scratch.display(),
+            path.display()
+        );
+        anyhow::ensure!(
+            !identities
+                .iter()
+                .any(|prior: &plurx_core::fs_secure::FileIdentity| prior.same_inode(identity)),
+            "{label} {} aliases another authoritative or persistent storage root",
+            path.display()
+        );
+        identities.push(identity);
+    }
+    let scratch_ancestors =
+        plurx_core::fs_secure::directory_ancestor_identities_nofollow_blocking(scratch)
+            .with_context(|| format!("walking transcode scratch ancestry {}", scratch.display()))?;
+    for (index, ((label, path), identity)) in persistent.iter().zip(&identities).enumerate() {
+        let ancestors =
+            plurx_core::fs_secure::directory_ancestor_identities_nofollow_blocking(path)
+                .with_context(|| format!("walking {label} ancestry {}", path.display()))?;
+        anyhow::ensure!(
+            !ancestors
+                .iter()
+                .any(|ancestor| ancestor.same_inode(scratch_identity)),
+            "{label} {} is inside the transcode scratch identity {}; cleanup roots must be disjoint",
+            path.display(),
+            scratch.display()
+        );
+        if index != 0 || !allow_scratch_inside_authority {
+            anyhow::ensure!(
+                !scratch_ancestors
+                    .iter()
+                    .any(|ancestor| ancestor.same_inode(*identity)),
+                "transcode scratch {} is inside {label} identity {}; cleanup roots must be disjoint",
+                scratch.display(),
+                path.display()
+            );
+        }
+        if index != 0 || !allow_scratch_inside_authority {
+            anyhow::ensure!(
+                !plurx_core::fs_secure::directory_source_ancestry_alias_blocking(scratch, path)
+                    .with_context(|| {
+                        format!(
+                            "proving transcode scratch {} is source-disjoint from {label} {}",
+                            scratch.display(),
+                            path.display()
+                        )
+                    })?,
+                "transcode scratch {} and {label} {} overlap through filesystem source ancestry; bind-mounted cleanup roots must be disjoint",
+                scratch.display(),
+                path.display()
+            );
+        }
+    }
+    let data_ancestors =
+        plurx_core::fs_secure::directory_ancestor_identities_nofollow_blocking(persistent[0].1)
+            .with_context(|| {
+                format!(
+                    "walking authoritative data ancestry {}",
+                    persistent[0].1.display()
+                )
+            })?;
+    for ((label, path), identity) in persistent.iter().zip(&identities).skip(1) {
+        anyhow::ensure!(
+            !data_ancestors
+                .iter()
+                .any(|ancestor| ancestor.same_inode(*identity)),
+            "authoritative data root {} is inside {label} identity {}; database and cache ownership must be disjoint",
+            persistent[0].1.display(),
+            path.display()
+        );
+    }
+    Ok(identities)
+}
+
+fn prepare_storage_dirs(
+    storage: &StorageConfig,
+    clear_scratch: bool,
+    extra_persistent: &[(&str, &std::path::Path)],
+    extra_protected: &[plurx_core::fs_secure::FileIdentity],
+) -> anyhow::Result<(crate::state::Dirs, Vec<plurx_core::fs_secure::FileIdentity>)> {
+    let configured = configured_dirs(storage);
+    let artwork = canonicalized_managed_dir(&configured.artwork, "artwork cache")?;
+    let cache = canonicalized_managed_dir(&configured.cache, "transcode cache")?;
+    let subs = canonicalized_managed_dir(&configured.subs, "subtitle cache")?;
+    let explicit_scratch = !storage.transcode_dir.as_os_str().is_empty();
+    let transcode_identity = canonicalized_managed_dir(&configured.transcode, "transcode scratch")?;
+    if !explicit_scratch {
+        let metadata = std::fs::symlink_metadata(&configured.transcode).with_context(|| {
             format!(
-                "canonicalizing configured data directory {}",
-                config.storage.data_dir.display()
+                "inspecting legacy transcode scratch {}",
+                configured.transcode.display()
             )
         })?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "legacy transcode scratch {} is a symlink; configure an explicit empty scratch root so plurx can bind and verify ownership",
+            configured.transcode.display()
+        );
+    }
+
+    anyhow::ensure!(
+        !storage.data_dir.starts_with(&transcode_identity),
+        "transcode scratch {} contains authoritative data root {}; choose a child or separate directory",
+        transcode_identity.display(),
+        storage.data_dir.display()
+    );
+    for persistent in [&artwork, &cache, &subs] {
+        anyhow::ensure!(
+            !storage.data_dir.starts_with(persistent),
+            "authoritative data root {} is inside managed persistent cache path {}; database and cache ownership must be disjoint",
+            storage.data_dir.display(),
+            persistent.display()
+        );
+        anyhow::ensure!(
+            !persistent.starts_with(&transcode_identity),
+            "transcode scratch {} contains persistent cache path {}; startup would erase durable bytes",
+            transcode_identity.display(),
+            persistent.display()
+        );
+        anyhow::ensure!(
+            !transcode_identity.starts_with(persistent),
+            "transcode scratch {} is inside persistent cache path {}; cleanup and cache sweeping must use disjoint roots",
+            transcode_identity.display(),
+            persistent.display()
+        );
+    }
+    let mut persistent = vec![
+        ("authoritative data root", storage.data_dir.as_path()),
+        ("artwork cache", artwork.as_path()),
+        ("transcode cache", cache.as_path()),
+        ("subtitle cache", subs.as_path()),
+    ];
+    if !storage.cache_dir.as_os_str().is_empty() {
+        persistent.push((
+            "configured persistent cache root",
+            storage.cache_dir.as_path(),
+        ));
+    }
+    persistent.extend_from_slice(extra_persistent);
+    let mut protected =
+        ensure_distinct_storage_identities(&transcode_identity, &persistent, !explicit_scratch)?;
+    protected.extend_from_slice(extra_protected);
+    if explicit_scratch && clear_scratch {
+        claim_explicit_scratch(storage, &transcode_identity, &protected)?;
+    }
+    Ok((
+        crate::state::Dirs {
+            artwork,
+            transcode: if explicit_scratch {
+                transcode_identity
+            } else {
+                configured.transcode
+            },
+            cache,
+            subs,
+        },
+        protected,
+    ))
+}
+
+fn canonicalize_persistent_roots(config: &mut Config) -> anyhow::Result<()> {
+    canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
+    if !config.storage.cache_dir.as_os_str().is_empty() {
+        canonicalize_configured_dir(&mut config.storage.cache_dir, "persistent cache")?;
+    }
+    Ok(())
+}
+
+fn canonicalize_and_validate_credential_key(
+    config: &mut Config,
+    dirs: &crate::state::Dirs,
+) -> anyhow::Result<()> {
+    if !config.cluster.credential_key_file.as_os_str().is_empty() {
+        let configured = config.cluster.credential_key_file.clone();
+        let name = configured
+            .file_name()
+            .context("configured credential key path has no filename")?;
+        let parent = configured
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let parent = std::fs::canonicalize(parent).with_context(|| {
+            format!(
+                "canonicalizing configured credential key parent {}",
+                parent.display()
+            )
+        })?;
+        config.cluster.credential_key_file = parent.join(name);
+    }
+    let key = config.cluster.credential_key_path(&config.storage.data_dir);
+    let mut forbidden = vec![
+        ("transcode scratch", dirs.transcode.as_path()),
+        ("artwork cache", dirs.artwork.as_path()),
+        ("transcode cache", dirs.cache.as_path()),
+        ("subtitle cache", dirs.subs.as_path()),
+    ];
+    if !config.storage.cache_dir.as_os_str().is_empty() {
+        forbidden.push((
+            "configured persistent cache root",
+            config.storage.cache_dir.as_path(),
+        ));
+    }
+    if !config.cluster.shared_cache_dir.as_os_str().is_empty() {
+        forbidden.push((
+            "verified shared cache root",
+            config.cluster.shared_cache_dir.as_path(),
+        ));
+    }
+    for (label, root) in forbidden {
+        anyhow::ensure!(
+            !key.starts_with(root),
+            "authoritative credential key {} is inside {label} {}; choose durable storage outside all managed cache and scratch roots",
+            key.display(),
+            root.display()
+        );
+    }
     Ok(())
 }
 
 /// Re-fetch provider-backed metadata through the activated replicated store.
 /// The command refuses a legacy-only data directory because only `run` owns
 /// the one-time import and activation sequence.
-async fn refresh_metadata(config: &Config, library_id: Option<i64>) -> anyhow::Result<()> {
+async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyhow::Result<()> {
+    // Maintenance must resolve and validate exactly the same storage topology
+    // as daemon startup. This remains non-destructive: scratch cleanup is
+    // reserved for the lock-owning `run` path.
+    let dirs = canonicalize_storage_roots(config)?;
     let store = connect_activated_store(config).await.context(
         "connecting to the activated store: an unmigrated data directory needs \
              `plurxd run` to import it once, and an activated one needs that daemon \
@@ -192,7 +553,7 @@ async fn refresh_metadata(config: &Config, library_id: Option<i64>) -> anyhow::R
     )?;
     let cluster_id = store.instance_id().await?;
     let identity = plurx_core::cluster::initialize_identity(&config.storage.data_dir, &cluster_id)?;
-    let artwork_dir = config.storage.data_dir.join("artwork");
+    let artwork_dir = dirs.artwork;
     std::fs::create_dir_all(&artwork_dir)?;
     refresh_metadata_with_store(store, &artwork_dir, library_id, &identity.node_id).await
 }
@@ -370,7 +731,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();
-        let dirs = create_dirs(&config.storage.data_dir)?;
+        let dirs = create_dirs_for_config(&config)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process
@@ -645,8 +1006,8 @@ fn spawn_gdm_responder(config: &Config, instance_id: String, gdm_port: u16) {
     });
 }
 
-/// Lay out the data dir, and clear exactly the one directory that must not
-/// survive a restart.
+/// Lay out the configured storage roots, and clear exactly the one directory
+/// that must not survive a restart.
 ///
 /// Which of these persists is load-bearing. The session scratch is cleared at
 /// every boot, because a half-written segment from a killed process is worse
@@ -654,26 +1015,100 @@ fn spawn_gdm_responder(config: &Config, instance_id: String, gdm_port: u16) {
 /// cache are its *siblings* rather than its children precisely so they are not
 /// caught by that — a cache that empties on restart is a warm-up cost with none
 /// of the benefit.
-fn create_dirs(data_dir: &std::path::Path) -> anyhow::Result<crate::state::Dirs> {
-    let artwork = data_dir.join("artwork");
-    std::fs::create_dir_all(&artwork)
-        .with_context(|| format!("creating artwork directory {}", artwork.display()))?;
-    let cache = data_dir.join("cache").join("transcode");
-    std::fs::create_dir_all(&cache)
-        .with_context(|| format!("creating cache directory {}", cache.display()))?;
-    let subs = data_dir.join("cache").join("subs");
-    std::fs::create_dir_all(&subs)
-        .with_context(|| format!("creating subtitle cache {}", subs.display()))?;
-    let transcode = data_dir.join("transcode");
-    // Clear any stale sessions from a previous run, then recreate.
-    let _ = std::fs::remove_dir_all(&transcode);
-    std::fs::create_dir_all(&transcode)
-        .with_context(|| format!("creating transcode directory {}", transcode.display()))?;
+fn configured_dirs(storage: &StorageConfig) -> crate::state::Dirs {
+    let (artwork, cache, subs) = if storage.cache_dir.as_os_str().is_empty() {
+        (
+            storage.data_dir.join("artwork"),
+            storage.data_dir.join("cache").join("transcode"),
+            storage.data_dir.join("cache").join("subs"),
+        )
+    } else {
+        (
+            storage.cache_dir.join("artwork"),
+            storage.cache_dir.join("transcode"),
+            storage.cache_dir.join("subs"),
+        )
+    };
+    let transcode = if storage.transcode_dir.as_os_str().is_empty() {
+        storage.data_dir.join("transcode")
+    } else {
+        storage.transcode_dir.clone()
+    };
+    crate::state::Dirs {
+        artwork,
+        transcode,
+        cache,
+        subs,
+    }
+}
+
+#[cfg(test)]
+fn create_dirs_for_storage(storage: &StorageConfig) -> anyhow::Result<crate::state::Dirs> {
+    create_dirs_for_storage_with_protected(storage, &[], &[])
+}
+
+fn create_dirs_for_config(config: &Config) -> anyhow::Result<crate::state::Dirs> {
+    let key_path = config.cluster.credential_key_path(&config.storage.data_dir);
+    let key_identity = plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&key_path)
+        .with_context(|| {
+            format!(
+                "opening authoritative credential key identity {} after store selection",
+                key_path.display()
+            )
+        })?;
+    let shared_cache = existing_shared_cache_roots(config);
+    create_dirs_for_storage_with_protected(&config.storage, &shared_cache, &[key_identity])
+}
+
+fn create_dirs_for_storage_with_protected(
+    storage: &StorageConfig,
+    extra_persistent: &[(&str, &std::path::Path)],
+    extra_protected: &[plurx_core::fs_secure::FileIdentity],
+) -> anyhow::Result<crate::state::Dirs> {
+    let mut normalized = storage.clone();
+    canonicalize_configured_dir(&mut normalized.data_dir, "data")?;
+    if !normalized.cache_dir.as_os_str().is_empty() {
+        canonicalize_configured_dir(&mut normalized.cache_dir, "persistent cache")?;
+    }
+    if !normalized.transcode_dir.as_os_str().is_empty() {
+        canonicalize_configured_dir(&mut normalized.transcode_dir, "transcode scratch")?;
+    }
+    // `run` calls this only after `select_daemon_store` has acquired and
+    // retained the data-directory daemon lock, so this is the single startup
+    // point authorized to clear scratch.
+    let (dirs, protected) =
+        prepare_storage_dirs(&normalized, true, extra_persistent, extra_protected)?;
+    let crate::state::Dirs {
+        artwork,
+        transcode,
+        cache,
+        subs,
+    } = dirs;
+    // Explicit scratch was claimed and cleared by `prepare_storage_dirs`
+    // through one retained no-follow descriptor. Legacy scratch has no marker,
+    // but receives the same descriptor-relative, rename-resistant cleanup.
+    if normalized.transcode_dir.as_os_str().is_empty() {
+        plurx_core::fs_secure::clear_scratch_with_protected_blocking(&transcode, &protected)
+            .with_context(|| {
+                format!(
+                    "securely clearing legacy transcode scratch {}",
+                    transcode.display()
+                )
+            })?;
+    }
     Ok(crate::state::Dirs {
         artwork,
         transcode,
         cache,
         subs,
+    })
+}
+
+#[cfg(test)]
+fn create_dirs(data_dir: &std::path::Path) -> anyhow::Result<crate::state::Dirs> {
+    create_dirs_for_storage(&StorageConfig {
+        data_dir: data_dir.to_owned(),
+        ..Default::default()
     })
 }
 
@@ -1712,12 +2147,449 @@ mod startup_tests {
     }
 
     #[test]
+    fn split_storage_roots_preserve_cache_and_clear_only_scratch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = StorageConfig {
+            data_dir: tmp.path().join("durable"),
+            cache_dir: tmp.path().join("persistent"),
+            transcode_dir: tmp.path().join("scratch"),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&storage.data_dir).expect("durable root");
+        let first = create_dirs_for_storage(&storage).expect("first split boot");
+        std::fs::write(storage.data_dir.join("authority.marker"), b"durable").expect("authority");
+        std::fs::write(first.cache.join("finished.mp4"), b"kept").expect("cache");
+        let offline_generation = first.cache.join("offline/ready/media");
+        std::fs::create_dir_all(&offline_generation).expect("offline generation");
+        std::fs::write(offline_generation.join("segment-00001.m4s"), b"kept")
+            .expect("offline segment");
+        std::fs::write(first.subs.join("extracted.srt"), b"kept").expect("subs");
+        std::fs::write(first.artwork.join("poster.jpg"), b"kept").expect("artwork");
+        std::fs::write(first.transcode.join("partial.m4s"), b"discard").expect("scratch");
+
+        let second = create_dirs_for_storage(&storage).expect("second split boot");
+        let cache_root = std::fs::canonicalize(&storage.cache_dir).expect("cache identity");
+        let scratch_root = std::fs::canonicalize(&storage.transcode_dir).expect("scratch identity");
+        assert_eq!(second.artwork, cache_root.join("artwork"));
+        assert_eq!(second.cache, cache_root.join("transcode"));
+        assert_eq!(second.subs, cache_root.join("subs"));
+        assert_eq!(second.transcode, scratch_root);
+        assert!(storage.data_dir.join("authority.marker").exists());
+        assert!(second.cache.join("finished.mp4").exists());
+        assert!(
+            second
+                .cache
+                .join("offline/ready/media/segment-00001.m4s")
+                .exists(),
+            "nested offline-generation bytes must survive restart"
+        );
+        assert!(second.subs.join("extracted.srt").exists());
+        assert!(second.artwork.join("poster.jpg").exists());
+        assert!(!second.transcode.join("partial.m4s").exists());
+        assert!(
+            second.transcode.join(TRANSCODE_SCRATCH_MARKER).exists(),
+            "the exact scratch ownership marker must survive cleanup"
+        );
+    }
+
+    #[test]
+    fn scratch_must_not_contain_authoritative_or_persistent_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("scratch").join("durable");
+        config.storage.cache_dir = tmp.path().join("scratch").join("persistent");
+        config.storage.transcode_dir = tmp.path().join("scratch");
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut config).expect_err("scratch ancestor must fail")
+        );
+        assert!(
+            error.contains("contains authoritative data root"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn shared_cache_root_is_never_scratch_or_a_local_cache_alias() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        let shared = scratch.join("shared-cache");
+        std::fs::create_dir_all(shared.join("objects")).expect("shared cache root");
+        let shared_object = shared.join("objects/immutable-segment");
+        std::fs::write(&shared_object, b"must survive").expect("shared cache object");
+
+        let mut nested = Config::default();
+        nested.storage.data_dir = tmp.path().join("nested-durable");
+        nested.storage.cache_dir = tmp.path().join("nested-local-cache");
+        nested.storage.transcode_dir = scratch;
+        nested.cluster.shared_cache_dir = shared;
+        nested.cluster.shared_cache_id = "shared-a".to_string();
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut nested)
+                .expect_err("scratch containing shared cache must fail")
+        );
+        assert!(
+            error.contains("verified shared cache root") && error.contains("scratch"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&shared_object).expect("shared object survives"),
+            b"must survive"
+        );
+        assert!(!nested
+            .storage
+            .transcode_dir
+            .join(TRANSCODE_SCRATCH_MARKER)
+            .exists());
+
+        let local_cache = tmp.path().join("aliased-local-cache");
+        std::fs::create_dir_all(&local_cache).expect("local cache root");
+        let mut aliased = Config::default();
+        aliased.storage.data_dir = tmp.path().join("aliased-durable");
+        aliased.storage.cache_dir = local_cache.clone();
+        aliased.storage.transcode_dir = tmp.path().join("aliased-scratch");
+        aliased.cluster.shared_cache_dir = local_cache;
+        aliased.cluster.shared_cache_id = "shared-a".to_string();
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut aliased)
+                .expect_err("shared and local cache roots must be disjoint")
+        );
+        assert!(
+            error.contains("aliases another authoritative or persistent storage root"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn missing_shared_cache_mount_preserves_node_local_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_shared = tmp.path().join("offline-shared-mount");
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = tmp.path().join("local-cache");
+        config.storage.transcode_dir = tmp.path().join("scratch");
+        config.cluster.shared_cache_dir = missing_shared.clone();
+        config.cluster.shared_cache_id = "shared-a".to_string();
+
+        canonicalize_storage_roots(&mut config)
+            .expect("an unavailable shared cache retains node-local fallback");
+        assert_eq!(config.cluster.shared_cache_dir, missing_shared);
+        assert!(
+            !config.cluster.shared_cache_dir.exists(),
+            "P5 preflight must not create an unavailable shared mount"
+        );
+    }
+
+    #[test]
+    fn populated_unowned_explicit_scratch_is_refused_and_untouched() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scratch = tmp.path().join("broad-existing-directory");
+        std::fs::create_dir_all(&scratch).expect("scratch root");
+        let unrelated = scratch.join("unrelated-host-data");
+        std::fs::write(&unrelated, b"must survive").expect("unrelated data");
+
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = tmp.path().join("persistent");
+        config.storage.transcode_dir = scratch;
+        let error = format!(
+            "{:#}",
+            create_dirs_for_storage(&config.storage).expect_err("unowned scratch must fail")
+        );
+        assert!(
+            error.contains("populated before ownership could be claimed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&unrelated).expect("unrelated data remains"),
+            b"must survive"
+        );
+    }
+
+    #[test]
+    fn prelock_storage_validation_never_clears_owned_live_scratch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = StorageConfig {
+            data_dir: tmp.path().join("durable"),
+            cache_dir: tmp.path().join("persistent"),
+            transcode_dir: tmp.path().join("scratch"),
+            ..Default::default()
+        };
+        let first = create_dirs_for_storage(&storage).expect("first daemon owns scratch");
+        let live = first.transcode.join("live-session/segment-00001.m4s");
+        std::fs::create_dir_all(live.parent().expect("live parent")).expect("live session");
+        std::fs::write(&live, b"currently-serving").expect("live segment");
+
+        let mut second = Config {
+            storage,
+            ..Default::default()
+        };
+        canonicalize_storage_roots(&mut second).expect("second daemon prelock validation");
+        assert_eq!(
+            std::fs::read(&live).expect("live segment remains"),
+            b"currently-serving",
+            "prelock startup work must not clear the active daemon's scratch"
+        );
+    }
+
+    #[test]
+    fn scratch_must_not_be_nested_inside_a_managed_cache() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = tmp.path().join("persistent");
+        config.storage.transcode_dir = config
+            .storage
+            .cache_dir
+            .join("transcode")
+            .join("live-sessions");
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut config).expect_err("nested scratch must fail")
+        );
+        assert!(error.contains("is inside persistent cache path"), "{error}");
+    }
+
+    #[test]
+    fn authoritative_data_must_not_be_a_managed_cache_child() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.storage.cache_dir = tmp.path().join("persistent");
+        config.storage.data_dir = config.storage.cache_dir.join("transcode");
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut config)
+                .expect_err("authority/cache identity collision must fail")
+        );
+        assert!(
+            error.contains("authoritative data root") && error.contains("managed persistent cache"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_refresh_resolves_the_daemon_storage_topology() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache = tmp.path().join("persistent");
+        let artwork_target = tmp.path().join("artwork-on-another-disk");
+        std::fs::create_dir_all(&cache).expect("cache root");
+        std::fs::create_dir_all(&artwork_target).expect("artwork target");
+        std::os::unix::fs::symlink(&artwork_target, cache.join("artwork"))
+            .expect("supported artwork relocation");
+
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = cache;
+        config.storage.transcode_dir = tmp.path().join("scratch");
+        let refresh_dirs =
+            canonicalize_storage_roots(&mut config).expect("refresh topology preflight");
+        let (daemon_dirs, _) = prepare_storage_dirs(&config.storage, false, &[], &[])
+            .expect("daemon topology preflight");
+
+        assert_eq!(refresh_dirs.artwork, daemon_dirs.artwork);
+        assert_eq!(refresh_dirs.cache, daemon_dirs.cache);
+        assert_eq!(refresh_dirs.subs, daemon_dirs.subs);
+        assert_eq!(refresh_dirs.transcode, daemon_dirs.transcode);
+        assert_eq!(
+            refresh_dirs.artwork,
+            std::fs::canonicalize(&artwork_target).expect("canonical artwork target")
+        );
+    }
+
+    #[test]
+    fn credential_key_inside_scratch_is_refused_without_deleting_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).expect("scratch root");
+        let key = scratch.join("credentials.key");
+        std::fs::write(&key, b"authoritative-key-material").expect("credential key");
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = tmp.path().join("persistent");
+        config.storage.transcode_dir = scratch;
+        config.cluster.credential_key_file = key.clone();
+
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut config)
+                .expect_err("credential key in scratch must fail")
+        );
+        assert!(
+            error.contains("credential key") && error.contains("transcode scratch"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&key).expect("credential key survives"),
+            b"authoritative-key-material"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_identity_alias_is_refused_even_without_ancestry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("one-mounted-directory");
+        let scratch_name = tmp.path().join("scratch-name");
+        let cache_name = tmp.path().join("cache-name");
+        std::fs::create_dir(&target).expect("target directory");
+        std::os::unix::fs::symlink(&target, &scratch_name).expect("scratch alias");
+        std::os::unix::fs::symlink(&target, &cache_name).expect("cache alias");
+        let scratch = std::fs::canonicalize(&scratch_name).expect("scratch identity path");
+        let cache = std::fs::canonicalize(&cache_name).expect("cache identity path");
+
+        let error = format!(
+            "{:#}",
+            ensure_distinct_storage_identities(&scratch, &[("persistent cache", &cache)], false,)
+                .expect_err("one inode under two names must fail")
+        );
+        assert!(error.contains("aliases persistent cache"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_symlink_alias_to_scratch_is_refused_without_cleanup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache = tmp.path().join("persistent");
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&cache).expect("cache root");
+        std::fs::create_dir_all(&scratch).expect("scratch root");
+        let persistent = scratch.join("offline-package.bin");
+        std::fs::write(&persistent, b"must survive").expect("persistent bytes");
+        std::os::unix::fs::symlink(&scratch, cache.join("transcode")).expect("cache/scratch alias");
+
+        let mut config = Config::default();
+        config.storage.data_dir = tmp.path().join("durable");
+        config.storage.cache_dir = cache;
+        config.storage.transcode_dir = scratch;
+        let error = format!(
+            "{:#}",
+            canonicalize_storage_roots(&mut config).expect_err("alias must fail")
+        );
+        assert!(error.contains("contains persistent cache path"), "{error}");
+        assert_eq!(
+            std::fs::read(&persistent).expect("persistent alias target survives"),
+            b"must survive"
+        );
+        assert!(!config
+            .storage
+            .transcode_dir
+            .join(TRANSCODE_SCRATCH_MARKER)
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_scratch_symlink_is_refused_without_touching_its_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("durable");
+        let external = tmp.path().join("external-host-tree");
+        std::fs::create_dir_all(&data).expect("data root");
+        std::fs::create_dir_all(&external).expect("external target");
+        let unrelated = external.join("unrelated-host-data");
+        std::fs::write(&unrelated, b"must survive").expect("unrelated data");
+        std::os::unix::fs::symlink(&external, data.join("transcode"))
+            .expect("legacy scratch symlink");
+
+        let error = format!(
+            "{:#}",
+            create_dirs(&data).expect_err("legacy scratch symlink must fail")
+        );
+        assert!(error.contains("legacy transcode scratch"), "{error}");
+        assert_eq!(
+            std::fs::read(&unrelated).expect("external target survives"),
+            b"must survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incomplete_scratch_cleanup_fails_startup_and_preserves_the_error_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = StorageConfig {
+            data_dir: tmp.path().join("durable"),
+            cache_dir: tmp.path().join("persistent"),
+            transcode_dir: tmp.path().join("scratch"),
+            ..Default::default()
+        };
+        let first = create_dirs_for_storage(&storage).expect("claim scratch");
+        let stale = first.transcode.join("stale-session.m4s");
+        std::fs::write(&stale, b"partial").expect("stale segment");
+        let mut locked = std::fs::metadata(&first.transcode)
+            .expect("scratch metadata")
+            .permissions();
+        locked.set_mode(0o500);
+        std::fs::set_permissions(&first.transcode, locked).expect("lock scratch");
+
+        let result = create_dirs_for_storage(&storage);
+
+        let mut restored = std::fs::metadata(&first.transcode)
+            .expect("locked scratch metadata")
+            .permissions();
+        restored.set_mode(0o700);
+        std::fs::set_permissions(&first.transcode, restored).expect("restore scratch");
+        let error = format!(
+            "{:#}",
+            result.expect_err("partial cleanup must fail startup")
+        );
+        assert!(
+            error.contains("securely clearing transcode scratch"),
+            "{error}"
+        );
+        assert!(
+            stale.exists(),
+            "the failed cleanup target must remain observable"
+        );
+    }
+
+    #[test]
+    fn cache_or_scratch_device_failure_leaves_authoritative_bytes_untouched() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("durable");
+        std::fs::create_dir_all(&data).expect("durable root");
+        let marker = data.join("authority.marker");
+        std::fs::write(&marker, b"do-not-move").expect("authority marker");
+
+        let blocked_cache = tmp.path().join("blocked-cache");
+        std::fs::write(&blocked_cache, b"not a directory").expect("blocked cache");
+        let cache_error = create_dirs_for_storage(&StorageConfig {
+            data_dir: data.clone(),
+            cache_dir: blocked_cache,
+            ..Default::default()
+        })
+        .expect_err("cache device failure");
+        assert!(cache_error.to_string().contains("persistent cache"));
+        assert_eq!(
+            std::fs::read(&marker).expect("authority survives cache failure"),
+            b"do-not-move"
+        );
+
+        let blocked_scratch = tmp.path().join("blocked-scratch");
+        std::fs::write(&blocked_scratch, b"not a directory").expect("blocked scratch");
+        let scratch_error = create_dirs_for_storage(&StorageConfig {
+            data_dir: data,
+            transcode_dir: blocked_scratch,
+            ..Default::default()
+        })
+        .expect_err("scratch device failure");
+        assert!(scratch_error.to_string().contains("transcode"));
+        assert_eq!(
+            std::fs::read(&marker).expect("authority survives scratch failure"),
+            b"do-not-move"
+        );
+    }
+
+    #[test]
     fn a_data_dir_that_cannot_be_created_is_reported_with_its_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let blocked = tmp.path().join("data");
         std::fs::write(&blocked, b"a file, not a directory").expect("write");
         let error = format!("{:#}", create_dirs(&blocked).expect_err("must fail"));
-        assert!(error.contains("artwork"), "{error}");
+        assert!(error.contains("configured data"), "{error}");
     }
 
     /// An empty `PLURX_HWACCEL=` is what Compose produces for an unset
@@ -2296,7 +3168,7 @@ mod startup_tests {
     #[tokio::test]
     async fn maintenance_commands_refuse_an_unmigrated_data_directory() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let config = config_in(tmp.path());
+        let mut config = config_in(tmp.path());
         let store = store_in(tmp.path());
         let hash = plurx_core::auth::hash_password("original-password").expect("hash");
         store
@@ -2309,7 +3181,7 @@ mod startup_tests {
             reset_password(&config, "owner", Some("a-new-password".to_owned()))
                 .await
                 .expect_err("reset must refuse legacy SQLite"),
-            refresh_metadata(&config, None)
+            refresh_metadata(&mut config, None)
                 .await
                 .expect_err("refresh must refuse legacy SQLite"),
         ] {
@@ -2459,11 +3331,12 @@ mod startup_tests {
     fn the_assembled_state_carries_the_configured_identity_and_directories() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical state root");
         assert_eq!(state.server_name, "plurx");
         assert_eq!(state.node_id, "test-node");
-        assert_eq!(state.artwork_dir, tmp.path().join("artwork"));
-        assert_eq!(state.cache_dir, tmp.path().join("cache").join("transcode"));
-        assert_eq!(state.subs_dir, tmp.path().join("cache").join("subs"));
+        assert_eq!(state.artwork_dir, root.join("artwork"));
+        assert_eq!(state.cache_dir, root.join("cache").join("transcode"));
+        assert_eq!(state.subs_dir, root.join("cache").join("subs"));
         // The scratch and the persistent cache both reached the transcode
         // manager: with the cache wired, ffmpeg's runtime cache is placed
         // beside it rather than inside the scratch that gets cleared at boot.
