@@ -1499,6 +1499,32 @@ async function startServer(options, fixtureDirectory) {
   }
 }
 
+function cdpBrowserArgs(options, baseUrl, profile) {
+  return [
+    options.headed ? "" : "--headless=new",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--autoplay-policy=no-user-gesture-required",
+    // The self-hosted runners are unprivileged Incus containers. Chromium's
+    // namespace sandbox aborts before DevTools there, and /dev/shm is sized
+    // for the container rather than long-lived media playback. These are the
+    // same container launch flags used by scripts/ui-baseline.
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    // Fixtures intentionally contain synthetic tones for audio-path checks;
+    // decode them in the browser without routing them to the host speakers.
+    "--mute-audio",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    // Test playback must not claim the host's media keys or macOS Now Playing.
+    "--disable-features=Translate,MediaRouter,HardwareMediaKeyHandling",
+    baseUrl,
+  ].filter(Boolean);
+}
+
 class CdpDriver {
   constructor(options, baseUrl, runtime, browserName) {
     this.options = options;
@@ -1519,23 +1545,7 @@ class CdpDriver {
     }
     const profile = path.join(this.runtime, `${this.browserName}-profile`);
     await fsp.mkdir(profile, { recursive: true });
-    const args = [
-      this.options.headed ? "" : "--headless=new",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profile}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--autoplay-policy=no-user-gesture-required",
-      // Fixtures intentionally contain synthetic tones for audio-path checks;
-      // decode them in the browser without routing them to the host speakers.
-      "--mute-audio",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      // Test playback must not claim the host's media keys or macOS Now Playing.
-      "--disable-features=Translate,MediaRouter,HardwareMediaKeyHandling",
-      this.baseUrl,
-    ].filter(Boolean);
+    const args = cdpBrowserArgs(this.options, this.baseUrl, profile);
     const logPath = path.join(this.runtime, "browser.log");
     this.log = fs.createWriteStream(logPath, { flags: "a" });
     this.child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -1549,7 +1559,13 @@ class CdpDriver {
     this.child.on("exit", (code, signal) => { exited = { code, signal }; });
     this.child.on("error", (error) => { exited = { error }; });
     const devtools = await waitFor(async () => {
-      if (exited) throw exited.error || new Error(`browser exited ${exited.code ?? exited.signal}`);
+      if (exited) {
+        if (exited.error) throw exited.error;
+        const detail = sanitizedText(stderr.trim().slice(-2_000));
+        throw new Error(
+          `browser exited ${exited.code ?? exited.signal}${detail ? `: ${detail}` : ""}`,
+        );
+      }
       const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
       return match ? match[1] : null;
     }, 30_000, `${this.browserName} DevTools`, 100);
@@ -3264,6 +3280,7 @@ module.exports = {
   SHAPER_SLICE_BYTES,
   ShapingProxy,
   TokenBucket,
+  cdpBrowserArgs,
   diagnosticPath,
   deviceRunCommand,
   deviceProxyCommand,

@@ -1954,6 +1954,20 @@ test("the documented acceptance command is the one the harness accepts", () => {
   assert.match(help.stdout, /stall-recovery/);
 });
 
+test("the raw Chromium driver is safe to launch in an unprivileged runner container", () => {
+  const args = lab.cdpBrowserArgs(
+    { headed: false },
+    "http://127.0.0.1:41001",
+    "/tmp/playback-lab-chrome-profile",
+  );
+  assert.ok(args.includes("--headless=new"));
+  assert.ok(args.includes("--no-sandbox"), "the Incus runner cannot create Chromium's namespace sandbox");
+  assert.ok(args.includes("--disable-dev-shm-usage"), "media playback must not depend on container /dev/shm size");
+  assert.ok(args.includes("--remote-debugging-port=0"));
+  assert.ok(args.includes("--user-data-dir=/tmp/playback-lab-chrome-profile"));
+  assert.equal(args.at(-1), "http://127.0.0.1:41001");
+});
+
 runAll().then(() => {
   if (failures.length) {
     process.stderr.write(`\n${failures.length} shaping contract failure(s)\n`);
