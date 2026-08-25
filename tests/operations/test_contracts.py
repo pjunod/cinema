@@ -404,6 +404,24 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("cache-from: type=gha", docker)
         self.assertIn("cache-to: type=gha,mode=min", docker)
 
+    def test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries(self):
+        workflow = read(".github/workflows/ci.yml")
+
+        # Every artifact emitted by the high-frequency CI workflow expires
+        # quickly; durable release evidence belongs to publish-release.yml.
+        self.assertEqual(
+            workflow.count("uses: actions/upload-artifact@v4"),
+            workflow.count("retention-days: 1"),
+        )
+
+        # PR and merge-queue builds prove both release targets compile, but no
+        # downstream job consumes those binaries. Only push/tag runs retain
+        # them, avoiding two large duplicate artifacts on every validation.
+        build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertIn("name: Retain release binary for push and tag runs", build)
+        self.assertIn("if: github.event_name == 'push'", build)
+        self.assertIn("name: plurxd-${{ matrix.target }}", build)
+
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
         publisher = read(".github/workflows/publish-release.yml")
