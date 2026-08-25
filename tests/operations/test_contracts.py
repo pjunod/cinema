@@ -433,6 +433,7 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
+        ffmpeg6 = "    runs-on: [self-hosted, Linux, X64, lab, general, ubuntu-24.04]"
         high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
         android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
         hosted_linux = "    runs-on: ubuntu-latest"
@@ -451,7 +452,12 @@ class OperationsContractCase(unittest.TestCase):
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if path == ".github/workflows/ci.yml" and name == "apple":
+                if (
+                    "uses: ./.github/actions/ffmpeg" in block
+                    and "container: ubuntu:26.04" not in block
+                ):
+                    expected = ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name == "docker":
                     expected = high_cpu
