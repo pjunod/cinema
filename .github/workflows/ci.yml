@@ -225,6 +225,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: hiqlite-cluster-auth
+      # The cluster activity contract creates one small AV fixture before it
+      # starts the two daemons. Keep that late-stage dependency explicit so a
+      # newly provisioned high-CPU runner fails before the 60-test store sweep.
+      - name: Verify the cluster fixture generator
+        run: |
+          command -v ffmpeg
+          ffmpeg -version
       - name: Run separate-process replica and failure contracts
         if: needs.scope.outputs.cluster_auth == 'true'
         run: make cluster-check

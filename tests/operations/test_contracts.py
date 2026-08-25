@@ -398,6 +398,8 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
         self.assertIn("run: make cluster-check", cluster)
+        self.assertIn("name: Verify the cluster fixture generator", cluster)
+        self.assertIn("command -v ffmpeg", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
         self.assertIn("name: cluster-topology-semantic", cluster)
