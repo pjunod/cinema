@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f85a37a9"]
+points = ["core.media", "server.api", "playback.pipeline"]
+checks = ["rust-gate", "resource-bounds"]
+reason = "The retained Darwin regressions canonicalize the system temporary root before descriptor-secure traversal, exercise fresh readdir errors after descriptor replacement, and require anonymous snapshot handles to survive create, write, flush, seal-or-noop, rewind, and read. Cache cleanup retains its affected-cursor resume contract so deleting APFS siblings cannot skip an orphan. The macOS pre-transcode child proves descriptor-relative output through fchdir, process tests classify live children through ps when procfs is absent, and the deterministic real audio/video fixture keeps the combined-activity path executable. Restoring the pre-fix behavior rejects valid Darwin paths, silently skips cleanup work, or makes the production child and lifecycle regressions fail on macOS."

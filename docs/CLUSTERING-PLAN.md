@@ -895,6 +895,20 @@ can therefore degrade visibly without guessing ports or silently dropping
 nodes. SQLite and never-joined one-node paths construct no peer work. Snapshot
 rows deliberately omit HLS session capability ids.
 
+**M3e aggregation delivered.** The two public activity reads overlap their
+local work with that one bounded peer round. The summary reports the total
+direct, remux, HLS-copy, and transcode deliveries from every node that answered.
+The detail response keeps the native-client `sessions` array byte-for-byte in
+its established node-local shape and aggregates through the additive
+`deliveries` array instead. Clustered delivery rows add only the stable
+`node_id`; remote rows carry no stop capability. The additive `activity_nodes`
+array records `answered`, `unhealthy`, `unreachable`, `timed_out`, or
+`invalid_response` for each known voter. A peer-directory failure is also a
+visible unavailable state. The web page leads with that incomplete-state
+warning and names each known node that did not answer instead of presenting a
+short list as complete. When the peer directory is empty, both public payloads
+retain the exact pre-M3e shape.
+
 ### 6.8 M4 — transactional fences and materialization ownership
 
 Put scans, metadata refresh, genre backfill, scheduled cache production, and
@@ -994,18 +1008,19 @@ mode without lowering quality or losing selected tracks.
 6. **Do not call a VIP the failover implementation.** A VIP locates a process;
    replicated state, fencing, and takeover let it continue the film.
 
-## 8. Handoff checkpoint — M3a owns voters; M3 still owns discovery and fencing
+## 8. Handoff checkpoint — M3 owns the complete membership surface
 
 M0 through M2 provide the complete one-voter path: exact import parity, a
 durable activation marker, atomic target selection, failure-injected SQLite
-recovery, replicated daemon startup, and credential sealing before the immutable
-source backup is published. The post-coalescer compacted-growth and credential
-encryption gates are closed. M3a adds bounded single-use admission, real
-learner-to-voter growth, replicated privacy-safe node records, health, and safe
-follower removal. It refuses removal while the target owns offline work rather
-than guessing that another mount contains the same bytes. The remaining §6.7
-boundaries are server-name/discovery parity, activity aggregation, deliberate
-offline-work resolution, and singleton fencing.
+recovery, replicated daemon startup, and credential sealing before the
+immutable source backup is published. The post-coalescer compacted-growth and
+credential-encryption gates are closed. M3 adds bounded single-use admission,
+real learner-to-voter growth, replicated privacy-safe node records, health,
+safe removal with deliberate offline-work resolution, one replicated server
+name, node-specific discovery, and an activity surface that names both the node
+performing each delivery and every voter that did not answer. M4 owns
+singleton-job fencing and materialization ownership; later milestones retain
+their separate media-placement and failover boundaries.
 
 ```bash
 make check                    # M0 and every milestone: repository baseline

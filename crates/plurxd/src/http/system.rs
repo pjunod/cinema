@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use super::auth::LoginResponse;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
+use super::internal_activity::{ActivityDelivery, PeerActivityOutcome};
 use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, StoreMetricsView};
 
 #[derive(Serialize)]
@@ -1995,6 +1996,182 @@ pub struct Activity {
     pub percent: Option<u8>,
 }
 
+/// Result of the optional clustered half of an activity read. Ordinary
+/// SQLite and never-joined installs never construct this work, while an
+/// opted-in cluster keeps transport failures as data instead of turning the
+/// whole page into an error.
+enum PeerActivityRead {
+    LocalOnly,
+    Peers(Vec<(String, PeerActivityOutcome)>),
+    DirectoryUnavailable,
+}
+
+#[derive(Serialize)]
+struct ActivityNodeStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct ClusterDelivery {
+    method: String,
+    user: String,
+    file_id: i64,
+    item_id: i64,
+    title: String,
+    started_unix: i64,
+    idle_seconds: u64,
+    session_id: Option<String>,
+    delivered_bytes: Option<i64>,
+    delivered_bps: Option<i64>,
+    node_id: String,
+}
+
+impl ClusterDelivery {
+    fn local(delivery: Delivery, node_id: &str) -> Self {
+        Self {
+            method: delivery.method.to_owned(),
+            user: delivery.user,
+            file_id: delivery.file_id,
+            item_id: delivery.item_id,
+            title: delivery.title,
+            started_unix: delivery.started_unix,
+            idle_seconds: delivery.idle_seconds,
+            session_id: delivery.session_id,
+            delivered_bytes: delivery.delivered_bytes,
+            delivered_bps: delivery.delivered_bps,
+            node_id: node_id.to_owned(),
+        }
+    }
+
+    fn peer(delivery: ActivityDelivery, node_id: String) -> Self {
+        Self {
+            method: delivery.method,
+            user: delivery.user,
+            file_id: delivery.file_id,
+            item_id: delivery.item_id,
+            title: delivery.title,
+            started_unix: delivery.started_unix,
+            idle_seconds: delivery.idle_seconds,
+            session_id: None,
+            delivered_bytes: delivery.delivered_bytes,
+            delivered_bps: delivery.delivered_bps,
+            node_id,
+        }
+    }
+}
+
+async fn peer_activity(state: &AppState) -> PeerActivityRead {
+    // `advertise_host` is the explicit first step toward peer membership.
+    // Keeping this guard outside `snapshots()` means the overwhelmingly common
+    // SQLite and never-joined paths do not even read the peer directory.
+    if !state.cluster_advertisement || !state.membership.is_replicated() {
+        return PeerActivityRead::LocalOnly;
+    }
+    match state.peer_activity.snapshots().await {
+        Ok(peers) if peers.is_empty() => PeerActivityRead::LocalOnly,
+        Ok(peers) => PeerActivityRead::Peers(peers),
+        Err(_) => PeerActivityRead::DirectoryUnavailable,
+    }
+}
+
+fn peer_status(outcome: &PeerActivityOutcome) -> &'static str {
+    match outcome {
+        PeerActivityOutcome::Answered(_) => "answered",
+        PeerActivityOutcome::Unhealthy => "unhealthy",
+        PeerActivityOutcome::Unreachable => "unreachable",
+        PeerActivityOutcome::TimedOut => "timed_out",
+        PeerActivityOutcome::InvalidResponse => "invalid_response",
+    }
+}
+
+fn activity_nodes(local_node_id: &str, peers: &PeerActivityRead) -> Vec<ActivityNodeStatus> {
+    let mut nodes = vec![ActivityNodeStatus {
+        node_id: Some(local_node_id.to_owned()),
+        status: "answered",
+    }];
+    match peers {
+        PeerActivityRead::Peers(outcomes) => nodes.extend(outcomes.iter().map(
+            |(node_id, outcome)| ActivityNodeStatus {
+                node_id: Some(node_id.clone()),
+                status: peer_status(outcome),
+            },
+        )),
+        PeerActivityRead::DirectoryUnavailable => nodes.push(ActivityNodeStatus {
+            node_id: None,
+            status: "unavailable",
+        }),
+        PeerActivityRead::LocalOnly => {}
+    }
+    nodes
+}
+
+fn clustered_deliveries(
+    local_node_id: &str,
+    local: Vec<Delivery>,
+    peers: &PeerActivityRead,
+) -> Vec<ClusterDelivery> {
+    let mut out = local
+        .into_iter()
+        .map(|delivery| ClusterDelivery::local(delivery, local_node_id))
+        .collect::<Vec<_>>();
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (node_id, outcome) in outcomes {
+            let PeerActivityOutcome::Answered(snapshot) = outcome else {
+                continue;
+            };
+            out.extend(
+                snapshot
+                    .deliveries
+                    .iter()
+                    .cloned()
+                    .map(|delivery| ClusterDelivery::peer(delivery, node_id.clone())),
+            );
+        }
+    }
+    out.sort_by(|left, right| {
+        right
+            .started_unix
+            .cmp(&left.started_unix)
+            .then(left.method.cmp(&right.method))
+            .then(left.file_id.cmp(&right.file_id))
+            .then(left.user.cmp(&right.user))
+            .then(left.node_id.cmp(&right.node_id))
+    });
+    out
+}
+
+fn missing_activity_summary(peers: &PeerActivityRead) -> Option<String> {
+    match peers {
+        PeerActivityRead::LocalOnly => None,
+        PeerActivityRead::DirectoryUnavailable => {
+            Some("cluster peer directory did not answer".to_owned())
+        }
+        PeerActivityRead::Peers(outcomes) => {
+            let missing = outcomes
+                .iter()
+                .filter(|(_, outcome)| !matches!(outcome, PeerActivityOutcome::Answered(_)))
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                return None;
+            }
+            let shown = missing
+                .iter()
+                .take(3)
+                .map(|(node_id, outcome)| format!("{node_id} ({})", peer_status(outcome)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remainder = missing.len().saturating_sub(3);
+            Some(if remainder == 0 {
+                format!("{shown} did not answer")
+            } else {
+                format!("{shown}, and {remainder} more did not answer")
+            })
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct OfflineWork {
     id: String,
@@ -2090,6 +2267,72 @@ pub async fn activity(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Activity>>, ApiError> {
+    if !state.cluster_advertisement || !state.membership.is_replicated() {
+        return Ok(Json(local_activity(&state).await?));
+    }
+
+    // Local Store work and the bounded peer round overlap. A healthy peer can
+    // never add another sequential wave to the page, and the common two-second
+    // peer deadline remains the only added clustered wait.
+    let (activities, peers) = tokio::join!(local_activity(&state), peer_activity(&state));
+    let mut activities = activities?;
+    if matches!(peers, PeerActivityRead::LocalOnly) {
+        return Ok(Json(activities));
+    }
+
+    let remote = match &peers {
+        PeerActivityRead::Peers(outcomes) => outcomes
+            .iter()
+            .filter_map(|(_, outcome)| match outcome {
+                PeerActivityOutcome::Answered(snapshot) => Some(snapshot.deliveries.len()),
+                _ => None,
+            })
+            .sum::<usize>(),
+        PeerActivityRead::LocalOnly | PeerActivityRead::DirectoryUnavailable => 0,
+    };
+    let local = state.transcode.active_sessions().await
+        + state.streams.list().len()
+        + state.direct_plays.list().len();
+    let streams = local.saturating_add(remote);
+
+    // The historical local HLS-only summary would double count clustered
+    // streams. Replace it with the complete direct/remux/HLS total while
+    // retaining the established scan -> stream -> background-work ordering.
+    activities.retain(|activity| activity.kind != "stream");
+    if streams > 0 {
+        let insert_at = activities
+            .iter()
+            .take_while(|activity| matches!(activity.kind, "scan" | "enrich"))
+            .count();
+        activities.insert(
+            insert_at,
+            Activity {
+                kind: "stream",
+                label: if streams == 1 {
+                    "1 active stream".to_owned()
+                } else {
+                    format!("{streams} active streams")
+                },
+                detail: None,
+                percent: None,
+            },
+        );
+    }
+    if let Some(detail) = missing_activity_summary(&peers) {
+        activities.insert(
+            0,
+            Activity {
+                kind: "cluster_degraded",
+                label: "Activity incomplete".to_owned(),
+                detail: Some(detail),
+                percent: None,
+            },
+        );
+    }
+    Ok(Json(activities))
+}
+
+async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
     let mut activities = Vec::new();
 
     let mut statuses: Vec<_> = state
@@ -2164,7 +2407,7 @@ pub async fn activity(
         });
     }
 
-    for work in offline_work(&state).await? {
+    for work in offline_work(state).await? {
         let sending = work.kind == "send";
         activities.push(Activity {
             kind: if sending {
@@ -2205,7 +2448,7 @@ pub async fn activity(
         });
     }
 
-    Ok(Json(activities))
+    Ok(activities)
 }
 
 /// One live delivery, whatever route it takes to the screen.
@@ -2350,7 +2593,19 @@ pub async fn activity_detail(
     // `sessions` is untouched — native clients parse it — and `deliveries` is
     // the superset beside it: the same HLS sessions plus the two routes that
     // were never listed at all.
-    let (sessions, deliveries) = deliveries(&state).await;
+    let ((sessions, deliveries), peers) =
+        if state.cluster_advertisement && state.membership.is_replicated() {
+            tokio::join!(deliveries(&state), peer_activity(&state))
+        } else {
+            (deliveries(&state).await, PeerActivityRead::LocalOnly)
+        };
+    let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
+    let deliveries = if clustered {
+        serde_json::to_value(clustered_deliveries(&state.node_id, deliveries, &peers))
+            .map_err(|error| ApiError::Internal(error.to_string()))?
+    } else {
+        serde_json::to_value(deliveries).map_err(|error| ApiError::Internal(error.to_string()))?
+    };
     let offline = offline_work(&state).await?;
     let statuses = state.jobs.all_statuses().await;
     let names: HashMap<i64, String> = if statuses.is_empty() {
@@ -2387,7 +2642,7 @@ pub async fn activity_detail(
                 "last_sync_at": (a.last_sync_at > 0).then_some(a.last_sync_at),
             })
         });
-    Ok(Json(serde_json::json!({
+    let mut response = serde_json::json!({
         "sessions": sessions,
         "deliveries": deliveries,
         "offline": offline,
@@ -2399,7 +2654,12 @@ pub async fn activity_detail(
             "syncing": trakt.syncing,
             "note": trakt.note,
         },
-    })))
+    });
+    if clustered {
+        response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
+    Ok(Json(response))
 }
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
@@ -2829,6 +3089,85 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    fn test_delivery(method: &'static str, started_unix: i64) -> Delivery {
+        Delivery {
+            method,
+            user: "paul".to_owned(),
+            file_id: started_unix,
+            item_id: started_unix + 100,
+            title: format!("Title {started_unix}"),
+            started_unix,
+            idle_seconds: 2,
+            session_id: Some(format!("session-{started_unix}")),
+            delivered_bytes: Some(4_096),
+            delivered_bps: Some(8_000),
+        }
+    }
+
+    #[test]
+    fn clustered_activity_attributes_answered_rows_and_names_missing_nodes() {
+        let peers = PeerActivityRead::Peers(vec![
+            (
+                "node-b".to_owned(),
+                PeerActivityOutcome::Answered(crate::http::internal_activity::ActivitySnapshot {
+                    node_id: "node-b".to_owned(),
+                    deliveries: vec![ActivityDelivery {
+                        method: "direct".to_owned(),
+                        user: "viewer".to_owned(),
+                        file_id: 2,
+                        item_id: 102,
+                        title: "Remote title".to_owned(),
+                        started_unix: 2,
+                        idle_seconds: 1,
+                        delivered_bytes: None,
+                        delivered_bps: None,
+                    }],
+                }),
+            ),
+            ("node-c".to_owned(), PeerActivityOutcome::TimedOut),
+            ("node-d".to_owned(), PeerActivityOutcome::Unhealthy),
+        ]);
+
+        let rows = serde_json::to_value(clustered_deliveries(
+            "node-a",
+            vec![test_delivery("transcode", 1)],
+            &peers,
+        ))
+        .expect("cluster deliveries serialize");
+        let rows = rows.as_array().expect("delivery array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["node_id"], "node-b");
+        assert_eq!(rows[0]["method"], "direct");
+        assert!(rows[0]["session_id"].is_null());
+        assert_eq!(rows[1]["node_id"], "node-a");
+        assert_eq!(rows[1]["session_id"], "session-1");
+
+        let nodes =
+            serde_json::to_value(activity_nodes("node-a", &peers)).expect("node status serializes");
+        assert_eq!(nodes[0]["status"], "answered");
+        assert_eq!(nodes[1]["node_id"], "node-b");
+        assert_eq!(nodes[1]["status"], "answered");
+        assert_eq!(nodes[2]["status"], "timed_out");
+        assert_eq!(nodes[3]["status"], "unhealthy");
+
+        let missing = missing_activity_summary(&peers).expect("missing-node summary");
+        assert!(missing.contains("node-c (timed_out)"), "{missing}");
+        assert!(missing.contains("node-d (unhealthy)"), "{missing}");
+        assert!(missing.ends_with("did not answer"), "{missing}");
+    }
+
+    #[test]
+    fn failed_peer_directory_is_visible_without_exposing_an_address() {
+        let peers = PeerActivityRead::DirectoryUnavailable;
+        let nodes =
+            serde_json::to_value(activity_nodes("node-a", &peers)).expect("node status serializes");
+        assert_eq!(nodes[1]["status"], "unavailable");
+        assert!(nodes[1].get("node_id").is_none());
+        let summary = missing_activity_summary(&peers).expect("directory failure summary");
+        assert_eq!(summary, "cluster peer directory did not answer");
+        assert!(!summary.contains("http"));
+    }
 
     #[test]
     fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
