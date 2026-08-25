@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["53e4f458"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The cluster gate explicitly runs the full-purge WAL-number reuse regression and the same-thread reader error-recovery regression, while the Rust gate retains the bounded snapshot-timeout configuration and production-default tests."

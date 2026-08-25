@@ -170,13 +170,40 @@ jobs. Impact optimization therefore fails open: a bad diff base costs time;
 it never suppresses tests. The scheduled workflow still runs the `nightly`
 profile.
 
+### Runner mode — one repository variable selects the pool
+
+`CI_RUNNER_MODE` selects where every trusted validation job starts. It accepts
+exactly `self-hosted` or `github`; an unset variable defaults to `self-hosted`
+so a missing setting cannot silently spend hosted-runner minutes. The workflow
+still pins the environment within either pool: Linux uses Ubuntu 24.04 and
+Apple uses macOS 26 with Xcode 26.6.
+
+```bash
+scripts/ci-runner-mode status       # print the active mode or the unset default
+scripts/ci-runner-mode github       # route new jobs to GitHub-hosted runners
+scripts/ci-runner-mode self-hosted  # route new jobs back to the lab fleet
+```
+
+Changing the variable affects jobs created after the change. It does not move
+an in-progress job between runners, and GitHub Actions does not retry a queued
+or failed hosted job on the other pool automatically. That is deliberate: an
+automatic fallback can run privileged repository code on a trust boundary you
+did not select.
+
+Disposable GitHub runners install the pinned ffmpeg, Playwright, XcodeGen, KVM,
+and cross-compiler prerequisites in the job. Persistent lab runners verify the
+same dependencies but do not mutate themselves; Ansible remains the source of
+truth for their installed toolchains.
+
 ### Which ffmpeg the profiles assume
 
-Every CI profile runs **ffmpeg 6**, from the pinned `ubuntu-24.04` runner image.
-`.github/actions/ffmpeg` is the single place that installs it; it prints the
-build that actually resolved into the job log and step summary, and fails the
-job when the major is not the one that lane named. So `runs-on` and the expected
-major move together in a reviewable diff, and neither can move on its own.
+Every CI profile runs **ffmpeg 6**, from a pinned Ubuntu 24.04 environment.
+`.github/actions/ffmpeg` installs it on a disposable GitHub runner or verifies
+the Ansible-provisioned build on a persistent lab runner. It prints the build
+that actually resolved into the job log and step summary, and fails the job
+when the major is not the one that lane named. So the selected environment and
+the expected major move together in a reviewable diff, and neither can move on
+its own.
 
 This is a deliberate choice rather than an inherited default, because the two do
 not agree. **ffmpeg 8 declares `-readrate_initial_burst` and then ignores it**,

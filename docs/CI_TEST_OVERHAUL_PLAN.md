@@ -296,10 +296,15 @@ least one test, appears in exactly one named check, and is absent from the
 broad command's `--list` output. One assertion should produce one set of
 runner-minutes.
 
-For Apple changes, add a T1 environment assertion before T4 starts: verify
-`/Applications/Xcode_16.4.app` exists and that `xcrun simctl list runtimes`
-contains the pinned iOS and tvOS runtimes. The check should fail in seconds
-with an environment-drift label, before any simulator boots.
+For Apple changes, T1 begins on the private-repository lab runner selected by
+`[self-hosted, macOS, ARM64, lab, apple, xcode-26]`. It verifies Xcode 26.6
+build 17F113, iOS 26.5 runtime build 23F77, tvOS 26.5 runtime build 23L470,
+the matching SDK versions, and XcodeGen 2.46.0 before restoring DerivedData or
+booting a simulator. That makes
+toolchain drift fail in seconds instead of paying for a partial build. The
+runner creates uniquely named iPhone, iPad, and Apple TV devices for each run
+and deletes them in an `always()` cleanup step; persistent runner state is not
+part of the test contract.
 
 ### 6.4 Coverage targets emphasize contracts
 
@@ -454,7 +459,7 @@ A successful job publishes a small JSON manifest as a workflow artifact:
   "workflow_sha": "...",
   "head_sha": "...",
   "base_sha": "...",
-  "runner": "macos-15/xcode-16.4",
+  "runner": "gha-mba-apple-01/xcode-26.6",
   "image_version": "...",
   "tests": 196,
   "result": "passed"

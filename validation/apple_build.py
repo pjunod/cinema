@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 import dataclasses
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -241,9 +242,25 @@ def check_repository(root: Path = REPO_ROOT) -> tuple[str, ...]:
 
 
 def _git(root: Path, *arguments: str) -> str:
+    # Git exports repository-local variables such as GIT_INDEX_FILE to hooks.
+    # This helper may intentionally operate on another repository (the tests do
+    # exactly that), so inherited outer-repository paths must not override cwd.
+    env = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ):
+        env.pop(name, None)
     result = subprocess.run(
         ["git", *arguments], cwd=root, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
     )
     if result.returncode != 0:
         raise AppleBuildError(

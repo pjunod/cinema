@@ -32,7 +32,7 @@ use crate::error::StoreError;
 use crate::store::SQLITE_SCHEMA_VERSION;
 
 #[cfg(feature = "hiqlite-store")]
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS};
 #[cfg(feature = "hiqlite-store")]
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
@@ -1740,20 +1740,35 @@ async fn start_voter(
 /// every size. One builder, one set of safety defaults.
 #[cfg(feature = "hiqlite-store")]
 pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> NodeConfig {
+    let mut raft_config = NodeConfig::default_raft_config(10_000);
+    raft_config.install_snapshot_timeout =
+        install_snapshot_timeout_ms(DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS);
     NodeConfig {
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
         read_pool_size,
-        // Snapshot, disaster-recovery retention, WAL sync, heartbeat, and
-        // election settings remain Hiqlite's established production values.
-        raft_config: NodeConfig::default_raft_config(10_000),
+        // Snapshot frequency, disaster-recovery retention, WAL sync, heartbeat,
+        // and election settings remain Hiqlite's established production values.
+        // Only the measured transfer deadline is widened for production-sized
+        // state-machine snapshots.
+        raft_config,
         ..Default::default()
     }
 }
 
 #[cfg(feature = "hiqlite-store")]
+fn install_snapshot_timeout_ms(seconds: u64) -> u64 {
+    seconds
+        .checked_mul(1_000)
+        .expect("validated snapshot timeout seconds must fit milliseconds")
+}
+
+#[cfg(feature = "hiqlite-store")]
 fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
-    production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size)
+    let mut defaults = production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size);
+    defaults.raft_config.install_snapshot_timeout =
+        install_snapshot_timeout_ms(config.cluster.install_snapshot_timeout_secs);
+    defaults
 }
 
 /// Build Hiqlite's connection roster without treating durable Raft ids as
@@ -2954,6 +2969,7 @@ mod tests {
         assert_eq!(defaults.raft_config.election_timeout_max, 3_000);
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);
+        assert_eq!(defaults.raft_config.install_snapshot_timeout, 120_000);
         assert!(
             format!("{:?}", defaults.raft_config.snapshot_policy).contains("10000"),
             "snapshot policy must stay at 10,000 entries"
@@ -2963,6 +2979,10 @@ mod tests {
             format!("{:?}", NodeConfig::default().wal_sync),
             "read-pool tuning must not change immediate-async WAL sync"
         );
+
+        config.cluster.install_snapshot_timeout_secs = 300;
+        let tuned = production_hiqlite_defaults(&config);
+        assert_eq!(tuned.raft_config.install_snapshot_timeout, 300_000);
     }
 
     #[cfg(feature = "hiqlite-store")]

@@ -47,23 +47,27 @@ runs:
           fi
         fi
 
+        installer=()
         if [ "$(id -u)" -ne 0 ]; then
-          echo "::error::ffmpeg $WANT_MAJOR must be provisioned on this runner" >&2
-          exit 1
+          if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+            echo "::error::ffmpeg $WANT_MAJOR must be provisioned on this runner" >&2
+            exit 1
+          fi
+          installer=(sudo)
         fi
 
-        # Root container jobs start from a bare distro image and install the
+        # Root container jobs and disposable GitHub runners install the
         # requested package here. Persistent runner VMs are provisioned by
-        # Ansible and take the early return above.
+        # Ansible and take the early return above without mutating themselves.
         sources=/etc/apt/sources.list.d/ubuntu.sources
         if [ -f "$sources" ]; then
-          sed -i \
+          "${installer[@]}" sed -i \
             's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
             "$sources"
         fi
-        apt-get -o Acquire::Retries=3 update
+        "${installer[@]}" apt-get -o Acquire::Retries=3 update
         DEBIAN_FRONTEND=noninteractive \
-          apt-get -o Acquire::Retries=3 install -y ffmpeg
+          "${installer[@]}" apt-get -o Acquire::Retries=3 install -y ffmpeg
 
     - name: Record and enforce the resolved ffmpeg build
       shell: bash

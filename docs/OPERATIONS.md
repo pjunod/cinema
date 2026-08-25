@@ -376,7 +376,7 @@ entry at the next index.
 | Verdict or observation | Meaning | Next action |
 |---|---|---|
 | `clean` | Metadata CRC, retained WAL sequence, snapshot, and local applied boundaries agree. | Preserve the copy and investigate process-memory or transport failures; do not call the disk corrupt. |
-| `wal_number_one_reused_above_initial_range` | Snapshot installation purged the old generation and reused WAL number 1 at a high index. This is an observation, not damage. | Current builds reject reader memos from the purged generation. On an older build, this condition plus `LogIndexNotFound` identifies the fixed stale-memo defect. |
+| `wal_number_one_reused_above_initial_range` | Snapshot installation purged the old generation and reused WAL number 1 at a high index. This is an observation, not damage. | Current builds replace reader mmaps and memos when the WAL incarnation changes. On an older build, this condition plus `LogIndexNotFound` identifies the fixed stale-reader defect. |
 | `metadata_corrupt` or `wal_missing` | Required physical state is absent or its metadata envelope cannot be trusted. | Keep the voter stopped. Recover by rejoining it from a healthy quorum; do not fabricate metadata by hand. |
 | `wal_file_gap`, `retained_gap`, `snapshot_wal_gap` | At least one log index needed between the snapshot and retained WAL is physically unaccounted for. | Keep the evidence and rejoin from a healthy quorum. |
 | `wal_header_payload_mismatch` | A WAL header's claimed boundary differs from its first or last decodable record. | Treat the local WAL as damaged and rejoin; keep the copy for a defect report. |
@@ -630,6 +630,7 @@ transcode_dir = "/var/cache/plurx-transcode"
 
 [cluster]
 read_pool_size = 4
+install_snapshot_timeout_secs = 120
 ```
 
 When omitted, both new paths preserve the exact legacy layout. With
@@ -785,6 +786,18 @@ guardrail. If no larger pool clears all three conditions, or any arm is
 inconclusive, keep 4. Preserve all raw pair files with the three campaign
 summaries; a summary without its hash-bound raw evidence is not a selection
 artifact.
+
+`cluster.install_snapshot_timeout_secs` is bounded from 10 through 3,600 and
+defaults to 120 seconds. It is the deadline OpenRaft applies while sending and
+installing snapshot segments because Hiqlite leaves its separate non-final
+segment timeout disabled. The previous fixed 10-second deadline repeatedly
+restarted a 72 MiB snapshot after about 50 MiB on the production LAN; 120
+seconds completed the same transfer. Keep the value identical on every voter
+so leadership changes do not change catch-up behavior. Snapshot frequency,
+WAL size/sync, disaster-recovery log retention, heartbeat, and election timers
+remain unchanged. During a rolling upgrade, an old-binary leader keeps its
+fixed 10-second deadline until that voter is upgraded; do not treat the new
+deadline as effective cluster-wide until every possible leader is current.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
@@ -1232,6 +1245,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
+| `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

@@ -1344,6 +1344,40 @@ test("a persistent stall gets one bounded method-aware recovery", () => {
   assert.equal(policy.stallRecoveryAction({ method: "unknown" }), "prompt");
 });
 
+test("a transcode stall reopen is bound to the exact predecessor", () => {
+  const ordinary = { start: 42, height: 720 };
+  assert.deepEqual(
+    policy.stallReopenSessionOptions({
+      options: ordinary,
+      forceReopen: true,
+      method: "transcode",
+      sessionId: "session-before-stall",
+    }),
+    {
+      start: 42,
+      height: 720,
+      previous_session_id: "session-before-stall",
+      reopen_reason: "stall",
+    },
+  );
+  assert.deepEqual(ordinary, { start: 42, height: 720 }, "input stays immutable");
+  assert.deepEqual(
+    policy.stallReopenSessionOptions({
+      options: ordinary,
+      forceReopen: false,
+      method: "transcode",
+      sessionId: "ordinary-seek",
+    }),
+    ordinary,
+    "viewer-directed seeks are ordinary creates",
+  );
+  assert.match(
+    shippedSource("seekTo"),
+    /stallReopenSessionOptions\([\s\S]*?sessionId:PLAYER\.sessionId/,
+    "the shipped restart path must carry the typed predecessor binding",
+  );
+});
+
 test("fallback swaps preserve healthy playback until the replacement exists", () => {
   assert.equal(
     policy.fallbackResetBeforeOpen({ reason: "stall-recovery" }),

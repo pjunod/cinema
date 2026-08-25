@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from validation.apple_build import (
     APPLE_README,
@@ -329,6 +330,25 @@ class SequentialMergeCase(unittest.TestCase):
 
         self.assertEqual(second, base + 1)
         self.assertEqual(changed_again, ())
+
+    def test_an_outer_hook_index_cannot_leak_into_the_claim_repository(self) -> None:
+        """Git hooks export their caller's index even when cwd changes."""
+        base = current_build(self.root)
+        self._git_ok("checkout", "-q", "-b", "apple-a", "main")
+        note = f"{NOTES_DIR}/1001-feature-a.md"
+        (self.root / note).write_text(
+            f"# feature-a\n\nBuild: {base}\nIssue: #1001\n\nProse.\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(
+            "os.environ",
+            {"GIT_INDEX_FILE": str(self.root / "foreign-index")},
+        ):
+            claimed, changed = bump(self.root, merge_target="main")
+
+        self.assertEqual(claimed, base + 1)
+        self.assertEqual(set(changed), {*SURFACE_PATHS, note})
 
     def test_an_unreadable_merge_target_refuses_rather_than_no_ops(self) -> None:
         """The dangerous outcome is a silent success, not a refusal.
