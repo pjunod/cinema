@@ -516,12 +516,7 @@ class OperationsContractCase(unittest.TestCase):
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if (
-                    "uses: ./.github/actions/ffmpeg" in block
-                    and "container: ubuntu:26.04" not in block
-                ):
-                    expected = ffmpeg6
-                elif path == ".github/workflows/ci.yml" and name == "apple":
+                if path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
                     "check",
@@ -541,6 +536,11 @@ class OperationsContractCase(unittest.TestCase):
                     "android_device",
                 }:
                     expected = android
+                elif (
+                    "uses: ./.github/actions/ffmpeg" in block
+                    and "container: ubuntu:26.04" not in block
+                ):
+                    expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
         for path in (
