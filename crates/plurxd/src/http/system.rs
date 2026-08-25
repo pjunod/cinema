@@ -2404,7 +2404,7 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
         });
     }
 
-    for work in offline_work(&state).await? {
+    for work in offline_work(state).await? {
         let sending = work.kind == "send";
         activities.push(Activity {
             kind: if sending {
