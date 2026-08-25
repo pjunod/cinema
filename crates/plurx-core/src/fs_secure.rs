@@ -1118,7 +1118,7 @@ fn linux_mount_coordinate_from(
     let mut selected: Option<(u64, u64, PathBuf, PathBuf)> = None;
     for line in mountinfo.lines() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 6 || !fields.iter().any(|field| *field == "-") {
+        if fields.len() < 6 || !fields.contains(&"-") {
             return Err(invalid_path("malformed Linux mountinfo record"));
         }
         let record_mount_id = fields[0]
