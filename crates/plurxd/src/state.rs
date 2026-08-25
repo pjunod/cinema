@@ -1349,7 +1349,12 @@ impl JobManager {
             Ok(Some(lease)) => lease,
             Ok(None) => return false,
             Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "acquiring scan lease failed");
+                tracing::warn!(
+                    library = library_id,
+                    stage = "acquire_lease",
+                    error = %error,
+                    "acquiring scan lease failed"
+                );
                 return false;
             }
         };
@@ -1381,6 +1386,11 @@ impl JobManager {
             tokio::select! {
                 () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
                 () = lost.cancelled() => {
+                    tracing::warn!(
+                        library = library_id,
+                        stage = "lease",
+                        "library scan failed because its cluster lease was lost"
+                    );
                     let mut status = manager
                         .statuses
                         .lock()
@@ -2282,6 +2292,12 @@ impl JobManager {
                 return;
             }
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "load_library",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2298,6 +2314,12 @@ impl JobManager {
         {
             Ok(report) => status.last_scan = Some(report),
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "catalogue_scan",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2332,7 +2354,12 @@ impl JobManager {
             .mark_library_scanned(library_id, force_metadata)
             .await
         {
-            tracing::warn!(error = %e, library = library_id, "recording the run time failed");
+            tracing::warn!(
+                error = %e,
+                library = library_id,
+                stage = "stamp_completion",
+                "recording the library scan completion time failed"
+            );
         }
         self.finish(library_id, status).await;
     }

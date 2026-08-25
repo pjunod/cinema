@@ -587,6 +587,37 @@ test("Settings loads only the active tab manifest", () => {
   }
 });
 
+test("Settings drops a node-local scan error superseded by replicated success", () => {
+  const currentScanStatus = new Function(
+    `${shippedSource("currentScanStatus")}; return currentScanStatus;`,
+  )();
+  const failed = {
+    running: false,
+    finished_at: 100,
+    error: "replicated store operation timed out",
+  };
+  assert.equal(currentScanStatus(failed, 100), null,
+    "a success in the same server second supersedes the local failure");
+  assert.equal(currentScanStatus(failed, 101), null);
+  assert.equal(currentScanStatus(failed, 99), failed,
+    "a newer failure remains actionable");
+  assert.equal(currentScanStatus({ ...failed, running: true }, 101).running, true,
+    "replicated history cannot hide live work");
+
+  const statusText = new Function(
+    "currentScanStatus", "esc", "fmtAgo",
+    `${shippedSource("statusText")}; return statusText;`,
+  )(currentScanStatus, (value) => String(value), () => "now");
+  assert.equal(statusText(failed, 101), "idle");
+  assert.match(statusText(failed, 99), /error: replicated store operation timed out/);
+  assert.match(shippedSource("libRow"),
+    /statusText\(status\[l\.id\],l\.last_scan_at\)/,
+    "the first settings paint compares local status with durable history");
+  assert.match(shippedSource("settingsTick"),
+    /statusText\(st,lastScans\.get\(String\(id\)\)\)/,
+    "polls retain the same stale-status projection");
+});
+
 test("Settings executes exact required and secondary waves for every tab", async () => {
   const endpointDeclaration=SHIPPED_UI.match(/const SETTINGS_ENDPOINTS=({[\s\S]*?\n};)/);
   const manifestDeclaration=SHIPPED_UI.match(/const SETTINGS_MANIFEST=({[\s\S]*?\n});/);
