@@ -563,6 +563,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("gh variable set CI_RUNNER_MODE", switch)
         self.assertIn("gh variable list", switch)
         self.assertNotIn("2>/dev/null", switch)
+        self.assertIn("new workflow runs will use", switch)
         self.assertIn("self-hosted|github", switch)
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):

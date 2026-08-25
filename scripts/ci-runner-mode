@@ -36,7 +36,7 @@ case "$mode" in
     ;;
   self-hosted|github)
     gh variable set CI_RUNNER_MODE --body "$mode" --repo "$repo"
-    printf 'CI_RUNNER_MODE=%s for %s; new jobs will use that runner pool.\n' \
+    printf 'CI_RUNNER_MODE=%s for %s; new workflow runs will use that runner pool.\n' \
       "$mode" "$repo"
     ;;
   *)
