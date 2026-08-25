@@ -208,6 +208,10 @@ jobs:
       # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph that
       # cluster-check just compiled instead of paying for ~400 crates twice.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # Keep every Make recipe on the workflow's pinned toolchain. Persistent
+      # lab runners may also have an older default cargo, and a later recipe
+      # must not silently fall back to it after the main contract run.
+      CARGO: rustup run 1.97.1 cargo
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.97.1
