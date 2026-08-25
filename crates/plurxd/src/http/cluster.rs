@@ -11,7 +11,7 @@ use plurx_core::cluster::membership::{
 use serde::Deserialize;
 
 use super::error::ApiError;
-use super::extract::AdminUser;
+use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
@@ -50,6 +50,45 @@ pub async fn nodes(
     State(state): State<AppState>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
     state.membership.status().await.map(Json).map_err(api_error)
+}
+
+/// GET /api/v1/cluster/ingress — the other ingresses a signed-in client may
+/// retry a media capability through.
+///
+/// Deliberately its own route rather than a field on the public
+/// `/api/v1/server`: that endpoint is what a client uses to *identify* an
+/// unknown candidate before it has decided to trust it, so it never carries a
+/// credential, and the cluster's ingress list is not something an anonymous
+/// prober should be able to enumerate. Every signed-in household member may
+/// read it — they already reach these hosts when a stream is placed there.
+///
+/// Origins only. This never names a node id, a Raft address, or a private
+/// port; §7.2 forbids exposing an internal address to a client, and what an
+/// operator publishes here is the same address a browser would already use.
+pub async fn ingress(
+    _viewer: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<ClusterIngress>, ApiError> {
+    Ok(Json(ClusterIngress {
+        node_urls: state
+            .membership
+            .reachable_peer_http_urls()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .take(MAX_ADVERTISED_INGRESSES)
+            .collect(),
+    }))
+}
+
+/// Bounded on the way out. A client walks this list one entry at a time on a
+/// transport failure, so an unbounded cluster would turn one failed stream
+/// into an unbounded retry ladder.
+const MAX_ADVERTISED_INGRESSES: usize = 8;
+
+#[derive(serde::Serialize)]
+pub struct ClusterIngress {
+    pub node_urls: Vec<String>,
 }
 
 pub async fn remove_node(
@@ -217,6 +256,7 @@ mod tests {
                 owner_node_id: "test-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms,
                 lease_expires_at_ms: now_ms.saturating_add(12_000),
             })

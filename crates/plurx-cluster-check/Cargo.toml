@@ -10,6 +10,7 @@ repository.workspace = true
 anyhow = { workspace = true }
 futures-util = { workspace = true }
 hiqlite = { workspace = true }
+hiqlite-wal = { version = "=0.14.0" }
 hex = { workspace = true }
 jsonschema = { workspace = true }
 libc = { workspace = true }

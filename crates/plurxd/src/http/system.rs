@@ -42,6 +42,11 @@ pub struct ServerInfo {
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
+///
+/// It stays credential-free in both directions: a client probing an unknown
+/// candidate must not attach a saved token, and this response must not carry
+/// anything a stranger should not read. The cluster's other ingress origins
+/// are therefore not here — see `GET /api/v1/cluster/ingress`.
 pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
     let instance_id = state.store.instance_id().await?;
     let setup_required = state.store.count_users().await? == 0;
@@ -1137,11 +1142,23 @@ pub struct SettingsDto {
     /// Opt-in physical-device experiment: serve new live sessions as typeless
     /// sliding playlists from their first response. Off by default.
     pub hls_typeless_sliding: bool,
+    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
+    /// default; a client must also send `presentation:"vod"` per session.
+    pub vod_presentation: bool,
+    /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
+    /// built-in default. Never zero — "no working set" is not a configuration
+    /// this accepts (M3 handoff §6).
+    pub vod_working_set_bytes: String,
+    /// Server ceiling on one blocking VOD segment fetch, seconds.
+    pub vod_block_budget_secs: String,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
     pub cluster_media_pool_enabled: bool,
     pub cluster_media_pool_ready: bool,
+    /// Opt-in replacement of expired HLS owners. This remains independently
+    /// gated after remote placement is enabled so operators can stage rollout.
+    pub cluster_session_takeover_enabled: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -1305,6 +1322,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::CLUSTER_MEDIA_POOL_ENABLED).as_deref() == Some("1");
     let cluster_media_pool_ready =
         cluster_media_pool_enabled && state.media_pool.remote_rollout_ready().await;
+    let cluster_session_takeover_enabled =
+        setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     Ok(SettingsDto {
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
@@ -1330,8 +1349,12 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_scratch_max_bytes,
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
+        vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() == Some("1"),
+        vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
+        vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
+        cluster_session_takeover_enabled,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -1371,6 +1394,11 @@ pub struct UpdateSettings {
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
+    /// VOD presentation opt-in and its two serving knobs; absent leaves each
+    /// as-is. `vod_working_set_bytes` refuses 0 — see the handler.
+    pub vod_presentation: Option<bool>,
+    pub vod_working_set_bytes: Option<String>,
+    pub vod_block_budget_secs: Option<String>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1398,6 +1426,9 @@ pub struct UpdateSettings {
     /// until every committed voter is freshly publishing this protocol;
     /// disabling always succeeds.
     pub cluster_media_pool_enabled: Option<bool>,
+    /// Replace an expired remote HLS owner while retaining the public session
+    /// id. Requires remote placement to remain enabled and rollout-ready.
+    pub cluster_session_takeover_enabled: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -1438,6 +1469,24 @@ pub async fn update_settings(
         return Err(ApiError::Conflict(
             "cluster media placement cannot be enabled until every committed voter is reachable and publishing the current media protocol".into(),
         ));
+    }
+    if req.cluster_session_takeover_enabled == Some(true) {
+        let media_pool_enabled = match req.cluster_media_pool_enabled {
+            Some(enabled) => enabled,
+            None => {
+                state
+                    .store
+                    .get_setting(keys::CLUSTER_MEDIA_POOL_ENABLED)
+                    .await?
+                    .as_deref()
+                    == Some("1")
+            }
+        };
+        if !media_pool_enabled || !state.media_pool.remote_rollout_ready().await {
+            return Err(ApiError::Conflict(
+                "cluster media session takeover requires remote placement to be enabled and every committed voter to publish the current media protocol".into(),
+            ));
+        }
     }
     match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => {}
@@ -1506,10 +1555,103 @@ pub async fn update_settings(
             .put_setting(keys::HLS_TYPELESS_SLIDING, if on { "1" } else { "0" })
             .await?;
     }
+    if let Some(on) = req.vod_presentation {
+        state
+            .store
+            .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(raw) = req
+        .vod_working_set_bytes
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        let parsed: u64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest("vod_working_set_bytes must be a number".into()))?;
+        // A parsed zero is refused rather than stored: 0 means "not
+        // configured" to the serving layer, and an operator who typed it
+        // meant "no working set" — an answer this presentation cannot run
+        // with. Offer the honest alternatives instead of silently keeping a
+        // default (M3 handoff §6).
+        if parsed == 0 {
+            return Err(ApiError::BadRequest(
+                "vod_working_set_bytes cannot be 0: to stop VOD production turn \
+                 vod_presentation off; the smallest accepted working set is 268435456 (256 MiB)"
+                    .into(),
+            ));
+        }
+        if parsed < 256 * 1024 * 1024 {
+            return Err(ApiError::BadRequest(
+                "vod_working_set_bytes must be at least 268435456 (256 MiB)".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_WORKING_SET_BYTES, &parsed.to_string())
+            .await?;
+    }
+    if req
+        .vod_working_set_bytes
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        // Empty resets to the built-in default — this is the one numeric
+        // setting that refuses 0, so it needs an explicit way back.
+        state
+            .store
+            .put_setting(keys::VOD_WORKING_SET_BYTES, "")
+            .await?;
+    }
+    if let Some(raw) = req
+        .vod_block_budget_secs
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        let parsed: f64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest("vod_block_budget_secs must be a number".into()))?;
+        if !(1.0..=30.0).contains(&parsed) {
+            return Err(ApiError::BadRequest(
+                "vod_block_budget_secs must be between 1 and 30".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, &parsed.to_string())
+            .await?;
+    }
+    if req
+        .vod_block_budget_secs
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        state
+            .store
+            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, "")
+            .await?;
+    }
     if let Some(on) = req.cluster_media_pool_enabled {
         state
             .store
             .put_setting(keys::CLUSTER_MEDIA_POOL_ENABLED, if on { "1" } else { "0" })
+            .await?;
+        if !on {
+            state
+                .store
+                .put_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED, "0")
+                .await?;
+        }
+    }
+    if let Some(on) = req.cluster_session_takeover_enabled {
+        state
+            .store
+            .put_setting(
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+                if on { "1" } else { "0" },
+            )
             .await?;
     }
     if let Some(mode) = &req.sub_mode {
@@ -2191,10 +2333,11 @@ pub async fn stop_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session_id = state
-        .transcode
-        .active_session_ids()
-        .await
+    let mut candidates = state.transcode.active_session_ids().await;
+    // VOD sessions live in their own registry; without them here the
+    // Terminal::AdminStop arm is unreachable from its only intended caller.
+    candidates.extend(state.transcode.vod_live_session_ids().await);
+    let session_id = candidates
         .into_iter()
         .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
     let stopped = match session_id {
@@ -2251,6 +2394,7 @@ pub(crate) struct MetricsState {
     offline: Arc<crate::offline::OfflineMetrics>,
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
+    passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -2262,8 +2406,66 @@ impl FromRef<AppState> for MetricsState {
             offline: state.offline.metrics_handle(),
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
+            passive_membership: state.membership.metrics_handle(),
         }
     }
+}
+
+fn render_passive_membership_metrics(
+    view: plurx_core::cluster::membership::PassiveMembershipMetricsView,
+) -> String {
+    let mut out = format!(
+        "# HELP plurx_cluster_replicated Whether this process is configured as a replicated cluster node.\n\
+         # TYPE plurx_cluster_replicated gauge\n\
+         plurx_cluster_replicated {}\n\
+         # HELP plurx_cluster_membership_sample_valid Whether the cached membership and heartbeat sample is present and fresh.\n\
+         # TYPE plurx_cluster_membership_sample_valid gauge\n\
+         plurx_cluster_membership_sample_valid {}\n\
+         # HELP plurx_cluster_membership_sample_errors_total Failed membership sample or local heartbeat attempts.\n\
+         # TYPE plurx_cluster_membership_sample_errors_total counter\n\
+         plurx_cluster_membership_sample_errors_total {}\n",
+        u8::from(view.replicated),
+        u8::from(view.valid),
+        view.errors,
+    );
+    if let Some(age) = view.age_seconds {
+        out.push_str(&format!(
+            "# HELP plurx_cluster_membership_sample_age_seconds Age of the last complete membership sample.\n\
+             # TYPE plurx_cluster_membership_sample_age_seconds gauge\n\
+             plurx_cluster_membership_sample_age_seconds {age}\n"
+        ));
+    }
+    let Some(sample) = view.sample else {
+        return out;
+    };
+    let quorum_required = sample.voters / 2 + 1;
+    let heartbeat_quorum_available = sample.heartbeat_fresh_voters >= quorum_required;
+    out.push_str(&format!(
+        "# HELP plurx_cluster_nodes Committed cluster nodes by role and heartbeat freshness.\n\
+         # TYPE plurx_cluster_nodes gauge\n\
+         plurx_cluster_nodes{{role=\"voter\",heartbeat=\"fresh\"}} {}\n\
+         plurx_cluster_nodes{{role=\"voter\",heartbeat=\"stale\"}} {}\n\
+         plurx_cluster_nodes{{role=\"learner\",heartbeat=\"all\"}} {}\n\
+         # HELP plurx_cluster_quorum_required Voters required to form a Raft majority.\n\
+         # TYPE plurx_cluster_quorum_required gauge\n\
+         plurx_cluster_quorum_required {quorum_required}\n\
+         # HELP plurx_cluster_heartbeat_quorum_available Whether heartbeat-fresh voters currently meet the majority count.\n\
+         # TYPE plurx_cluster_heartbeat_quorum_available gauge\n\
+         plurx_cluster_heartbeat_quorum_available {}\n\
+         # HELP plurx_cluster_local_is_voter Whether this process is in the committed voter set.\n\
+         # TYPE plurx_cluster_local_is_voter gauge\n\
+         plurx_cluster_local_is_voter {}\n\
+         # HELP plurx_cluster_removals_pending Durable membership-removal fences awaiting resolution.\n\
+         # TYPE plurx_cluster_removals_pending gauge\n\
+         plurx_cluster_removals_pending {}\n",
+        sample.heartbeat_fresh_voters,
+        sample.heartbeat_stale_voters,
+        sample.learners,
+        u8::from(heartbeat_quorum_available),
+        u8::from(sample.local_is_voter),
+        sample.removals_pending,
+    ));
+    out
 }
 
 fn render_passive_raft_metrics(
@@ -2475,6 +2677,7 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
+    let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
@@ -2513,9 +2716,10 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{raft_metrics}{process_metrics}{playback_metrics}",
+         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
+        takeover_metrics = crate::media_sessions::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
     );
     (
@@ -2529,8 +2733,9 @@ pub(crate) async fn metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{Duration, Instant};
+
+    use super::*;
 
     #[test]
     fn snapshot_histogram_labels_are_derived_from_every_exported_bound() {
@@ -2607,6 +2812,40 @@ mod tests {
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
+    }
+
+    #[test]
+    fn membership_exposition_reports_quorum_without_node_identity_labels() {
+        use plurx_core::cluster::membership::{
+            MembershipMetricsSample, PassiveMembershipMetricsView,
+        };
+
+        let rendered = render_passive_membership_metrics(PassiveMembershipMetricsView {
+            replicated: true,
+            valid: true,
+            age_seconds: Some(3),
+            errors: 2,
+            sample: Some(MembershipMetricsSample {
+                voters: 4,
+                learners: 1,
+                heartbeat_fresh_voters: 3,
+                heartbeat_stale_voters: 1,
+                removals_pending: 1,
+                local_is_voter: true,
+            }),
+        });
+        assert!(rendered.contains("plurx_cluster_replicated 1"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_valid 1"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_age_seconds 3"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_errors_total 2"));
+        assert!(rendered.contains("plurx_cluster_nodes{role=\"voter\",heartbeat=\"fresh\"} 3"));
+        assert!(rendered.contains("plurx_cluster_nodes{role=\"voter\",heartbeat=\"stale\"} 1"));
+        assert!(rendered.contains("plurx_cluster_quorum_required 3"));
+        assert!(rendered.contains("plurx_cluster_heartbeat_quorum_available 1"));
+        assert!(rendered.contains("plurx_cluster_local_is_voter 1"));
+        assert!(rendered.contains("plurx_cluster_removals_pending 1"));
+        assert!(!rendered.contains("node_id"));
+        assert!(!rendered.contains("hostname"));
     }
 
     #[test]

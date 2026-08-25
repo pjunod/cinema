@@ -16,6 +16,7 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 mod fragindex;
+mod renditionplan;
 mod sqlite;
 mod telemetry;
 
@@ -69,13 +70,13 @@ use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
     CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
     Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaShape, MetadataPatch, NetworkPrior,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
-    User, WatchRollup, WatchState,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
+    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
+    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
+    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -151,6 +152,9 @@ pub mod keys {
     /// voter is publishing the current media protocol. Absent is deliberately
     /// off so rolling upgrades keep all starts local.
     pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
+    /// Opt in to automatic expired-session takeover after the web/proxy
+    /// interruption corpus passes. Kept separate from new-session placement.
+    pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -306,6 +310,18 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
+    /// default: even a client that sends `presentation:"vod"` keeps today's
+    /// live presentation until an operator turns this on.
+    pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
+    /// Node-wide byte budget for un-admitted VOD rendition working sets.
+    /// Absent takes the built-in default. A parsed zero is refused at the
+    /// settings surface: "no working set" and "not configured" are opposite
+    /// answers and only the caller knows which one was meant (M3 handoff §6).
+    pub const VOD_WORKING_SET_BYTES: &str = "playback.vod_working_set_bytes";
+    /// Server ceiling, in seconds, for one blocking VOD segment fetch. The
+    /// per-request `block_budget_secs` is clamped to this.
+    pub const VOD_BLOCK_BUDGET_SECS: &str = "playback.vod_block_budget_secs";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not
@@ -2033,6 +2049,22 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         lease_expires_at_ms: i64,
     ) -> Result<Vec<String>, StoreError>;
 
+    /// Read a bounded, oldest-first inventory of expired active routes that a
+    /// survivor may independently prove it can reproduce.
+    async fn expired_media_sessions(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+
+    /// Atomically transfer an exact expired owner epoch and its lease fence.
+    /// A racing survivor, delete, renewal, or maintenance pass makes the CAS
+    /// return `None` rather than publishing a second owner.
+    async fn claim_media_session_takeover(
+        &self,
+        takeover: &MediaSessionTakeover,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     async fn end_media_session(
         &self,
         session_id: &str,
@@ -2079,6 +2111,58 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
 
     /// Drop one file's index. `true` when a row was there.
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+
+    /// File ids this node holds node-local VOD rows for — indexes, plans, or
+    /// both. Bounded, and ordered so a sweep makes progress across ticks.
+    ///
+    /// The sweep this feeds cannot be a hook inside `delete_files`. That is a
+    /// *replicated* write, while these rows live in each node's own sidecar
+    /// and share no transaction with it — so a hook there would only ever
+    /// clean the node that happened to run the delete, and would miss every
+    /// node that was down at the time. Asking each node what it holds and
+    /// checking those ids against the replicated `files` table converges
+    /// everywhere, on each node's own schedule.
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError>;
+
+    /// Which of `file_ids` still exist in the replicated `files` table.
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError>;
+}
+
+/// Node-local rendition plans.
+///
+/// Node-local for [`FragmentIndexStore`]'s reason, and persisted for a
+/// different one. An index is a measurement: lose it and it is rebuilt from
+/// the file. A plan is a *decision* — ledger D10 makes it normative, and a
+/// client holds a playlist naming its boundaries by index. Re-deriving one is
+/// not a cheaper way to the same answer, because [`crate::fmp4::CutPolicy`] is
+/// built from tuning constants a release may change while the file, the
+/// pipeline and the index all stay identical. See
+/// [`crate::store::renditionplan`].
+#[async_trait]
+pub trait RenditionPlanStore: Send + Sync + 'static {
+    /// Store a plan unless the key already has one. `true` when this call is
+    /// the one that stored it.
+    ///
+    /// Not an upsert, and that is the point: the first plan written under a
+    /// key is the plan. A rendition whose boundaries must genuinely differ
+    /// gets a different key.
+    async fn put_rendition_plan(
+        &self,
+        rendition_key: &str,
+        file_id: i64,
+        plan: &crate::segplan::SegmentPlan,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<bool, StoreError>;
+
+    /// The stored plan, but only when it still describes this source.
+    async fn rendition_plan(
+        &self,
+        rendition_key: &str,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError>;
+
+    /// Drop every rendition plan for a file. Answers how many went.
+    async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
 }
 
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
@@ -2100,6 +2184,7 @@ pub trait Store:
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
+    + RenditionPlanStore
     + CoordinationStore
     + FencedPublicationStore
     + MediaSessionStore
@@ -2127,6 +2212,8 @@ impl<T> Store for T where
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
+        + RenditionPlanStore
+        + RenditionPlanStore
         + CoordinationStore
         + FencedPublicationStore
         + MediaSessionStore

@@ -268,6 +268,16 @@ pub struct CreateSession {
     /// audio. It is carried into every seek/reopen by the client and is never
     /// written back to the media file.
     pub audio_offset_ms: Option<i64>,
+    /// `"vod"` asks for the film-addressed immutable presentation (plan
+    /// §2.7). Anything else — including absent, which is what every shipped
+    /// client sends — keeps today's live presentation. A request, never a
+    /// promise: a title the VOD presentation cannot serve falls back to the
+    /// live presentation, and the response's `vod` field says which one the
+    /// client actually got.
+    pub presentation: Option<String>,
+    /// With `presentation:"vod"`: the client's ceiling for one blocking
+    /// segment fetch, in seconds. Clamped server-side.
+    pub block_budget_secs: Option<f64>,
 }
 
 impl CreateSession {
@@ -302,6 +312,11 @@ impl CreateSession {
             subtitle_burn: self.subtitle_burn.filter(|s| *s >= 0),
             audio_offset_ms: self.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000),
             hdr10: self.hdr10 == Some(true),
+            presentation: match self.presentation.as_deref() {
+                Some("vod") => crate::transcode::Presentation::Vod,
+                _ => crate::transcode::Presentation::Live,
+            },
+            block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
         }
     }
 }
@@ -414,7 +429,18 @@ pub async fn create(
         Some(h) => crate::transcode::snap_height(h),
     }
     .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let mut req = req;
     let native_subtitles = req.native_subtitles == Some(true);
+    if native_subtitles && req.presentation.as_deref() == Some("vod") {
+        // The multivariant playlist has no VOD arm yet (M4/M5 work beside
+        // the client flags); honoring both would hand the client a
+        // master.m3u8 URL that 404s on its first fetch.
+        tracing::info!(
+            file = id,
+            "vod presentation requested with native subtitles; keeping the live presentation"
+        );
+        req.presentation = None;
+    }
     let native_subtitle = req.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
         if let Some(index) = native_subtitle {
@@ -508,6 +534,16 @@ pub async fn create(
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
+        // The source snapshot a later takeover must match exactly (§7.3). A
+        // row we could not read records an impossible snapshot rather than a
+        // plausible one, so takeover refuses instead of reproducing a session
+        // against a file it never verified.
+        source_size: source.as_ref().map_or(0, |f| f.size),
+        source_mtime: source.as_ref().map_or(0, |f| f.mtime),
+        // Recorded from the same decision the worker will make, so a later
+        // takeover can tell whether this URL was ever serving a shape a
+        // successor is allowed to continue.
+        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
         request: worker_request,
     };
     let recipe_json = serde_json::to_string(&remote_request)?;
@@ -824,6 +860,7 @@ pub async fn create(
         lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
         recipe_json,
         response_json,
+        media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
     // Once activation begins, this owned task also owns the cleanup guard.
@@ -1021,15 +1058,21 @@ async fn abort_started_session(
 }
 
 async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
+    stop_owned_session_because(state, route, "superseded by cluster session").await
+}
+
+/// Same teardown with an honest reason: a client DELETE is a release, not a
+/// supersession, and the VOD tombstone cause keys off this string.
+async fn stop_owned_session_because(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    reason: &'static str,
+) {
     state.media_sessions.cache_miss(&route.session_id).await;
     if route.owner_node_id == state.node_id {
         state
             .transcode
-            .stop_session_for_request(
-                &route.incarnation_id,
-                &route.session_id,
-                "superseded by cluster session",
-            )
+            .stop_session_for_request(&route.incarnation_id, &route.session_id, reason)
             .await;
     } else {
         state
@@ -1199,7 +1242,7 @@ pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<Strin
     match route {
         Some(route) => {
             state.media_sessions.cache_route(route.clone()).await;
-            stop_owned_session(&state, &route).await;
+            stop_owned_session_because(&state, &route, "released by client").await;
         }
         None => {
             state.media_sessions.cache_miss(&session).await;
@@ -1249,6 +1292,8 @@ pub async fn start(
         // it keeps the SDR ladder it has always had.
         hdr10: None,
         audio_offset_ms: None,
+        presentation: None,
+        block_budget_secs: None,
     };
     create(
         AuthUser(user),
@@ -1408,6 +1453,14 @@ async fn playlist_local(
     session: &str,
     query: PlaylistQuery,
 ) -> Result<Response, ApiError> {
+    // A VOD session has exactly one playlist artifact — the plan's immutable
+    // media playlist — whatever query arrived. VOD creates refuse native
+    // subtitles, so a `?native=1` here is a stale client habit, answered with
+    // the only playlist this session has rather than a 404.
+    if let Some(answer) = state.transcode.vod_playlist(session).await {
+        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        return Ok(playlist_response(bytes));
+    }
     if query.native != Some(1) {
         return video_playlist_local(state, session).await;
     }
@@ -1526,12 +1579,23 @@ pub async fn video_playlist(
 }
 
 async fn video_playlist_local(state: &AppState, session: &str) -> Result<Response, ApiError> {
-    let bytes = state
-        .transcode
-        .playlist(session)
-        .await
-        .map_err(|err| playlist_error(session, err))?;
-    Ok(playlist_response(bytes))
+    if let Some(answer) = state.transcode.vod_playlist(session).await {
+        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        return Ok(playlist_response(bytes));
+    }
+    match state.transcode.playlist(session).await {
+        Ok(bytes) => Ok(playlist_response(bytes)),
+        Err(PlaylistError::SessionGone) if vod_resurrected(state, session).await => {
+            match state.transcode.vod_playlist(session).await {
+                Some(answer) => {
+                    let bytes = answer.map_err(|err| vod_error(session, err))?;
+                    Ok(playlist_response(bytes))
+                }
+                None => Err(playlist_error(session, PlaylistError::SessionGone)),
+            }
+        }
+        Err(err) => Err(playlist_error(session, err)),
+    }
 }
 
 /// One native WebVTT rendition's media playlist. Its segments mirror the
@@ -1740,7 +1804,15 @@ async fn exact_hls_context(
     else {
         return context;
     };
-    let Ok(Some(opened)) = state.transcode.segment(session, "init.mp4").await else {
+    // A fenced successor names its init after its ownership epoch, so the
+    // object to probe comes from the session, not from a literal. Asking for
+    // the wrong name does not fail fast: `segment` waits for a segment that
+    // will never be produced, stalling every playlist request for the full
+    // production wait before falling back to the scanner's guessed tier.
+    let Some(init_object) = state.transcode.session_init_object(session).await else {
+        return context;
+    };
+    let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
         return context;
     };
     // Initialization segments are a few KiB. Bound malformed input so a
@@ -2618,6 +2690,201 @@ fn etag_matches(request: Option<&str>, etag: &str) -> bool {
     })
 }
 
+/// Try to resurrect a reaped VOD session from its durable route (plan §2.5).
+/// Only an active, unexpired route this node owns qualifies — a released
+/// route (DELETE, supersession) stays dead, which is what keeps every
+/// terminal cause terminal.
+async fn vod_resurrected(state: &AppState, session: &str) -> bool {
+    let Ok(Some(route)) = state.media_sessions.route(session).await else {
+        return false;
+    };
+    if route.owner_node_id != state.node_id
+        || route.state != "active"
+        || route.lease_expires_at_ms <= unix_ms()
+    {
+        return false;
+    }
+    state
+        .transcode
+        .vod_resurrect(&route.recipe_json, session, route.user_id)
+        .await
+}
+
+/// Map a VOD serving refusal to its typed response (plan §2.3).
+fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiError {
+    use crate::vodserve::VodError;
+    let log = |code: &str, message: &str| {
+        tracing::warn!(
+            session = %crate::transcode::session_log_id(session),
+            code,
+            "vod request refused: {message}"
+        );
+    };
+    match err {
+        // The third outcome: the deadline passed with the segment still
+        // unproduced. Retryable by contract, and says so.
+        VodError::Pending { retry_after } => {
+            let secs = retry_after.as_secs().max(1);
+            log("segment_pending", "the segment is not materialized yet");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_pending",
+                format!("the segment is being produced; retry in {secs}s"),
+            )
+        }
+        VodError::Busy => {
+            log("segment_wait_busy", "blocked-GET caps reached");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_wait_busy",
+                "too many blocked fetches for this session; retry shortly",
+            )
+        }
+        VodError::ProducerFailed(reason) => {
+            log("producer_failed", &reason);
+            ApiError::typed(StatusCode::BAD_GATEWAY, "producer_failed", &reason)
+        }
+        VodError::Gone(cause) => {
+            log("media_session_ended", &format!("{cause:?}"));
+            ApiError::typed(
+                StatusCode::GONE,
+                "media_session_ended",
+                "this session has ended and will not resume",
+            )
+        }
+        VodError::Io(error) => ApiError::Internal(error.to_string()),
+    }
+}
+
+/// Serve one VOD segment (or the init) with the immutable-cache headers the
+/// plan's §2.1 URIs deserve. Range and conditional requests are honoured; the
+/// Apple High-tier init rewrite is applied exactly as on the live path.
+async fn vod_segment_response(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+    ready: crate::vodserve::SegmentReady,
+) -> Result<Response, ApiError> {
+    let mut ready = ready;
+    if ready.len == 0 {
+        return Err(ApiError::NotFound("segment"));
+    }
+    let content_type = segment_content_type(seg);
+    let etag = format!("\"{}\"", ready.etag);
+    if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, immutable".to_owned(),
+                ),
+            ],
+        )
+            .into_response());
+    }
+    let requested_range = match requested_byte_range(headers.range.as_deref(), ready.len) {
+        Ok(range) => range,
+        Err(()) => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::ETAG, etag),
+                ],
+            )
+                .into_response());
+        }
+    };
+    // Small objects — the init above all — are answered from memory so the
+    // Apple rewrite can run; segments stream.
+    if crate::transcode::is_init_object(seg) && ready.len <= INIT_INSPECTION_LIMIT_BYTES {
+        let mut init = Vec::with_capacity(ready.len.min(64 * 1024) as usize);
+        ready
+            .file
+            .read_to_end(&mut init)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if let Some(file_id) = state.transcode.vod_session_file_id(session).await {
+            if let Ok(Some(file)) = state.store.get_file(file_id).await {
+                if normalize_high_tier_hevc_init(&file, &mut init) {
+                    tracing::info!(
+                        session = %crate::transcode::session_log_id(session),
+                        "translated the HEVC High-tier initialization record for Apple HLS"
+                    );
+                }
+            }
+        }
+        let (status, body, content_range) = match requested_range {
+            Some((start, end)) => {
+                let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
+                let end = usize::try_from(end).map_err(|_| ApiError::NotFound("segment"))?;
+                if end >= init.len() {
+                    return Err(ApiError::NotFound("segment"));
+                }
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    init[start..=end].to_vec(),
+                    Some(format!("bytes {start}-{end}/{}", init.len())),
+                )
+            }
+            None => (StatusCode::OK, init, None),
+        };
+        let mut response = (StatusCode::OK, body).into_response();
+        *response.status_mut() = status;
+        let headers_mut = response.headers_mut();
+        headers_mut.insert(header::CONTENT_TYPE, content_type.parse().expect("mime"));
+        headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
+        headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
+        headers_mut.insert(
+            header::CACHE_CONTROL,
+            "private, max-age=3600, immutable".parse().expect("cache"),
+        );
+        if let Some(range) = content_range {
+            headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
+        }
+        return Ok(response);
+    }
+    let (status, len, content_range) = match requested_range {
+        Some((start, end)) => {
+            use tokio::io::AsyncSeekExt;
+            ready
+                .file
+                .seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            (
+                StatusCode::PARTIAL_CONTENT,
+                end - start + 1,
+                Some(format!("bytes {start}-{end}/{}", ready.len)),
+            )
+        }
+        None => (StatusCode::OK, ready.len, None),
+    };
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
+        tokio::io::AsyncReadExt::take(ready.file, len),
+    ));
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    let headers_mut = response.headers_mut();
+    headers_mut.insert(header::CONTENT_TYPE, content_type.parse().expect("mime"));
+    headers_mut.insert(header::CONTENT_LENGTH, len.into());
+    headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
+    headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
+    headers_mut.insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600, immutable".parse().expect("cache"),
+    );
+    if let Some(range) = content_range {
+        headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
+    }
+    Ok(response)
+}
+
 async fn segment_local(
     state: &AppState,
     session: &str,
@@ -2625,6 +2892,25 @@ async fn segment_local(
     headers: &RelayHeaders,
 ) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
+
+    // The VOD presentation's three-outcome contract dispatches first; `None`
+    // falls through to the live path untouched. A session neither registry
+    // knows may be a reaped VOD handle whose durable route is still live —
+    // resurrect it and ask once more before giving up.
+    let mut vod_answer = state.transcode.vod_segment(session, seg).await;
+    if vod_answer.is_none()
+        && state.transcode.session_status(session).await.is_none()
+        && vod_resurrected(state, session).await
+    {
+        vod_answer = state.transcode.vod_segment(session, seg).await;
+    }
+    if let Some(answer) = vod_answer {
+        return match answer {
+            Ok(Some(ready)) => vod_segment_response(state, session, seg, headers, ready).await,
+            Ok(None) => Err(ApiError::NotFound("segment")),
+            Err(err) => Err(vod_error(session, err)),
+        };
+    }
 
     let mut opened = match state.transcode.segment(session, seg).await {
         Ok(Some(opened)) => opened,
@@ -2675,7 +2961,7 @@ async fn segment_local(
                 .into_response());
         }
     };
-    if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -2731,7 +3017,7 @@ async fn segment_local(
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()));
     }
-    if seg == "init.mp4" && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
+    if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
             session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,
@@ -3520,6 +3806,8 @@ mod tests {
             preserve_dolby_vision: None,
             hdr10: None,
             audio_offset_ms: Some(20_000),
+            presentation: None,
+            block_budget_secs: None,
         }
         .into_request(7, 1080);
 
@@ -3547,6 +3835,8 @@ mod tests {
             preserve_dolby_vision: None,
             hdr10: None,
             audio_offset_ms: None,
+            presentation: None,
+            block_budget_secs: None,
         }
         .into_request(5615, 2160);
         assert_eq!(request.subtitle_burn, Some(5));

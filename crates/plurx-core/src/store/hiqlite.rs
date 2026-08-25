@@ -55,6 +55,9 @@ const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
 pub const AUTH_PROTOCOL_VERSION: i64 = 4;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
+const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
+const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
+const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 
 const AUTH_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_meta (
@@ -605,6 +608,42 @@ async fn time_store_operation<T>(
     result
 }
 
+fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
+    matches!(
+        result,
+        Err(StoreError::Database(message)) if message == REPLICATED_STORE_TIMEOUT
+    )
+}
+
+async fn time_authority_read_with_retry<T, F, Fut>(
+    metrics: &'static StoreOperationMetrics,
+    mut operation: F,
+) -> Result<T, StoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, StoreError>>,
+{
+    for attempt in 1..=AUTHORITY_READ_MAX_ATTEMPTS {
+        let result = time_store_operation(
+            metrics,
+            StoreOperationClass::AuthorityRead,
+            operation(),
+            |_| true,
+        )
+        .await;
+        if !is_replicated_store_timeout(&result) || attempt == AUTHORITY_READ_MAX_ATTEMPTS {
+            return result;
+        }
+        tracing::warn!(
+            attempt,
+            max_attempts = AUTHORITY_READ_MAX_ATTEMPTS,
+            "replicated authority read timed out; retrying"
+        );
+        tokio::time::sleep(AUTHORITY_READ_RETRY_DELAY).await;
+    }
+    unreachable!("the bounded authority-read retry loop always returns")
+}
+
 /// Render fixed-cardinality process metrics for all replicated Store calls.
 ///
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
@@ -660,16 +699,16 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        #[cfg(feature = "cluster-read-cost-validation")]
-        self.operations
-            .consistent_query_calls
-            .fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
-            &STORE_OPERATION_METRICS,
-            StoreOperationClass::AuthorityRead,
-            timeout_store(self.inner().query_consistent_map(sql, params)),
-            |_| true,
-        )
+        time_authority_read_with_retry(&STORE_OPERATION_METRICS, || {
+            #[cfg(feature = "cluster-read-cost-validation")]
+            self.operations
+                .consistent_query_calls
+                .fetch_add(1, Ordering::Relaxed);
+            timeout_store(
+                self.inner()
+                    .query_consistent_map(sql.clone(), params.clone()),
+            )
+        })
         .await
     }
 
@@ -1378,7 +1417,7 @@ impl HiqliteAuthStore {
             super::hiqlite_catalog::local_catalog_truth_digest(self.client()),
         )
         .await
-        .map_err(|_| StoreError::Database("replicated store operation timed out".to_owned()))?
+        .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))?
     }
 
     async fn local_auth_dump(&self) -> Result<AuthStoreDump, StoreError> {
@@ -1402,7 +1441,7 @@ impl HiqliteAuthStore {
             )
             .await
             .map_err(|_| {
-                StoreError::Database("replicated store operation timed out".to_owned())
+                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
             })??,
             durable_digest: tokio::time::timeout(
                 STORE_TIMEOUT,
@@ -1410,7 +1449,7 @@ impl HiqliteAuthStore {
             )
             .await
             .map_err(|_| {
-                StoreError::Database("replicated store operation timed out".to_owned())
+                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
             })??,
             cluster_meta: self.client().query_map(
                 "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
@@ -1635,6 +1674,68 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
 
     async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
         self.telemetry.forget_fragment_index(file_id).await
+    }
+
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
+        // The sidecar's own rows -- this node's, which is the whole point.
+        self.telemetry.vod_row_file_ids(limit).await
+    }
+
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+        // The replicated side. Every node agrees on this answer, which is why
+        // the sweep converges rather than each node guessing -- and why a node
+        // that was down for the delete still cleans up on its next tick.
+        //
+        // One query per id rather than an `IN` list: the caller's window is
+        // small and bounded, and building an n-placeholder statement here
+        // would be the only dynamic SQL in this file.
+        let mut alive = Vec::new();
+        for id in file_ids {
+            let rows: Vec<IdRow> = self
+                .client
+                .query_map("SELECT id FROM files WHERE id = $1", hiqlite::params!(*id))
+                .await?;
+            if !rows.is_empty() {
+                alive.push(*id);
+            }
+        }
+        Ok(alive)
+    }
+}
+
+#[async_trait]
+impl crate::store::RenditionPlanStore for HiqliteAuthStore {
+    async fn put_rendition_plan(
+        &self,
+        rendition_key: &str,
+        file_id: i64,
+        plan: &crate::segplan::SegmentPlan,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<bool, StoreError> {
+        let now_ms = self.clock.now()?;
+        self.telemetry
+            .put_rendition_plan(
+                rendition_key.to_owned(),
+                file_id,
+                plan.clone(),
+                source.clone(),
+                now_ms,
+            )
+            .await
+    }
+
+    async fn rendition_plan(
+        &self,
+        rendition_key: &str,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError> {
+        self.telemetry
+            .rendition_plan(rendition_key.to_owned(), source.clone())
+            .await
+    }
+
+    async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
+        self.telemetry.forget_rendition_plans(file_id).await
     }
 }
 
@@ -2277,7 +2378,7 @@ where
 {
     tokio::time::timeout(STORE_TIMEOUT, operation)
         .await
-        .map_err(|_| StoreError::Database("replicated store operation timed out".to_owned()))?
+        .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))?
         .map_err(database_error)
 }
 
@@ -2402,6 +2503,19 @@ impl From<&mut Row<'_>> for PingRow {
 
 struct CountRow {
     count: i64,
+}
+
+/// One `id` column. Existence is the whole answer the sweep needs, but the
+/// column still has to be decoded for the row to be built.
+struct IdRow {
+    #[allow(dead_code)]
+    id: i64,
+}
+
+impl<'a> From<&'a mut hiqlite::Row<'_>> for IdRow {
+    fn from(row: &'a mut hiqlite::Row<'_>) -> IdRow {
+        IdRow { id: row.get("id") }
+    }
 }
 
 struct PrometheusStoreRow {
@@ -3053,6 +3167,63 @@ mod tests {
             count(StoreOperationClass::Write, StoreOperationOutcome::Error),
             statement_error_before + 1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authority_reads_retry_one_replicated_deadline_and_nothing_else() {
+        let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retried = time_authority_read_with_retry(metrics, {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt == 0 {
+                        Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the bounded retry recovers");
+        assert_eq!(retried, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Error,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1,
+            "the timed-out attempt remains visible in metrics"
+        );
+        assert_eq!(
+            metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = time_authority_read_with_retry(metrics, {
+            let attempts = Arc::clone(&permanent_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database("bad row".to_owned())) }
+            }
+        })
+        .await
+        .expect_err("non-timeout database errors are terminal");
+        assert_eq!(error.to_string(), "database error: bad row");
+        assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
     }
 
     #[test]

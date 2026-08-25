@@ -15,6 +15,10 @@ struct ServerInfo: Codable {
     var instanceId: String?
 }
 
+struct ClusterIngress: Codable {
+    var nodeUrls: [String]?
+}
+
 struct User: Codable {
     let id: Int
     let username: String

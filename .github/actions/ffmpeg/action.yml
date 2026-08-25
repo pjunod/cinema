@@ -1,6 +1,6 @@
 name: Provision ffmpeg
 description: >-
-  Install ffmpeg for a validation lane, print the build that actually resolved,
+  Resolve ffmpeg for a validation lane, print the build that actually resolved,
   and fail when it is not the major that lane's assertions were written against.
 
 # Every job that needed ffmpeg used to run `apt-get install -y ffmpeg` on
@@ -31,23 +31,39 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install ffmpeg
+    - name: Resolve ffmpeg
       shell: bash
+      env:
+        WANT_MAJOR: ${{ inputs.major }}
       run: |
         set -euo pipefail
-        # Hosted images run as a non-root user and have sudo; a container job
-        # is already root and has neither sudo nor the mirror list below.
-        sudo=""
-        if [ "$(id -u)" -ne 0 ]; then sudo="sudo"; fi
+        if command -v ffmpeg >/dev/null 2>&1; then
+          version_output="$(ffmpeg -version)"
+          banner="${version_output%%$'\n'*}"
+          got="$(printf '%s\n' "$banner" \
+            | sed -n '1s/^ffmpeg version n\?\([0-9][0-9]*\).*/\1/p')"
+          if [ "$got" = "$WANT_MAJOR" ]; then
+            exit 0
+          fi
+        fi
+
+        if [ "$(id -u)" -ne 0 ]; then
+          echo "::error::ffmpeg $WANT_MAJOR must be provisioned on this runner" >&2
+          exit 1
+        fi
+
+        # Root container jobs start from a bare distro image and install the
+        # requested package here. Persistent runner VMs are provisioned by
+        # Ansible and take the early return above.
         sources=/etc/apt/sources.list.d/ubuntu.sources
         if [ -f "$sources" ]; then
-          $sudo sed -i \
+          sed -i \
             's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
             "$sources"
         fi
-        $sudo apt-get -o Acquire::Retries=3 update
+        apt-get -o Acquire::Retries=3 update
         DEBIAN_FRONTEND=noninteractive \
-          $sudo apt-get -o Acquire::Retries=3 install -y ffmpeg
+          apt-get -o Acquire::Retries=3 install -y ffmpeg
 
     - name: Record and enforce the resolved ffmpeg build
       shell: bash

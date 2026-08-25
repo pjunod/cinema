@@ -424,8 +424,7 @@ impl HiqliteAuthStore {
                     format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
                     params!(id),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -435,8 +434,7 @@ impl HiqliteAuthStore {
                 format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
                 params!(),
             )
-            .await
-            .map_err(database_error)?
+            .await?
             .into_iter()
             .map(TryInto::try_into)
             .collect()
@@ -465,8 +463,7 @@ impl LibraryStore for HiqliteAuthStore {
                     now
                 ),
             )
-            .await
-            .map_err(database_error)?;
+            .await?;
         row.try_into()
     }
 
@@ -493,8 +490,7 @@ impl LibraryStore for HiqliteAuthStore {
                         id
                     ),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -515,8 +511,7 @@ impl LibraryStore for HiqliteAuthStore {
                     sql,
                     params!(scan_interval_mins.max(0), refresh_interval_mins.max(0), id),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -546,8 +541,7 @@ impl LibraryStore for HiqliteAuthStore {
                     format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
                     params!(id),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -557,8 +551,7 @@ impl LibraryStore for HiqliteAuthStore {
                 format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
                 params!(),
             )
-            .await
-            .map_err(database_error)?
+            .await?
             .into_iter()
             .map(TryInto::try_into)
             .collect()

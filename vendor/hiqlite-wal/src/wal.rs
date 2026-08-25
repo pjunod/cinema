@@ -397,6 +397,13 @@ impl WalFile {
 
         if let Some(memo) = memo
             && memo.last_wal_no == self.wal_no
+            // Purging every retained entry deletes the last WAL and creates a
+            // fresh file numbered one. A reader memo from the deleted file is
+            // an ABA match on `wal_no`, but its byte offset belongs to the old
+            // generation. Advancing `id_from` during an in-place front purge
+            // has the same shape. A memo below the current logical boundary
+            // must therefore be discarded before its offset is reused.
+            && memo.last_log_id >= self.id_from
             && memo.last_log_id < id_from
         {
             // we can use the memoized last log as our start position
@@ -1552,6 +1559,36 @@ mod tests {
         assert_eq!(back.data_start, None);
         assert_eq!(back.data_end, None);
 
+        Ok(())
+    }
+
+    #[test]
+    fn reused_wal_number_rejects_a_memo_from_the_purged_generation() -> Result<(), Error> {
+        let base_path = format!("{}/reused_wal_number_memo", PATH);
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut buf = Vec::with_capacity(32);
+        let mut wal = WalFile::new(1, &base_path, 0, 0, MB2)?;
+        wal.create_file(&mut buf)?;
+        wal.mmap_mut()?;
+        buf.clear();
+        wal.append_log(10_001, b"new generation", &mut buf)?;
+
+        // File number one was also used by the completely purged generation.
+        // Its memo points beyond the new entry even though its log id is below
+        // the new file's first retained index. Reusing that byte offset used to
+        // make a real first entry look absent immediately after snapshot install.
+        let mut memo = Some(LogReadMemo {
+            last_wal_no: 1,
+            last_log_id: 42,
+            data_end: 256,
+        });
+        let mut logs = Vec::with_capacity(1);
+        wal.read_logs(10_001, 10_001, &mut memo, &mut logs)?;
+
+        assert_eq!(logs, vec![(10_001, b"new generation".to_vec())]);
+        fs::remove_dir_all(base_path)?;
         Ok(())
     }
 }

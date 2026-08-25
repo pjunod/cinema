@@ -37,15 +37,18 @@ use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
     ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
-    MediaSessionRequestClaim, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
-    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingStateWrite, TraktAuth,
+    MediaSessionRequestClaim, MediaSessionTakeover, MetadataPatch, NetworkPriorObservation,
+    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
+    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
-use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
+use plurx_core::segplan::{
+    FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
+    SEGPLAN_VERSION,
+};
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
@@ -328,6 +331,16 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
+    // The orphan sweep's two halves. Node-local on one side and replicated on
+    // the other, which is the reason the sweep exists rather than a hook in
+    // `delete_files`.
+    "vod_row_file_ids",
+    "surviving_file_ids",
+];
+const RENDITION_PLAN_METHODS: &[&str] = &[
+    "put_rendition_plan",
+    "rendition_plan",
+    "forget_rendition_plans",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
     "observe_network_prior",
@@ -343,6 +356,8 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "media_session_route",
     "media_session_route_by_incarnation",
     "renew_media_sessions",
+    "expired_media_sessions",
+    "claim_media_session_takeover",
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
@@ -941,6 +956,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: r#"{"version":1}"#.to_owned(),
                 response_json: r#"{"session":"a"}"#.to_owned(),
+                media_origin_ms: 12_500,
                 now_ms: 130,
                 lease_expires_at_ms: 330,
             })
@@ -995,6 +1011,10 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-b".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                // Write-once at activation. Every generation's frontier is
+                // measured from this zero, so a claim that rewrote it would
+                // silently reinterpret every offset already published.
+                media_origin_ms: 90_000,
                 now_ms: 145,
                 lease_expires_at_ms: 345,
             })
@@ -1027,6 +1047,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 150,
                 lease_expires_at_ms: 350,
             })
@@ -1086,6 +1107,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 160,
                 lease_expires_at_ms: 360,
             })
@@ -1108,6 +1130,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 161,
                 lease_expires_at_ms: 361,
             })
@@ -1155,6 +1178,9 @@ async fn media_session_contract_runs_through_dyn_store() {
                     &[MediaSessionRenewal {
                         incarnation_id: incarnation_a2.to_owned(),
                         owner_epoch: 1,
+                        produced_playable_through_ms: 20_000,
+                        fetched_through_ms: 10_000,
+                        media_sequence: 5,
                     }],
                     200,
                     400,
@@ -1164,6 +1190,60 @@ async fn media_session_contract_runs_through_dyn_store() {
             vec![incarnation_a2.to_owned()],
             "{backend}"
         );
+        let renewed_route = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect renewed frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(
+            renewed_route.produced_playable_through_ms, 20_000,
+            "{backend}"
+        );
+        assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(renewed_route.media_sequence, 5, "{backend}");
+
+        // Monotone progress (§8.8). A generation that restarts its local
+        // encoder resets its own index and will heartbeat a lower frontier;
+        // the replicated high-water mark must absorb that, not follow it.
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "node-a",
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_a2.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 4_000,
+                        fetched_through_ms: 1_000,
+                        media_sequence: 1,
+                    }],
+                    201,
+                    // The same expiry the live renewal set: this fixture is
+                    // about the frontier columns, and must not disturb the
+                    // exact-expiry refusal asserted below.
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew with a regressed frontier: {error}")),
+            vec![incarnation_a2.to_owned()],
+            "{backend}: a regressed frontier still renews the lease"
+        );
+        let held = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect held frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(held.produced_playable_through_ms, 20_000, "{backend}");
+        assert_eq!(held.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(
+            held.media_sequence, 5,
+            "{backend}: the sequence high-water mark is what a successor \
+             starts above; it may never move backwards"
+        );
+        // P6's guarantee, restored: renewing the session renews its typed
+        // reader pin, so the generation it is reading cannot be retired out
+        // from under it. The renewal batch's placeholder scramble broke this
+        // and the assertion was inverted to match; the assertion is the
+        // contract, not the observation.
         assert!(store
             .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
             .await
@@ -1175,6 +1255,9 @@ async fn media_session_contract_runs_through_dyn_store() {
                 &[MediaSessionRenewal {
                     incarnation_id: incarnation_a2.to_owned(),
                     owner_epoch: 1,
+                    produced_playable_through_ms: 30_000,
+                    fetched_through_ms: 15_000,
+                    media_sequence: 6,
                 }],
                 400,
                 500,
@@ -1197,6 +1280,59 @@ async fn media_session_contract_runs_through_dyn_store() {
                 .is_empty(),
             "{backend}: owner inventory must exclude an expired lease"
         );
+
+        let expired = store
+            .expired_media_sessions(399, 64)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
+        let expired_b = expired
+            .iter()
+            .find(|route| route.session_id == session_b)
+            .unwrap_or_else(|| panic!("{backend}: expired route must be offered for takeover"));
+        assert_eq!(expired_b.owner_epoch, 1, "{backend}");
+        assert_eq!(expired_b.media_origin_ms, 90_000, "{backend}");
+        let takeover = MediaSessionTakeover {
+            incarnation_id: incarnation_b.to_owned(),
+            expected_owner_node_id: "node-b".to_owned(),
+            expected_owner_epoch: 1,
+            next_owner_node_id: "node-c".to_owned(),
+            now_ms: 399,
+            lease_expires_at_ms: 600,
+        };
+        let taken = store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim expired session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: eligible survivor must win takeover"));
+        assert_eq!(taken.session_id, session_b, "{backend}");
+        assert_eq!(taken.owner_node_id, "node-c", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+        assert_eq!(taken.discontinuity_sequence, 1, "{backend}");
+        assert_eq!(
+            taken.media_origin_ms, 90_000,
+            "{backend}: a claim moves ownership, never the timeline's zero"
+        );
+        assert!(store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay takeover CAS: {error}"))
+            .is_none());
+        assert!(store
+            .renew_media_sessions(
+                "node-b",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_b.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 1,
+                    fetched_through_ms: 1,
+                    media_sequence: 1,
+                }],
+                400,
+                700,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale owner renewal: {error}"))
+            .is_empty());
 
         let ended = store
             .end_media_session(session_a2, 410)
@@ -1285,6 +1421,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 440,
                 lease_expires_at_ms: 640,
             })
@@ -1319,10 +1456,9 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: reject expired owner: {error}")));
 
-        // Later request claims already ran bounded maintenance at t=430 and
-        // ended node-b's expired route. Inspect it inside the 24-hour terminal
-        // retention window before advancing past that window below.
-        let maintenance_now = 999;
+        // Expired routes remain active for one bounded takeover window, then
+        // maintenance terminals an unclaimed or abandoned successor.
+        let maintenance_now = 60_601;
         store
             .maintain_media_sessions(maintenance_now)
             .await
@@ -1356,6 +1492,148 @@ async fn media_session_contract_runs_through_dyn_store() {
     .await;
 }
 
+/// Ending an incarnation that has just been taken over must act on the owner
+/// it really has.
+///
+/// The route read that drives the end is not inside the mutation, so a claim
+/// can commit between the two. If the dependent statements trust that stale
+/// snapshot, the end clamps a lease the dead node no longer holds, leaves the
+/// successor's shared-cache pin behind, and hands the caller a route naming a
+/// host that is gone — so the abort is sent into the void while the
+/// replacement encoder keeps running and keeps its admission slot.
+#[tokio::test]
+async fn ending_a_taken_over_session_acts_on_the_current_owner() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("takeover-end-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let fingerprint = "e".repeat(64);
+        let incarnation = "00000000-0000-4000-8000-00000000e001";
+        let session = "00000000-0000-4000-8000-00000000e002";
+
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                user_id: user.id,
+                playback_id: "takeover-end-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-old".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 4_000,
+                now_ms: 1_000,
+                lease_expires_at_ms: 2_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+
+        let taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation.to_owned(),
+                expected_owner_node_id: "node-old".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "node-new".to_owned(),
+                now_ms: 2_000,
+                lease_expires_at_ms: 14_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the survivor must win the claim"));
+        assert_eq!(taken.owner_node_id, "node-new", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+
+        let ended = store
+            .end_media_session(session, 3_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ending a live session returns its route"));
+        assert_eq!(
+            ended.owner_node_id, "node-new",
+            "{backend}: the end must name the owner it is actually stopping"
+        );
+        assert_eq!(ended.owner_epoch, 2, "{backend}");
+
+        let route = store
+            .media_session_route(session)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read ended route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ended row is retained"));
+        assert_eq!(route.state, "ended", "{backend}");
+        assert!(
+            route.lease_expires_at_ms <= 3_000,
+            "{backend}: an ended incarnation keeps no live lease"
+        );
+        assert!(
+            store
+                .owned_media_sessions("node-new", 3_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: successor inventory: {error}"))
+                .is_empty(),
+            "{backend}: the successor must not still own an ended incarnation"
+        );
+
+        // The ended incarnation's coordination lease is clamped, not merely
+        // its session row: nothing may still hold `session:<incarnation>` at
+        // the successor's fence. A third node acquiring it cleanly is what
+        // proves the clamp landed on the owner the end actually had.
+        let reacquired = store
+            .acquire_lease(
+                &format!("session:{incarnation}"),
+                "node-third",
+                3_200,
+                9_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reacquire ended lease: {error}"));
+        assert!(
+            matches!(reacquired, LeaseClaim::Acquired(_)),
+            "{backend}: an ended incarnation leaves no live lease behind: {reacquired:?}"
+        );
+
+        // Idempotent, and still reporting the same owner.
+        let again = store
+            .end_media_session(session, 3_100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
+        assert_eq!(again.owner_node_id, "node-new", "{backend}");
+
+        // §7.2: a delete racing a takeover resolves to ended. Once ended, no
+        // survivor may claim the incarnation back into life.
+        assert!(
+            store
+                .expired_media_sessions(4_000, 64)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
+                .iter()
+                .all(|route| route.incarnation_id != incarnation),
+            "{backend}: an ended incarnation is not offered for takeover"
+        );
+        assert!(
+            store
+                .claim_media_session_takeover(&MediaSessionTakeover {
+                    incarnation_id: incarnation.to_owned(),
+                    expected_owner_node_id: "node-new".to_owned(),
+                    expected_owner_epoch: 2,
+                    next_owner_node_id: "node-third".to_owned(),
+                    now_ms: 4_000,
+                    lease_expires_at_ms: 16_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim an ended incarnation: {error}"))
+                .is_none(),
+            "{backend}: no replacement child may be created for an ended incarnation"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
     for_each_backend(|store, backend| async move {
@@ -1382,6 +1660,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                     owner_node_id: "cap-node".to_owned(),
                     recipe_json: "{}".to_owned(),
                     response_json: "{}".to_owned(),
+                    media_origin_ms: 0,
                     now_ms: 100,
                     lease_expires_at_ms: 10_000,
                 })
@@ -1452,6 +1731,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                 owner_node_id: "cap-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                media_origin_ms: 0,
                 now_ms: 1_003,
                 lease_expires_at_ms: 10_000,
             })
@@ -1541,6 +1821,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            media_origin_ms: 0,
             now_ms: 120,
             lease_expires_at_ms: 320,
         })
@@ -1606,6 +1887,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            media_origin_ms: 0,
             now_ms: 150,
             lease_expires_at_ms: 350,
         })
@@ -6323,6 +6605,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP INDEX transcode_cache_storage_generation;
              DROP TABLE cache_consumer_pins;
              DROP TABLE cache_storage_members;
+             DROP INDEX rendition_plans_by_file;
+             DROP TABLE rendition_plans;
              DROP TABLE fragment_indexes;
              ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
              ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
@@ -7807,6 +8091,7 @@ fn contract_inventory_matches_every_store_method() {
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
         FRAGMENT_INDEX_METHODS,
+        RENDITION_PLAN_METHODS,
         COORDINATION_METHODS,
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
@@ -7817,11 +8102,168 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 224, "review the Store method count");
+    assert_eq!(declared.len(), 231, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn rendition_plan_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");
+        let entry = |index: u32, start: u64, kind: PlanEntryKind, cut: PlanCut| PlanEntry {
+            index,
+            kind,
+            start_ticks: start,
+            duration_ticks: 112_128,
+            est_bytes: 48_000_000 + u64::from(index),
+            cut,
+            fragments: if kind == PlanEntryKind::Video { 4 } else { 0 },
+        };
+        let plan = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 16_000,
+            entries: vec![
+                entry(0, 0, PlanEntryKind::Video, PlanCut::Clean),
+                entry(1, 112_128, PlanEntryKind::Video, PlanCut::ByteCeiling),
+                entry(2, 224_256, PlanEntryKind::AudioTail, PlanCut::EndOfStream),
+            ],
+            target_duration: 15,
+        };
+
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing plan: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        assert!(
+            store
+                .put_rendition_plan("rk", 42, &plan, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a plan: {error}")),
+            "backend {backend}: storing the first plan under a key is the write"
+        );
+        let read = store
+            .rendition_plan("rk", &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the plan: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the plan it just stored"));
+        assert_eq!(read, plan, "backend {backend}");
+
+        // A plan is a decision a client already holds a playlist for, so a
+        // second one under the same key is refused rather than applied. A
+        // backend that upserted here would re-cut a rendition under the index
+        // a viewer is mid-seek against.
+        let mut recut = plan.clone();
+        recut.entries[0].duration_ticks = 999;
+        assert!(
+            !store
+                .put_rendition_plan("rk", 42, &recut, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a second plan: {error}")),
+            "backend {backend}: a second plan under one key must not be stored"
+        );
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-read: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: still stored")),
+            plan,
+            "backend {backend}: the first plan is still the plan"
+        );
+
+        // Invalidation by mismatch, the same discipline the index keeps.
+        let moved_on = SourceIdentity::new(8_192, 1_700_000_000_000, "fingerprint");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &moved_on)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a resized source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        let repiped = SourceIdentity::new(4_096, 1_700_000_000_000, "other-pipeline");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a repiped source: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        // One file carries several renditions; forgetting the file takes all
+        // of them and leaves another file's alone.
+        store
+            .put_rendition_plan("rk-720", 42, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store a second rendition: {error}"));
+        store
+            .put_rendition_plan("rk-other", 43, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store another file's: {error}"));
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the file's plans: {error}")),
+            2,
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .rendition_plan("rk-other", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: another file's plan: {error}"))
+                .is_some(),
+            "backend {backend}: forgetting one file must not take another's"
+        );
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget twice: {error}")),
+            0,
+            "backend {backend}"
+        );
+
+        // The sweep's two queries. Both backends must answer the same way, and
+        // they reach the answer differently: SQLite reads one database, while
+        // hiqlite asks its own sidecar what it holds and the replicated table
+        // which of those still exist. That split is the whole reason the sweep
+        // is per-node rather than a hook inside `delete_files`.
+        let held = store
+            .vod_row_file_ids(512)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list held rows: {error}"));
+        assert!(
+            held.contains(&43),
+            "backend {backend}: the surviving file's plan must still be listed, got {held:?}"
+        );
+        assert!(
+            held.windows(2).all(|pair| pair[0] < pair[1]),
+            "backend {backend}: ordered so consecutive sweeps make progress"
+        );
+
+        // Neither file id was ever inserted into `files`, so both are orphans
+        // — which is exactly what the sweep is looking for.
+        let alive = store
+            .surviving_file_ids(&held)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: check survivors: {error}"));
+        assert!(
+            alive.is_empty(),
+            "backend {backend}: no rows in `files`, so nothing survives, got {alive:?}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -7835,12 +8277,14 @@ async fn fragment_index_contract_runs_through_dyn_store() {
                     dts: 0,
                     duration: 28_016,
                     bytes: 104_452,
+                    video_bytes: 103_836,
                     class: CutClass::CleanIdr,
                 },
                 IndexRow {
                     dts: 28_016,
                     duration: 28_032,
                     bytes: 110_038,
+                    video_bytes: 109_422,
                     class: CutClass::Dirty,
                 },
             ],

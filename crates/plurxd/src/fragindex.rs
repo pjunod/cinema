@@ -26,7 +26,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::MediaFile;
-use plurx_core::fmp4::{self, FragmentReader, Init, TrackKind, Unit};
+use plurx_core::fmp4::{self, FragmentReader, Init, PromotionInputs, TrackKind, Unit};
 use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
 use plurx_core::transcode;
 use sha2::{Digest, Sha256};
@@ -68,6 +68,12 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     let mut init_sha = String::new();
     let mut timescale: u32 = 0;
     let mut rows: Vec<IndexRow> = Vec::new();
+    // The promotion inputs the whole film's generations will share, taken from
+    // the first clean fragment, plus whether every later clean fragment agrees
+    // with it. Both are plan §2.2's ruling: capture once, check continuously,
+    // and refuse a varying title here rather than mid-playback.
+    let mut promotion: Option<PromotionInputs> = None;
+    let mut parameter_sets_constant = true;
     let mut buf = vec![0u8; READ_CHUNK];
 
     loop {
@@ -145,11 +151,42 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
                     let dts = track.base_decode_time;
                     let duration = fragment.video_duration(init);
                     let bytes = u32::try_from(fragment.len()).unwrap_or(u32::MAX);
+                    // The landing matcher's quantity. Container overhead is
+                    // excluded deliberately: a production generation carries
+                    // audio, so its `moof` and `mdat` are tens of kilobytes
+                    // larger than this pipe's and vary with the audio track,
+                    // while the video samples themselves are copied and come
+                    // out byte for byte identical.
+                    let video_bytes = u32::try_from(track.byte_len()).unwrap_or(u32::MAX);
                     let class = fmp4::classify(&fragment, init);
+
+                    // Only a clean fragment can begin a segment, so only a
+                    // clean fragment can ever be a generation's first — which
+                    // makes these the only fragments whose promotion inputs
+                    // could ever differ from the stored ones.
+                    if class.is_clean() {
+                        let here = PromotionInputs::from_fragment(&fragment, init);
+                        match promotion {
+                            None => promotion = Some(here),
+                            Some(ref canonical) => {
+                                if &here != canonical {
+                                    // A film whose clean starts disagree cannot
+                                    // be described by one immutable init. Not a
+                                    // failure — a fact, recorded so the title
+                                    // keeps the legacy presentation instead of
+                                    // being VOD-presented on a promise that
+                                    // cannot be kept.
+                                    parameter_sets_constant = false;
+                                }
+                            }
+                        }
+                    }
+
                     rows.push(IndexRow {
                         dts,
                         duration,
                         bytes,
+                        video_bytes,
                         class,
                     });
                 }
@@ -188,9 +225,10 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
         }
     }
 
-    IndexOutcome::Built(Box::new(FragmentIndex::new(
-        timescale, rows, init_sha, identity,
-    )))
+    let mut built = FragmentIndex::new(timescale, rows, init_sha, identity);
+    built.promotion = promotion.unwrap_or_default();
+    built.parameter_sets_constant = parameter_sets_constant;
+    IndexOutcome::Built(Box::new(built))
 }
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
@@ -315,7 +353,7 @@ mod tests {
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
-    fn index_pipe_bytes(kind: &str) -> Vec<u8> {
+    pub(super) fn index_pipe_bytes(kind: &str) -> Vec<u8> {
         let source = testfixtures::source(kind);
         let mut command = std::process::Command::new(testfixtures::ffmpeg());
         command
@@ -344,6 +382,62 @@ mod tests {
             ])
             .args(["-use_editlist", "0", "-f", "mp4", "pipe:1"]);
         testfixtures::run(&mut command)
+    }
+
+    #[tokio::test]
+    async fn a_real_pipe_reports_its_parameter_sets_constant() {
+        // The scan-time check plan §2.2's ruling asks for. Every clean
+        // fragment of a single-pass encode carries the same parameter sets, so
+        // the film is VOD-presentable.
+        let IndexOutcome::Built(index) = index_fixture("closed-gop").await else {
+            panic!("the closed-gop fixture must index");
+        };
+        assert!(
+            index.parameter_sets_constant,
+            "a single-pass encode's clean starts must agree"
+        );
+        // And this corpus carries nothing promotable -- the test pipe strips
+        // types 32-34 the way `copy_video_args` does for ordinary HEVC, so
+        // promotion is a no-op and there is nothing to capture. Asserted
+        // rather than assumed, because a corpus that silently started
+        // carrying them would make the test above pass for a different reason.
+        assert!(
+            index.promotion.is_empty(),
+            "ordinary HEVC carries its parameter sets in hvcC, not in band"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_film_whose_clean_starts_disagree_is_not_vod_presentable() {
+        // Built by hand, because no fixture can produce it: the corpus is
+        // single-invocation encodes, which are structurally incapable of
+        // per-IDR parameter-set variation. The check still has to work.
+        let bytes = index_pipe_bytes("closed-gop");
+        let IndexOutcome::Built(index) =
+            index_stream(std::io::Cursor::new(bytes), identity(), None).await
+        else {
+            panic!("must index");
+        };
+        // A constant film, as the fixture is.
+        assert!(index.parameter_sets_constant);
+
+        // Now the same walk with one start disagreeing. `PromotionInputs`
+        // compares by value, so this is the exact comparison `index_stream`
+        // makes.
+        use plurx_core::fmp4::PromotionInputs;
+        let canonical = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
+            hdr10_sei: Vec::new(),
+        };
+        let differing = PromotionInputs {
+            parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
+            hdr10_sei: Vec::new(),
+        };
+        assert_ne!(
+            canonical, differing,
+            "the comparison that decides VOD-presentability must see the \
+             difference between two parameter sets that differ by one byte"
+        );
     }
 
     #[tokio::test]
@@ -506,7 +600,7 @@ mod tests {
         for start in 0..index.rows.len().saturating_sub(3) {
             let observed: Vec<u32> = index.rows[start..start + 3]
                 .iter()
-                .map(|row| row.bytes)
+                .map(|row| row.video_bytes)
                 .collect();
             assert_eq!(
                 segplan::match_landing(&index, &observed),
@@ -514,5 +608,85 @@ mod tests {
                 "a real fixture's fragment byte counts must place a landing"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod equality_tests {
+    use super::*;
+    use plurx_core::testfixtures;
+
+    /// The equality the whole landing mechanism rests on, asserted by
+    /// `cargo test` rather than by a script that ran once.
+    ///
+    /// M0 §12.2 measured that the video-only index pipe and the full
+    /// production pipe agree fragment for fragment. Not on everything: the
+    /// wire length differs by tens of kilobytes because the production pipe
+    /// carries audio. What matches is the video sample bytes, and that is what
+    /// `segplan::match_landing` compares — so if this test ever fails, a
+    /// repositioned producer can no longer be placed and every far seek turns
+    /// into a typed producer failure.
+    #[tokio::test]
+    async fn the_index_records_the_quantity_a_production_generation_reproduces() {
+        for kind in ["closed-gop", "open-gop", "clean-cra", "h264"] {
+            let IndexOutcome::Built(index) = index_stream(
+                std::io::Cursor::new(super::tests::index_pipe_bytes(kind)),
+                SourceIdentity::new(1, 1, "fingerprint"),
+                None,
+            )
+            .await
+            else {
+                panic!("{kind}: the index pipe must index");
+            };
+
+            // The production pipe, audio and all — what a repositioned
+            // generation really emits. It cannot go through `index_stream`,
+            // which refuses a non-video track on purpose, so it is read
+            // directly here.
+            let (produced_video, produced_wire) = production_fragments(kind);
+
+            assert_eq!(
+                index.rows.len(),
+                produced_video.len(),
+                "{kind}: fragment counts must agree"
+            );
+            let video: Vec<u32> = index.rows.iter().map(|row| row.video_bytes).collect();
+            assert_eq!(
+                video, produced_video,
+                "{kind}: video sample bytes are what the landing matcher \
+                 compares, so they must be identical across audio branches"
+            );
+
+            let wire: Vec<u32> = index.rows.iter().map(|row| row.bytes).collect();
+            assert_ne!(
+                wire, produced_wire,
+                "{kind}: if the wire lengths ever DID agree, the fixture stopped \
+                 carrying audio and this test stopped proving anything"
+            );
+        }
+    }
+
+    /// The production pipe's per-fragment (video sample bytes, wire length).
+    fn production_fragments(kind: &str) -> (Vec<u32>, Vec<u32>) {
+        let bytes = testfixtures::pipe(kind);
+        let mut reader = FragmentReader::new();
+        reader.push(&bytes);
+        let mut init: Option<Init> = None;
+        let mut video = Vec::new();
+        let mut wire = Vec::new();
+        while let Ok(Some(unit)) = reader.next_unit() {
+            match unit {
+                Unit::Init(parsed) => init = Some(parsed),
+                Unit::Fragment(fragment) => {
+                    let init = init.as_ref().expect("moov before fragments");
+                    let track_id = init.video().expect("a video track").id;
+                    let track = fragment.track(track_id).expect("video in the fragment");
+                    video.push(u32::try_from(track.byte_len()).unwrap_or(u32::MAX));
+                    wire.push(u32::try_from(fragment.len()).unwrap_or(u32::MAX));
+                }
+                Unit::Trailer => {}
+            }
+        }
+        (video, wire)
     }
 }

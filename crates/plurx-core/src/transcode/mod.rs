@@ -451,6 +451,9 @@ pub struct TranscodeOptions {
     pub audio_index: Option<i64>,
     /// Start offset in seconds (resume / session start).
     pub start_seconds: f64,
+    /// First immutable HLS object number. Ordinary sessions start at zero;
+    /// a fenced takeover resumes above the predecessor's published prefix.
+    pub start_number: i64,
     pub tone_map: ToneMap,
     /// The video path this session should use. Chosen per node by probe (see
     /// [`Pipeline`]); [`Pipeline::Cpu`] is the always-available default and
@@ -500,6 +503,7 @@ impl Default for TranscodeOptions {
             audio_bitrate_kbps: AUDIO_BITRATE_KBPS_DEFAULT,
             audio_index: None,
             start_seconds: 0.0,
+            start_number: 0,
             tone_map: ToneMap::Zscale,
             pipeline: Pipeline::Cpu,
             subtitle_burn: None,
@@ -1075,7 +1079,7 @@ pub fn hls_args(
             "-hls_segment_filename",
             &format!("{out_dir}/seg%05d.ts"),
             "-start_number",
-            "0",
+            &opts.start_number.max(0).to_string(),
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -1557,6 +1561,34 @@ pub fn hls_copy_args_with_dolby_vision(
     dolby_vision: DolbyVisionCopyOptions,
     out_dir: &str,
 ) -> Vec<String> {
+    hls_copy_args_with_sequence(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        dolby_vision,
+        0,
+        "init.mp4",
+        out_dir,
+    )
+}
+
+/// Build copy-HLS arguments for a fenced successor generation. The init name
+/// and segment number are generation-specific so a stable capability URL can
+/// never make a previously cached URI name different bytes after takeover.
+#[allow(clippy::too_many_arguments)]
+pub fn hls_copy_args_with_sequence(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    dolby_vision: DolbyVisionCopyOptions,
+    start_number: i64,
+    init_filename: &str,
+    out_dir: &str,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -1595,11 +1627,11 @@ pub fn hls_copy_args_with_dolby_vision(
             "-hls_segment_type",
             "fmp4",
             "-hls_fmp4_init_filename",
-            "init.mp4",
+            init_filename,
             "-hls_segment_filename",
             &format!("{out_dir}/seg%05d.m4s"),
             "-start_number",
-            "0",
+            &start_number.max(0).to_string(),
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -2595,6 +2627,27 @@ mod tests {
         let h264 = hls_copy_args(&f, 0.0, None, true, Pacing::unpaced(), true, "/tmp/s").join(" ");
         assert!(!h264.contains("-bsf:v"));
         assert!(!h264.contains("-tag:v"));
+    }
+
+    #[test]
+    fn takeover_copy_uses_generation_specific_object_names() {
+        let args = hls_copy_args_with_sequence(
+            &file(Some("hdr10")),
+            42.0,
+            None,
+            false,
+            Pacing::unpaced(),
+            DolbyVisionCopyOptions::new(true, false),
+            17,
+            "init-e3.mp4",
+            "/tmp/s",
+        )
+        .join(" ");
+        assert!(args.contains("-start_number 17"), "{args}");
+        assert!(
+            args.contains("-hls_fmp4_init_filename init-e3.mp4"),
+            "{args}"
+        );
     }
 
     /// The gate on dovi_rpu is an ffmpeg version parse, and getting it wrong

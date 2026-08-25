@@ -1349,7 +1349,12 @@ impl JobManager {
             Ok(Some(lease)) => lease,
             Ok(None) => return false,
             Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "acquiring scan lease failed");
+                tracing::warn!(
+                    library = library_id,
+                    stage = "acquire_lease",
+                    error = %error,
+                    "acquiring scan lease failed"
+                );
                 return false;
             }
         };
@@ -1381,6 +1386,11 @@ impl JobManager {
             tokio::select! {
                 () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
                 () = lost.cancelled() => {
+                    tracing::warn!(
+                        library = library_id,
+                        stage = "lease",
+                        "library scan failed because its cluster lease was lost"
+                    );
                     let mut status = manager
                         .statuses
                         .lock()
@@ -2282,6 +2292,12 @@ impl JobManager {
                 return;
             }
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "load_library",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2298,6 +2314,12 @@ impl JobManager {
         {
             Ok(report) => status.last_scan = Some(report),
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "catalogue_scan",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2332,7 +2354,12 @@ impl JobManager {
             .mark_library_scanned(library_id, force_metadata)
             .await
         {
-            tracing::warn!(error = %e, library = library_id, "recording the run time failed");
+            tracing::warn!(
+                error = %e,
+                library = library_id,
+                stage = "stamp_completion",
+                "recording the library scan completion time failed"
+            );
         }
         self.finish(library_id, status).await;
     }
@@ -2989,12 +3016,76 @@ impl JobManager {
     /// Nothing reads an index yet. A file without one keeps today's
     /// presentation (plan §2.2, ledger D4), which is what lets this run — or
     /// not run — without any client noticing either way.
+    /// Forget node-local VOD rows whose file no longer exists.
+    ///
+    /// Bounded per tick rather than exhaustive: the rows are small, nothing
+    /// depends on them going promptly, and a sweep that walked a whole library
+    /// would compete with the indexing pass it runs in front of. Ordered by
+    /// file id so consecutive ticks make progress rather than re-examining the
+    /// same window.
+    ///
+    /// Failure is not worth interrupting the tick for. These rows are a leak,
+    /// not a correctness problem -- an index whose file is gone stops matching
+    /// on identity long before anyone could serve from it.
+    async fn sweep_orphaned_vod_rows(&self) {
+        const SWEEP_WINDOW: i64 = 512;
+
+        let held = match self.store.vod_row_file_ids(SWEEP_WINDOW).await {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "listing node-local VOD rows to sweep");
+                return;
+            }
+        };
+        let alive = match self.store.surviving_file_ids(&held).await {
+            Ok(alive) => alive,
+            Err(error) => {
+                tracing::warn!(error = %error, "checking which indexed files still exist");
+                return;
+            }
+        };
+
+        let mut indexes = 0usize;
+        let mut plans = 0usize;
+        for file_id in held.iter().filter(|id| !alive.contains(id)) {
+            match self.store.forget_fragment_index(*file_id).await {
+                Ok(true) => indexes += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting a stale index");
+                }
+            }
+            match self.store.forget_rendition_plans(*file_id).await {
+                Ok(count) => plans += count,
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting stale plans");
+                }
+            }
+        }
+        if indexes > 0 || plans > 0 {
+            tracing::info!(
+                indexes,
+                plans,
+                examined = held.len(),
+                "swept node-local VOD rows for files that are gone"
+            );
+        }
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
         }
         let _running = IndexingGuard(Arc::clone(&self));
         self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
+
+        // Before building anything, give back what belongs to files that are
+        // gone. Node-local rows and a replicated `files` table share no
+        // transaction, so a hook inside `delete_files` could only ever clean
+        // the node that ran the delete -- and never a node that was down at
+        // the time. Each node asking, on its own tick, converges everywhere.
+        self.sweep_orphaned_vod_rows().await;
 
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();

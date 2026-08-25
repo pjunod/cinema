@@ -15,10 +15,14 @@ mod offline;
 mod pgs_overlay;
 mod pipeprobe;
 mod playstart;
+mod prodexec;
+mod prodrun;
+mod prodsched;
 mod produce;
 mod progress;
 mod progressive;
 mod reader_formats;
+mod renditiondir;
 mod schedule;
 mod serving_fence;
 mod shared_cache;
@@ -26,9 +30,13 @@ mod state;
 mod storeprobe;
 mod subtitles;
 mod telemetry;
+mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
+mod vodgen;
+mod vodserve;
+mod waitpool;
 mod watched;
 
 use std::future::IntoFuture;
@@ -78,7 +86,7 @@ struct Cli {
 enum Command {
     /// Run the server (the default when no subcommand is given).
     Run,
-    /// Probe a running local server's /healthz and exit 0/1 (container
+    /// Probe a running local server's /readyz and exit 0/1 (container
     /// health checks: no curl needed in the image).
     Healthcheck,
     /// Advertise a bridge-networked server on the host's Bonjour interfaces.
@@ -1315,6 +1323,7 @@ fn spawn_background_loops(
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
+    tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
     // Answers "can you read this package's source?" while a peer is being
     // removed. Every node has to be listening for its own removal to be
@@ -1328,6 +1337,7 @@ fn spawn_background_loops(
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
     tokio::spawn(std::sync::Arc::clone(&state.offline).run());
 
     // What the libraries' storage reads at. Deliberately after the listener
@@ -2051,7 +2061,7 @@ fn healthcheck(config: &Config) -> anyhow::Result<()> {
         .with_context(|| format!("connecting to {addr}"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(b"GET /healthz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")?;
+    stream.write_all(b"GET /readyz HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
@@ -2993,28 +3003,43 @@ mod startup_tests {
     /// server answering anything but 200 has to fail rather than pass quietly.
     #[test]
     fn the_health_check_believes_only_a_200() {
-        fn serve_once(status_line: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+        fn serve_once(
+            status_line: &'static str,
+        ) -> (
+            u16,
+            std::sync::mpsc::Receiver<Vec<u8>>,
+            std::thread::JoinHandle<()>,
+        ) {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let port = listener.local_addr().expect("addr").port();
+            let (request_tx, request_rx) = std::sync::mpsc::channel();
             let handle = std::thread::spawn(move || {
                 if let Ok((mut socket, _)) = listener.accept() {
                     let mut request = [0u8; 512];
-                    let _ = socket.read(&mut request);
+                    let read = socket.read(&mut request).unwrap_or_default();
+                    let _ = request_tx.send(request[..read].to_vec());
                     let _ = socket.write_all(status_line.as_bytes());
                 }
             });
-            (port, handle)
+            (port, request_rx, handle)
         }
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
 
-        let (port, server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let (port, request, server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
         config.server.bind = format!("127.0.0.1:{port}").parse().expect("addr");
         healthcheck(&config).expect("a 200 is healthy");
+        assert!(
+            request
+                .recv()
+                .expect("health request")
+                .starts_with(b"GET /readyz HTTP/1.0\r\n"),
+            "container health must measure serving readiness"
+        );
         server.join().expect("server thread");
 
-        let (port, server) = serve_once("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+        let (port, _request, server) = serve_once("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         config.server.bind = format!("127.0.0.1:{port}").parse().expect("addr");
         let error = format!(
             "{:#}",

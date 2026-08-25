@@ -88,6 +88,27 @@ internal fun playbackErrorAction(
  * can be repaired by changing the encode. Network, HTTP, timeout, manifest,
  * and temporary resource errors stay on the current delivery.
  */
+/**
+ * Errors a *different node* could plausibly answer differently.
+ *
+ * Deliberately an allowlist. "Not a codec failure" is not the same question:
+ * a 404 on an ended session, a 401, a DRM refusal and a behind-live-window
+ * error are all reproducible on every node, and walking the whole ingress
+ * list for one of those buys nothing but a full player prepare per node
+ * before the viewer sees the error they were always going to see. Only the
+ * 2xxx transport family can be answered by moving the request.
+ */
+internal fun isTransportPlaybackError(errorCode: Int): Boolean = errorCode in setOf(
+    2000, // ERROR_CODE_IO_UNSPECIFIED
+    2001, // ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+    2002, // ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+    2003, // ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE
+    2004, // ERROR_CODE_IO_BAD_HTTP_STATUS — only 5xx reaches this in practice;
+          // a 4xx capability answer is terminal and is filtered at the call site
+    2007, // ERROR_CODE_IO_NO_PERMISSION
+    2008, // ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED
+)
+
 internal fun isCompatibilityPlaybackError(errorCode: Int): Boolean = errorCode in setOf(
     3001, // ERROR_CODE_PARSING_CONTAINER_MALFORMED
     3003, // ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED

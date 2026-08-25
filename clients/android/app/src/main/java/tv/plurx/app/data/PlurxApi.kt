@@ -20,6 +20,10 @@ interface PlurxApi {
     @GET("server")
     suspend fun server(): Server
 
+    /** Signed-in only: the other ingresses a stream may be retried through. */
+    @GET("cluster/ingress")
+    suspend fun clusterIngress(): ClusterIngress
+
     @POST("auth/login")
     suspend fun login(@Body body: LoginReq): LoginResp
 
