@@ -24,16 +24,6 @@ pub mod coordination;
 pub mod membership;
 pub mod migration;
 
-/// HTTP framework re-export for the separate-process validation harness.
-///
-/// The harness already enables `cluster-validation`, while production daemon
-/// builds do not. Keeping this seam here lets executable cluster fixtures use
-/// the exact shipped HTTP stack without adding a second audited dependency
-/// edge to the validation-only package.
-#[cfg(feature = "cluster-validation")]
-#[doc(hidden)]
-pub use axum as validation_axum;
-
 pub const NODE_ID_FILENAME: &str = "node.id";
 /// The M0/M2 path starts with one voter; later membership assigns other ids.
 pub const SINGLE_VOTER_RAFT_ID: u64 = 1;

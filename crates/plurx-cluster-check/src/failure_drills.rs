@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use plurx_core::cluster::validation_axum as axum;
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use axum::http::{Method, Response, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
+use plurx_compat_plex::validation_axum as axum;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
