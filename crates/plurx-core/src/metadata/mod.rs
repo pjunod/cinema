@@ -12,8 +12,16 @@ pub mod local;
 pub mod tmdb;
 
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::CString;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 
 pub use anilist::AniListClient;
 pub use tmdb::TmdbClient;
@@ -30,6 +38,69 @@ const POSTER_SIZE: &str = "w500";
 const BACKDROP_SIZE: &str = "original";
 const STILL_SIZE: &str = "original";
 
+/// One ceiling shared by every artwork producer, clustered replication, and
+/// the serving path. Publishing bytes a voter can never serve creates a
+/// permanent repair loop, so producer limits are part of the storage format.
+pub const MAX_ARTWORK_BYTES: u64 = 15 * 1024 * 1024;
+
+/// Select the exact already-published artwork generation that these bytes can
+/// safely recreate. Legacy unversioned names remain repairable, while newer
+/// fenced publications authenticate the same 64-bit digest prefix used by
+/// [`PublicationStore::scoped_artwork_filename`].
+pub(crate) fn matching_materialized_artwork_filename(
+    legacy_filename: &str,
+    bytes: &[u8],
+    expected: &[String],
+) -> Option<String> {
+    let path = Path::new(legacy_filename);
+    let stem = path.file_stem()?.to_str()?;
+    let digest = hex::encode(Sha256::digest(bytes));
+    let versioned = match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) => format!("{stem}-c{}.{}", &digest[..16], extension),
+        None => format!("{stem}-c{}", &digest[..16]),
+    };
+    if expected.iter().any(|candidate| candidate == &versioned) {
+        Some(versioned)
+    } else if expected
+        .iter()
+        .any(|candidate| candidate == legacy_filename)
+    {
+        Some(legacy_filename.to_owned())
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn bounded_artwork_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, crate::error::MetadataError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARTWORK_BYTES)
+    {
+        return Err(crate::error::MetadataError::Http(format!(
+            "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
+        )));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|error| crate::error::MetadataError::Http(error.to_string()))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_ARTWORK_BYTES as usize {
+            return Err(crate::error::MetadataError::Http(format!(
+                "artwork exceeds {MAX_ARTWORK_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(crate::error::MetadataError::Parse(
+            "artwork response was empty".to_owned(),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Cap on the problem lines one pass records, mirroring `ScanReport`'s: past
 /// it only a trailing summary is added. A refresh of a library whose provider
 /// is down would otherwise put one line per title into an HTTP response.
@@ -39,26 +110,32 @@ const MAX_PROBLEMS: usize = 40;
 /// cancelled. The synchronous unlink is intentional: `Drop` cannot await,
 /// and leaving a partial file is worse than a tiny best-effort filesystem
 /// call during cancellation.
-struct UnpublishedArtwork(Option<PathBuf>);
+struct UnpublishedArtwork {
+    directory_fd: RawFd,
+    name: CString,
+    published: bool,
+}
 
 impl UnpublishedArtwork {
-    fn new(path: PathBuf) -> Self {
-        Self(Some(path))
-    }
-
-    fn path(&self) -> &Path {
-        self.0.as_deref().expect("unpublished artwork path")
+    fn new(directory_fd: RawFd, name: CString) -> Self {
+        Self {
+            directory_fd,
+            name,
+            published: false,
+        }
     }
 
     fn published(&mut self) {
-        self.0 = None;
+        self.published = true;
     }
 }
 
 impl Drop for UnpublishedArtwork {
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
+        if !self.published {
+            unsafe {
+                libc::unlinkat(self.directory_fd, self.name.as_ptr(), 0);
+            }
         }
     }
 }
@@ -137,40 +214,74 @@ pub fn reserve_artwork_publication(
     })
 }
 
-async fn publish_artwork_with_reservation<F>(
+type BeforeArtworkPublish = Option<Box<dyn FnOnce() + Send + 'static>>;
+
+async fn publish_artwork_with_reservation(
     reservation: ArtworkPublicationReservation,
-    writer: F,
-) -> std::io::Result<()>
-where
-    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
-{
+    bytes: Vec<u8>,
+    before_publish: BeforeArtworkPublish,
+) -> std::io::Result<()> {
     let state = Arc::new(std::sync::Mutex::new(ArtworkPublicationState::default()));
     let cancellation = CancelArtworkPublication(Arc::clone(&state));
-    let result = tokio::task::spawn_blocking(move || {
-        let ArtworkPublicationReservation {
-            target,
-            _slot: slot,
-        } = reservation;
-        let _slot = slot;
-        let parent = target.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "artwork path has no parent directory",
-            )
-        })?;
-        let filename = target.file_name().ok_or_else(|| {
+    let parent = reservation.target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artwork path has no parent directory",
+        )
+    })?;
+    let filename = reservation
+        .target
+        .file_name()
+        .filter(|name| !name.as_bytes().contains(&0))
+        .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "artwork path has no filename",
             )
+        })?
+        .to_owned();
+    let directory = crate::fs_secure::SecureDirectory::open(parent).await?;
+    let result = tokio::task::spawn_blocking(move || {
+        let ArtworkPublicationReservation {
+            target: _,
+            _slot: slot,
+        } = reservation;
+        let _slot = slot;
+        let filename = CString::new(filename.as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "artwork filename contains a NUL byte",
+            )
         })?;
-        let temporary = parent.join(format!(
+        let temporary = CString::new(format!(
             ".{}.{}.tmp",
             filename.to_string_lossy(),
             uuid::Uuid::new_v4().simple()
-        ));
-        let mut unpublished = UnpublishedArtwork::new(temporary);
-        writer(unpublished.path())?;
+        ))
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "temporary artwork filename contains a NUL byte",
+            )
+        })?;
+        let raw = unsafe {
+            libc::openat(
+                directory.raw_fd(),
+                temporary.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut unpublished = UnpublishedArtwork::new(directory.raw_fd(), temporary);
+        let mut temporary_file = unsafe { File::from_raw_fd(raw) };
+        temporary_file.write_all(&bytes)?;
+        temporary_file.sync_all()?;
+        if let Some(before_publish) = before_publish {
+            before_publish();
+        }
 
         let mut publication = state.lock().unwrap_or_else(|error| error.into_inner());
         if publication.cancelled {
@@ -179,8 +290,21 @@ where
                 "artwork publication was cancelled",
             ));
         }
-        std::fs::rename(unpublished.path(), &target)?;
+        if unsafe {
+            libc::renameat(
+                directory.raw_fd(),
+                unpublished.name.as_ptr(),
+                directory.raw_fd(),
+                filename.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
         unpublished.published();
+        if unsafe { libc::fsync(directory.raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         publication.finished = true;
         Ok(())
     })
@@ -194,12 +318,13 @@ where
     }
 }
 
-async fn publish_artwork_with<F>(target: PathBuf, writer: F) -> std::io::Result<()>
-where
-    F: FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
-{
+async fn publish_artwork_with(
+    target: PathBuf,
+    bytes: Vec<u8>,
+    before_publish: BeforeArtworkPublish,
+) -> std::io::Result<()> {
     let reservation = reserve_artwork_publication(target)?;
-    publish_artwork_with_reservation(reservation, writer).await
+    publish_artwork_with_reservation(reservation, bytes, before_publish).await
 }
 
 /// Publish artwork through a same-directory temporary file so readers see
@@ -207,11 +332,7 @@ where
 /// provider response. This is shared by TMDB and Books artwork.
 #[doc(hidden)]
 pub async fn write_artwork_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let bytes = bytes.to_vec();
-    publish_artwork_with(target.to_path_buf(), move |temporary| {
-        std::fs::write(temporary, bytes)
-    })
-    .await
+    publish_artwork_with(target.to_path_buf(), bytes.to_vec(), None).await
 }
 
 #[doc(hidden)]
@@ -219,40 +340,40 @@ pub async fn write_artwork_atomically_reserved(
     reservation: ArtworkPublicationReservation,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    let bytes = bytes.to_vec();
-    publish_artwork_with_reservation(reservation, move |temporary| {
-        std::fs::write(temporary, bytes)
-    })
-    .await
+    publish_artwork_with_reservation(reservation, bytes.to_vec(), None).await
 }
 
-/// Remove an unreferenced final file while retaining its publication slot in
-/// the blocking worker. If the sweep is cancelled, a later publisher still
-/// cannot race an already-dispatched unlink.
+/// Remove an unreferenced final file while retaining its publication slot and
+/// the already-open parent capability. A pathname swap after validation can
+/// therefore neither redirect the unlink nor race a later publisher.
 #[doc(hidden)]
 pub async fn remove_artwork_reserved(
     reservation: ArtworkPublicationReservation,
 ) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || {
-        let ArtworkPublicationReservation {
-            target,
-            _slot: slot,
-        } = reservation;
-        let _slot = slot;
-        std::fs::remove_file(target)
-    })
-    .await
-    .map_err(|error| std::io::Error::other(format!("artwork removal worker failed: {error}")))?
-}
-
-/// Copy an existing local image through the same cancellation-safe atomic
-/// publication path used for provider bytes.
-pub(crate) async fn copy_artwork_atomically(source: &Path, target: &Path) -> std::io::Result<()> {
-    let source = source.to_path_buf();
-    publish_artwork_with(target.to_path_buf(), move |temporary| {
-        std::fs::copy(source, temporary).map(|_| ())
-    })
-    .await
+    let parent = reservation.target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artwork path has no parent directory",
+        )
+    })?;
+    let filename = reservation
+        .target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "artwork path has no filename",
+            )
+        })?
+        .to_owned();
+    let directory = crate::fs_secure::SecureDirectory::open(parent).await?;
+    let ArtworkPublicationReservation {
+        target: _,
+        _slot: slot,
+    } = reservation;
+    let _slot = slot;
+    directory.unlink_child(&filename).await
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -504,6 +625,7 @@ async fn enrich_library_for_targets_inner(
             ItemKind::Movie => match movie_lookup(tmdb, &item, known).await {
                 Ok(Some(m)) => {
                     let poster = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -513,6 +635,7 @@ async fn enrich_library_for_targets_inner(
                     )
                     .await;
                     let backdrop = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -559,6 +682,7 @@ async fn enrich_library_for_targets_inner(
                 Ok(Some(m)) => {
                     let show_tmdb_id = m.tmdb_id;
                     let poster = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -568,6 +692,7 @@ async fn enrich_library_for_targets_inner(
                     )
                     .await;
                     let backdrop = cache_image(
+                        store,
                         tmdb,
                         artwork_dir,
                         item.id,
@@ -773,6 +898,7 @@ async fn enrich_anime_library_inner(
         match client.find_anime(&item.title).await {
             Ok(Some(m)) => {
                 let poster = download_url(
+                    store,
                     client,
                     artwork_dir,
                     item.id,
@@ -781,6 +907,7 @@ async fn enrich_anime_library_inner(
                 )
                 .await;
                 let backdrop = download_url(
+                    store,
                     client,
                     artwork_dir,
                     item.id,
@@ -827,6 +954,7 @@ async fn enrich_anime_library_inner(
 
 /// Download an image from an absolute URL (AniList) into the artwork cache.
 async fn download_url(
+    store: &PublicationStore<'_>,
     client: &AniListClient,
     artwork_dir: &Path,
     item_id: i64,
@@ -843,7 +971,7 @@ async fn download_url(
             return Artwork::failed(format!("download: {e}"));
         }
     };
-    write_artwork(artwork_dir, item_id, kind, &bytes).await
+    write_artwork(store, artwork_dir, item_id, kind, &bytes).await
 }
 
 /// One artwork slot after an attempt: the file to store, and the attempt to
@@ -891,10 +1019,28 @@ impl Artwork {
 }
 
 /// Write downloaded bytes into the artwork cache under the conventional name.
-async fn write_artwork(artwork_dir: &Path, item_id: i64, kind: &str, bytes: &[u8]) -> Artwork {
-    let filename = format!("{item_id}-{kind}.jpg");
+async fn write_artwork(
+    store: &PublicationStore<'_>,
+    artwork_dir: &Path,
+    item_id: i64,
+    kind: &str,
+    bytes: &[u8],
+) -> Artwork {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ARTWORK_BYTES {
+        return Artwork::failed(format!(
+            "artwork is outside the 1..={MAX_ARTWORK_BYTES} byte storage bound"
+        ));
+    }
+    let filename = match store
+        .scoped_artwork_filename(&format!("{item_id}-{kind}.jpg"), bytes)
+        .await
+    {
+        Ok(filename) => filename,
+        Err(error) => return Artwork::failed(format!("publication fence: {error}")),
+    };
     let dest: PathBuf = artwork_dir.join(&filename);
-    if let Err(e) = write_artwork_atomically(&dest, bytes).await {
+    let write = crate::fs_secure::atomic_write_child(artwork_dir, &filename, bytes).await;
+    if let Err(e) = write {
         tracing::warn!(path = %dest.display(), error = %e, "writing artwork");
         // A full or read-only artwork directory is as much a reason to come
         // back as a failed download, and from the item's side it is the same
@@ -991,6 +1137,7 @@ async fn enrich_episodes(
             let needs_art = season_item.poster_path.is_none();
             let poster = if needs_art {
                 cache_image(
+                    store,
                     tmdb,
                     artwork_dir,
                     season_item.id,
@@ -1045,6 +1192,7 @@ async fn enrich_episodes(
                 continue;
             };
             let still = cache_image(
+                store,
                 tmdb,
                 artwork_dir,
                 ep.id,
@@ -1109,6 +1257,7 @@ async fn apply(
 /// Download and cache one image, reporting both the file and the attempt.
 /// Failures stay non-fatal — they are now merely recorded rather than lost.
 async fn cache_image(
+    store: &PublicationStore<'_>,
     tmdb: &TmdbClient,
     artwork_dir: &Path,
     item_id: i64,
@@ -1126,7 +1275,7 @@ async fn cache_image(
             return Artwork::failed(format!("download: {e}"));
         }
     };
-    write_artwork(artwork_dir, item_id, kind, &bytes).await
+    write_artwork(store, artwork_dir, item_id, kind, &bytes).await
 }
 
 #[cfg(test)]
@@ -1164,12 +1313,14 @@ mod tests {
         let task_release = Arc::clone(&release);
         let task_target = target.clone();
         let task = tokio::spawn(async move {
-            publish_artwork_with(task_target, move |temporary| {
-                std::fs::write(temporary, b"partial")?;
-                started_tx.send(()).expect("signal start");
-                task_release.wait();
-                Ok(())
-            })
+            publish_artwork_with(
+                task_target,
+                b"partial".to_vec(),
+                Some(Box::new(move || {
+                    started_tx.send(()).expect("signal start");
+                    task_release.wait();
+                })),
+            )
             .await
         });
 
@@ -1201,6 +1352,43 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("entries");
         assert!(entries.is_empty(), "temporary output must be reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artwork_publication_stays_bound_to_the_open_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let artwork = root.path().join("artwork");
+        let held = root.path().join("held-artwork");
+        let redirected = root.path().join("redirected-artwork");
+        std::fs::create_dir(&artwork).expect("artwork directory");
+        std::fs::create_dir(&redirected).expect("redirected directory");
+        let target = artwork.join("42-poster.jpg");
+        let swap_artwork = artwork.clone();
+        let swap_held = held.clone();
+        let swap_redirected = redirected.clone();
+
+        publish_artwork_with(
+            target,
+            b"capability-bound artwork".to_vec(),
+            Some(Box::new(move || {
+                std::fs::rename(&swap_artwork, &swap_held).expect("swap parent directory");
+                symlink(&swap_redirected, &swap_artwork).expect("redirect pathname");
+            })),
+        )
+        .await
+        .expect("publish through held directory capability");
+
+        assert_eq!(
+            std::fs::read(held.join("42-poster.jpg")).expect("held publication"),
+            b"capability-bound artwork"
+        );
+        assert!(
+            !redirected.join("42-poster.jpg").exists(),
+            "a parent pathname replacement must not redirect publication"
+        );
     }
 
     /// A TMDB mock covering the movie + show + season calls, with any image

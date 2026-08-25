@@ -12,6 +12,10 @@ use openraft::{ServerState, StoredMembership};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::{Deref, Sub};
+#[cfg(feature = "sqlite")]
+use std::sync::Arc;
+#[cfg(feature = "sqlite")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::{task, time};
@@ -30,6 +34,10 @@ use crate::store::state_machine::memory::dlock_handler::{
 
 #[cfg(feature = "sqlite")]
 use crate::{
+    client::{
+        DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER,
+        db_quorum_watermark_local,
+    },
     migration::Migration,
     query::{query_consistent_local, query_owned_local, rows::RowOwned},
     store::state_machine::sqlite::state_machine::{Query, QueryWrite},
@@ -496,6 +504,18 @@ async fn handle_socket_concurrent(
     };
 
     let (tx_write, rx_write) = flume::bounded::<WsWriteMsg>(1);
+    // The compatibility harness disables only the new marker interception on
+    // one voter. This per-connection latch makes its follow-up ordinary query
+    // prove that an old handler's serialized SQL error did not tear down or
+    // replace the shared API stream.
+    #[cfg(feature = "sqlite")]
+    let old_watermark_marker_rejected = Arc::new(AtomicBool::new(false));
+    #[cfg(feature = "sqlite")]
+    let emulate_old_watermark_handler =
+        std::env::var_os("HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER").is_some();
+    #[cfg(feature = "sqlite")]
+    let emulate_p3a_watermark_handler =
+        std::env::var_os("HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER").is_some();
     // TODO splitting needs `unstable-split` feature right now but is about to be stabilized soon
     let (rx, mut write) = ws.split(tokio::io::split);
     // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
@@ -564,6 +584,8 @@ async fn handle_socket_concurrent(
 
         let state = state.clone();
         let tx_write = tx_write.clone();
+        #[cfg(feature = "sqlite")]
+        let old_watermark_marker_rejected = old_watermark_marker_rejected.clone();
         task::spawn(async move {
             let request_id = req.request_id;
 
@@ -650,14 +672,43 @@ async fn handle_socket_concurrent(
 
                 #[cfg(feature = "sqlite")]
                 ApiStreamRequestPayload::QueryConsistent(Query { sql, params }) => {
-                    let res = query_consistent_local(
-                        &state.raft_db.raft,
-                        state.raft_db.log_statements,
-                        state.raft_db.read_pool.clone(),
-                        sql,
-                        params,
-                    )
-                    .await;
+                    let is_watermark_marker =
+                        sql == DB_QUORUM_WATERMARK_MARKER && params.is_empty();
+                    let res = if is_watermark_marker && emulate_p3a_watermark_handler {
+                        db_quorum_watermark_local(&state.0).await.map(|watermark| {
+                            let mut row = RowOwned::from_db_quorum_watermark(watermark);
+                            row.columns.retain(|column| {
+                                column.name != "local_read_protocol_version"
+                            });
+                            vec![row]
+                        })
+                    } else if is_watermark_marker && !emulate_old_watermark_handler {
+                        db_quorum_watermark_local(&state.0)
+                            .await
+                            .map(|watermark| vec![RowOwned::from_db_quorum_watermark(watermark)])
+                    } else if emulate_old_watermark_handler
+                        && sql == DB_QUORUM_WATERMARK_COMPAT_PROBE
+                        && params.is_empty()
+                        && !old_watermark_marker_rejected.swap(false, Ordering::AcqRel)
+                    {
+                        Err(Error::Connect(
+                            "rolling compatibility probe did not follow a rejected watermark marker on the same API stream"
+                                .into(),
+                        ))
+                    } else {
+                        let result = query_consistent_local(
+                            &state.raft_db.raft,
+                            state.raft_db.log_statements,
+                            state.raft_db.read_pool.clone(),
+                            sql,
+                            params,
+                        )
+                        .await;
+                        if emulate_old_watermark_handler && is_watermark_marker && result.is_err() {
+                            old_watermark_marker_rejected.store(true, Ordering::Release);
+                        }
+                        result
+                    };
 
                     ApiStreamResponse {
                         request_id,

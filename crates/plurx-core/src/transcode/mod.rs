@@ -13,13 +13,14 @@
 //! not by version (PERF-PLAN §5).
 
 mod encoder;
+pub mod manifest;
 mod pipeline;
 mod recipe;
 
 pub use encoder::{
-    detect_encoders, validate_quality_rate_control, validate_quality_rate_control_yielding,
-    EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, QualityRateControlValidation,
-    QualityRc, RateMode,
+    detect_encoders, detect_video_decoders, validate_quality_rate_control,
+    validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe};
@@ -450,6 +451,9 @@ pub struct TranscodeOptions {
     pub audio_index: Option<i64>,
     /// Start offset in seconds (resume / session start).
     pub start_seconds: f64,
+    /// First immutable HLS object number. Ordinary sessions start at zero;
+    /// a fenced takeover resumes above the predecessor's published prefix.
+    pub start_number: i64,
     pub tone_map: ToneMap,
     /// The video path this session should use. Chosen per node by probe (see
     /// [`Pipeline`]); [`Pipeline::Cpu`] is the always-available default and
@@ -499,6 +503,7 @@ impl Default for TranscodeOptions {
             audio_bitrate_kbps: AUDIO_BITRATE_KBPS_DEFAULT,
             audio_index: None,
             start_seconds: 0.0,
+            start_number: 0,
             tone_map: ToneMap::Zscale,
             pipeline: Pipeline::Cpu,
             subtitle_burn: None,
@@ -1074,7 +1079,7 @@ pub fn hls_args(
             "-hls_segment_filename",
             &format!("{out_dir}/seg%05d.ts"),
             "-start_number",
-            "0",
+            &opts.start_number.max(0).to_string(),
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -1129,6 +1134,74 @@ pub fn keyframe_probe_args(source_path: &str, start_seconds: f64) -> Vec<String>
         "csv=p=0".into(),
         source_path.to_owned(),
     ]
+}
+
+/// The arguments that decide the **video** bytes of a copy pipe.
+///
+/// Extracted so the index pipe and the production pipe cannot drift: an index
+/// is a list of output byte counts, and the landing matcher compares them, so
+/// an index built by a subtly different video branch is not merely stale — it
+/// is confidently wrong. Sharing the code is stronger than a test asserting
+/// the two agree.
+///
+/// This is also what [`crate::segplan::argv_fingerprint`] is fed, which is why
+/// it deliberately excludes the input path: a moved file is caught by its
+/// identity, and re-indexing every file after a library move would be a cost
+/// with no finding behind it.
+pub fn copy_video_args(
+    source: &MediaFile,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    args.push("-c:v".into());
+    args.push("copy".into());
+    // Safari only decodes HEVC when the sample entry is tagged `hvc1`; MKV HEVC
+    // is commonly `hev1`, which renders black. Harmless if already hvc1.
+    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        args.push("-tag:v".into());
+        args.push(
+            hevc_copy_tag_for_format(
+                source.hdr.as_deref(),
+                source.hdr_format.as_deref(),
+                preserve_dolby_vision,
+            )
+            .into(),
+        );
+        // FFmpeg's MOV muxer guards dvcC/dvvC behind `unofficial`. Without
+        // this, it keeps the Dolby Vision RPUs and writes a `dvh1` sample
+        // entry but silently omits the decoder configuration box. A media
+        // playlist can then appear to play through the HDR10 base layer,
+        // while an HLS master that correctly advertises `dvh1.08.06` fails
+        // AVPlayer with CoreMedia -12927. The strictness option is scoped to
+        // preserved DV; ordinary HEVC and stripped HDR10 copies do not need
+        // an experimental muxer feature.
+        if source.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
+            args.push("-strict".into());
+            args.push("unofficial".into());
+        }
+        // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
+        // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
+        // first fragment. Some WEB-DL Matroska files carry a minimal, empty
+        // hvcC and repeat those parameter sets only in-band. Stripping them
+        // here made an initialization record with no decoder configuration;
+        // tvOS rejected it with CoreMedia -15517. Leave the parameter sets in
+        // the pipe so the GOP-aware segmenter can promote them into hvcC from
+        // the first sample. Compatible Profile 8 and ordinary HEVC keep the
+        // existing hvc1 normalization.
+        let promote_profile5_parameter_sets = source.hdr.as_deref() == Some("dolby_vision")
+            && preserve_dolby_vision
+            && !dolby_vision_has_compatible_base(source.hdr_format.as_deref());
+        if !promote_profile5_parameter_sets {
+            args.push("-bsf:v".into());
+            args.push(hevc_copy_bsf_for_client(
+                source.hdr.as_deref(),
+                have_dovi_bsf,
+                preserve_dolby_vision,
+            ));
+        }
+    }
+    args
 }
 
 /// The source-timeline origin implied by [`keyframe_probe_args`] output.
@@ -1258,53 +1331,11 @@ fn copy_input_args(
     }
     args.push("-sn".into());
 
-    args.push("-c:v".into());
-    args.push("copy".into());
-    // Safari only decodes HEVC when the sample entry is tagged `hvc1`; MKV HEVC
-    // is commonly `hev1`, which renders black. Harmless if already hvc1.
-    if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
-        args.push("-tag:v".into());
-        args.push(
-            hevc_copy_tag_for_format(
-                source.hdr.as_deref(),
-                source.hdr_format.as_deref(),
-                preserve_dolby_vision,
-            )
-            .into(),
-        );
-        // FFmpeg's MOV muxer guards dvcC/dvvC behind `unofficial`. Without
-        // this, it keeps the Dolby Vision RPUs and writes a `dvh1` sample
-        // entry but silently omits the decoder configuration box. A media
-        // playlist can then appear to play through the HDR10 base layer,
-        // while an HLS master that correctly advertises `dvh1.08.06` fails
-        // AVPlayer with CoreMedia -12927. The strictness option is scoped to
-        // preserved DV; ordinary HEVC and stripped HDR10 copies do not need
-        // an experimental muxer feature.
-        if source.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
-            args.push("-strict".into());
-            args.push("unofficial".into());
-        }
-        // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
-        // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
-        // first fragment. Some WEB-DL Matroska files carry a minimal, empty
-        // hvcC and repeat those parameter sets only in-band. Stripping them
-        // here made an initialization record with no decoder configuration;
-        // tvOS rejected it with CoreMedia -15517. Leave the parameter sets in
-        // the pipe so the GOP-aware segmenter can promote them into hvcC from
-        // the first sample. Compatible Profile 8 and ordinary HEVC keep the
-        // existing hvc1 normalization.
-        let promote_profile5_parameter_sets = source.hdr.as_deref() == Some("dolby_vision")
-            && preserve_dolby_vision
-            && !dolby_vision_has_compatible_base(source.hdr_format.as_deref());
-        if !promote_profile5_parameter_sets {
-            args.push("-bsf:v".into());
-            args.push(hevc_copy_bsf_for_client(
-                source.hdr.as_deref(),
-                have_dovi_bsf,
-                preserve_dolby_vision,
-            ));
-        }
-    }
+    args.extend(copy_video_args(
+        source,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+    ));
 
     if transcode_audio {
         // The correction rides the encode as a filter — same input, no
@@ -1338,6 +1369,59 @@ fn copy_input_args(
         args.push("-c:a".into());
         args.push("copy".into());
     }
+    args
+}
+
+/// Build the **index** pipe: the production copy pipe, video only, from the
+/// start of the file, unpaced.
+///
+/// This is what builds a file's fragment index ([`crate::segplan`]). Three
+/// deliberate differences from the production pipe, each with its reason:
+///
+/// - **video only** (`-an`, no audio map). The fragment *sequence* is
+///   identical for every audio selection — count, verdicts, durations and
+///   output byte counts matched on 9 of 9 M0 fixtures — so one index serves
+///   them all. The *timeline* is not: the production pipe's DTS grid sits a
+///   constant, audio-branch-dependent offset ahead of this one, which is why
+///   nothing downstream addresses fragments by timestamp.
+/// - **from zero**, never `-ss`. An index describes the whole file.
+/// - **unpaced.** Pacing rate-limits the input to protect a live session's
+///   supply; an index build is background work with no viewer behind it, and
+///   throttling it would only make it take longer.
+pub fn copy_index_pipe_args(
+    source: &MediaFile,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    args.push("-i".into());
+    args.push(source.path.to_string_lossy().into_owned());
+    args.push("-map_chapters".into());
+    args.push("-1".into());
+    args.push("-map".into());
+    args.push("0:v:0?".into());
+    args.push("-an".into());
+    args.push("-sn".into());
+    args.extend(copy_video_args(
+        source,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+    ));
+    args.extend(
+        [
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-use_editlist",
+            "0",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
     args
 }
 
@@ -1477,6 +1561,34 @@ pub fn hls_copy_args_with_dolby_vision(
     dolby_vision: DolbyVisionCopyOptions,
     out_dir: &str,
 ) -> Vec<String> {
+    hls_copy_args_with_sequence(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        dolby_vision,
+        0,
+        "init.mp4",
+        out_dir,
+    )
+}
+
+/// Build copy-HLS arguments for a fenced successor generation. The init name
+/// and segment number are generation-specific so a stable capability URL can
+/// never make a previously cached URI name different bytes after takeover.
+#[allow(clippy::too_many_arguments)]
+pub fn hls_copy_args_with_sequence(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    dolby_vision: DolbyVisionCopyOptions,
+    start_number: i64,
+    init_filename: &str,
+    out_dir: &str,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -1515,11 +1627,11 @@ pub fn hls_copy_args_with_dolby_vision(
             "-hls_segment_type",
             "fmp4",
             "-hls_fmp4_init_filename",
-            "init.mp4",
+            init_filename,
             "-hls_segment_filename",
             &format!("{out_dir}/seg%05d.m4s"),
             "-start_number",
-            "0",
+            &start_number.max(0).to_string(),
         ]
         .iter()
         .map(|s| s.to_string()),
@@ -2517,6 +2629,27 @@ mod tests {
         assert!(!h264.contains("-tag:v"));
     }
 
+    #[test]
+    fn takeover_copy_uses_generation_specific_object_names() {
+        let args = hls_copy_args_with_sequence(
+            &file(Some("hdr10")),
+            42.0,
+            None,
+            false,
+            Pacing::unpaced(),
+            DolbyVisionCopyOptions::new(true, false),
+            17,
+            "init-e3.mp4",
+            "/tmp/s",
+        )
+        .join(" ");
+        assert!(args.contains("-start_number 17"), "{args}");
+        assert!(
+            args.contains("-hls_fmp4_init_filename init-e3.mp4"),
+            "{args}"
+        );
+    }
+
     /// The gate on dovi_rpu is an ffmpeg version parse, and getting it wrong
     /// in either direction has a cost: too eager is a hard session exit on an
     /// older build ("Unknown bit stream filter"), too shy leaves the dvcC box
@@ -3111,5 +3244,106 @@ mod tests {
             "this fixture must actually exercise the lead, got {}s",
             requested - origin
         );
+    }
+}
+
+#[cfg(test)]
+mod index_pipe_tests {
+    use super::*;
+
+    use crate::domain::MediaFile;
+
+    fn hevc_dv() -> MediaFile {
+        MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/library/film.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(600_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: Some("dolby_vision".into()),
+            hdr_format: Some("Profile 5".into()),
+            bitrate: Some(60_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+
+    /// The index and the production pipe must agree about the video, because
+    /// the index is a list of output byte counts and the landing matcher
+    /// compares them. A drift here is not a stale index, it is a wrong one.
+    #[test]
+    fn the_index_pipe_carries_the_production_pipes_video_arguments() {
+        for preserve in [false, true] {
+            for dovi in [false, true] {
+                let file = hevc_dv();
+                let production = copy_pipe_args_with_dolby_vision(
+                    &file,
+                    0.0,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    dovi,
+                    preserve,
+                );
+                let index = copy_index_pipe_args(&file, dovi, preserve);
+                let video = copy_video_args(&file, dovi, preserve);
+                assert!(
+                    contains_run(&production, &video),
+                    "production pipe lost the video arguments: {production:?}"
+                );
+                assert!(
+                    contains_run(&index, &video),
+                    "index pipe lost the video arguments: {index:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_index_pipe_maps_no_audio_and_never_seeks() {
+        let file = hevc_dv();
+        let args = copy_index_pipe_args(&file, false, false);
+        assert!(args.contains(&"-an".to_owned()));
+        assert!(!args.iter().any(|a| a.starts_with("0:a:")));
+        assert!(!args.contains(&"-ss".to_owned()));
+        assert!(!args.contains(&"-noaccurate_seek".to_owned()));
+        assert!(!args.contains(&"-readrate".to_owned()));
+        assert!(args.ends_with(&["-f".to_owned(), "mp4".to_owned(), "pipe:1".to_owned()]));
+    }
+
+    /// The fingerprint must move when the video branch moves and stay put when
+    /// the file merely moves, which is the whole reason it is not a digest of
+    /// the entire argv.
+    #[test]
+    fn the_video_fingerprint_tracks_the_branch_not_the_path() {
+        let file = hevc_dv();
+        let mut moved = hevc_dv();
+        moved.path = "/other/place/film.mkv".into();
+        let stripped = crate::segplan::argv_fingerprint(&copy_video_args(&file, false, false));
+        let preserved = crate::segplan::argv_fingerprint(&copy_video_args(&file, false, true));
+        let relocated = crate::segplan::argv_fingerprint(&copy_video_args(&moved, false, false));
+        assert_ne!(
+            stripped, preserved,
+            "preserving Dolby Vision changes the copied NAL stream, so it must \
+             change the fingerprint"
+        );
+        assert_eq!(stripped, relocated, "a moved file is not a new pipeline");
+    }
+
+    fn contains_run(haystack: &[String], needle: &[String]) -> bool {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return false;
+        }
+        (0..=haystack.len() - needle.len()).any(|i| &haystack[i..i + needle.len()] == needle)
     }
 }

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["56298695"]
+points = ["core.media", "cluster.auth", "cluster.page-reads", "validation.framework"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "`a_brand_new_sidecar_gets_every_column_the_reader_asks_for` opens a sidecar from nothing and round-trips an index through the columns the frozen create constant does not carry. It fails against a guard that asks `table_exists` before the batch that creates the table has run -- the shape that left a fresh cluster node at the old column set carrying a current schema stamp, where nothing noticed until the first read of a v6 column. `fragment_index_contract_runs_through_dyn_store` covers the same ground across both backends, which is where it was actually caught: the targeted run passed because it only selected a column present since v4."

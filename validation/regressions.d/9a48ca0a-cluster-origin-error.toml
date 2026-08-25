@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9a48ca0a"]
+points = ["cluster.membership", "server.api"]
+checks = ["rust-gate", "api-wire"]
+reason = "The retained Rust route contract requires every membership refusal to map to a stable HTTP status and machine code. Reverting this correction leaves the new invalid cluster-origin refusal outside the exhaustive join-handler mapping, preventing the daemon from compiling or returning the intended bad-request response."

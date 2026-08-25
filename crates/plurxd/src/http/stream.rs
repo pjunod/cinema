@@ -1294,7 +1294,7 @@ pub async fn subtitles_vtt(
         ));
     }
 
-    let cached = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
+    let bytes = crate::subtitles::ensure_vtt_bytes(&state.subs_dir, &file, index)
         .await
         .map_err(|why| {
             // Keep the endpoint's existing diagnostic while sharing the
@@ -1302,9 +1302,6 @@ pub async fn subtitles_vtt(
             tracing::warn!(file_id = id, index, "subtitle extraction failed: {why}");
             ApiError::Internal("subtitle extraction failed".into())
         })?;
-    let bytes = tokio::fs::read(&cached)
-        .await
-        .map_err(|e| ApiError::Internal(format!("reading extracted subtitles: {e}")))?;
     Ok(vtt_response(bytes))
 }
 
@@ -1546,11 +1543,12 @@ pub async fn stream_mp4(
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("srv-{}", uuid::Uuid::new_v4()));
-    let tracked = Some(
-        state
-            .streams
-            .register(&sid, user.id, &user.username, id, readrate),
-    );
+    let tracked =
+        Some(
+            state
+                .streams
+                .register(&sid, user.id, &user.username, id, file.item_id, readrate),
+        );
     remux(RemuxSpec {
         path: &file.path,
         start: q.start,
@@ -1569,6 +1567,7 @@ pub async fn stream_mp4(
         preserve_dolby_vision: decision.preserve_dolby_vision,
         readrate,
         tracked,
+        serving: state.serving.subscribe(),
     })
     .await
 }
@@ -1746,6 +1745,63 @@ struct RemuxSpec<'a> {
         std::sync::Arc<crate::progressive::Stream>,
         crate::progressive::StreamGuard,
     )>,
+    /// Process-wide quorum authority. Its monotonic generation makes a loss
+    /// observable even when recovery is published before this task runs.
+    serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+}
+
+/// Cancels the independent child owner when the HTTP body is dropped. The
+/// owner, not body polling, holds and reaps ffmpeg; an idle TCP consumer can
+/// therefore never prevent quorum-loss teardown from running.
+struct RemuxProcessGuard {
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for RemuxProcessGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+fn spawn_remux_process_owner(
+    mut child: tokio::process::Child,
+    mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+    admitted_generation: u64,
+    registry_guard: Option<crate::progressive::StreamGuard>,
+) -> (RemuxProcessGuard, tokio::task::JoinHandle<()>) {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let owner_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        // Registration belongs to the process lifetime. It disappears on
+        // natural exit, body drop, or serving loss—not merely when Hyper next
+        // decides to poll a response body.
+        let _registry_guard = registry_guard;
+        loop {
+            let authority = *serving.borrow_and_update();
+            if authority.authority_lost_since(admitted_generation) {
+                break;
+            }
+            tokio::select! {
+                status = child.wait() => {
+                    if let Err(error) = status {
+                        tracing::warn!(%error, "waiting for remux ffmpeg failed");
+                    }
+                    return;
+                }
+                () = owner_cancel.cancelled() => break,
+                changed = serving.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill().await;
+        }
+        let _ = child.wait().await;
+    });
+    (RemuxProcessGuard { cancel }, task)
 }
 
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
@@ -1761,7 +1817,17 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         preserve_dolby_vision,
         readrate,
         tracked,
+        mut serving,
     } = spec;
+    let admitted_generation = {
+        let authority = *serving.borrow_and_update();
+        if !authority.ready {
+            return Err(ApiError::ServiceUnavailable(
+                crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+            ));
+        }
+        authority.loss_generation
+    };
     let pacing = pacing_caps().await;
     let mut cmd = tokio::process::Command::new(ffmpeg_bin());
     cmd.arg("-hide_banner").arg("-loglevel").arg("error");
@@ -1873,12 +1939,28 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // `make_zero` makes the preceding keyframe local time zero, so the
     // requested seek is not an accurate source-time origin for copied video.
     let start_seconds = start.unwrap_or(0.0).max(0.0);
-    let media_origin_seconds = bounded_progressive_media_origin(
+    let media_origin = bounded_progressive_media_origin(
         start_seconds,
         PROGRESSIVE_MEDIA_ORIGIN_PROBE_TIMEOUT,
         crate::transcode::probe_media_origin(path, start_seconds),
-    )
-    .await;
+    );
+    tokio::pin!(media_origin);
+    let media_origin_seconds = loop {
+        tokio::select! {
+            origin = &mut media_origin => break origin,
+            changed = serving.changed() => {
+                if changed.is_err()
+                    || serving
+                        .borrow_and_update()
+                        .authority_lost_since(admitted_generation)
+                {
+                    return Err(ApiError::ServiceUnavailable(
+                        crate::serving_fence::SERVING_FENCED_MESSAGE.to_owned(),
+                    ));
+                }
+            }
+        }
+    };
 
     let (tracked_stream, guard) = match tracked {
         Some((s, g)) => (Some(s), Some(g)),
@@ -1918,16 +2000,50 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .take()
         .ok_or_else(|| ApiError::Internal("ffmpeg stdout unavailable".into()))?;
 
-    // Stream ffmpeg stdout; the Child rides along in the stream state and is
-    // killed (kill_on_drop) if the client disconnects mid-stream. The
-    // registration guard rides along too, so the stream deregisters at exactly
-    // the moment its ffmpeg dies rather than on a timer that could outlive it.
+    let owner_guard = guard.clone();
+    let (process_guard, _process_owner) =
+        spawn_remux_process_owner(child, serving.clone(), admitted_generation, owner_guard);
+
+    // Stream ffmpeg stdout. The body carries cancellation plus its own
+    // idempotent registry guard; the detached owner carries a clone so body
+    // drop deregisters synchronously while serving loss can do the same even
+    // when Hyper is not polling this body.
     let reader = tokio::io::BufReader::new(stdout);
-    let state = (child, reader, tracked_stream, guard);
-    let stream =
-        futures_util::stream::unfold(state, |(child, mut reader, tracked, guard)| async move {
+    let state = (
+        reader,
+        tracked_stream,
+        process_guard,
+        guard,
+        serving,
+        admitted_generation,
+    );
+    let stream = futures_util::stream::unfold(
+        state,
+        |(mut reader, tracked, process_guard, registry_guard, mut serving, admitted_generation)| async move {
+            if serving
+                .borrow_and_update()
+                .authority_lost_since(admitted_generation)
+            {
+                return None;
+            }
             let mut buf = vec![0u8; 64 * 1024];
-            match reader.read(&mut buf).await {
+            let read = reader.read(&mut buf);
+            tokio::pin!(read);
+            let read = loop {
+                tokio::select! {
+                    result = &mut read => break result,
+                    changed = serving.changed() => {
+                        if changed.is_err()
+                            || serving
+                                .borrow_and_update()
+                                .authority_lost_since(admitted_generation)
+                        {
+                            return None;
+                        }
+                    }
+                }
+            };
+            match read {
                 Ok(0) => None,
                 Ok(n) => {
                     buf.truncate(n);
@@ -1939,7 +2055,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
                     }
                     Some((
                         Ok::<_, std::io::Error>(bytes::Bytes::from(buf)),
-                        (child, reader, tracked, guard),
+                        (
+                            reader,
+                            tracked,
+                            process_guard,
+                            registry_guard,
+                            serving,
+                            admitted_generation,
+                        ),
                     ))
                 }
                 Err(e) => {
@@ -1947,7 +2070,8 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
                     None
                 }
             }
-        });
+        },
+    );
 
     let mut response = (
         StatusCode::OK,
@@ -2280,6 +2404,39 @@ mod tests {
             40.0,
             "a prompt keyframe answer still reaches the response header"
         );
+    }
+
+    #[tokio::test]
+    async fn remux_owner_reaps_child_without_polling_the_http_body() {
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("60").kill_on_drop(true);
+        let child = command.spawn().expect("spawn remux stand-in");
+        let (serving_tx, serving_rx) =
+            tokio::sync::watch::channel(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 0,
+            });
+        let (_body_guard, owner) = spawn_remux_process_owner(child, serving_rx, 0, None);
+
+        // Deliberately publish recovery before the owner gets a scheduling
+        // point and never construct or poll a body stream. The generation—not
+        // a transient false boolean—must still make the owner reap the child.
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: false,
+                loss_generation: 1,
+            })
+            .expect("publish serving loss");
+        serving_tx
+            .send(crate::serving_fence::ServingState {
+                ready: true,
+                loss_generation: 1,
+            })
+            .expect("publish serving recovery");
+        tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+            .await
+            .expect("independent owner must finish")
+            .expect("owner task must not panic");
     }
 
     fn headers_with_range(value: &str) -> HeaderMap {

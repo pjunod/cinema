@@ -10,6 +10,305 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **The VOD presentation serves (milestone M3).** A session created with
+  `presentation:"vod"` while the new `playback.vod_presentation` setting is on
+  is a film, not a broadcast: its playlist is rendered once from the stored
+  segment plan — `PLAYLIST-TYPE:VOD`, every segment named, `ENDLIST` from the
+  first byte — and never changes for the session's life. Segments materialize
+  just-in-time behind blocking GETs with the plan's three-outcome contract: a
+  materialized segment serves immutably (strong ETag, `immutable`
+  cache-control, byte ranges), a planned one blocks up to a hard deadline
+  (client-declared `block_budget_secs`, clamped by
+  `playback.vod_block_budget_secs`) and then answers a typed `segment_pending`
+  503, and an unknown name is the only 404 left. Production is driven by the
+  M2 scheduler/executor pair against real producer children — suspend on the
+  ahead window, reposition on a far seek, reclaim when idle — cutting on the
+  plan's own boundaries and enforcing the rendition's init identity before a
+  byte is written. Renditions live beside the persistent caches under a
+  node-wide working-set budget (`playback.vod_working_set_bytes`, never zero),
+  evict coldest-first without ever taking a reader's window, admit into the
+  copy cache when they complete (`reserve → fsync → complete`, budgeted by
+  `cache.max_gb`), and adopt their own directories back after a restart — a
+  reaped session resurrects from its durable route while that route is live,
+  and every terminal cause (DELETE, supersession, admin stop, revocation,
+  file replacement) answers a typed 410 and never resurrects. Everything is
+  double-opt-in: a transcode rung (gated on the open D6 device measurement), a
+  subtitle burn, a missing fragment index, varying in-band parameter sets, or
+  the setting being off all keep today's live presentation byte for byte, with
+  one log line naming why. Off by default; no shipped client sends the flag
+  yet (web lands in M4).
+
+### Changed
+
+- **Playback info is a top-right ledger on every client.** The panel anchored
+  to a different place in each mode and laid its sections out by measured
+  height, so the reading order was a side effect of how long the values
+  happened to be and shifted while it was open; sentence-shaped values such as
+  the transcode reason sat in the grid and stretched their column, which is
+  what left the ragged gaps between sections. Mini, Standard and Debug now all
+  anchor to the top-right corner — the only corner clear of the transport bar
+  and the subtitle band on every surface — so changing mode grows the block
+  downward from a fixed point instead of moving it. Standard and Debug lay out
+  two fixed columns, the media chain on the left and the delivery chain on the
+  right; a row's column is a property of the row and never of its value, so
+  nothing migrates under the reader's eye on the refresh tick. Sentences move
+  to a notes strip grouped by the section they came from, sections align as a
+  unit with tabular figures where the values are quantities, and Mini collapses
+  to a single line. On Apple TV the full Debug set now fits without scrolling,
+  and every section and the notes strip are focusable so the fallback is
+  reachable by remote — Debug also takes initial focus on Done, which it never
+  did before. On Android the panel sits inside the safe drawing area, so a
+  display cutout in landscape can no longer clip it, and a section renders only
+  when it has a row, which retires the empty SOURCE and NETWORK headings that
+  appeared on direct play.
+
+### Added
+
+- **A node that dies mid-film no longer ends the stream.** When an HLS owner's
+  replicated lease expires, an eligible survivor reproduces that exact session
+  behind the same capability URL: the player's address does not change, so
+  nothing about the client has to know a failover happened. Owners publish
+  their produced and fetched frontiers in the two-second liveness batch they
+  already send, and a successor resumes one complete segment behind the last
+  frontier the client actually reached. Only a node that can prove it has the
+  same source revision and can build the same pipeline may claim, and the
+  replicated compare-and-swap admits exactly one of them — losers stop the
+  worker they had speculatively started. The replacement advertises one HLS
+  discontinuity, an init object named for its own ownership epoch so it can
+  never overwrite one a client cached, and segment numbers in a range no
+  earlier generation could have used, so no URL in the session's life ever
+  names two different sets of bytes. It resumes a whole segment behind the
+  frontier rather than a fixed margin, because that frontier records what the
+  client asked for and not what it received — the viewer sees a moment
+  twice rather than losing a moment nobody produced. Recovery takes fifteen to
+  twenty seconds, most of it waiting out the dead owner's lease. This is off
+  by default and gated separately from remote placement, it does not apply to
+  sessions that were already playing when it was switched on, and
+  `docs/OPERATIONS.md` covers enabling it and what it makes visible.
+
+- **A title's initialization data is now settled once, for the whole film,
+  instead of being taken from wherever a producer happened to start.** A few
+  sources — mostly HEVC web releases — leave the decoder's setup information
+  out of the container header and repeat it inside the picture data instead, so
+  the server lifts it out of the first frame it sees and writes it into the
+  header it serves. That worked while a session only ever started at the
+  beginning. A VOD title's producer restarts all over the film, and one
+  restarting in the middle was lifting a *different* copy — or, where the data
+  appears only on some scenes, none at all — producing a header that no longer
+  matched the one already published, and a title that would refuse to continue
+  after a seek. The scan now takes that setup information once, from the film's
+  opening, and every later restart uses the stored copy, so what a viewer holds
+  is the same bytes no matter where production resumed. The scan also checks
+  every legal restart point for disagreement, and a title whose scenes genuinely
+  disagree keeps the old presentation rather than being offered as something it
+  cannot be — decided in the background, before anyone watches it, rather than
+  as a failure mid-playback.
+
+- **Completing a title now makes it durable before promising it is complete.**
+  Marking a title cached is a promise that survives restarts, so it is now the
+  point where every segment and the header are flushed to the disk properly.
+  Nothing else on the path pays that cost: a power cut before completion simply
+  produces the title again, honestly, but one after it would otherwise leave a
+  directory of plausible-looking half-files that get served as a finished copy
+  weeks later with nothing left to notice. Adoption also checks each file
+  against the length that was recorded for it, so a half-written segment is
+  rebuilt rather than believed.
+
+- **Bookkeeping for deleted files is now cleaned up on each machine's own
+  schedule.** The scan and plan records live on the machine that made them
+  while the file list is shared across machines, so cleaning them up at the
+  moment of deletion could only ever tidy the one machine that ran it — and
+  never one that was switched off at the time. Each machine now checks its own
+  records against the shared list as part of its regular scan, so every machine
+  converges whether or not it was there.
+
+- **A decision about a producer is now turned into exactly one thing done to
+  the process.** Two facts the scheduler cannot see decide most of it. A
+  stopped encoder still holds its hardware codec session, so stopping is only
+  right for a hold that clears on its own and soon — a reader advancing does,
+  and the disk filling up does not, since only another title releasing space
+  will clear that, on no schedule this one controls. Those give the process
+  back rather than sitting on a scarce session indefinitely. And because a
+  signal goes to a process id, and ids get reused, every transition refuses to
+  repeat itself: what is already stopped is never stopped again.
+
+  Building it surfaced a fault in the scheduler that could not be seen without
+  it. "Where the producer has got to" and "where the producer was sent" were
+  one fact, so a producer dispatched to the middle of a film — having made
+  nothing there yet — was indistinguishable from one that had never started,
+  and was dispatched to the same place again. The result was a tight loop of
+  starting and killing an encoder while the viewer who asked for that part of
+  the film waited on a segment nobody was making. The two facts are now
+  separate, and a producer already sitting where it was sent is left alone to
+  get on with it.
+
+- **A title's whole playlist can now be rendered before a byte of its media
+  exists.** This is the artifact the rest of the work is for, and the
+  difference between it and what the daemon serves today is the entire point: a
+  live playlist grows, so a client can only ever see as far as the server has
+  produced, and every seek past that edge is a seek into a timeline the player
+  does not believe exists. The plan renders one that lists every segment of the
+  film up front, declared `VOD` rather than `EVENT` — `EVENT` promises only
+  that segments are appended, where `VOD` promises the playlist is final, which
+  is what makes the whole duration seekable — and closed with `EXT-X-ENDLIST`
+  so the end is not provisional. Target duration counts audio-tail entries as
+  well as video ones, because a title whose audio outlives its picture has an
+  honest target duration of fifteen seconds where a video-only reading emits
+  eight, and understating it is a spec violation players act on. Durations are
+  the plan's own and nominal, since measurement showed players preferring the
+  media's own timestamps over the declared ones.
+
+- **A rendition's segments on disk and the manifest that describes them can no
+  longer drift apart.** The bookkeeping was pure and testable and the bytes were
+  nowhere, which left the dangerous half unwritten: a manifest claiming a
+  segment that is not on disk is a cache *hit* that 404s a viewer mid-film,
+  which is worse than a miss in every case. Materializing now writes the bytes
+  before it records them, and evicting clears the record before it unlinks, so
+  whichever half a crash interrupts the residue is an unclaimed byte rather
+  than a phantom row. Adopting a directory this process did not write repairs
+  both directions and says what it found: a segment on disk nothing claimed is
+  adopted rather than deleted, because it cost a read of the source and is
+  exactly what the plan asked for, and a claim on bytes that are gone is
+  dropped even on a completed rendition, where refusing to notice would be
+  worst of all. Names and tmp-then-rename semantics are the copy segmenter's
+  exactly, so the serving layer and the GC need no changes.
+
+- **A rendition's plan is now kept, because it is a decision and not a
+  measurement.** Segment boundaries are computed once and a producer cuts at
+  them for the life of the file, but nothing was storing them — the plan was
+  re-derived on demand, which sounds like a cheaper route to the same answer
+  and is not. The cut policy is built from tuning constants, and any release
+  may move one; nothing in the plan version or the source identity covers that,
+  so the file, the pipeline and the index can all be unchanged while the plan
+  comes out cut somewhere else. A client holding the old playlist then asks for
+  segment 412 and is handed a different part of the film. Plans are now stored
+  node-local beside the fragment index, packed at 32 bytes an entry, and the
+  first plan written under a rendition key is the plan: a second write is
+  refused rather than silently re-cutting a rendition somebody is mid-seek
+  against. SQLite migration v28 and sidecar v5, both additive, both held to one
+  behaviour across the two durable backends.
+
+- **A rendition's segment boundaries are now obeyed, not re-derived.** The
+  segment plan has always been normative — a producer cuts *at* its boundaries
+  and never re-decides them — but the segmenter had never seen a plan, so every
+  boundary after the first came from re-running the cut policy live. The two
+  derivations cannot agree: the plan runs that policy over the video-only index
+  pipe's byte counts plus a deliberately generous audio estimate, while a live
+  generation accumulates the real production wire length. They pick the same
+  keyframe on a clean cut and different fragments on a byte-ceiling cut, which
+  on a 69 Mb/s remux with no clean point in reach is the ordinary case — and
+  every segment after such a disagreement would have been published under an
+  index naming a different part of the film, in a playlist the client already
+  held. `Segmenter::following` takes the boundaries instead. A generation whose
+  media steps over a planned boundary is refused rather than publishing an
+  empty segment under an index somebody will request. Sessions without a plan
+  cut by policy exactly as before.
+
+- **A producer that seeks now publishes on the film's timeline rather than on
+  ffmpeg's.** Reopening a file partway in with `-noaccurate_seek -ss` yields
+  decode times that are not film time — measured in every configuration tried,
+  `-copyts` included — so the segments a repositioned generation published
+  carried ffmpeg's clock into a playlist claiming to be the film's.
+  `Segmenter::resuming_at` takes the plan entry the producer landed on and
+  rebases the whole generation onto it: the shift is learned once from the
+  first fragment carrying video, converted into each track's own clock, and
+  added to what is already there, so nothing can move audio relative to
+  picture. The segment also gets its plan name instead of restarting the
+  numbering, and the first-segment duration floor, which exists to start a
+  session quickly, is not spent again on a segment that is nobody's first. Two
+  real generations of the same fixture are now required to publish one
+  continuous timeline under one set of indexes. Nothing calls this yet.
+
+- **A rendition's segments now have bookkeeping and a scheduler of their own.**
+  `plurxd::titlestore` keeps three separate facts about every planned segment —
+  planned, materialized, admitted — because one bitmap cannot mean both "the
+  bytes are here now" and "the whole rendition is durably cached": eviction
+  clears the first while the second is still being assembled. A title too large
+  for the completed-cache budget is therefore not a failure but a
+  working-set-only rendition, still VOD-presented and honestly re-materialized
+  on a later watch, which is the ordinary case for the large remuxes this work
+  exists for. `plurxd::prodsched` decides what a producer does next as a pure
+  function of the manifest and the attached readers' open requests, with one
+  rule above the ahead window: a reader whose segment GET is blocked has a
+  first-byte deadline running against it and outranks everything else, so the
+  producer never walks backwards to refill a hole nobody has asked for. Neither
+  module is wired to a request path yet.
+
+- **A file's segmentation is now computed once and kept, instead of being
+  re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan
+  from a fragment index — one row per fragment of the production-shaped
+  video-only copy pipe — and a repositioned producer finds its place in that
+  index by matching three consecutive fragments' video sample bytes — the
+  summed `trun` sizes, which are copied and so come out identical whatever
+  audio a generation carries, where the wire length does not — because M0
+  measured that a repositioned generation's timestamps carry no film time at
+  all. The index is node-local on both backends, packed at twenty-four bytes a
+  row, and invalidated by mismatch rather than by deletion: a changed file or a
+  changed video pipeline simply stops matching. The background job that builds
+  them is bounded and ships off, because M0-P1 has not yet priced a full read
+  of a library over NFS. Nothing serves from any of this yet; a file without an
+  index keeps today's presentation.
+
+- **The VOD presentation plan's feasibility spike ran, and it stopped the
+  build.** Three harnesses under `scripts/` measure what the plan assumed:
+  `vod-plan-probe` builds the plan's fragment index from the
+  production-shaped video-only copy pipe, applies `CutPolicy` over it, then
+  materializes the full production pipe and checks the plan's boundaries,
+  byte bounds and initialization segment against real ffmpeg output;
+  `vod-probe-stub` drives the vendored hls.js through a stub HLS server that
+  can declare nominal EXTINFs over jittered media, block a segment, and
+  answer a deadline with a typed `segment_pending` 503; `vod-probe-fixtures.sh`
+  builds a nine-fixture corpus whose GOPs are deliberately not a whole number
+  of milliseconds. Plan section 12 records the results. The fragment index is
+  deterministic and describes the production fragment stream exactly, so
+  ledger D4 is upheld; blocking behind one hard deadline works on a stock web
+  player, but only when the deadline sits below the client's own first-byte
+  timeout, which sets D1's number at 8 seconds rather than 15; and hls.js
+  ignores the playlist's declared durations in favour of measured PTS, which
+  settles D6 as nominal. A repositioned producer's timestamps, however, carry
+  no film time in any configuration tested, so section 2.2's addressing rule
+  is unimplementable as written and M1 does not start.
+
+- **Cluster topology guidance and comparable three-versus-four-voter evidence
+  are now executable.** Operations recommends three voters for ordinary HA,
+  documents readiness-aware sticky proxying and a complete durable authority
+  set, and keeps scratch/cache I/O off consensus storage. The separate-process
+  harness runs an identical quorum-acknowledged write workload on fresh three-
+  and four-voter clusters and emits a versioned semantic artifact with raw
+  acknowledged-write round trips, type-7 percentiles, a stable leader term,
+  quorum, commit count, applied lag, and per-voter validation of the expected
+  logical corpus. Hosted CI leaves resource fields null so it cannot
+  masquerade as named-runner evidence.
+
+- **Idle cluster voters now prepare different likely-next titles in parallel.**
+  One fenced scheduler ranks and enqueues immutable source generations, while
+  every compatible node claims distinct whole-title jobs with renewable,
+  takeover-safe row fences. Yielded work resumes from node-local numbered
+  parts; a successor on another node restarts cleanly, and an expired worker
+  cannot publish. Cache location and ready state commit atomically, source
+  deletion cancels work, eviction makes it eligible again, and housekeeping
+  preserves only the current staging owner. New distributed cache generations
+  carry an authenticated object manifest whose fenced digest is bound to the
+  cache-location row. Starts load that bounded manifest without walking the
+  film, while requests authenticate the exact playlist or segment bytes they
+  return. Scheduled cleanup rotates a durable object cursor under a 132 MiB
+  plus two-byte EOF-probe ceiling, yields to same-title playback, and
+  invalidates the exact corrupt generation. Offline downloads fail their ready
+  lease coherently when that authoritative generation is removed. The existing
+  foreground admission lane still preempts speculative ffmpeg work within its
+  five-second bound, and completed hits start as childless cached sessions.
+  Worker claims use the boot-probed decoder/encoder/tone-map inventory and
+  current reserved disk capacity, paginate beyond incompatible work, and
+  self-fence renewals at their local deadline. Ready/terminal history is
+  pruned under hard active and total queue ceilings. Workers open/stat the
+  source before ffmpeg and keep unreadable-mount refusals node-local, so one
+  unmounted voter cannot spend the cluster's failure budget. Individual empty
+  queue polls avoid cache filesystem walks; producer nodes rate-limit a bounded
+  local sweep to every 15 minutes, while scheduled cleanup remains the
+  backstop for abandoned queue staging/final directories after a restart with
+  no cache rows. Rename-to-publication blocks both recipe eviction and orphan
+  cleanup.
+
 - **Cluster schedulers now spend shared work once, even when every voter ticks
   together.** Scans and refreshes share a per-library lease across startup,
   scheduled, manual, and targeted integration triggers; probe repair, artwork
@@ -63,10 +362,9 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - **Apple TV playback diagnostics are readable from the couch.** Playback info
-  now opens as a large three-column Source, Playing, and Server dashboard with
-  the playback method, position, and stall health visible at a glance. A
-  focused Done action keeps the Siri Remote inside the modal until dismissal;
-  iPhone and iPad retain their compact inspector.
+  carries the playback method, position, and stall health at a glance, and a
+  focused Done action keeps the Siri Remote inside the modal until dismissal.
+  Its layout is superseded by the top-right ledger described under Changed.
 
 - **Audiobook artwork refresh now uses the cover already embedded in the
   audio file.** Plurx's Books enricher inspected EPUBs only, so refreshing an

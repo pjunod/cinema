@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["14185362"]
+points = ["cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Store aggregate contracts prove one authority query across SQLite and three-voter Hiqlite with non-empty gauges, while the daemon concurrency and exposition regressions prove complete background publication, explicit stale or absent state, and Store-free lock-free Prometheus scrapes."

@@ -50,6 +50,8 @@ pub enum BookMetadataError {
     Http(String),
     #[error("cannot extract embedded cover: {0}")]
     EmbeddedCover(String),
+    #[error("cover publication was rejected: {0}")]
+    Publication(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -154,10 +156,20 @@ pub async fn materialize_item_cover(
     expected: &[String],
     workers: &CoverMaterializationWorkers,
 ) -> Result<Option<bool>, crate::error::StoreError> {
+    let publisher = PublicationStore::unfenced(store);
     let Some(item) = store.get_item(item_id).await? else {
         return Ok(Some(false));
     };
     if !matches!(item.kind, ItemKind::Book | ItemKind::Audiobook) {
+        return Ok(Some(false));
+    }
+    let published = item
+        .poster_path
+        .iter()
+        .chain(item.backdrop_path.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if published.is_empty() {
         return Ok(Some(false));
     }
     if item.book_metadata_source.as_deref() == Some(BookMetadataSource::Curator.as_str())
@@ -165,7 +177,7 @@ pub async fn materialize_item_cover(
             store,
             item.id,
             item.book_edition_id.as_deref().unwrap_or_default(),
-            expected,
+            &published,
         )
         .await?
     {
@@ -184,8 +196,15 @@ pub async fn materialize_item_cover(
             let Some(stream_index) = attached_picture_stream(&probe) else {
                 continue;
             };
-            let Ok(filename) =
-                extract_attached_picture(artwork_dir, item.id, &file.path, stream_index).await
+            let Ok(filename) = extract_attached_picture(
+                &publisher,
+                artwork_dir,
+                item.id,
+                &file.path,
+                stream_index,
+                Some(&published),
+            )
+            .await
             else {
                 continue;
             };
@@ -211,7 +230,9 @@ pub async fn materialize_item_cover(
     let Some(cover) = facts.cover.as_deref() else {
         return Ok(Some(false));
     };
-    let Ok(filename) = write_cached_cover(artwork_dir, item.id, cover).await else {
+    let Ok(filename) =
+        write_cached_cover(&publisher, artwork_dir, item.id, cover, Some(&published)).await
+    else {
         return Ok(Some(false));
     };
     if !expected.contains(&filename) {
@@ -302,6 +323,7 @@ pub async fn materialize_curator_cover(
                 edition_id: Some(edition_id.to_owned()),
                 poster_path: Some(filename),
                 source: BookMetadataSource::Curator,
+                required_origin: Some((origin_key, updated_origin)),
             },
             repair_fence,
         )
@@ -517,7 +539,7 @@ pub async fn enrich_library_with_publication(
             .as_deref()
             .filter(|_| force || item.poster_path.is_none())
         {
-            match write_cached_cover(artwork_dir, item.id, bytes).await {
+            match write_cached_cover(store, artwork_dir, item.id, bytes, None).await {
                 Ok(path) => Some(path),
                 Err(error) => {
                     report.errors += 1;
@@ -535,6 +557,7 @@ pub async fn enrich_library_with_publication(
             edition_id: clean(facts.identifier, MAX_IDENTIFIER_BYTES),
             poster_path,
             source: BookMetadataSource::Epub,
+            required_origin: None,
         };
         let unchanged = patch
             .title
@@ -584,7 +607,9 @@ async fn enrich_audiobook_cover(
             continue;
         };
         report.inspected += 1;
-        match extract_attached_picture(artwork_dir, item_id, &file.path, stream_index).await {
+        match extract_attached_picture(store, artwork_dir, item_id, &file.path, stream_index, None)
+            .await
+        {
             Ok(poster_path) => {
                 let patch = MetadataPatch {
                     poster_path: Some(poster_path),
@@ -642,10 +667,12 @@ fn ffmpeg_bin() -> String {
 }
 
 async fn extract_attached_picture(
+    store: &PublicationStore<'_>,
     artwork_dir: &Path,
     item_id: i64,
     media: &Path,
     stream_index: i64,
+    expected: Option<&[String]>,
 ) -> Result<String, BookMetadataError> {
     tokio::fs::create_dir_all(artwork_dir).await?;
     let mut command = tokio::process::Command::new(ffmpeg_bin());
@@ -693,7 +720,7 @@ async fn extract_attached_picture(
     let bytes = tokio::time::timeout(COVER_EXTRACT_TIMEOUT, extract)
         .await
         .map_err(|_| BookMetadataError::EmbeddedCover("ffmpeg timed out".to_owned()))??;
-    write_cached_cover(artwork_dir, item_id, &bytes).await
+    write_cached_cover(store, artwork_dir, item_id, &bytes, expected).await
 }
 
 /// Fetch one Curator-provided Open Library cover with no redirects, no bearer,
@@ -804,9 +831,11 @@ pub fn allowed_curator_cover_url(url: &str) -> Option<reqwest::Url> {
 }
 
 async fn write_cached_cover(
+    store: &PublicationStore<'_>,
     artwork_dir: &Path,
     item_id: i64,
     bytes: &[u8],
+    expected: Option<&[String]>,
 ) -> Result<String, BookMetadataError> {
     if bytes.is_empty() || bytes.len() > MAX_COVER_BYTES as usize {
         return Err(BookMetadataError::Limit);
@@ -814,9 +843,22 @@ async fn write_cached_cover(
     let extension = raster_cover_extension(bytes).ok_or(BookMetadataError::Invalid(
         "cover is not a supported raster image",
     ))?;
-    let filename = format!("{item_id}-poster.{extension}");
-    let target = artwork_dir.join(&filename);
-    super::write_artwork_atomically(&target, bytes).await?;
+    let legacy_filename = format!("{item_id}-poster.{extension}");
+    let filename = if let Some(expected) = expected {
+        super::matching_materialized_artwork_filename(&legacy_filename, bytes, expected).ok_or(
+            BookMetadataError::Publication(
+                "cover bytes do not match the requested artwork generation".to_owned(),
+            ),
+        )?
+    } else {
+        store
+            .scoped_artwork_filename(&legacy_filename, bytes)
+            .await
+            .map_err(|error| BookMetadataError::Publication(error.to_string()))?
+    };
+    crate::fs_secure::atomic_write_child(artwork_dir, &filename, bytes)
+        .await
+        .map_err(BookMetadataError::Io)?;
     Ok(filename)
 }
 
@@ -1301,6 +1343,7 @@ mod tests {
                     edition_id: Some(edition.to_owned()),
                     poster_path: Some(current_filename.clone()),
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -1435,6 +1478,7 @@ mod tests {
                     edition_id: None,
                     poster_path: Some(filename.clone()),
                     source: BookMetadataSource::Epub,
+                    required_origin: None,
                 },
             )
             .await
@@ -1449,6 +1493,7 @@ mod tests {
                     edition_id: Some("curator:item:84:ebook".to_owned()),
                     poster_path: None,
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -1507,6 +1552,7 @@ mod tests {
                     edition_id: Some("curator:item:new:ebook".to_owned()),
                     poster_path: Some("new-generation.jpg".to_owned()),
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
             )
             .await
@@ -1521,6 +1567,7 @@ mod tests {
                     edition_id: stale.book_edition_id.clone(),
                     poster_path: stale.poster_path.clone(),
                     source: BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 None,
             )

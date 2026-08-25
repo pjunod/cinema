@@ -146,6 +146,250 @@ private struct DetailNavigationTestHost<Content: View>: View {
 #endif
 
 final class AppleClientTests: XCTestCase {
+    func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            [
+                "http://primary.local:32400",
+                "http://node-b.local:32400/",
+                "ftp://bad.local:32400",
+                "http://user:pass@bad.local:32400",
+                "http://node-b.local:32400",
+                "https://node-c.local:443",
+            ],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/api/v1/hls/cap/index.m3u8"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/files/7/content", authenticated: true)?.query,
+            "token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(session.origin, "http://primary.local:32400")
+    }
+
+    /// A candidate becomes a request authority the moment it is used, and a
+    /// direct-play failover carries the account token in its query string.
+    /// These rules must match the Android client's `Session.canonicalOrigin`
+    /// case for case; there is no shared implementation to lean on.
+    func testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate() {
+        XCTAssertEqual(Session.canonicalOrigin("HTTP://H.Local:32400"), "http://h.local:32400")
+        XCTAssertEqual(Session.canonicalOrigin("http://h.local:80"), "http://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("https://h.local:443/"), "https://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("http://[::1]:32400"), "http://[::1]:32400")
+
+        for refused in [
+            "ftp://h.local:32400",
+            "http://user:pass@h.local:32400",
+            "http://h.local:32400/api",
+            "http://h.local:32400/?a=b",
+            "http://h.local:32400#f",
+            "//h.local:32400",
+            "",
+        ] {
+            XCTAssertNil(Session.canonicalOrigin(refused), "must refuse \(refused)")
+        }
+    }
+
+    /// The path is concatenated onto another origin verbatim. An absolute URL
+    /// or the scheme-relative `//host/x` form would silently retarget the
+    /// request, so neither may produce a candidate.
+    func testOnlyAServerRelativePathIsRebound() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+
+        XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+    }
+
+    /// An `https` household must not be moved onto an `http` sibling: a
+    /// direct-play failover puts the account token in the query string, and a
+    /// downgraded candidate would put it on the wire in cleartext.
+    func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
+        let session = Session()
+        session.origin = "https://primary.local"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "https://node-c.local"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: true)?.absoluteString,
+            "https://node-c.local/x?token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: true))
+    }
+
+    /// A fresh stream starts at the head of the node list. Without the reset
+    /// one film's failover leaves the index advanced for every film after it
+    /// in the same process, and the next one has no node left to try.
+    func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "http://node-c.local:32400"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        session.resetMediaFailover()
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-c.local:32400/x"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: false))
+    }
+
+    /// Only a transport failure can be answered by another node. A terminal
+    /// answer — an ended session's 404, a refused credential — is the same on
+    /// every ingress.
+    @MainActor
+    func testOnlyATransportFailureMovesToAnotherNode() {
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        // An access-log event names `CoreMediaErrorDomain` and carries the
+        // transfer's HTTP status. Asserting the domain the media stack really
+        // reports is what makes this fixture constrain the field: keyed on
+        // `NSURLErrorDomain`, the branch passed here and was dead everywhere
+        // else.
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: 503
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: 404
+        ))
+        // A decoder verdict reaches the same parameter as a negative CoreMedia
+        // code, and must not be read as a node fault worth another ingress.
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: -12909
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorUserCancelledAuthentication),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        // AVFoundation reports a lost transfer as `-11800` with the real cause
+        // underneath it. The predicate walks `NSUnderlyingErrorKey`, and this
+        // is the shape that reaches it in the field — a bare `NSURLErrorDomain`
+        // error at the top level is the exception, not the rule.
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(
+                domain: AVFoundationErrorDomain,
+                code: AVError.unknown.rawValue,
+                userInfo: [
+                    NSUnderlyingErrorKey: NSError(
+                        domain: NSURLErrorDomain,
+                        code: NSURLErrorTimedOut
+                    ),
+                ]
+            ),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+    }
+
+    /// `handleItemFailure` chooses between two recoveries with
+    /// `!isCompatibilityFailure && isTransportFailure`. That gate is only
+    /// meaningful while the two predicates are disjoint: a failure classified
+    /// as both would take whichever branch the expression happens to order
+    /// first, and the ladder and the node list would each be spent on a
+    /// failure the other one owns. Neither predicate mentions the other, so
+    /// nothing but this fixture keeps them apart — and both have been widened
+    /// since they were written.
+    @MainActor
+    func testNoFailureIsBothAMediaVerdictAndANodeFault() {
+        let probes: [(String, NSError?, String?, Int?, String?)] = [
+            (
+                "a timeout wrapped in an opaque AVError",
+                NSError(
+                    domain: AVFoundationErrorDomain,
+                    code: AVError.unknown.rawValue,
+                    userInfo: [
+                        NSUnderlyingErrorKey: NSError(
+                            domain: NSURLErrorDomain,
+                            code: NSURLErrorTimedOut
+                        ),
+                    ]
+                ),
+                NSURLErrorDomain, NSURLErrorTimedOut, "segment request timed out"
+            ),
+            ("a 5xx on a segment", nil, "CoreMediaErrorDomain", 503, nil),
+            ("an ended session's 404", nil, "CoreMediaErrorDomain", 404, nil),
+            (
+                "a Dolby Vision Profile 5 rejection",
+                NSError(domain: "CoreMediaErrorDomain", code: -12927),
+                nil, nil, nil
+            ),
+            (
+                "a decoder malfunction",
+                NSError(domain: "CoreMediaErrorDomain", code: -12911),
+                nil, nil, nil
+            ),
+            (
+                "an unreachable host",
+                NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+                nil, nil, nil
+            ),
+            (
+                "a refused credential",
+                NSError(domain: "CoreMediaErrorDomain", code: -12660),
+                "CoreMediaErrorDomain", -12660, "HTTP 403"
+            ),
+        ]
+
+        for (label, error, eventDomain, eventStatus, eventComment) in probes {
+            let isMediaVerdict = PlayerController.isCompatibilityPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus,
+                eventComment: eventComment
+            )
+            let isNodeFault = PlayerController.isTransportPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus
+            )
+            XCTAssertFalse(
+                isMediaVerdict && isNodeFault,
+                "\(label) was classified as both a media verdict and a node fault"
+            )
+        }
+    }
+
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
         XCTAssertEqual(
             PlayerController.recoveryTransport(hasOfflineAsset: true),
@@ -553,7 +797,11 @@ final class AppleClientTests: XCTestCase {
             itemId: 9,
             fileId: 90
         ))
-        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line",9,90);"#)
+        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line","9","90");"#)
+        XCTAssertEqual(
+            NativeReaderHandoff.startScript(token: "bearer", itemId: Int.max, fileId: Int.max),
+            "window.startNativeReader(\"bearer\",\"\(Int.max)\",\"\(Int.max)\");"
+        )
         XCTAssertNil(NativeReaderHandoff.startScript(token: "", itemId: 9, fileId: 90))
         XCTAssertNil(NativeReaderHandoff.shellURL(origin: "file:///tmp/cinema"))
         XCTAssertTrue(NativeReaderHandoff.permitsNavigation(
@@ -6093,17 +6341,27 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    func testTVPlaybackInfoUsesTenFootScaleAndPlainHealthLabels() {
-        XCTAssertGreaterThanOrEqual(
+    func testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale() {
+        XCTAssertLessThanOrEqual(
             TVPlaybackInfoPresentation.panelMaxWidth,
-            1_440,
-            "playback diagnostics must use the television canvas, not a phone-sized panel"
+            1_480,
+            "the standard panel must not reserve unused television width"
         )
-        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 40)
-        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 22)
-        XCTAssertGreaterThanOrEqual(
-            TVPlaybackInfoPresentation.cardMinimumHeight,
-            300
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 28)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 34)
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 18)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 20)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.cardMinimumHeight, 250)
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxWidth
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_920
+        )
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxHeight
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_080,
+            "debug diagnostics must remain inside the tvOS canvas"
         )
         XCTAssertEqual(
             TVPlaybackInfoPresentation.healthLabel(stalls: nil),

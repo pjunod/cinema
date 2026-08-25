@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b9fa291d"]
+points = ["cluster.auth", "core.media", "offline.viewing"]
+checks = ["rust-gate", "cluster-auth", "offline-contract"]
+reason = "The retained backend-neutral and three-voter cache integrity contracts require conditional invalidation to bind its offline-package timestamp before the generation identity, reject stale relative paths and manifest digests, and fail an offline package only when the exact invalidated generation still exists."

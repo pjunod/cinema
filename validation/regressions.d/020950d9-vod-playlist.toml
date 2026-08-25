@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["020950d9"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`the_playlist_is_the_whole_film_before_a_byte_of_it_exists` requires PLAYLIST-TYPE:VOD rather than EVENT, an EXT-X-ENDLIST terminator, an EXT-X-MAP, the absence of EXT-X-INDEPENDENT-SEGMENTS, and one correctly named entry per plan entry -- a renderer that emitted the live path's EVENT header, or stopped at the produced edge, fails on the first assertion. `the_target_duration_counts_the_audio_tail_too` uses the audiotail case and requires the declared target duration to cover the longest entry including the tail, so a video-only reading that understates it fails. `every_extinf_is_the_entry_s_own_duration` pins each EXTINF to its entry's own duration in the plan's timescale. `the_playlist_is_the_same_bytes_every_time_it_is_rendered` requires two renders to be byte-identical, because the playlist is stored once and served for the life of the rendition."

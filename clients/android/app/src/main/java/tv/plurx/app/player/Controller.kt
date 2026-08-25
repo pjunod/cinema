@@ -272,6 +272,7 @@ class Controller(
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+    private var activeMediaPath: String? = null
 
     private val playbackTelemetry = ControllerPlaybackTelemetry(
         plan = plan,
@@ -354,6 +355,12 @@ class Controller(
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            // Only a transport failure can be answered by another node. A
+            // terminal answer — an ended session's 404, a refused
+            // credential — is the same on every ingress, and walking the list
+            // for one costs a full player prepare per node before the viewer
+            // sees the error they were always going to see.
+            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -501,8 +508,10 @@ class Controller(
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
                 val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
+                Session.resetMediaFailover()
                 baseMs = t
                 val uri = remuxUri(t)
+                activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
@@ -615,12 +624,14 @@ class Controller(
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
+        Session.resetMediaFailover()
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         when {
             !subtitleDelivery.usesPlanTransport -> openSession(positionMs, attempt)
             planMode == "direct" -> {
                 leaveSessionPlayback()
+                activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
@@ -631,6 +642,7 @@ class Controller(
                 leaveSessionPlayback()
                 baseMs = positionMs
                 val uri = remuxUri(positionMs)
+                activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
@@ -707,6 +719,7 @@ class Controller(
             // starts at zero and the player seeks, exactly like direct play.
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
             baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
             player.setMediaItem(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
@@ -817,6 +830,7 @@ class Controller(
             hls.delivered_dynamic_range?.let { deliveredRange = it }
             val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
             baseMs = timeline.baseMs
+            activeMediaPath = relativeMediaPath(hls.playlist_url)
             player.setMediaItem(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
@@ -1011,6 +1025,56 @@ class Controller(
         caps = caps,
         encode = Uri::encode,
     )
+
+    /** Retry the exact delivery URL through another advertised ingress. The
+     * media recipe, session capability, and compatibility flags do not move. */
+    private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
+        val path = activeMediaPath ?: return false
+        val next = Session.nextMediaFailoverUrl(path) ?: return false
+        val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
+        playbackTelemetry.report(
+            event = "playback_transport_failover",
+            level = "warn",
+            message = error.errorCodeName,
+            code = error.errorCode,
+            detail = "delivery=$deliveryMode compatibility_ladder=false",
+        )
+        // A progressive remux answers its achieved origin in a response
+        // header, and the tracker only accepts a response whose URI it is
+        // expecting. Re-arming it here is what keeps every position after a
+        // failover honest: without it the tracker keeps the dead node's URI,
+        // discards the successor's origin, and every reported position stays
+        // off by the successor's keyframe snap for the rest of the stream.
+        if (progressiveTransport) {
+            progressiveMediaOrigin.begin(next, realPosition())
+        }
+        player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        player.prepare()
+        player.playWhenReady = true
+        armTrackSelections()
+        return true
+    }
+
+    /**
+     * The server-relative form of a delivery URL, or null when it does not
+     * belong to this server.
+     *
+     * The origin check is the security half: whatever comes back here is
+     * concatenated onto another node's origin and requested with the account
+     * bearer attached, so a URL pointing anywhere else must not be reduced to
+     * a path and replayed against the cluster.
+     */
+    private fun relativeMediaPath(value: String): String? {
+        val uri = Uri.parse(value)
+        if (uri.scheme.isNullOrEmpty()) {
+            return value.takeIf { it.startsWith('/') && !it.startsWith("//") }
+        }
+        val primary = Session.canonicalPrimaryOrigin() ?: return null
+        val authority = uri.authority?.let { "${uri.scheme}://$it" } ?: return null
+        if (Session.canonicalOrigin(authority) != primary) return null
+        val path = uri.encodedPath?.takeIf { it.startsWith('/') } ?: return null
+        return uri.encodedQuery?.let { "$path?$it" } ?: path
+    }
 }
 
 /**

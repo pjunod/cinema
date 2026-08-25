@@ -203,6 +203,7 @@ class SequentialMergeCase(unittest.TestCase):
         self.env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
             "HOME": str(self.root),
+            "TMPDIR": str(self.root),
             "GIT_AUTHOR_NAME": "t",
             "GIT_AUTHOR_EMAIL": "t@example.invalid",
             "GIT_COMMITTER_NAME": "t",

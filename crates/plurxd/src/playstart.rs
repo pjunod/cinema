@@ -36,6 +36,15 @@ impl AvailabilityCache {
         AvailabilityCache::default()
     }
 
+    /// Read the recent-success fact without touching the source path. Peer
+    /// offer fan-out must never be what wakes a sleeping NAS.
+    pub fn recently_present(&self, file_id: i64) -> bool {
+        self.seen.lock().is_ok_and(|seen| {
+            seen.get(&file_id)
+                .is_some_and(|at| at.elapsed() < AVAILABILITY_TTL)
+        })
+    }
+
     /// True when the file is on disk. Cached briefly on success and never on
     /// failure — a missing file is the answer that changes a player into an
     /// error message, so it is worth re-asking every time.

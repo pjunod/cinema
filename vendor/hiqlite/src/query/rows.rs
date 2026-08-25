@@ -84,6 +84,66 @@ impl RowOwned {
 
         Self { columns: cols }
     }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn from_db_quorum_watermark(watermark: crate::DbQuorumWatermark) -> Self {
+        Self {
+            columns: vec![
+                ColumnOwned {
+                    name: "term".to_owned(),
+                    value: ValueOwned::Text(watermark.term.to_string()),
+                },
+                ColumnOwned {
+                    name: "leader_id".to_owned(),
+                    value: ValueOwned::Text(watermark.leader_id.to_string()),
+                },
+                ColumnOwned {
+                    name: "committed_index".to_owned(),
+                    value: ValueOwned::Text(watermark.committed_index.to_string()),
+                },
+                ColumnOwned {
+                    name: "local_read_protocol_version".to_owned(),
+                    value: ValueOwned::Text(watermark.local_read_protocol_version.to_string()),
+                },
+            ],
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn into_db_quorum_watermark(mut self) -> Result<crate::DbQuorumWatermark, Error> {
+        fn parse(field: &'static str, value: String) -> Result<u64, Error> {
+            value.parse().map_err(|_| {
+                Error::Connect(format!("database quorum watermark has invalid {field}"))
+            })
+        }
+
+        let term = parse("term", self.try_get("term")?)?;
+        let leader_id = parse("leader_id", self.try_get("leader_id")?)?;
+        let committed_index = parse("committed_index", self.try_get("committed_index")?)?;
+        // P3a leaders return the original three-column watermark. Preserve
+        // that quorum proof for Authority/readiness consumers during a serial
+        // rolling upgrade, while advertising protocol 0 so bounded local
+        // reads remain closed. A present but malformed version is still a
+        // corrupt response and must fail rather than being mistaken for old.
+        let local_read_protocol_version = if self
+            .columns
+            .iter()
+            .any(|column| column.name == "local_read_protocol_version")
+        {
+            parse(
+                "local_read_protocol_version",
+                self.try_get("local_read_protocol_version")?,
+            )?
+        } else {
+            0
+        };
+        Ok(crate::DbQuorumWatermark {
+            term,
+            leader_id,
+            committed_index,
+            local_read_protocol_version,
+        })
+    }
 }
 
 impl RowOwned {

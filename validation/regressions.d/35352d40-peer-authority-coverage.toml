@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["35352d40"]
+points = ["cluster.auth", "cluster.membership"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained cluster lifecycle requires production and legacy artwork HMAC implementations to interoperate in both rolling directions. Unit regressions fill the bounded verifier cache, require the next voter to replace exactly one entry, and prove the cache-miss admission window closes and reopens. The cluster lifecycle also executes the corrected self-excluding key refresh query. Reverting this correction restores invalid Hiqlite placeholder order, rolling artwork incompatibility, or rejection of an uncached live voter."

@@ -15,11 +15,15 @@ mod error;
 mod extract;
 mod hls;
 pub(crate) mod images;
+pub(crate) mod internal_activity;
+pub(crate) mod internal_media;
+pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
 mod network;
 mod offline;
+pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
@@ -54,8 +58,9 @@ mod web;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{Request, StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
@@ -98,6 +103,12 @@ pub fn router(state: AppState) -> Router {
         // exception: their single-use token is its own narrow credential.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/ingress", get(cluster::ingress))
+        .route("/cluster/media", get(internal_media::directory))
+        .route(
+            "/cluster/media/offers",
+            post(internal_media::diagnostic_offers),
+        )
         .route("/cluster/leave", post(cluster::leave))
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
@@ -155,6 +166,7 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/hubs", get(browse::hubs))
+        .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
         // Watch
         .route("/items/{id}/photo", get(photos::serve))
@@ -241,7 +253,11 @@ pub fn router(state: AppState) -> Router {
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
         // Images
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     // Plex-compat Tier 1 façade at Plex's absolute paths (docs/CLIENTS.md §3).
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
@@ -262,7 +278,11 @@ pub fn router(state: AppState) -> Router {
         .route("/:/scrobble", get(plex::scrobble))
         .route("/:/unscrobble", get(plex::unscrobble))
         .route("/search", get(plex::search))
-        .route("/hubs/search", get(plex::search));
+        .route("/hubs/search", get(plex::search))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
@@ -281,6 +301,40 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            crate::media_pool::SNAPSHOT_PATH,
+            get(internal_media::snapshot),
+        )
+        .route(
+            crate::media_pool::OFFERS_PATH,
+            post(internal_media::offers)
+                .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
+        .route(
+            crate::shared_cache::CANARY_PATH,
+            post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
+                crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::START_PATH,
+            post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ABORT_PATH,
+            post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::RELAY_PATH,
+            post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
         .nest("/api/v1", api)
         .merge(plex_routes)
         .fallback(web::fallback)
@@ -344,6 +398,20 @@ async fn healthz() -> &'static str {
 
 /// Readiness: this node can do work (storage answers).
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(policy) = state.serving.http_policy("/readyz") {
+        if policy.status != 200 {
+            return (
+                StatusCode::from_u16(policy.status).expect("serving policy status"),
+                policy.body,
+            );
+        }
+    }
+    // A fresh quorum watermark is already a recent replicated-store proof.
+    // Do not turn readiness into another multi-second Store request exactly
+    // when an isolated node needs to self-fence promptly.
+    if state.serving.is_quorum_managed() {
+        return (StatusCode::OK, "ready\n");
+    }
     match state.store.ping().await {
         Ok(()) => (StatusCode::OK, "ready\n"),
         Err(error) => {
@@ -351,6 +419,29 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n")
         }
     }
+}
+
+async fn mutable_media_serving_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+        return next.run(request).await;
+    };
+
+    let mut response = (
+        StatusCode::from_u16(policy.status).expect("serving policy status"),
+        [(header::CONTENT_TYPE, policy.content_type)],
+        policy.body,
+    )
+        .into_response();
+    if policy.retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 #[cfg(test)]
@@ -401,6 +492,185 @@ mod tests {
         );
     }
 
+    fn compact_handler(source: &str, start: &str, end: &str) -> String {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing handler boundary {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing handler boundary {end}"))
+            .0
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn assert_catalogue_methods(handler: &str, methods: &[&str]) {
+        for method in methods {
+            assert!(
+                handler.contains(&format!("state.catalogue.{method}")),
+                "eligible handler no longer routes {method} through CatalogueReader"
+            );
+            assert!(
+                !handler.contains(&format!("state.store.{method}")),
+                "eligible handler routes {method} directly through Authority"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
+        let browse = include_str!("browse.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn list_items",
+                "pub async fn item_detail",
+            ),
+            &[
+                "get_library",
+                "list_top_items_in_genre",
+                "item_max_heights",
+                "item_media_facts",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn item_detail",
+                "pub async fn home_previews",
+            ),
+            &[
+                "get_item",
+                "get_item_children",
+                "item_media_facts",
+                "files_for_item",
+                "get_file_probe_json",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn home_previews", "pub async fn hubs"),
+            &[
+                "list_libraries",
+                "home_preview_pages",
+                "item_max_heights",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
+            &["recently_added", "child_counts", "item_max_heights"],
+        );
+        assert!(
+            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
+                .contains("state.store.search_items")
+        );
+
+        let libraries = include_str!("libraries.rs");
+        assert_catalogue_methods(
+            &compact_handler(libraries, "pub async fn list", "pub async fn create"),
+            &["list_libraries"],
+        );
+        for mutation in [
+            "state.store.create_library",
+            "state.store.update_library",
+            "state.store.set_library_schedule",
+            "state.store.delete_library",
+            "state.store.reset_library_root_fingerprint",
+        ] {
+            assert!(libraries
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(mutation));
+        }
+
+        let plex = include_str!("plex.rs");
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn sections", "async fn views"),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn visible_item", "async fn element_for"),
+            &["get_item", "get_library"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn element_for", "pub async fn section_all"),
+            &["files_for_item", "get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
+            &["get_library", "list_top_items_in_genre"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn children", "pub async fn part"),
+            &["get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn part", "pub async fn image"),
+            &["get_file"],
+        );
+        let image = compact_handler(plex, "pub async fn image", "pub async fn photo_transcode");
+        assert!(image.contains("visible_item(&state"));
+        assert!(!image.contains("state.store."));
+        assert_catalogue_methods(
+            &compact_handler(
+                plex,
+                "pub async fn photo_transcode",
+                "pub async fn timeline",
+            ),
+            &["get_item"],
+        );
+        let timeline = compact_handler(plex, "pub async fn timeline", "pub async fn scrobble");
+        assert!(timeline.contains("state.store.get_item"));
+        assert!(!timeline.contains("state.catalogue.get_item"));
+        assert!(timeline.contains("state.progress.put"));
+        let scrobble = compact_handler(plex, "pub async fn scrobble", "pub async fn unscrobble");
+        assert!(scrobble.contains("state.store.get_item"));
+        assert!(scrobble.contains("state.store.set_watched_tree"));
+        assert!(!scrobble.contains("state.catalogue.get_item"));
+        let unscrobble =
+            compact_handler(plex, "pub async fn unscrobble", "pub struct ScrobbleQuery");
+        assert!(unscrobble.contains("state.store.get_item"));
+        assert!(unscrobble.contains("state.store.set_watched_tree"));
+        assert!(!unscrobble.contains("state.catalogue.get_item"));
+        let plex_search = compact_handler(plex, "pub async fn search", "fn version");
+        assert!(plex_search.contains("state.store.search_items"));
+        assert!(!plex_search.contains("state.catalogue.search_items"));
+
+        let system = include_str!("system.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn system_info",
+                "pub async fn library_shape",
+            ),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn library_shape",
+                "pub async fn probe_storage",
+            ),
+            &["media_shape"],
+        );
+        let authority_only = [include_str!("auth.rs"), include_str!("watch.rs"), system]
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        for authority_call in [
+            "state.store.get_user_by_username",
+            "state.store.set_watched_tree",
+            "state.store.settings_snapshot",
+            "state.store.put_setting",
+        ] {
+            assert!(authority_only.contains(authority_call));
+        }
+    }
+
     fn test_dirs(base: &std::path::Path) -> crate::state::Dirs {
         crate::state::Dirs {
             artwork: base.join("artwork"),
@@ -417,7 +687,7 @@ mod tests {
     /// The same app, plus the state behind it — for tests that have to put the
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
-    fn test_app_with_state() -> (Router, AppState) {
+    pub(super) fn test_app_with_state() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = std::env::temp_dir().join(format!("plurx-test-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
@@ -460,6 +730,58 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(false);
+
+        let (status, body) = call_text(&app, get("/healthz", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ok\n");
+
+        let (status, body) = call_text(&app, get("/readyz", None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "quorum unavailable\n");
+
+        for path in [
+            "/api/v1/hls/probe/status",
+            "/api/v1/files/7/decision",
+            "/api/v1/files/7/offline-options",
+            "/api/v1/files/7/stream.mp4",
+            "/api/v1/files/7/direct",
+            "/api/v1/files/7/content",
+            "/api/v1/offline/media/capability/0.ts",
+            "/api/v1/publication/capability/chapter.xhtml",
+            "/api/v1/files/7/subs/0",
+            "/api/v1/images/poster.jpg",
+            "/api/v1/items/7/photo",
+            "/library/parts/7/0/movie.mkv",
+            "/library/metadata/7/thumb",
+            "/photo/:/transcode",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("fenced response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&HeaderValue::from_static("1")),
+                "{path}"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let body: Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], "serving_fenced", "{path}");
+            assert!(body.get("retry_nodes").is_none(), "{path}");
+        }
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -1802,6 +2124,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn repeated_metrics_scrapes_do_not_record_store_operations() {
+        let (app, _) = test_state();
+        let before = plurx_core::store::prometheus_store_operations();
+        for _ in 0..3 {
+            let (status, body) = call_text(&app, get("/metrics", None)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        }
+        assert_eq!(plurx_core::store::prometheus_store_operations(), before);
+    }
+
     /// The seam between "another app told us the id" and "go and enrich it".
     ///
     /// These two features can each be right and still combine into an item
@@ -2345,6 +2679,7 @@ mod tests {
         // setup_required now false; a second setup is rejected.
         let (_, info) = call(&app, get("/api/v1/server", None)).await;
         assert_eq!(info["setup_required"], false);
+
         let (status, _) = call(
             &app,
             post(
@@ -2588,16 +2923,169 @@ mod tests {
         assert_eq!(body["users"], 1);
     }
 
+    /// The ingress list is the cluster's topology. It is not admin-only —
+    /// every household member's player needs it to retry a stream through
+    /// another node — but it is not public either, and it must never appear
+    /// on the credential-free identity endpoint the clients use to probe an
+    /// unknown candidate.
+    #[tokio::test]
+    async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
+        let app = test_app();
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", None)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an anonymous prober may not enumerate the cluster"
+        );
+
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let (status, body) = call(&app, get("/api/v1/cluster/ingress", Some(&viewer))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an ordinary viewer's player needs this list: {body}"
+        );
+        assert!(body["node_urls"].is_array(), "{body}");
+
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // And it is not smuggled back onto the public identity endpoint,
+        // which both clients deliberately call without a credential.
+        let (_, info) = call(&app, get("/api/v1/server", None)).await;
+        assert!(
+            info.get("node_urls").is_none(),
+            "the identity probe must not carry the cluster's addresses: {info}"
+        );
+    }
+
     #[tokio::test]
     async fn cluster_membership_controls_are_admin_only_and_sqlite_is_explicit() {
         let app = test_app();
         let (status, _) = call(&app, get("/api/v1/cluster/nodes", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(&app, get("/api/v1/cluster/media", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
+        let (status, media) = call(&app, get("/api/v1/cluster/media", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            media["protocol_version"],
+            crate::media_pool::PROTOCOL_VERSION
+        );
+        assert_eq!(media["remote_placement_enabled"], false);
+        assert_eq!(media["remote_placement_rollout_ready"], false);
+        assert_eq!(media["remote_placement_ready"], false);
+        assert_eq!(media["session_takeover_enabled"], false);
+        assert_eq!(media["session_takeover_ready"], false);
+        assert_eq!(media["local_active_sessions"], 0);
+        assert_eq!(media["nodes"].as_array().map(Vec::len), Some(1));
+        assert!(
+            !media.to_string().contains("path"),
+            "media directory diagnostics must not expose source paths: {media}"
+        );
         let (status, body) = call(&app, get("/api/v1/cluster/nodes", Some(&admin))).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("every committed voter")),
+            "legacy settings errors retain their {{error}} response contract: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], false);
+        assert_eq!(body["cluster_media_pool_ready"], false);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("remote placement")),
+            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
 
         let leave_body = json!({ "node_id": "test-node" });
         let (status, _) = call(
@@ -2762,7 +3250,7 @@ mod tests {
             .jobs
             .set_producing(Some(crate::state::ProducingNow {
                 title: "Willow".into(),
-                reason: crate::produce::REASON_IN_PROGRESS,
+                reason: crate::produce::REASON_IN_PROGRESS.to_owned(),
                 index: 2,
                 total: 12,
             }))
@@ -3306,6 +3794,164 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let seeded = seed_content(&state).await;
+        let home = seed_home(&state).await;
+        let empty = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Empty Preview Library".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![std::path::PathBuf::from("/empty-preview")],
+                anime: false,
+            })
+            .await
+            .expect("empty library");
+        let mut preview_movies = Vec::new();
+        for index in 0..30 {
+            let item = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: seeded.lib,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Preview Movie {index:02}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("preview movie");
+            preview_movies.push(item);
+        }
+        let watched_movie = *preview_movies.last().expect("preview movie id");
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{watched_movie}/progress"),
+                Some(&admin),
+                json!({ "position_ms": 1_000, "duration_ms": 10_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, admin_body) =
+            call(&app, get("/api/v1/home/previews?limit=1", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{admin_body}");
+        let libraries = admin_body["libraries"].as_array().expect("libraries");
+        let empty_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == empty.id)
+            .expect("empty library remains visible");
+        assert_eq!(empty_page["total"], 0);
+        assert_eq!(empty_page["items"], json!([]));
+
+        let movie_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("movie preview");
+        assert_eq!(movie_page["items"].as_array().map(Vec::len), Some(24));
+        assert_eq!(movie_page["total"], 32);
+        let (_, ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(movie_page["items"], ordinary["items"]);
+        assert_eq!(movie_page["total"], ordinary["total"]);
+        let admin_movie = movie_page["items"]
+            .as_array()
+            .expect("movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("seeded movie");
+        assert!(admin_movie.get("watch").is_some());
+
+        let home_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == home.lib)
+            .expect("home-video preview");
+        let folder = home_page["items"]
+            .as_array()
+            .expect("home-video items")
+            .iter()
+            .find(|item| item["id"] == home.folder)
+            .expect("root folder");
+        assert_eq!(folder["child_count"], 2);
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token").to_owned();
+        let (status, viewer_body) = call(&app, get("/api/v1/home/previews", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK);
+        let viewer_movie_page = viewer_body["libraries"]
+            .as_array()
+            .expect("viewer libraries")
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("viewer movie preview");
+        let (_, viewer_ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&viewer),
+            ),
+        )
+        .await;
+        assert_eq!(viewer_movie_page["items"], viewer_ordinary["items"]);
+        let viewer_movie = viewer_movie_page["items"]
+            .as_array()
+            .expect("viewer movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("viewer seeded movie");
+        assert!(viewer_movie.get("watch").is_none());
+
+        assert_eq!(
+            call(&app, post("/api/v1/auth/logout", Some(&viewer), json!({})),)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", Some(&viewer)),)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "token revocation must apply to the next preview request"
+        );
     }
 
     // ---- seeded integration surface -----------------------------------------
@@ -4084,11 +4730,20 @@ mod tests {
                 row["kind"] == "offline_prepare" && row["label"] == "Preparing offline · Flight"
             })));
 
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (status_code, metrics) = call_text(&app, get("/metrics", None)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
         assert!(metrics.contains("plurx_offline_requests_total{height=\"720\"} 2"));
         assert!(metrics.contains("plurx_cache_protected_entries{reason=\"active_playback\"} 0"));
+        assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(metrics
+            .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
+        assert!(metrics.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!metrics.contains("plurx_raft_commit_index"));
         assert!(
             !metrics.contains("Flight"),
             "titles must never become labels"
@@ -4229,6 +4884,10 @@ mod tests {
             .await
             .expect("package lookup")
             .is_none());
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (_, metrics) = call_text(&app, get("/metrics", None)).await;
         assert!(metrics.contains("plurx_offline_packages{state=\"ready\"} 0"));
         assert!(metrics.contains("plurx_offline_cancellations_total 1"));
@@ -7193,7 +7852,7 @@ mod tests {
         // it is guessable by construction — ownership is what protects it.
         let (_stream, _guard) = state
             .streams
-            .register("pb-1-s1", 9999, "someone-else", 42, 4.0);
+            .register("pb-1-s1", 9999, "someone-else", 42, 5, 4.0);
         assert_eq!(
             call(&app, get("/api/v1/stream/pb-1-s1/status", Some(&admin)))
                 .await

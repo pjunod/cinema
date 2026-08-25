@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b9c85c64", "921bf76c", "b795eaba", "6cfc927c"]
+points = ["cluster.auth", "cluster.page-reads", "persistence.upgrades", "server.api"]
+checks = ["cluster-auth", "database-upgrades", "rust-gate"]
+reason = "The retained handler inventory routes only the declared pure catalogue reads through the bounded reader while mutations, authorization, watch state, and write-follow-read paths remain authoritative. The separate-process three-voter proof pauses apply and partitions a reader, requiring immediate Authority fallback, one fresh bounded-local read before lease expiry, fail-closed behavior after expiry, and recovery with a current watermark no older than 250 ms. The validation-only Hiqlite pause uses a pre-registered Notify waiter so the proof cannot lose its wakeup, and operations documentation pins activation and rollback."

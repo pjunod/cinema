@@ -2,16 +2,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use plurx_core::cluster::coordination::{LeaseClaim, StoreCoordinator};
+#[cfg(test)]
+use plurx_core::cluster::coordination::LeaseClaim;
+use plurx_core::cluster::coordination::StoreCoordinator;
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MetadataPatch,
-    PlaybackEvent,
+    NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
+    PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
 use plurx_core::metadata::book::BookEnrichReport;
@@ -20,16 +23,20 @@ use plurx_core::metadata::local::LocalArtReport;
 use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
-use plurx_core::store::{keys, ArtworkRepairFence, PublicationFence, PublicationStore, Store};
+use plurx_core::store::{
+    keys, ArtworkRepairFence, CatalogueReader, PrometheusStoreSnapshot, PublicationStore, Store,
+};
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use crate::job_lease::{acquire_cluster_job, ActiveJobLease};
 use crate::logbuf::{LogBuffer, LogBuffers};
 use crate::offline::OfflineManager;
 use crate::schedule::{due_jobs, DueJob, GlobalSchedule};
 use crate::trakt::TraktManager;
-use crate::transcode::TranscodeManager;
+use crate::transcode::{PretranscodeFence, PretranscodeProduceOutcome, TranscodeManager};
 
 /// Environment facts collected once at startup, shown on the settings page.
 /// Everything here is admin-facing diagnostics — paths, tool versions,
@@ -44,6 +51,8 @@ pub struct SystemInfo {
     /// PLURX_HWACCEL preference, or "auto".
     pub hwaccel_pref: String,
     pub encoders: EncoderCaps,
+    /// Portable video decoders reported by this exact ffmpeg at boot.
+    pub decoders: Vec<String>,
     /// Human label of the encoder the transcoder will actually pick.
     pub encoder_selected: String,
     /// What the tone-map probe found at boot: the graph this node uses, and
@@ -101,14 +110,208 @@ pub struct Dirs {
     pub subs: PathBuf,
 }
 
+const STORE_METRICS_FRESHNESS_SECS: u64 = 120;
+
+#[derive(Default)]
+struct StoreMetricsAtomics {
+    sequence: AtomicU64,
+    published: AtomicBool,
+    sampled_elapsed: AtomicU64,
+    errors: AtomicU64,
+    libraries: AtomicI64,
+    users: AtomicI64,
+    queued: AtomicI64,
+    preparing: AtomicI64,
+    ready: AtomicI64,
+    failed: AtomicI64,
+    queued_bytes: AtomicI64,
+    preparing_bytes: AtomicI64,
+    ready_bytes: AtomicI64,
+    failed_bytes: AtomicI64,
+    active_leases: AtomicI64,
+    pinned_bytes: AtomicI64,
+    outbox_pending: AtomicI64,
+    outbox_ok: AtomicI64,
+    outbox_failed: AtomicI64,
+}
+
+/// Lock-free view consumed by the Prometheus handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreMetricsView {
+    pub sample: Option<PrometheusStoreSnapshot>,
+    pub age_seconds: Option<u64>,
+    pub valid: bool,
+    pub errors: u64,
+}
+
+/// Last complete Store-backed sample used by the Prometheus handler.
+///
+/// A single-writer sequence protects atomic publication without putting a
+/// mutex on a runtime thread. Scrapes see the complete preceding or complete
+/// next sample, never a mixture of both.
+#[derive(Clone)]
+pub struct StoreMetricsCache {
+    inner: Arc<StoreMetricsAtomics>,
+    started_at: Instant,
+}
+
+impl Default for StoreMetricsCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(StoreMetricsAtomics::default()),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl StoreMetricsCache {
+    #[must_use]
+    pub fn snapshot(&self) -> StoreMetricsView {
+        self.snapshot_at(self.started_at.elapsed().as_secs())
+    }
+
+    fn snapshot_at(&self, elapsed: u64) -> StoreMetricsView {
+        loop {
+            let before = self.inner.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let published = self.inner.published.load(Ordering::Relaxed);
+            let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+            let errors = self.inner.errors.load(Ordering::Relaxed);
+            let sample = PrometheusStoreSnapshot {
+                libraries: self.inner.libraries.load(Ordering::Relaxed),
+                users: self.inner.users.load(Ordering::Relaxed),
+                offline: OfflinePackageStats {
+                    queued: self.inner.queued.load(Ordering::Relaxed),
+                    preparing: self.inner.preparing.load(Ordering::Relaxed),
+                    ready: self.inner.ready.load(Ordering::Relaxed),
+                    failed: self.inner.failed.load(Ordering::Relaxed),
+                    queued_bytes: self.inner.queued_bytes.load(Ordering::Relaxed),
+                    preparing_bytes: self.inner.preparing_bytes.load(Ordering::Relaxed),
+                    ready_bytes: self.inner.ready_bytes.load(Ordering::Relaxed),
+                    failed_bytes: self.inner.failed_bytes.load(Ordering::Relaxed),
+                    active_leases: self.inner.active_leases.load(Ordering::Relaxed),
+                    pinned_bytes: self.inner.pinned_bytes.load(Ordering::Relaxed),
+                },
+                watched_outbox: (
+                    self.inner.outbox_pending.load(Ordering::Relaxed),
+                    self.inner.outbox_ok.load(Ordering::Relaxed),
+                    self.inner.outbox_failed.load(Ordering::Relaxed),
+                ),
+            };
+            let after = self.inner.sequence.load(Ordering::Acquire);
+            if before == after {
+                let age_seconds = published.then(|| elapsed.saturating_sub(sampled_elapsed));
+                return StoreMetricsView {
+                    sample: published.then_some(sample),
+                    age_seconds,
+                    valid: age_seconds.is_some_and(|age| age <= STORE_METRICS_FRESHNESS_SECS),
+                    errors,
+                };
+            }
+        }
+    }
+
+    fn publish(&self, sample: PrometheusStoreSnapshot) {
+        self.publish_at(sample, self.started_at.elapsed().as_secs());
+    }
+
+    fn publish_at(&self, sample: PrometheusStoreSnapshot, elapsed: u64) {
+        let sequence = loop {
+            let current = self.inner.sequence.load(Ordering::Acquire);
+            if current & 1 == 0
+                && self
+                    .inner
+                    .sequence
+                    .compare_exchange(
+                        current,
+                        current.wrapping_add(1),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                break current;
+            }
+            std::hint::spin_loop();
+        };
+        self.inner
+            .libraries
+            .store(sample.libraries, Ordering::Relaxed);
+        self.inner.users.store(sample.users, Ordering::Relaxed);
+        self.inner
+            .queued
+            .store(sample.offline.queued, Ordering::Relaxed);
+        self.inner
+            .preparing
+            .store(sample.offline.preparing, Ordering::Relaxed);
+        self.inner
+            .ready
+            .store(sample.offline.ready, Ordering::Relaxed);
+        self.inner
+            .failed
+            .store(sample.offline.failed, Ordering::Relaxed);
+        self.inner
+            .queued_bytes
+            .store(sample.offline.queued_bytes, Ordering::Relaxed);
+        self.inner
+            .preparing_bytes
+            .store(sample.offline.preparing_bytes, Ordering::Relaxed);
+        self.inner
+            .ready_bytes
+            .store(sample.offline.ready_bytes, Ordering::Relaxed);
+        self.inner
+            .failed_bytes
+            .store(sample.offline.failed_bytes, Ordering::Relaxed);
+        self.inner
+            .active_leases
+            .store(sample.offline.active_leases, Ordering::Relaxed);
+        self.inner
+            .pinned_bytes
+            .store(sample.offline.pinned_bytes, Ordering::Relaxed);
+        self.inner
+            .outbox_pending
+            .store(sample.watched_outbox.0, Ordering::Relaxed);
+        self.inner
+            .outbox_ok
+            .store(sample.watched_outbox.1, Ordering::Relaxed);
+        self.inner
+            .outbox_failed
+            .store(sample.watched_outbox.2, Ordering::Relaxed);
+        self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
+        self.inner.published.store(true, Ordering::Relaxed);
+        self.inner
+            .sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
+    }
+
+    fn record_error(&self) {
+        self.inner.errors.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Everything a request handler needs. Cheap to clone (all shared via `Arc`).
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
+    pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
+    /// Monotonic, Store-free authority for mutable media and readiness.
+    pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Bounded authenticated client for node-local activity snapshots.
+    #[allow(dead_code)] // aggregation child #326 is the first consumer
+    pub peer_activity: crate::http::internal_activity::PeerActivityClient,
+    /// Fresh, authenticated media-capability snapshots and diagnostics-only
+    /// placement offers. P4 observes candidates; it never starts a session.
+    pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
+    /// Authenticated remote start/abort and streaming HLS relay transport.
+    pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -119,6 +322,9 @@ pub struct AppState {
     /// Finished content-addressed transcodes. Offline routes never join a
     /// request-controlled path directly to this root.
     pub cache_dir: PathBuf,
+    /// Optional shared-cache mount, admitted only while its all-voter canary
+    /// proof remains current.
+    pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
@@ -166,6 +372,8 @@ pub struct AppState {
     /// lifetimes, so this holds only what would otherwise be invisible; see
     /// [`crate::delivery`].
     pub direct_plays: Arc<crate::delivery::DirectPlays>,
+    /// Store-backed gauges sampled away from the Prometheus request path.
+    pub store_metrics: StoreMetricsCache,
     /// Application-initiated graceful drain. Signals still use the process
     /// watcher in `main`; the cluster leave endpoint cancels this only after
     /// its own voter removal has committed.
@@ -186,6 +394,7 @@ impl AppState {
         system: SystemInfo,
         logs: Arc<LogBuffer>,
     ) -> Self {
+        let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 server_name,
@@ -198,6 +407,10 @@ impl AppState {
                 credential_key: Arc::new(CredentialKey::generate()),
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_id: String::new(),
+                shared_cache_dir: PathBuf::new(),
+                shared_cache_id: String::new(),
+                catalogue,
             },
             store,
             dirs,
@@ -225,7 +438,12 @@ impl AppState {
             credential_key,
             replication,
             membership,
+            cluster_id,
+            shared_cache_dir,
+            shared_cache_id,
+            catalogue,
         } = config;
+        let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
             artwork: artwork_dir,
             transcode: transcode_dir,
@@ -241,6 +459,14 @@ impl AppState {
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
         let progress = crate::progress::ProgressCoalescer::new(Arc::clone(&store));
+        let shared_cache = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_cache_dir,
+            shared_cache_id,
+            &cluster_id,
+            node_id.clone(),
+            membership.clone(),
+            Arc::clone(&store),
+        );
         let transcode = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -248,6 +474,7 @@ impl AppState {
                 encoder_caps,
                 system.tone_map.selected(),
             )
+            .with_decoders(system.decoders.clone())
             .with_dv_strippable(system.dovi_rpu)
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
@@ -256,7 +483,8 @@ impl AppState {
                 cache_dir.clone(),
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-            ),
+            )
+            .with_shared_cache(Arc::clone(&shared_cache)),
         );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.
         let trakt_base = std::env::var("PLURX_TRAKT_BASE")
@@ -270,15 +498,28 @@ impl AppState {
         ));
         let offline =
             OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
+        let media_pool = crate::media_pool::MediaPool::new(membership.clone());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+            membership.clone(),
+            Arc::clone(&store),
+        );
         AppState {
             store,
+            catalogue,
             replication,
+            peer_activity: crate::http::internal_activity::PeerActivityClient::new(
+                membership.clone(),
+            ),
+            serving,
             membership,
+            media_pool,
+            media_sessions,
             server_name,
             node_id,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
+            shared_cache,
             subs_dir,
             pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
                 matches!(
@@ -302,8 +543,59 @@ impl AppState {
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             streams: crate::progressive::Streams::new(),
             direct_plays: crate::delivery::DirectPlays::new(),
+            store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             started_at: Instant::now(),
+        }
+    }
+
+    /// Refresh all Store-backed Prometheus gauges as one complete sample.
+    /// A failure preserves the previous sample and increments its bounded
+    /// source counter.
+    pub async fn refresh_store_metrics(&self) -> Result<(), StoreError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64;
+        match self
+            .store
+            .prometheus_store_snapshot(&self.node_id, now)
+            .await
+        {
+            Ok(snapshot) => {
+                self.store_metrics.publish(snapshot);
+                Ok(())
+            }
+            Err(error) => {
+                self.store_metrics.record_error();
+                Err(error)
+            }
+        }
+    }
+
+    /// Keep the scrape snapshot fresh without coupling availability to a
+    /// Store or leader round trip. The first sample starts immediately.
+    pub async fn store_metrics_loop(self) {
+        let stagger = self.node_id.bytes().fold(0_u64, |hash, byte| {
+            hash.wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(byte))
+        }) % 15;
+        let base_interval = Duration::from_secs(30 + stagger);
+        let mut consecutive_errors = 0_u32;
+        loop {
+            if let Err(error) = self.refresh_store_metrics().await {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                tracing::debug!(%error, "refreshing Store-backed metrics snapshot failed");
+            } else {
+                consecutive_errors = 0;
+            }
+            let backoff = 1_u32 << consecutive_errors.min(3);
+            let interval = base_interval.saturating_mul(backoff);
+            tokio::select! {
+                () = self.shutdown.cancelled() => break,
+                () = tokio::time::sleep(interval) => {}
+            }
         }
     }
 }
@@ -319,6 +611,10 @@ pub struct AppConfig {
     /// Actual backend selected before HTTP starts; tests default to SQLite.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    pub cluster_id: String,
+    pub shared_cache_dir: PathBuf,
+    pub shared_cache_id: String,
+    pub catalogue: CatalogueReader,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -488,12 +784,15 @@ pub struct JobManager {
     pending_retries: Mutex<HashSet<i64>>,
     /// Recent targeted-scan requests and their outcomes, newest last.
     requests: Mutex<VecDeque<ScanRequestRecord>>,
-    metrics: IntegrationMetrics,
+    metrics: Arc<IntegrationMetrics>,
     /// A pre-transcode pass is running. Not a mutex, because the answer wanted
     /// is "is one going" rather than "wait for it": a second pass would fight
     /// the first for the same slots, and queuing one behind an encode that
     /// takes hours is worse than skipping it.
     producing: std::sync::atomic::AtomicBool,
+    /// A fragment-indexing pass is running on this node. Same shape and same
+    /// reason as `producing`: the question is "is one going", not "wait".
+    indexing: std::sync::atomic::AtomicBool,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -505,6 +804,14 @@ pub struct JobManager {
     now_producing: Mutex<Option<ProducingNow>>,
     /// Set to ask the running pass to stop after the title it is on.
     stop_producing: std::sync::atomic::AtomicBool,
+    /// Jobs this node proved it cannot currently read. Claim filtering keeps
+    /// the refusal local: a peer with the same absolute path mounted may take
+    /// the row immediately, while this process avoids reclaiming and burning
+    /// the shared retry budget every scheduler tick.
+    pretranscode_refusals: Mutex<HashMap<String, i64>>,
+    /// Per-node maintenance cadence for node-local cache bytes. Candidate
+    /// generation is cluster-singleton and cannot maintain every worker disk.
+    last_pretranscode_cache_sweep_ms: AtomicI64,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -531,7 +838,7 @@ pub struct ProducingNow {
     /// One of [`crate::produce::REASON_IN_PROGRESS`] and friends — the rail
     /// this candidate came off. "Why is it encoding *that*" is half the
     /// question, and the answer is never obvious from the filename.
-    pub reason: &'static str,
+    pub reason: String,
     /// 1-based position within this pass, and how many it means to attempt.
     pub index: usize,
     pub total: usize,
@@ -565,6 +872,31 @@ struct ArtworkSweepResult {
     claimed_ids: Vec<i64>,
 }
 
+/// Ceiling on one indexing pass. Small because indexing is never urgent and
+/// the next tick is a minute away: a library converts over hours, which is
+/// exactly the shape D4 wants, since a file without an index simply keeps
+/// today's presentation until it has one.
+const INDEX_MAX_PER_PASS: usize = 4;
+/// Files one pass will even look at. An already-indexed library attempts
+/// nothing, so without this the pass would query every file every minute for
+/// the life of the server.
+const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
+/// Wall clock one pass will spend, whatever it got through.
+const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// Per file, so one pathological NAS read gives the slot back rather than
+/// holding it until the process restarts.
+const INDEX_FILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Clears [`JobManager::indexing`] however the pass ends, including the ways a
+/// `?` or a panic would leave it set for the life of the process.
+struct IndexingGuard(Arc<JobManager>);
+
+impl Drop for IndexingGuard {
+    fn drop(&mut self) {
+        self.0.indexing.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Clears [`JobManager::producing`] however the pass ends — including the ways
 /// a `?` or a panic would leave it set forever, which would silently stop the
 /// producer for the life of the process.
@@ -589,6 +921,10 @@ const PRODUCE_RAIL: i64 = 5;
 
 /// Ceiling on what one pass will attempt, across every user and rail.
 const PRODUCE_MAX_PER_PASS: usize = 12;
+/// Hard fan-out bounds for one singleton discovery pass. The rotating user
+/// cursor gives every account a turn without an all-users allocation.
+const PRODUCE_USER_PAGE: i64 = 64;
+const PRODUCE_DISCOVERY_ITEMS: usize = 64;
 
 /// How long one pass may spend. A bound rather than "until the list is done"
 /// because the list is never done: it is regenerated every interval from what
@@ -700,40 +1036,45 @@ const MAX_REQUESTS: usize = 256;
 /// request-history ring; overflow is terminal and visible to the caller.
 const MAX_PENDING_PER_LIBRARY: usize = 256;
 
-const JOB_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
-const JOB_LEASE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+const PRETRANSCODE_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const PRETRANSCODE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(10);
+const PRETRANSCODE_REFUSAL_TTL_MS: i64 = 10 * 60 * 1_000;
+// The store admits at most 4,096 active queue rows. Retaining that entire
+// bounded universe avoids rotating one unreadable high-priority row back into
+// eligibility before a lower-priority row on this node's mount can be found.
+const MAX_PRETRANSCODE_REFUSALS: usize = 4_096 + PRODUCE_MAX_PER_PASS;
 
-pub(crate) struct ActiveJobLease {
-    coordinator: StoreCoordinator,
-    fence: PublicationFence,
-    cancel: tokio_util::sync::CancellationToken,
-    lost: tokio_util::sync::CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
+fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
+    let now_unix_ms = clock_ms();
+    std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
 }
 
-impl ActiveJobLease {
-    fn start(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-    ) -> Self {
-        Self::start_with_policy(coordinator, lease, JOB_LEASE_TTL, JOB_LEASE_HEARTBEAT)
-    }
+fn clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(i64::MAX)
+}
 
-    fn start_with_policy(
-        coordinator: StoreCoordinator,
-        lease: plurx_core::cluster::coordination::Lease,
-        ttl: std::time::Duration,
-        heartbeat_every: std::time::Duration,
-    ) -> Self {
-        let fence = PublicationFence::new(lease);
+/// Heartbeat and self-fence for one distributed queue row.
+struct ActivePretranscodeJob {
+    fence: PretranscodeFence,
+    cancel: tokio_util::sync::CancellationToken,
+    lost: tokio_util::sync::CancellationToken,
+    heartbeat: Option<tokio::task::JoinHandle<Result<(), StoreError>>>,
+}
+
+impl ActivePretranscodeJob {
+    fn start(store: Arc<dyn Store>, job: PretranscodeJob) -> Self {
+        let fence = PretranscodeFence::new(job);
         let heartbeat_fence = fence.clone();
-        let heartbeat_coordinator = coordinator.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let heartbeat_cancel = cancel.clone();
         let lost = tokio_util::sync::CancellationToken::new();
         let heartbeat_lost = lost.clone();
         let heartbeat = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(heartbeat_every);
+            let mut heartbeat_error = None;
+            let mut ticker = tokio::time::interval(PRETRANSCODE_HEARTBEAT);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await;
             loop {
@@ -742,23 +1083,48 @@ impl ActiveJobLease {
                     _ = ticker.tick() => {}
                 }
                 let Some(current) = heartbeat_fence.snapshot().await else {
+                    heartbeat_lost.cancel();
                     break;
                 };
-                let renewal = heartbeat_fence.renew(&heartbeat_coordinator, ttl);
+                let now_unix_ms = clock_ms();
+                if now_unix_ms >= current.lease_expires_ms {
+                    let _ = heartbeat_fence.invalidate(&current).await;
+                    heartbeat_lost.cancel();
+                    tracing::warn!(
+                        job = current.id,
+                        fence = current.fence,
+                        "pre-transcode queue heartbeat missed its lease deadline"
+                    );
+                    break;
+                }
+                let expires_at =
+                    now_unix_ms.saturating_add(
+                        PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64,
+                    );
+                let renewal = heartbeat_fence.renew(store.as_ref(), now_unix_ms, expires_at);
                 tokio::pin!(renewal);
-                let expiry = tokio::time::sleep(lease_time_remaining(current.expires_at_unix_ms));
+                let expiry = tokio::time::sleep(lease_time_remaining(current.lease_expires_ms));
                 tokio::pin!(expiry);
+                let mut stop_after_renewal = false;
                 let renewed = tokio::select! {
-                    _ = heartbeat_cancel.cancelled() => break,
+                    _ = heartbeat_cancel.cancelled() => {
+                        // A renewal may already have crossed the backend
+                        // boundary. Drain it before retirement so an
+                        // acknowledged replacement cannot be stranded.
+                        stop_after_renewal = true;
+                        renewal.await
+                    }
                     _ = &mut expiry => {
-                        let _ = heartbeat_fence.invalidate(&current).await;
+                        stop_after_renewal = true;
+                        heartbeat_fence.revoke();
                         heartbeat_lost.cancel();
+                        let result = renewal.await;
                         tracing::warn!(
-                            resource = current.resource,
+                            job = current.id,
                             fence = current.fence,
-                            "cluster job renewal exceeded its lease deadline and self-fenced"
+                            "pre-transcode queue renewal exceeded its lease deadline and self-fenced"
                         );
-                        break;
+                        result
                     }
                     result = &mut renewal => result,
                 };
@@ -767,27 +1133,41 @@ impl ActiveJobLease {
                     Ok(false) => {
                         heartbeat_lost.cancel();
                         tracing::warn!(
-                            resource = current.resource,
+                            job = current.id,
                             fence = current.fence,
-                            "cluster job lost its lease and self-fenced"
+                            "pre-transcode queue job lost its fence"
                         );
                         break;
                     }
                     Err(error) => {
                         heartbeat_lost.cancel();
                         tracing::warn!(
-                            resource = current.resource,
+                            job = current.id,
                             fence = current.fence,
-                            error = %error,
-                            "cluster job lease renewal failed and self-fenced"
+                            %error,
+                            "pre-transcode queue renewal failed and self-fenced"
                         );
+                        heartbeat_error = Some(error);
                         break;
                     }
                 }
+                if stop_after_renewal {
+                    break;
+                }
+            }
+            heartbeat_fence.revoke();
+            if let Err(error) = heartbeat_fence.retire(store.as_ref()).await {
+                tracing::warn!(%error, "pre-transcode queue retirement was ambiguous");
+                if heartbeat_error.is_none() {
+                    heartbeat_error = Some(error);
+                }
+            }
+            match heartbeat_error {
+                Some(error) => Err(error),
+                None => Ok(()),
             }
         });
         Self {
-            coordinator,
             fence,
             cancel,
             lost,
@@ -795,77 +1175,41 @@ impl ActiveJobLease {
         }
     }
 
-    pub(crate) fn publisher<'a>(&self, store: &'a dyn Store) -> PublicationStore<'a> {
-        PublicationStore::fenced(store, self.fence.clone())
-    }
-
-    pub(crate) fn loss_token(&self) -> tokio_util::sync::CancellationToken {
-        self.lost.clone()
-    }
-
-    fn publication_fence(&self) -> PublicationFence {
+    fn fence(&self) -> PretranscodeFence {
         self.fence.clone()
     }
 
-    pub(crate) async fn release(mut self) {
+    fn loss_token(&self) -> tokio_util::sync::CancellationToken {
+        self.lost.clone()
+    }
+
+    async fn finish(mut self) {
+        self.fence.revoke();
+        self.lost.cancel();
         self.cancel.cancel();
         if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(error = %error, "cluster job heartbeat task failed during release");
-            }
-        }
-        let token = self.fence.snapshot().await;
-        if let Some(token) = token {
-            if let Err(error) = self.coordinator.release(&token).await {
-                tracing::warn!(
-                    resource = token.resource,
-                    fence = token.fence,
-                    error = %error,
-                    "cluster job lease release failed; TTL will recover it"
-                );
+            match heartbeat.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "pre-transcode cleanup was ambiguous after settlement");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "pre-transcode heartbeat task failed during settlement");
+                }
             }
         }
     }
 }
 
-fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
-    let now_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(i64::MAX);
-    std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
-}
-
-impl Drop for ActiveJobLease {
+impl Drop for ActivePretranscodeJob {
     fn drop(&mut self) {
+        self.fence.revoke();
         self.cancel.cancel();
         self.lost.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            heartbeat.abort();
-        }
-    }
-}
-
-pub(crate) async fn acquire_cluster_job(
-    coordinator: &StoreCoordinator,
-    resource: String,
-) -> Result<Option<ActiveJobLease>, StoreError> {
-    match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
-        LeaseClaim::Acquired(lease) => Ok(Some(ActiveJobLease::start(coordinator.clone(), lease))),
-        LeaseClaim::Held {
-            owner_node_id,
-            fence,
-            expires_at_unix_ms,
-        } => {
-            tracing::debug!(
-                resource,
-                owner = owner_node_id,
-                fence,
-                expires_at_unix_ms,
-                "cluster job lease is held; skipping local duplicate"
-            );
-            Ok(None)
-        }
+        // Dropping a JoinHandle detaches the task. Cancellation makes it
+        // drain any dispatched renewal and retire the final acknowledged
+        // token; aborting here would recreate the late-write race.
+        let _ = self.heartbeat.take();
     }
 }
 
@@ -900,10 +1244,13 @@ impl JobManager {
             pending: Mutex::new(HashMap::new()),
             pending_retries: Mutex::new(HashSet::new()),
             requests: Mutex::new(VecDeque::new()),
-            metrics: IntegrationMetrics::default(),
+            metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
+            indexing: std::sync::atomic::AtomicBool::new(false),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
+            pretranscode_refusals: Mutex::new(HashMap::new()),
+            last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -975,6 +1322,11 @@ impl JobManager {
         &self.metrics
     }
 
+    /// Store-free counter handle for the Prometheus substate.
+    pub(crate) fn metrics_handle(&self) -> Arc<IntegrationMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
     /// Like [`trigger_scan`], but forces a full metadata refresh — re-enriches
     /// even already-matched items (backfills season posters onto older shows).
     pub async fn trigger_refresh(self: &Arc<Self>, library_id: i64) -> bool {
@@ -997,7 +1349,12 @@ impl JobManager {
             Ok(Some(lease)) => lease,
             Ok(None) => return false,
             Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "acquiring scan lease failed");
+                tracing::warn!(
+                    library = library_id,
+                    stage = "acquire_lease",
+                    error = %error,
+                    "acquiring scan lease failed"
+                );
                 return false;
             }
         };
@@ -1006,7 +1363,7 @@ impl JobManager {
             let entry = statuses.entry(library_id).or_default();
             if entry.running {
                 drop(statuses);
-                lease.release().await;
+                let _ = lease.release().await;
                 return false;
             }
             self.metrics.count_scan(why);
@@ -1029,6 +1386,11 @@ impl JobManager {
             tokio::select! {
                 () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
                 () = lost.cancelled() => {
+                    tracing::warn!(
+                        library = library_id,
+                        stage = "lease",
+                        "library scan failed because its cluster lease was lost"
+                    );
                     let mut status = manager
                         .statuses
                         .lock()
@@ -1040,7 +1402,7 @@ impl JobManager {
                     manager.finish(library_id, status).await;
                 }
             }
-            lease.release().await;
+            let _ = lease.release().await;
             // Whatever queued up while this ran is work someone was
             // promised. A full scan covers the same files a targeted one
             // would have, but the CALLER is still owed its answer — the
@@ -1109,7 +1471,7 @@ impl JobManager {
                 "cluster scan lease was lost".to_owned(),
             ))),
         };
-        lease.release().await;
+        let _ = lease.release().await;
         match &out {
             Ok(scan) => {
                 self.record_request(&req, "done", Some(scan), None).await;
@@ -1453,7 +1815,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         outcome
     }
 
@@ -1475,7 +1837,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -1649,7 +2011,9 @@ impl JobManager {
                 );
                 continue;
             }
-            let poster_path = if let Some((cover, reservation, url)) = prepared_cover.take() {
+            let (poster_path, required_origin) = if let Some((cover, reservation, url)) =
+                prepared_cover.take()
+            {
                 let filename = cover.filename().to_owned();
                 if let Err(error) =
                     metadata::book::publish_curator_cover(&self.artwork_dir, cover, reservation)
@@ -1675,9 +2039,9 @@ impl JobManager {
                     tracing::warn!(item = item.id, %error, "persisting Curator cover origin");
                     continue;
                 }
-                Some(filename)
+                (Some(filename), Some((key, origin)))
             } else {
-                None
+                (None, None)
             };
             let patch = BookMetadataPatch {
                 title: hints.title.clone(),
@@ -1686,6 +2050,7 @@ impl JobManager {
                 edition_id: Some(hints.edition_id.clone()),
                 poster_path,
                 source: BookMetadataSource::Curator,
+                required_origin,
             };
             match publisher
                 .apply_book_metadata_if_current(&item, &patch, None)
@@ -1844,7 +2209,7 @@ impl JobManager {
             }
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         false
     }
 
@@ -1927,6 +2292,12 @@ impl JobManager {
                 return;
             }
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "load_library",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -1943,6 +2314,12 @@ impl JobManager {
         {
             Ok(report) => status.last_scan = Some(report),
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "catalogue_scan",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -1977,7 +2354,12 @@ impl JobManager {
             .mark_library_scanned(library_id, force_metadata)
             .await
         {
-            tracing::warn!(error = %e, library = library_id, "recording the run time failed");
+            tracing::warn!(
+                error = %e,
+                library = library_id,
+                stage = "stamp_completion",
+                "recording the library scan completion time failed"
+            );
         }
         self.finish(library_id, status).await;
     }
@@ -2072,6 +2454,10 @@ impl JobManager {
                 .await,
             cache_produce_mins: self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await,
             last_cache_produce: self.job_stamp(keys::JOB_LAST_CACHE_PRODUCE).await,
+            vod_index_mins: self.job_interval(keys::VOD_INDEX_MINS).await,
+            last_vod_index: self
+                .job_stamp(&self.local_job_key(keys::JOB_LAST_VOD_INDEX))
+                .await,
         };
         for job in due_jobs(now(), &libraries, global) {
             match job {
@@ -2113,7 +2499,7 @@ impl JobManager {
                             )),
                         };
                         drop(publisher);
-                        lease.release().await;
+                        let _ = lease.release().await;
                         result?;
                     }
                 }
@@ -2153,19 +2539,36 @@ impl JobManager {
                         tracing::info!(removed, "pruned aged playback telemetry");
                     }
                 }
-                DueJob::ProduceCache => {
-                    // Spawned rather than run inline: this one takes hours, and
-                    // the scheduler tick it is on is also what starts scans and
-                    // sweeps. `run_due_jobs` is stamped-before-run, so a
-                    // producer still going when the next tick arrives simply
-                    // finds itself already stamped and does not double up —
-                    // and `produce_pass` refuses a second concurrent run
-                    // outright.
+                DueJob::BuildFragmentIndexes => {
+                    // Node-local work on node-local files, so the lease is
+                    // only about not running two passes on THIS node — the
+                    // single-flight guard inside does the rest.
                     let state = Arc::clone(self);
                     let transcode = Arc::clone(transcode);
-                    tokio::spawn(async move { state.produce_pass(transcode).await });
+                    tokio::spawn(async move {
+                        state.build_fragment_indexes(transcode).await;
+                    });
+                }
+                DueJob::ProduceCache => {
+                    // Candidate generation is the singleton half. It only
+                    // ranks and enqueues; every node's worker below competes
+                    // for distinct execution rows.
+                    let state = Arc::clone(self);
+                    let transcode = Arc::clone(transcode);
+                    tokio::spawn(async move {
+                        state.enqueue_pretranscode_pass(transcode).await;
+                    });
                 }
             }
+        }
+
+        // Execution has no interval of its own. Every node asks once per
+        // scheduler tick while speculative production is enabled, and the
+        // process-local guard keeps a long title from stacking worker loops.
+        if global.cache_produce_mins > 0 {
+            let state = Arc::clone(self);
+            let transcode = Arc::clone(transcode);
+            tokio::spawn(async move { state.work_pretranscode_queue(transcode).await });
         }
 
         // Not a `DueJob`: there is no interval to decide about. It runs on
@@ -2210,7 +2613,7 @@ impl JobManager {
                     }
                 }
                 drop(publisher);
-                lease.release().await;
+                let _ = lease.release().await;
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(error = %error, "artwork retry lease failed"),
@@ -2315,17 +2718,12 @@ impl JobManager {
             *self.last_genre_backfill.lock().await = Some(report);
         }
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
     }
 
-    /// One producer pass: sweep the cache back under budget, work out what
-    /// somebody is likely to play next, and pre-transcode as much of it as the
-    /// window allows (PERF-PLAN §6.2).
-    ///
-    /// Everything here is best-effort by construction. A candidate that fails
-    /// is logged and skipped rather than ending the pass: the list is a
-    /// prediction, and one bad prediction is not a reason to stop making them.
-    async fn produce_pass(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+    /// Singleton half of speculative production: rank likely titles and put
+    /// their immutable source generations on the distributed queue.
+    async fn enqueue_pretranscode_pass(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         let lease = match self.acquire_job("candidate:pretranscode".to_owned()).await {
             Ok(Some(lease)) => lease,
             Ok(None) => return,
@@ -2336,63 +2734,51 @@ impl JobManager {
         };
         let publisher = lease.publisher(self.store.as_ref());
         self.stamp(keys::JOB_LAST_CACHE_PRODUCE, &publisher).await;
-        drop(publisher);
         let lost = lease.loss_token();
-        self.produce_pass_owned(transcode, &lost, lease.publication_fence())
-            .await;
-        lease.release().await;
-    }
-
-    async fn produce_pass_owned(
-        self: &Arc<Self>,
-        transcode: Arc<TranscodeManager>,
-        lease_lost: &tokio_util::sync::CancellationToken,
-        publication_fence: PublicationFence,
-    ) {
         use crate::produce;
-        if lease_lost.is_cancelled() {
-            return;
-        }
-        let Some((root, node)) = transcode.cache_location() else {
-            self.emit_producer_pass(0, 0, serde_json::json!({"unavailable": 1}));
-            return;
-        };
-        // One at a time. Two passes would fight for the same slots and the
-        // same claims — the claims would sort it out correctly, but only after
-        // both had spawned encoders.
-        if self.producing.swap(true, Ordering::Relaxed) {
-            tracing::debug!("a producer pass is already running; skipping this one");
-            self.emit_producer_pass(0, 1, serde_json::json!({"already_running": 1}));
-            return;
-        }
-        let _running = ProducingGuard(Arc::clone(self));
-
-        // Under budget BEFORE producing, not after. Producing first would push
-        // the cache over its ceiling and then evict — and the eviction is LRU,
-        // so what it takes could easily be the entry just made.
-        crate::cachekeep::sweep_with_readers(
-            &self.store,
-            root,
-            node,
-            transcode.cache_readers(),
-            now(),
-        )
-        .await;
-        if crate::cachekeep::budget_bytes(&self.store).await.is_none() {
-            tracing::debug!("cache is switched off; nothing to produce");
-            self.emit_producer_pass(0, 1, serde_json::json!({"cache_off": 1}));
-            return;
-        }
-
-        let users = match self.store.list_users().await {
+        let user_cursor = publisher
+            .get_setting(keys::CACHE_PRETRANSCODE_USER_CURSOR)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(0);
+        let mut users = match self
+            .store
+            .list_users_page(user_cursor, PRODUCE_USER_PAGE)
+            .await
+        {
             Ok(users) => users,
             Err(e) => {
-                tracing::warn!(error = %e, "producer: cannot list users");
-                self.emit_producer_pass(0, 1, serde_json::json!({"store_error": 1}));
+                tracing::warn!(error = %e, "candidate generator cannot page users");
+                drop(publisher);
+                let _ = lease.release().await;
                 return;
             }
         };
-        let mut rails: Vec<Vec<produce::Candidate>> = Vec::new();
+        if users.is_empty() && user_cursor > 0 {
+            users = self
+                .store
+                .list_users_page(0, PRODUCE_USER_PAGE)
+                .await
+                .unwrap_or_default();
+        }
+        let next_user_cursor = if users.len() < PRODUCE_USER_PAGE as usize {
+            0
+        } else {
+            users.last().map_or(0, |user| user.id)
+        };
+        if let Err(error) = publisher
+            .put_setting(
+                keys::CACHE_PRETRANSCODE_USER_CURSOR,
+                &next_user_cursor.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(%error, "candidate generator could not advance its user cursor");
+        }
+        let mut rails: Vec<Vec<produce::DiscoveryCandidate>> = Vec::new();
         let mut in_progress = Vec::new();
         let mut next_up = Vec::new();
         for user in &users {
@@ -2415,9 +2801,6 @@ impl JobManager {
             .map(|r| (r.item.id, r.item.title))
             .collect();
 
-        // Resolve items to their files here rather than in `rank`, so the
-        // ranking stays a pure list operation and an item with no playable
-        // file simply never enters it.
         for (reason, items) in [
             (produce::REASON_IN_PROGRESS, in_progress),
             (produce::REASON_NEXT_UP, next_up),
@@ -2425,113 +2808,709 @@ impl JobManager {
         ] {
             let mut rail = Vec::new();
             for (item_id, title) in items {
-                if let Ok(files) = self.store.files_for_item(item_id).await {
-                    if let Some(f) = files.first() {
-                        rail.push(produce::Candidate {
-                            file_id: f.id,
-                            item_id,
-                            title,
-                            reason,
-                        });
-                    }
-                }
+                rail.push(produce::DiscoveryCandidate {
+                    item_id,
+                    title,
+                    reason,
+                });
             }
             rails.push(rail);
         }
 
-        let candidates = produce::rank(&rails, PRODUCE_MAX_PER_PASS);
-        if candidates.is_empty() {
-            self.emit_producer_pass(0, 0, serde_json::json!({"no_candidates": 1}));
-            return;
+        // Dedupe/rank cheap item ids first, then perform at most one bounded
+        // file lookup per globally selected item. This is O(1) store fan-out
+        // as users/history grow: 64 users, 129 rail reads, and 64 file reads.
+        let discoveries = produce::rank_discovery(&rails, PRODUCE_DISCOVERY_ITEMS);
+        let mut candidates = Vec::with_capacity(PRODUCE_MAX_PER_PASS);
+        for discovery in discoveries {
+            let Ok(files) = self.store.files_for_item(discovery.item_id).await else {
+                continue;
+            };
+            let Some(file) = files.into_iter().next() else {
+                continue;
+            };
+            if !produce::worth_producing(&file) {
+                continue;
+            }
+            candidates.push((
+                produce::Candidate {
+                    file_id: file.id,
+                    item_id: discovery.item_id,
+                    title: discovery.title,
+                    reason: discovery.reason,
+                },
+                file,
+            ));
+            if candidates.len() == PRODUCE_MAX_PER_PASS {
+                break;
+            }
         }
-        let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
-        tracing::info!(
-            candidates = candidates.len(),
-            window_mins = PRODUCE_WINDOW.as_secs() / 60,
-            "pre-transcode pass starting"
-        );
         let total = candidates.len();
-        let mut produced = 0_u64;
+        let mut enqueued = 0_u64;
         let mut skipped = 0_u64;
         let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
-        for (i, c) in candidates.into_iter().enumerate() {
-            if lease_lost.is_cancelled() {
-                tracing::warn!("pre-transcode pass stopped after losing its cluster lease");
+        let policy = match transcode.try_pretranscode_policy_snapshot().await {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "candidate generation could not read transcode policy");
+                drop(publisher);
+                let _ = lease.release().await;
+                return;
+            }
+        };
+        for (i, (c, file)) in candidates.into_iter().enumerate() {
+            if lost.is_cancelled() {
+                tracing::warn!("candidate generation stopped after losing its cluster lease");
                 skipped += (total - i) as u64;
                 reasons.insert("lease_lost", (total - i) as u64);
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                tracing::info!("pre-transcode pass out of time");
-                skipped += (total - i) as u64;
-                reasons.insert("deadline", (total - i) as u64);
-                break;
-            }
-            if self.stop_producing.load(Ordering::Relaxed) {
-                tracing::info!("pre-transcode pass stopped by request");
-                skipped += (total - i) as u64;
-                reasons.insert("stopped", (total - i) as u64);
-                break;
-            }
-            let Ok(Some(file)) = self.store.get_file(c.file_id).await else {
+            let height = policy.target_height(&file);
+            let decoder = match file.video_codec.as_deref() {
+                Some("h264" | "avc") => "h264",
+                Some("hevc" | "h265" | "hevc10") => "hevc",
+                Some("vp8") => "vp8",
+                Some("vp9") => "vp9",
+                Some("av1") => "av1",
+                Some("mpeg4") => "mpeg4",
+                Some("mpeg2video") => "mpeg2video",
+                _ => {
+                    skipped += 1;
+                    *reasons.entry("unsupported_decoder_contract").or_default() += 1;
+                    continue;
+                }
+            };
+            // Dolby Vision needs an RPU-aware renderer capability, not the
+            // ordinary HDR tone-map bit. Keep it on the live path until the
+            // queue contract can express that exact proof.
+            if file.hdr.as_deref() == Some("dolby_vision") {
                 skipped += 1;
-                *reasons.entry("missing_file").or_default() += 1;
+                *reasons
+                    .entry("dolby_renderer_contract_pending")
+                    .or_default() += 1;
+                continue;
+            }
+            let Some(duration_ms) = file.duration_ms.filter(|duration| *duration > 0) else {
+                skipped += 1;
+                *reasons.entry("missing_duration").or_default() += 1;
                 continue;
             };
-            if !produce::worth_producing(&file) {
+            let Some(peak_kbps) = crate::transcode::ladder(file.height)
+                .into_iter()
+                .find(|rung| rung.height == height)
+                .map(|rung| rung.peak_kbps)
+            else {
                 skipped += 1;
-                *reasons.entry("not_worth_producing").or_default() += 1;
+                *reasons.entry("missing_output_contract").or_default() += 1;
                 continue;
+            };
+            const GENERATION_OVERHEAD_BYTES: i64 = 64 * 1024 * 1024;
+            let artifact_bytes = duration_ms
+                .saturating_mul(i64::from(peak_kbps))
+                .saturating_div(8);
+            // Retained parts plus one complete copied generation are the
+            // portable worst case on filesystems without hard-link support.
+            let scratch_bytes = artifact_bytes
+                .saturating_mul(2)
+                .saturating_add(GENERATION_OVERHEAD_BYTES);
+            let mut hasher = Sha256::new();
+            for value in [
+                file.id.to_string(),
+                file.size.to_string(),
+                file.mtime.to_string(),
+                height.to_string(),
+                policy.generation.clone(),
+            ] {
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value.as_bytes());
             }
-            // Published BEFORE the encode starts, not after it finishes. The
-            // encode is the part that takes hours and holds the hardware, so
-            // announcing it afterwards describes only work that is already
-            // over — which is exactly the gap that made a busy ffmpeg
-            // unattributable from inside the product.
-            self.set_producing(Some(ProducingNow {
-                title: c.title.clone(),
-                reason: c.reason,
-                index: i + 1,
-                total,
-            }))
-            .await;
+            let requirements = PretranscodeRequirements {
+                version: PretranscodeRequirements::VERSION,
+                decoder: decoder.to_owned(),
+                acceptable_encoder_families: policy.acceptable_encoder_families(),
+                output_contract: "hls-mpegts-v1".to_owned(),
+                tone_map: file.hdr.is_some(),
+                output_grade: "sdr".to_owned(),
+                scratch_bytes,
+            };
+            let created_at_ms = clock_ms();
+            let priority_base = match c.reason {
+                produce::REASON_IN_PROGRESS => 300,
+                produce::REASON_NEXT_UP => 200,
+                _ => 100,
+            };
+            let job = NewPretranscodeJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                dedupe_key: hex::encode(hasher.finalize()),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                target_height: height,
+                policy_generation: policy.generation.clone(),
+                requirements_json: serde_json::to_string(&requirements)
+                    .expect("bounded pre-transcode requirements serialize"),
+                reason: produce::queue_reason(c.reason)
+                    .expect("ranked discovery reasons have stable queue identifiers")
+                    .to_owned(),
+                priority: priority_base + i64::try_from(total.saturating_sub(i)).unwrap_or(0),
+                not_before_ms: created_at_ms,
+                created_at_ms,
+            };
+            match publisher.enqueue_pretranscode_job(&job).await {
+                Ok(true) => {
+                    enqueued += 1;
+                    tracing::info!(
+                        job = job.id,
+                        file = file.id,
+                        title = %c.title,
+                        reason = c.reason,
+                        height,
+                        "queued speculative transcode"
+                    );
+                }
+                Ok(false) => {
+                    skipped += 1;
+                    *reasons.entry("already_active_or_ready").or_default() += 1;
+                }
+                Err(error) => {
+                    skipped += 1;
+                    *reasons.entry("enqueue_failed").or_default() += 1;
+                    tracing::warn!(title = %c.title, %error, "could not queue speculative transcode");
+                    if lost.is_cancelled() {
+                        break;
+                    }
+                }
+            }
+        }
+        crate::telemetry::emit(
+            Arc::clone(&self.store),
+            PlaybackEvent {
+                at_unix_ms: clock_ms(),
+                event: "producer_candidates".to_owned(),
+                extra: Some(
+                    serde_json::json!({
+                        "enqueued": enqueued,
+                        "skipped": skipped,
+                        "reasons": reasons,
+                    })
+                    .to_string(),
+                ),
+                ..PlaybackEvent::default()
+            },
+        );
+        drop(publisher);
+        let _ = lease.release().await;
+    }
+
+    /// Non-singleton half: every idle compatible node drains distinct queue
+    /// rows through the existing preemptible producer.
+    /// Build fragment indexes for files that have none.
+    ///
+    /// Bounded three ways on purpose, because this reads whole files off the
+    /// same disks a playback reads from and buys a viewer nothing today:
+    /// [`INDEX_MAX_PER_PASS`] files, [`INDEX_WINDOW`] of wall clock, and
+    /// [`INDEX_FILE_BUDGET`] per file. It also declines to start while the
+    /// pre-transcode worker is busy, for the same reason that worker declines
+    /// to start while a foreground session is.
+    ///
+    /// Nothing reads an index yet. A file without one keeps today's
+    /// presentation (plan §2.2, ledger D4), which is what lets this run — or
+    /// not run — without any client noticing either way.
+    /// Forget node-local VOD rows whose file no longer exists.
+    ///
+    /// Bounded per tick rather than exhaustive: the rows are small, nothing
+    /// depends on them going promptly, and a sweep that walked a whole library
+    /// would compete with the indexing pass it runs in front of. Ordered by
+    /// file id so consecutive ticks make progress rather than re-examining the
+    /// same window.
+    ///
+    /// Failure is not worth interrupting the tick for. These rows are a leak,
+    /// not a correctness problem -- an index whose file is gone stops matching
+    /// on identity long before anyone could serve from it.
+    async fn sweep_orphaned_vod_rows(&self) {
+        const SWEEP_WINDOW: i64 = 512;
+
+        let held = match self.store.vod_row_file_ids(SWEEP_WINDOW).await {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "listing node-local VOD rows to sweep");
+                return;
+            }
+        };
+        let alive = match self.store.surviving_file_ids(&held).await {
+            Ok(alive) => alive,
+            Err(error) => {
+                tracing::warn!(error = %error, "checking which indexed files still exist");
+                return;
+            }
+        };
+
+        let mut indexes = 0usize;
+        let mut plans = 0usize;
+        for file_id in held.iter().filter(|id| !alive.contains(id)) {
+            match self.store.forget_fragment_index(*file_id).await {
+                Ok(true) => indexes += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting a stale index");
+                }
+            }
+            match self.store.forget_rendition_plans(*file_id).await {
+                Ok(count) => plans += count,
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting stale plans");
+                }
+            }
+        }
+        if indexes > 0 || plans > 0 {
             tracing::info!(
-                title = %c.title, reason = c.reason, n = i + 1, of = total,
-                "pre-transcoding"
+                indexes,
+                plans,
+                examined = held.len(),
+                "swept node-local VOD rows for files that are gone"
             );
-            // The rung a viewer would actually be given, so the entry matches
-            // what a real playback looks up. Asking the manager rather than
-            // assuming is what keeps the two in step when Auto's policy moves.
-            let height = transcode.auto_height_for_file(Some(&file), None).await;
-            match transcode
-                .produce_cancelled(
+        }
+    }
+
+    async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        if self.indexing.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _running = IndexingGuard(Arc::clone(&self));
+        self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
+
+        // Before building anything, give back what belongs to files that are
+        // gone. Node-local rows and a replicated `files` table share no
+        // transaction, so a hook inside `delete_files` could only ever clean
+        // the node that ran the delete -- and never a node that was down at
+        // the time. Each node asking, on its own tick, converges everywhere.
+        self.sweep_orphaned_vod_rows().await;
+
+        let deadline = std::time::Instant::now() + INDEX_WINDOW;
+        let have_dovi = transcode.dv_strippable();
+        let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
+        let libraries = match self.store.list_libraries().await {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                tracing::warn!(error = %error, "fragment indexing could not list libraries");
+                return;
+            }
+        };
+
+        let mut built = 0usize;
+        let mut attempted = 0usize;
+        let mut examined = 0usize;
+        for library in libraries {
+            let paths = match self.store.library_file_paths(library.id).await {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tracing::warn!(library = library.id, error = %error, "listing files to index");
+                    continue;
+                }
+            };
+            for (file_id, _path) in paths {
+                // Both bounds, because they stop different runaways: a
+                // library that is already fully indexed attempts nothing and
+                // would otherwise walk every file every minute.
+                if attempted >= INDEX_MAX_PER_PASS
+                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                    || std::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                examined += 1;
+                if !transcode.pretranscode_worker_idle() {
+                    return;
+                }
+                let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                    continue;
+                };
+                if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                    continue;
+                }
+                let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+                match self.store.fragment_index(file_id, &identity).await {
+                    // Already current for this file and this pipeline.
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(file_id, error = %error, "reading a fragment index");
+                        continue;
+                    }
+                }
+                attempted += 1;
+                match crate::fragindex::build(
                     &file,
-                    height,
-                    deadline,
-                    lease_lost,
-                    publication_fence.clone(),
+                    have_dovi,
+                    false,
+                    &runtime_cache,
+                    INDEX_FILE_BUDGET,
+                )
+                .await
+                {
+                    crate::fragindex::IndexOutcome::Built(index) => {
+                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                            tracing::warn!(file_id, error = %error, "storing a fragment index");
+                        } else {
+                            built += 1;
+                        }
+                    }
+                    // A short read is not an index — persisting one would put
+                    // every later boundary in the wrong part of the film — so
+                    // the next pass simply tries again.
+                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                        tracing::debug!(file_id, rows, "fragment index incomplete: {reason}");
+                    }
+                    crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                        tracing::debug!(file_id, "file cannot be indexed: {reason}");
+                    }
+                }
+            }
+        }
+        if attempted > 0 {
+            tracing::info!(attempted, built, "fragment indexing pass finished");
+        }
+    }
+
+    async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        let Some((root, node)) = transcode.cache_location() else {
+            return;
+        };
+        if self.producing.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _running = ProducingGuard(Arc::clone(&self));
+        const LOCAL_SWEEP_INTERVAL_MS: i64 = 15 * 60 * 1_000;
+        let sweep_now = clock_ms();
+        let previous = self
+            .last_pretranscode_cache_sweep_ms
+            .load(Ordering::Acquire);
+        if sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
+            && self
+                .last_pretranscode_cache_sweep_ms
+                .compare_exchange(previous, sweep_now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            // This runs even when the queue is empty. Every producer-enabled
+            // node therefore maintains its own disk without multiplying work
+            // on each scheduler tick.
+            crate::cachekeep::sweep_with_readers(
+                &self.store,
+                root,
+                node,
+                transcode.cache_readers(),
+                now(),
+            )
+            .await;
+        }
+        let cache_ceiling = match crate::cachekeep::budget_bytes_fallible(&self.store).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "speculative queue cannot read its cache budget");
+                return;
+            }
+        };
+
+        let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
+        let mut produced = 0_u64;
+        let mut skipped = 0_u64;
+        let mut reasons = std::collections::BTreeMap::<&'static str, u64>::new();
+        let has_refusals = !self.pretranscode_refusals.lock().await.is_empty();
+        if has_refusals {
+            let active_job_ids = match self.store.active_pretranscode_job_ids().await {
+                Ok(ids) if ids.len() <= 4_096 => ids.into_iter().collect::<HashSet<_>>(),
+                Ok(_) => {
+                    tracing::error!("active speculative queue exceeded its hard row bound");
+                    *reasons.entry("active_queue_bound_exceeded").or_default() += 1;
+                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not prune stale node-local queue refusals");
+                    *reasons.entry("refusal_prune_failed").or_default() += 1;
+                    self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+                    return;
+                }
+            };
+            let now_unix_ms = clock_ms();
+            self.pretranscode_refusals
+                .lock()
+                .await
+                .retain(|id, retry_at| *retry_at > now_unix_ms && active_job_ids.contains(id));
+        }
+        for index in 0..PRODUCE_MAX_PER_PASS {
+            if self.stop_producing.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            if !transcode.pretranscode_worker_idle() {
+                *reasons.entry("foreground_or_offline_busy").or_default() += 1;
+                break;
+            }
+            // `statvfs` is cheap enough to refresh after every title. Full
+            // cache reconciliation stays on the cleanup schedule: doing its
+            // database inventory and filesystem walk here would make an empty
+            // queue tax every media-serving node once per scheduler tick.
+            let used_bytes = match self.store.cache_bytes(node).await {
+                Ok(bytes) => bytes.max(0),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read durable cache usage before queue claim");
+                    *reasons.entry("cache_usage_unavailable").or_default() += 1;
+                    break;
+                }
+            };
+            let remaining_budget = cache_ceiling.saturating_sub(used_bytes);
+            if remaining_budget <= 0 {
+                tracing::info!(
+                    used_bytes,
+                    cache_ceiling,
+                    "speculative worker stopped at cache budget"
+                );
+                *reasons.entry("cache_budget_full").or_default() += 1;
+                break;
+            }
+            let mut capabilities = transcode.pretranscode_capabilities();
+            // Requirements carry the estimated complete artifact plus 64 MiB
+            // generation headroom. Advertising only the lesser of physical
+            // scratch and durable budget remainder prevents a claim whose
+            // expected publication is already known not to fit.
+            capabilities.scratch_bytes = capabilities.scratch_bytes.min(remaining_budget);
+            if !capabilities.validate() || capabilities.scratch_bytes == 0 {
+                tracing::warn!(
+                    decoders = ?capabilities.decoders,
+                    scratch_bytes = capabilities.scratch_bytes,
+                    "speculative worker has no proved decoder inventory or cache scratch"
+                );
+                *reasons.entry("unproved_capability_or_scratch").or_default() += 1;
+                break;
+            }
+            let now_unix_ms = clock_ms();
+            let expires_at = now_unix_ms
+                .saturating_add(PRETRANSCODE_LEASE_TTL.as_millis().min(i64::MAX as u128) as i64);
+            let excluded_job_ids = {
+                let mut refusals = self.pretranscode_refusals.lock().await;
+                refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
+                refusals
+                    .keys()
+                    .take(MAX_PRETRANSCODE_REFUSALS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let job = match self
+                .store
+                .claim_pretranscode_job(
+                    node,
+                    &capabilities,
+                    &excluded_job_ids,
+                    now_unix_ms,
+                    expires_at,
                 )
                 .await
             {
-                Ok(Some(made)) => {
-                    produced += 1;
-                    tracing::info!(
-                        recipe = %made.recipe, title = %c.title, reason = c.reason, height,
-                        minutes = made.duration_ms / 60_000, segments = made.segments,
-                        mb = made.bytes / 1_048_576, parts = made.parts,
-                        "pre-transcoded"
+                Ok(Some(job)) => job,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "could not claim speculative-transcode work");
+                    *reasons.entry("claim_failed").or_default() += 1;
+                    break;
+                }
+            };
+            let active = ActivePretranscodeJob::start(Arc::clone(&self.store), job.clone());
+            let fence = active.fence();
+            let lost = active.loss_token();
+            let file = match self.store.get_file(job.file_id).await {
+                Ok(Some(file))
+                    if file.size == job.source_size && file.mtime == job.source_mtime =>
+                {
+                    file
+                }
+                Ok(Some(_)) | Ok(None) => {
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "source_changed", clock_ms())
+                        .await;
+                    active.finish().await;
+                    skipped += 1;
+                    *reasons.entry("source_changed").or_default() += 1;
+                    continue;
+                }
+                Err(error) => {
+                    let now_unix_ms = clock_ms();
+                    tracing::warn!(job = job.id, %error, "source row unavailable for speculative transcode");
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    active.finish().await;
+                    skipped += 1;
+                    *reasons.entry("store_unavailable").or_default() += 1;
+                    continue;
+                }
+            };
+            let trusted_roots = match self.store.get_item(file.item_id).await {
+                Ok(Some(item)) => self
+                    .store
+                    .get_library(item.library_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|library| library.paths)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let Some(source_snapshot) =
+                crate::transcode::pretranscode_source_snapshot(&file, &trusted_roots).await
+            else {
+                let now_unix_ms = clock_ms();
+                {
+                    let mut refusals = self.pretranscode_refusals.lock().await;
+                    refusals.retain(|_, retry_at| *retry_at > now_unix_ms);
+                    if refusals.len() >= MAX_PRETRANSCODE_REFUSALS {
+                        if let Some(oldest) = refusals
+                            .iter()
+                            .min_by_key(|(_, retry_at)| **retry_at)
+                            .map(|(id, _)| id.clone())
+                        {
+                            refusals.remove(&oldest);
+                        }
+                    }
+                    refusals.insert(
+                        job.id.clone(),
+                        now_unix_ms.saturating_add(PRETRANSCODE_REFUSAL_TTL_MS),
                     );
                 }
-                Ok(None) => {
-                    skipped += 1;
-                    *reasons.entry("already_cached_or_claimed").or_default() += 1;
+                let _ = fence
+                    .yield_job(self.store.as_ref(), now_unix_ms, now_unix_ms)
+                    .await;
+                active.finish().await;
+                skipped += 1;
+                *reasons.entry("source_unreadable_on_node").or_default() += 1;
+                tracing::debug!(
+                    job = job.id,
+                    path = %file.path.display(),
+                    "speculative transcode refused on a node without the source snapshot"
+                );
+                continue;
+            };
+            let title = self
+                .store
+                .get_item(file.item_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| file.path.display().to_string(), |item| item.title);
+            self.set_producing(Some(ProducingNow {
+                title: title.clone(),
+                reason: job.reason.clone(),
+                index: index + 1,
+                total: PRODUCE_MAX_PER_PASS,
+            }))
+            .await;
+            let result = transcode
+                .produce_pretranscode_job(
+                    &file,
+                    job.target_height,
+                    deadline,
+                    &lost,
+                    source_snapshot,
+                    fence.clone(),
+                )
+                .await;
+            match result {
+                Ok(PretranscodeProduceOutcome::Ready(made)) => {
+                    produced += 1;
+                    tracing::info!(
+                        job = job.id,
+                        recipe = %made.recipe,
+                        title = %title,
+                        reason = job.reason,
+                        height = job.target_height,
+                        segments = made.segments,
+                        mb = made.bytes / 1_048_576,
+                        parts = made.parts,
+                        "distributed speculative transcode ready"
+                    );
                 }
-                Err(e) => {
+                Ok(PretranscodeProduceOutcome::Yielded) if lost.is_cancelled() => {
+                    skipped += 1;
+                    *reasons.entry("lease_lost").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::Yielded) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(1_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("yielded").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::StoreUnavailable) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("store_unavailable").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::PolicyChanged) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "policy_changed", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("policy_changed").or_default() += 1;
+                }
+                Ok(PretranscodeProduceOutcome::SourceChanged) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "source_changed", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("source_changed").or_default() += 1;
+                }
+                Err(error) if crate::transcode::is_retryable_capacity_error(&error) => {
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .yield_job(
+                            self.store.as_ref(),
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(5_000),
+                        )
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("capacity").or_default() += 1;
+                }
+                Err(error) => {
+                    let now_unix_ms = clock_ms();
+                    let exponent = u32::try_from(job.attempts.clamp(0, 7)).unwrap_or(0);
+                    let backoff_ms = 30_000_i64
+                        .saturating_mul(1_i64 << exponent)
+                        .min(60 * 60 * 1_000);
+                    let _ = fence
+                        .fail_job(
+                            self.store.as_ref(),
+                            "encode_failed",
+                            now_unix_ms,
+                            now_unix_ms.saturating_add(backoff_ms),
+                        )
+                        .await;
                     skipped += 1;
                     *reasons.entry("failed").or_default() += 1;
-                    tracing::warn!(title = %c.title, error = %e, "pre-transcode failed");
+                    tracing::warn!(job = job.id, title = %title, %error, "speculative transcode failed");
                 }
             }
+            active.finish().await;
             self.set_producing(None).await;
         }
         self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
@@ -2595,7 +3574,7 @@ impl JobManager {
             )),
         };
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         result
     }
 
@@ -2796,6 +3775,84 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
 
+    fn metrics_sample(value: i64) -> PrometheusStoreSnapshot {
+        PrometheusStoreSnapshot {
+            libraries: value,
+            users: value,
+            offline: OfflinePackageStats {
+                queued: value,
+                preparing: value,
+                ready: value,
+                failed: value,
+                queued_bytes: value,
+                preparing_bytes: value,
+                ready_bytes: value,
+                failed_bytes: value,
+                active_leases: value,
+                pinned_bytes: value,
+            },
+            watched_outbox: (value, value, value),
+        }
+    }
+
+    #[test]
+    fn store_metrics_cache_distinguishes_absent_stale_and_failed_samples() {
+        let cache = StoreMetricsCache::default();
+        assert_eq!(
+            cache.snapshot_at(0),
+            StoreMetricsView {
+                sample: None,
+                age_seconds: None,
+                valid: false,
+                errors: 0,
+            }
+        );
+
+        cache.record_error();
+        assert_eq!(cache.snapshot_at(30).sample, None);
+        assert_eq!(cache.snapshot_at(30).errors, 1);
+
+        let complete = metrics_sample(7);
+        cache.publish_at(complete, 40);
+        assert_eq!(
+            cache.snapshot_at(41),
+            StoreMetricsView {
+                sample: Some(complete),
+                age_seconds: Some(1),
+                valid: true,
+                errors: 1,
+            }
+        );
+
+        cache.record_error();
+        let stale = cache.snapshot_at(40 + STORE_METRICS_FRESHNESS_SECS + 1);
+        assert_eq!(stale.sample, Some(complete));
+        assert_eq!(stale.age_seconds, Some(STORE_METRICS_FRESHNESS_SECS + 1));
+        assert!(!stale.valid);
+        assert_eq!(stale.errors, 2);
+    }
+
+    #[test]
+    fn store_metrics_cache_never_exposes_a_torn_complete_sample() {
+        let cache = StoreMetricsCache::default();
+        cache.publish_at(metrics_sample(1), 0);
+        let writer = cache.clone();
+        let handle = std::thread::spawn(move || {
+            for ordinal in 0..10_000 {
+                writer.publish_at(metrics_sample(if ordinal % 2 == 0 { 2 } else { 3 }), 0);
+            }
+        });
+        for _ in 0..10_000 {
+            let sample = cache
+                .snapshot_at(0)
+                .sample
+                .expect("the initial complete sample remains present");
+            let expected = sample.libraries;
+            assert_eq!(sample, metrics_sample(expected));
+        }
+        handle.join().expect("join metrics publisher");
+    }
+
     #[test]
     fn re_pairing_provider_art_waits_for_its_replacement_cover() {
         assert!(
@@ -2934,7 +3991,8 @@ mod tests {
             lease,
             std::time::Duration::from_secs(1),
             std::time::Duration::from_millis(50),
-        );
+        )
+        .expect("valid test lease policy");
         let owner = tokio::spawn(async move {
             let active = active;
             std::future::pending::<()>().await;
@@ -2955,6 +4013,47 @@ mod tests {
                 .expect("takeover acquire"),
             LeaseClaim::Acquired(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_pretranscode_queue_rate_limits_local_cache_maintenance() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("empty queue store"));
+        store
+            .put_setting(keys::CACHE_MAX_GB, "50")
+            .await
+            .expect("enable cache");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let cache = tempfile::tempdir().expect("cache");
+        let cache_root = cache.path().join("transcode");
+        let recipe = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let orphan = cache_root
+            .join("dd")
+            .join(format!("{recipe}-j00000000-0000-4000-8000-000000000303-f1"));
+        tokio::fs::create_dir_all(&orphan)
+            .await
+            .expect("queue-shaped orphan");
+        tokio::fs::write(orphan.join("index.m3u8"), b"unbound")
+            .await
+            .expect("orphan bytes");
+
+        let shared: Arc<dyn Store> = store;
+        let jobs = manager(Arc::clone(&shared), artwork.path());
+        let transcode = Arc::new(
+            TranscodeManager::new(
+                shared,
+                cache.path().join("work"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_decoders(vec!["h264".to_owned()])
+            .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
+        );
+
+        Arc::clone(&jobs).work_pretranscode_queue(transcode).await;
+        assert!(
+            !orphan.exists(),
+            "a producer-enabled node did not maintain its local cache on an empty queue"
+        );
     }
 
     fn targeted_show_tmdb(
@@ -3175,7 +4274,7 @@ mod tests {
         jobs.producing.store(true, Ordering::Relaxed);
         jobs.set_producing(Some(ProducingNow {
             title: "Heat".into(),
-            reason: crate::produce::REASON_RECENT,
+            reason: crate::produce::REASON_RECENT.to_owned(),
             index: 1,
             total: 2,
         }))
@@ -3260,7 +4359,7 @@ mod tests {
         let publisher = lease.publisher(store.as_ref());
         jobs.stamp("job.stamped", &publisher).await;
         drop(publisher);
-        lease.release().await;
+        let _ = lease.release().await;
         let stamped = jobs.job_stamp("job.stamped").await.expect("stamp");
         assert!((now() - stamped).abs() <= 1);
     }

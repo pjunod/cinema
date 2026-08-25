@@ -1,11 +1,11 @@
 # Clustering transition — from one plurxd node to Phase 4
 
-**Status:** executing — M0 through M3a are complete; Hiqlite now activates,
-grows, and safely removes a follower, while the remaining M3 discovery,
-offline-work resolution, activity aggregation, and singleton fencing are next
+**Status:** executing — M0 through M3 are complete; M4's production fences,
+real-process singleton pause/takeover proof, and distinct serving-process
+partition proof are staged, while the later client failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
-2026-08-15
+2026-08-22
 
 Companion to [PHASE3-SPIKE.md](PHASE3-SPIKE.md), which chose hiqlite and
 proved restart-at-boundary media behavior; [PERF-PLAN.md](PERF-PLAN.md) §7,
@@ -63,8 +63,8 @@ node-local FTS, and bounded root-aware reconciliation; and M1d completes the
 content-addressed source backup, fresh-target import with per-table parity,
 fsynced completion marker, and atomic one-voter activation; after that verified
 import, the daemon selects Hiqlite instead of SQLite. Membership/join,
-lease-fenced publication, replicated session ownership, serving self-fencing,
-and client failover remain open.
+lease-fenced publication and serving self-fencing are implemented. Replicated
+session takeover and client failover remain open.
 
 ## 3. Contracts — safety lives in signatures and transactions
 
@@ -355,11 +355,16 @@ silently renumbers every remaining discontinuity.
 
 ### 3.6 Quorum, discovery, and local bytes have explicit failure behavior
 
-On quorum loss or lease-renewal failure, a node fails `/readyz`, stops serving
-playlists and segments with `503` plus healthy node addresses, and terminates
-session children. It may serve immutable direct bytes only if the request does
-not mutate progress and the client already has the node list; the default is
-self-fence, because stale serving hides failed writes.
+On quorum loss or lease-renewal failure, a node fails `/readyz`, terminates
+session children, and self-fences every media byte path—including native and
+Plex direct play. M4 deliberately returns a topology-free `503` with
+`Retry-After: 1`: it has quorum proof but not yet the M5 discovery contract,
+so exposing cached peer addresses would turn stale topology into an API.
+
+M5 adds healthy node addresses to that response. Only then may an immutable
+direct-byte request remain available when it cannot mutate progress and the
+client already has the current node list; self-fence remains the default,
+because stale serving hides failed writes.
 
 Each node advertises a hostname derived from `node.id`, not `instance.id`.
 mDNS and GDM include the logical server id, node id, protocol version, and
@@ -861,6 +866,19 @@ to the operator. The activity page aggregates
 direct-play and session rows from all healthy nodes instead of exposing only
 the process that answered the request.
 
+**M3e transport delivered.** Membership retains each node's explicitly
+configured plurxd URL in a cluster-internal table while the public status shape
+continues to omit every address. A narrow read-only activity snapshot route is
+authorized by a short-lived sender/target-bound Ed25519 signature from a
+durable per-node private key plus a current-voter check, never by a forwarded
+household bearer or the cluster-wide API secret. The pre-wired client races at
+most 64 bounded peer reads under one two-second deadline, refuses redirects,
+caps each response at an exact 256 KiB serialized budget, and returns
+answered, unhealthy, unreachable, invalid, or timed-out. The aggregation above
+can therefore degrade visibly without guessing ports or silently dropping
+nodes. SQLite and never-joined one-node paths construct no peer work. Snapshot
+rows deliberately omit HLS session capability ids.
+
 ### 6.8 M4 — transactional fences and materialization ownership
 
 Put scans, metadata refresh, genre backfill, scheduled cache production, and
@@ -873,6 +891,33 @@ queue repair.
 prove its resumed write is rejected inside the transaction. Kill a scan owner
 and observe one successor restart. Partition a serving node and prove it fails
 readiness, kills children, and stops capability-URL serving.
+
+The retained singleton slice uses three real voter processes and the exact
+daemon lease-heartbeat source. A follower begins a blocked provider request,
+both peers are refused without making another physical call, and the follower
+is stopped past the expiry read from the authoritative lease row. One surviving
+peer takes over with the next fence, publishes a distinct response, and the
+resumed production task self-fences. Replaying the pre-takeover token is
+rejected by the atomic successor-generation transaction independently of its
+former wall-clock TTL. Both live peers contest takeover, exactly
+one observes acquisition while the other observes its new fence, and the proof
+allows exactly two provider calls and at most eight post-baseline Raft entries.
+The retained serving slice starts a distinct process with a remote Hiqlite
+client behind raw TCP cut-points, while all three voter processes remain
+directly reachable. Its production quorum watermark drives `/readyz`, the
+mutable-media and direct-play gates, progressive-remux cancellation, and HLS
+child retirement without a Store request on the loss path. Cutting every
+serving connection must leave `/healthz` at 200, move readiness and the
+capability to 503 with `Retry-After`, expose no cluster address, and reap the
+live child. The controller then commits a setting and reads it from every
+voter's local replica through the intact majority, restores the serving links,
+and requires readiness and capability recovery.
+
+That remote serving monitor is intentionally quorum-authority-only. It does
+not poll a voter-management metrics endpoint, claim a local replica, or emit an
+apply-lag value. The short proof can gate media readiness, but cannot authorize
+a bounded local catalogue read; that later optimization requires a fresh local
+term, leader, epoch, and applied-index binding on an embedded replica.
 
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
@@ -949,10 +994,14 @@ offline-work resolution, and singleton fencing.
 ```bash
 make check                    # M0 and every milestone: repository baseline
 make validate-staged          # changed behavior contracts
-make cluster-check            # M1b-M3a state, membership, import, and loss gate
+make cluster-check            # M1b-M4 state, membership, singleton, and loss gate
 make cluster-growth           # 10,000-beat compacted growth + raw control
 cargo run --locked -p plurx-cluster-check -- membership
                               # focused real-process 1 -> 3 -> 2 lifecycle
+cargo run --locked -p plurx-cluster-check -- singleton
+                              # focused SIGSTOP/TTL/takeover/stale-token proof
+cargo run --locked -p plurx-cluster-check -- serving-partition
+                              # focused serving-only cut, child reap, majority-write, recovery proof
 cargo test -p plurx-core store::sqlite::tests:: -- --nocapture
                               # explicit local M2 database-upgrade gate
 ```

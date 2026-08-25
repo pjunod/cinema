@@ -61,7 +61,7 @@ pub async fn list(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LibraryDto>>, ApiError> {
-    let libraries = state.store.list_libraries().await?;
+    let libraries = state.catalogue.list_libraries().await?;
     Ok(Json(libraries.into_iter().map(Into::into).collect()))
 }
 

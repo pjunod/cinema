@@ -294,33 +294,26 @@ class OperationsContractCase(unittest.TestCase):
             "cargo build --release -p plurxd --target ${{ matrix.target }}",
             workflow,
         )
-        # apt on a hosted image points at a mirror list that fails often enough
-        # to matter on a required gate, so every apt use rewrites it to the
-        # archive and retries. Counting invocations rather than asserting a
-        # fixed total keeps this true as jobs move: the ffmpeg lanes now satisfy
-        # it once inside ./.github/actions/ffmpeg instead of per job.
-        for name in (
-            ".github/workflows/ci.yml",
-            ".github/actions/ffmpeg/action.yml",
-        ):
-            with self.subTest(source=name):
-                source = read(name)
-                self.assertIn(
-                    "s|mirror+file:/etc/apt/apt-mirrors.txt"
-                    "|https://archive.ubuntu.com/ubuntu|g",
-                    source,
-                )
-                self.assertEqual(
-                    [],
-                    [
-                        line.strip()
-                        for line in source.splitlines()
-                        if "apt-get" in line
-                        and not line.lstrip().startswith("#")
-                        and "-o Acquire::Retries=3" not in line
-                    ],
-                    f"{name} runs apt-get without the retry policy",
-                )
+        # Root container lanes still install ffmpeg through apt. Keep that one
+        # package-manager boundary on the canonical archive with retries;
+        # persistent runner jobs consume dependencies provisioned by Ansible.
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn(
+            "s|mirror+file:/etc/apt/apt-mirrors.txt"
+            "|https://archive.ubuntu.com/ubuntu|g",
+            action,
+        )
+        self.assertEqual(
+            [],
+            [
+                line.strip()
+                for line in action.splitlines()
+                if "apt-get" in line
+                and not line.lstrip().startswith("#")
+                and "-o Acquire::Retries=3" not in line
+            ],
+            ".github/actions/ffmpeg/action.yml runs apt-get without retries",
+        )
         self.assertNotIn("sudo apt-get update", workflow)
         self.assertNotIn("sudo apt-get install", workflow)
         self.assertNotIn(
@@ -379,6 +372,8 @@ class OperationsContractCase(unittest.TestCase):
         # The emulator restores a cached AVD snapshot and never saves over it.
         self.assertIn("key: avd-35-google_apis-pixel_7_pro", workflow)
         self.assertIn("-no-snapshot-save", workflow)
+        self.assertIn("uninstall tv.plurx.app.test", makefile)
+        self.assertIn("uninstall tv.plurx.app", makefile)
 
         # The semantic proof reuses the cluster job's root target instead of
         # compiling the same Hiqlite/OpenRaft dependency graph a second time.
@@ -389,6 +384,11 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("run: make cluster-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
+        self.assertIn("name: cluster-topology-semantic", cluster)
+        self.assertIn(
+            "path: target/validation/cluster-topology-semantic.json", cluster
+        )
+        self.assertIn("if-no-files-found: error", cluster)
 
         # The docker smoke build keeps the GHA layer cache wired so the
         # ffmpeg runtime layers stop re-downloading on every run.
@@ -430,6 +430,46 @@ class OperationsContractCase(unittest.TestCase):
                     and "\n    uses:" not in block
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
+
+    def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
+        general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
+        high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
+        android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
+        hosted_linux = "    runs-on: ubuntu-latest"
+        apple = "    runs-on: macos-15"
+
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/fix-evidence.yml",
+            ".github/workflows/lint.yml",
+            ".github/workflows/release-readiness.yml",
+            ".github/workflows/validation-nightly.yml",
+        ):
+            for name, block in workflow_job_blocks(path).items():
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                if runs_on is None:
+                    self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
+                    continue
+                expected = general
+                if path == ".github/workflows/ci.yml" and name == "apple":
+                    expected = apple
+                elif path == ".github/workflows/ci.yml" and name == "docker":
+                    expected = high_cpu
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "android_jvm",
+                    "android_device",
+                }:
+                    expected = android
+                self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
+
+        for path in (
+            ".github/workflows/publish-release.yml",
+            ".github/workflows/rust-audit.yml",
+        ):
+            for name, block in workflow_job_blocks(path).items():
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
+                self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):
         # An unpinned `apt-get install -y ffmpeg` on `ubuntu-latest` made the

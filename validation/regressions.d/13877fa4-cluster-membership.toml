@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["13877fa4"]
+points = ["cluster.auth", "cluster.membership", "web.experience"]
+checks = ["rust-gate", "cluster-auth", "web-membership"]
+reason = "The real cluster harness proves current-leader leave from odd and degraded even voter sets, including exact four-to-three convergence with one survivor down, a confirmed successor, tombstone persistence, and post-leave ownership fences. SQLite regressions prove reference-counted concurrent rollback, rolling-version capability refusal without fence or lease side effects, legacy heartbeat and join-finalize pinning, atomic preexisting-fence backfill, and cluster-wide rejection of old coordinator inserts. The membership web contract renders mixed-version and pending-removal refusals with an actionable retry path."

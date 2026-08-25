@@ -93,6 +93,15 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   }
   assert.match(SHIPPED_UI, /localStorage\.setItem\("plurx_stats_mode",mode\)/);
   assert.match(SHIPPED_UI, /STATS_MODE==="debug"\?debugHtml:standardHtml/);
+  for (const tone of ["good", "warn", "bad", "muted"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`\\.statsov \\.stat-${tone}`),
+      `${tone} playback diagnostics must have a visible text treatment`,
+    );
+  }
+  assert.match(SHIPPED_UI, /function statsRunwayTone\(seconds,suspended\)/);
+  assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
@@ -1447,7 +1456,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "newRequestId",
     "logout",
     [
-      'const API="/api/v1"; let TOKEN="token";',
+      'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
       shippedSource("api"),
       shippedSource("openSession"),
@@ -1684,7 +1693,9 @@ test("the detail screen names every subtitle track, its format and its markers",
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {
   const html = detailHarness().specBlock(MOVIE_FILE);
-  const disclosure = html.match(/<details class="trkfold">([\s\S]+?)<\/details>/)?.[1];
+  const disclosure = html.match(
+    /<dt>Subtitles<\/dt><dd><details class="trkfold">([\s\S]+?)<\/details>/,
+  )?.[1];
   assert.ok(disclosure, "multiple subtitle tracks use a native disclosure");
   assert.doesNotMatch(html, /<details class="trkfold" open>/);
   assert.match(
@@ -1707,8 +1718,34 @@ test("one subtitle track needs no expand control", () => {
       },
     },
   });
-  assert.equal(html.includes('class="trkfold"'), false);
-  assert.match(html, /English · SRT · forced · Heptapod/);
+  const subtitleRow = html.match(/<dt>Subtitles<\/dt><dd>([\s\S]+?)<\/dd>/)?.[1];
+  assert.ok(subtitleRow);
+  assert.equal(subtitleRow.includes('class="trkfold"'), false);
+  assert.match(subtitleRow, /English · SRT · forced · Heptapod/);
+});
+
+test("the detail screen keeps only the selected audio track visible until expanded", () => {
+  const html = detailHarness().specBlock(MOVIE_FILE);
+  const disclosure = html.match(
+    /<dt>Audio<\/dt><dd><details class="trkfold">([\s\S]+?)<\/details>/,
+  )?.[1];
+  assert.ok(disclosure, "multiple audio tracks use a native disclosure");
+  assert.match(
+    disclosure,
+    /^<summary><span class="trk on">English · TRUEHD · 7\.1 · <span class="tdef">plays by default<\/span><\/span><span class="trkmore">1 more<\/span><\/summary>/,
+  );
+  assert.match(disclosure, /French · AC3 · 5\.1/);
+});
+
+test("one audio track needs no expand control", () => {
+  const html = detailHarness().specBlock({
+    ...MOVIE_FILE,
+    audio_streams: [MOVIE_FILE.audio_streams[0]],
+  });
+  const audioRow = html.match(/<dt>Audio<\/dt><dd>([\s\S]+?)<\/dd>/)?.[1];
+  assert.ok(audioRow);
+  assert.equal(audioRow.includes('class="trkfold"'), false);
+  assert.match(audioRow, /English · TRUEHD · 7\.1/);
 });
 
 test("a file with no subtitle tracks says so instead of showing an empty row", () => {

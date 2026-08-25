@@ -1,6 +1,6 @@
 //! Items (movie/show/season/episode), media files, search.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -10,13 +10,14 @@ use super::{
     file_from_row, item_cols, item_from_row, SqliteStore, FILE_COLS, ITEM_COLS, ITEM_COL_COUNT,
 };
 use crate::domain::{
-    sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemEdit, ItemKind, ItemPage,
-    ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
+    sort_title_for, ArtworkAttempt, BookMetadataPatch, HomePreviewPage, Item, ItemEdit, ItemKind,
+    ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
 };
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
@@ -296,6 +297,25 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ids = serde_json::to_string(ids)
+            .map_err(|error| StoreError::Task(format!("encode item title ids: {error}")))?;
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, title FROM items \
+                 WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map(params![ids], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         self.with_conn(move |conn| {
             // Shows order by season/episode; home folders want subfolders
@@ -335,16 +355,75 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        if after_item_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid artwork inventory page".to_owned(),
+            ));
+        }
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {i} FROM items i
+                 WHERE i.id > ?1
+                   AND (i.poster_path IS NOT NULL OR i.backdrop_path IS NOT NULL)
+                 ORDER BY i.id LIMIT ?2",
+                i = item_cols("i")
+            ))?;
+            let items = stmt
+                .query_map(params![after_item_id, limit], |row| item_from_row(row, 0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(items)
+        })
+        .await
+    }
+
     async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
         let filename = filename.to_owned();
-        self.with_conn(move |conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM items \
-                 WHERE poster_path = ?1 OR backdrop_path = ?1)",
-                params![filename],
+        self.with_read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM items
+                  WHERE poster_path = ?1 OR backdrop_path = ?1)",
+                [filename],
                 |row| row.get::<_, bool>(0),
-            )
-            .map_err(Into::into)
+            )?)
+        })
+        .await
+    }
+
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if filenames.len() > 256
+            || filenames
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 512)
+        {
+            return Err(StoreError::Task(
+                "invalid artwork reference batch".to_owned(),
+            ));
+        }
+        if filenames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(filenames)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT poster_path AS filename FROM items
+                  WHERE poster_path IN (SELECT value FROM json_each(?1))
+                 UNION
+                 SELECT backdrop_path AS filename FROM items
+                  WHERE backdrop_path IN (SELECT value FROM json_each(?1))",
+            )?;
+            let referenced = stmt
+                .query_map([encoded], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(referenced)
         })
         .await
     }
@@ -369,10 +448,6 @@ impl MediaStore for SqliteStore {
                 }
                 ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
             };
-            // Top level = what a library's grid shows: movies, shows, books,
-            // audiobooks, plus (home libraries) whatever sits under a root.
-            const TOP: &str = "(kind IN ('movie','show','book','audiobook') \
-                 OR (kind IN ('folder','video','photo') AND parent_id IS NULL))";
             // Genres are a JSON array (migration v13), so membership is a
             // `json_each` scan rather than an index probe. Written as
             // "no filter asked, OR the array contains it" in ONE clause so
@@ -392,13 +467,16 @@ impl MediaStore for SqliteStore {
             // is the point: two hand-written copies of "does this item have
             // this genre" is how a total stops agreeing with its page.
             let total: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM items WHERE library_id = ?1 AND {TOP} AND {GENRE}"),
+                &format!(
+                    "SELECT COUNT(*) FROM items WHERE library_id = ?1 AND \
+                     {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                ),
                 params![library_id, 0, 0, genre],
                 |row| row.get(0),
             )?;
             let mut stmt = conn.prepare(&format!(
                 "SELECT {ITEM_COLS} FROM items
-                 WHERE library_id = ?1 AND {TOP} AND {GENRE}
+                 WHERE library_id = ?1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}
                  ORDER BY {order} LIMIT ?3 OFFSET ?2"
             ))?;
             let items = stmt
@@ -407,6 +485,55 @@ impl MediaStore for SqliteStore {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(ItemPage { items, total })
+        })
+        .await
+    }
+
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        let limit_per_library = limit_per_library.clamp(1, 24);
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "WITH ranked AS (
+                     SELECT id, library_id,
+                            COUNT(*) OVER (PARTITION BY library_id) AS library_total,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY library_id
+                                ORDER BY added_at DESC, id DESC
+                            ) AS preview_rank
+                       FROM items
+                      WHERE {TOP_LEVEL_ITEM_PREDICATE}
+                 ), selected AS (
+                     SELECT id, library_id, library_total, preview_rank
+                       FROM ranked
+                      WHERE preview_rank <= ?1
+                 )
+                 SELECT {}, selected.library_total
+                   FROM selected
+                   JOIN items i ON i.id = selected.id
+                  ORDER BY selected.library_id, selected.preview_rank",
+                item_cols("i")
+            ))?;
+            let rows = stmt
+                .query_map([limit_per_library], |row| {
+                    Ok((item_from_row(row, 0)?, row.get::<_, i64>(ITEM_COL_COUNT)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let mut pages: Vec<HomePreviewPage> = Vec::new();
+            for (item, total) in rows {
+                match pages.last_mut() {
+                    Some(page) if page.library_id == item.library_id => page.items.push(item),
+                    _ => pages.push(HomePreviewPage {
+                        library_id: item.library_id,
+                        items: vec![item],
+                        total,
+                    }),
+                }
+            }
+            Ok(pages)
         })
         .await
     }
@@ -737,14 +864,22 @@ impl MediaStore for SqliteStore {
                    AND book_work_id IS ?11
                    AND book_metadata_source IS ?12
                    AND book_edition_id IS ?13
-                   AND poster_path IS ?14";
+                   AND poster_path IS ?14
+                   AND (?15 IS NULL OR EXISTS (
+                       SELECT 1 FROM settings WHERE key = ?15 AND value = ?16))";
+            let (origin_key, origin_value) = patch
+                .required_origin
+                .as_ref()
+                .map_or((None, None), |(key, value)| {
+                    (Some(key.as_str()), Some(value.as_str()))
+                });
             let changed = if let Some(fence) = repair_fence.as_ref() {
                 conn.execute(
                     &format!(
-                        "{base_sql} AND ?15 = ?1 AND EXISTS (
+                        "{base_sql} AND ?17 = ?1 AND EXISTS (
                            SELECT 1 FROM cluster_artwork_repairs
-                           WHERE item_id = ?15 AND owner_node_id = ?16 AND leader_term = ?17
-                             AND generation = ?18)"
+                           WHERE item_id = ?17 AND owner_node_id = ?18 AND leader_term = ?19
+                             AND generation = ?20)"
                     ),
                     params![
                         expected.id,
@@ -761,6 +896,8 @@ impl MediaStore for SqliteStore {
                         expected.book_metadata_source,
                         expected.book_edition_id,
                         expected.poster_path,
+                        origin_key,
+                        origin_value,
                         fence.item_id,
                         fence.owner_node_id,
                         fence.leader_term,
@@ -785,6 +922,8 @@ impl MediaStore for SqliteStore {
                         expected.book_metadata_source,
                         expected.book_edition_id,
                         expected.poster_path,
+                        origin_key,
+                        origin_value,
                     ],
                 )?
             };
@@ -1494,6 +1633,9 @@ impl MediaStore for SqliteStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
         self.with_conn(move |conn| {

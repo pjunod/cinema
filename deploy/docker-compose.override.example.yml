@@ -29,13 +29,20 @@ services:
       - /mnt/qnap/media:/media:ro
       # - /mnt/qnap/20t:/mnt/qnap/20t:ro
       # - /mnt/qnap/8tb:/mnt/qnap/8tb:ro
+      # Optional cluster shared-cache mount. Use the same underlying writable
+      # filesystem and PLURX_SHARED_CACHE_ID on every participating voter;
+      # the container path itself may differ between hosts.
+      # - /mnt/shared/plurx-cache:/var/cache/plurx-shared
 
     # Point at a specific ffmpeg build (e.g. jellyfin-ffmpeg), force an
-    # encoder family, or leave unset for validated auto-detect:
+    # encoder family, configure the optional verified shared cache, or leave
+    # unset for validated auto-detect and node-local cache behavior:
     # environment:
     #   PLURX_FFMPEG: "/usr/lib/jellyfin-ffmpeg/ffmpeg"
     #   PLURX_FFPROBE: "/usr/lib/jellyfin-ffmpeg/ffprobe"
     #   PLURX_HWACCEL: "vaapi"   # nvenc | qsv | vaapi | videotoolbox | software
+    #   PLURX_SHARED_CACHE_DIR: "/var/cache/plurx-shared"
+    #   PLURX_SHARED_CACHE_ID: "media-cache-a"
 
     # --- Hardware transcode passthrough (uncomment for your GPU) ---
     #

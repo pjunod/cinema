@@ -33,7 +33,7 @@ pub enum Encoder {
 /// there is no place to spell the two halves separately: a caller picks a
 /// grade and gets both. [`crate::transcode::assert_no_pq_at_8_bit`] is the
 /// belt to this braces, for chains assembled as text elsewhere.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
     /// BT.709 8-bit, the only grade that existed before M5.
@@ -175,6 +175,17 @@ impl EffectiveRateControl {
 }
 
 impl Encoder {
+    /// Stable queue/capability family name.
+    pub fn family_name(self) -> &'static str {
+        match self {
+            Encoder::Software => "software",
+            Encoder::Nvenc => "nvenc",
+            Encoder::Qsv => "qsv",
+            Encoder::Vaapi => "vaapi",
+            Encoder::VideoToolbox => "videotoolbox",
+        }
+    }
+
     /// Family defaults. QSV 22 is the highest passing value from the
     /// 2026-08-14 nynuc D5 sweep; the other families remain candidates until
     /// the same corpus runs on hardware that can select them. Explicit
@@ -691,6 +702,51 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
     }
 }
 
+/// Decoder names Plurx may place on a distributed pre-transcode row.
+///
+/// The list is intentionally small and canonical: queue requirements come
+/// from ffprobe's `codec_name`, and advertising every alias or hardware-only
+/// decoder would let an unproved path claim work. Presence here means this
+/// exact ffmpeg build exposes the portable decoder Plurx will invoke.
+pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
+    const CODECS: &[&str] = &["h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video"];
+    let available = output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let flags = fields.next()?;
+            let name = fields.next()?;
+            flags.starts_with('V').then_some(name)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    CODECS
+        .iter()
+        .filter(|codec| available.contains(**codec))
+        .map(|codec| (*codec).to_owned())
+        .collect()
+}
+
+/// Snapshot the portable video decoders exposed by this boot's ffmpeg.
+pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
+    match tokio::process::Command::new(ffmpeg_bin)
+        .args(["-hide_banner", "-decoders"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            parse_video_decoder_list(&String::from_utf8_lossy(&output.stdout))
+        }
+        Ok(output) => {
+            tracing::warn!(status = %output.status, "ffmpeg decoder inventory failed; speculative worker disabled");
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not inventory ffmpeg decoders; speculative worker disabled");
+            Vec::new()
+        }
+    }
+}
+
 /// The probe's synthetic clip. Every number here was a false negative waiting
 /// to happen in the version that used a 64×64 still at 1 fps for a tenth of a
 /// second: hardware encoders have minimum dimensions, and one that buffers
@@ -1140,6 +1196,15 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_inventory_advertises_only_canonical_portable_video_decoders() {
+        let output = "Decoders:\n VFS..D h264 H.264\n VFS..D hevc HEVC\n V..... vp9 VP9\n A....D aac AAC\n V..... h264_videotoolbox H.264 hardware\n";
+        assert_eq!(
+            parse_video_decoder_list(output),
+            vec!["h264".to_owned(), "hevc".to_owned(), "vp9".to_owned()]
+        );
+    }
 
     // Keep executable fakes in the checkout rather than creating and
     // immediately executing them in /tmp. Under Linux process churn that

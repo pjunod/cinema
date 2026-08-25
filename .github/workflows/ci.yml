@@ -24,7 +24,7 @@ jobs:
   # merge groups, pushes, and tags deliberately enable every surface.
   scope:
     name: validation scope
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -58,7 +58,7 @@ jobs:
     name: mobile release version
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -124,10 +124,9 @@ jobs:
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; the merge queue re-runs it always.
     if: needs.scope.outputs.rust == 'true'
-    # Pinned, not floating: this job's playback assertions are written against
-    # one ffmpeg major, and apt on `ubuntu-latest` supplies whichever one that
-    # week's image ships. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    # The fleet image is fixed by the runner playbook, and this job's playback
+    # assertions also pin the ffmpeg major. See .github/actions/ffmpeg.
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -149,18 +148,17 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
       # plurxd shells out to ffmpeg, and the transcode and stream tests drive
-      # that far enough to spawn it — they don't need it to succeed on the
-      # placeholder fixtures, they need a child process to exist so there is a
-      # session to make assertions about. The runner image doesn't ship ffmpeg,
-      # so without this those tests fail on `No such file or directory`, which
-      # is an absent dependency rather than anything wrong with the tree.
+      # that far enough to spawn it. The action verifies the build provisioned
+      # in the runner image instead of granting the job package-manager access.
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Install browser prerequisites
+      - name: Verify Playwright and install its pinned browser
         run: |
-          python3 -m pip install playwright==1.62.0
-          python3 -m playwright install --with-deps chromium
+          requirement=playwright==1.62.0
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
       # Keep the portable baseline and focused Linux contracts in this job.
       # The large UI-golden sweep and Android JVM checks are selected by the
       # same impact graph, but delegated to parallel jobs below instead of
@@ -193,8 +191,12 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    # The first cold lab run reached the final three-voter proof but crossed
+    # the old 25-minute guard while building the command-profile dependency
+    # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
+    # persistent-runner caches make subsequent runs substantially faster.
+    timeout-minutes: 40
     env:
       # The M0 proof has its own manifest, but not its own dependency build.
       # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph that
@@ -211,6 +213,13 @@ jobs:
       - name: Run separate-process replica and failure contracts
         if: needs.scope.outputs.cluster_auth == 'true'
         run: make cluster-check
+      - name: Retain deterministic topology evidence
+        if: always() && needs.scope.outputs.cluster_auth == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-topology-semantic
+          path: target/validation/cluster-topology-semantic.json
+          if-no-files-found: error
       - name: Lint the isolated semantic harness
         if: needs.scope.outputs.hiqlite_spike == 'true'
         run: cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings
@@ -224,7 +233,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -242,10 +251,12 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Install browser prerequisites
+      - name: Verify Playwright and install its pinned browser
         run: |
-          python3 -m pip install playwright==1.62.0
-          python3 -m playwright install --with-deps chromium
+          requirement=playwright==1.62.0
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
       - name: Check every affected web layout
         run: make ui-check
 
@@ -253,7 +264,7 @@ jobs:
     name: Android JVM tests and lint
     needs: [scope, preflight]
     if: needs.scope.outputs.android_jvm == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -345,19 +356,18 @@ jobs:
     name: Android instrumented UI tests
     needs: [scope, preflight]
     if: needs.scope.outputs.android_device == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Enable emulator acceleration
+      - name: Verify emulator acceleration
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
       - name: Reuse the pinned Android toolchain image from GHCR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -430,7 +440,7 @@ jobs:
     name: coverage
     # Same suite as `check`, so the same pinned ffmpeg. See
     # .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     needs: check
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
@@ -484,7 +494,7 @@ jobs:
 
   build:
     name: release build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true'
     timeout-minutes: 30
@@ -507,18 +517,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install aarch64 cross toolchain
+      - name: Verify the provisioned aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         # Also provides the C cross-compiler for rusqlite's bundled SQLite.
         run: |
-          # ubuntu-latest can inherit an Azure mirror that accepts the runner
-          # but never serves the archive. Pin the canonical mirror so apt does
-          # not spend the entire job retrying a dead regional endpoint.
-          sudo sed -i \
-            's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-            /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y gcc-aarch64-linux-gnu
+          command -v aarch64-linux-gnu-gcc
+          aarch64-linux-gnu-gcc --version
       - run: cargo build --release -p plurxd --target ${{ matrix.target }}
         env:
           # Linker for the arm64 target (harmlessly unused on x86_64).
@@ -545,7 +549,7 @@ jobs:
   # PR / branch smoke test that the image both builds and runs, without publishing.
   docker:
     name: docker runtime smoke
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     needs: [scope, preflight]
     if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 30
@@ -587,7 +591,7 @@ jobs:
       - android_device
       - build
       - docker
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     steps:
       - name: Require every selected job to pass

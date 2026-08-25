@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["e9b9a08a"]
+points = []
+checks = []
+reason = "This commit only records the current singleton reconnect validation evidence; it does not change runtime behavior."
+ignore = true

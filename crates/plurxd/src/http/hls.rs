@@ -17,17 +17,28 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use plurx_core::domain::{MediaFile, SubtitleStream};
+use plurx_core::domain::{
+    MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRequestClaim,
+    MediaSessionRoute, SubtitleStream,
+};
 use plurx_core::playback::PlaybackMethod;
 use plurx_core::tracks::is_native_text_subtitle;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
+use crate::media_pool::MediaOfferRequest;
+use crate::media_sessions::{
+    unix_ms, worker_session_request_is_valid, RelayHeaders, RelayRequest, RelayResource,
+    RemoteAbortRequest, RemoteStartRequest, RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW,
+    ACTIVATION_FAST_RECONCILIATION, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
+    OWNER_ASSIGNMENT_DEADLINE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE,
+};
 use crate::state::AppState;
-use crate::transcode::PlaylistError;
+use crate::transcode::{ClusterReplacementGuard, PlaylistError};
 
 /// How much of an `init.mp4` this module will ever read into memory.
 ///
@@ -36,6 +47,7 @@ use crate::transcode::PlaylistError;
 /// hold their delivery tracker to the same figure, so a larger init reports a
 /// skipped inspection rather than a truncated response.
 const INIT_INSPECTION_LIMIT_BYTES: u64 = 1024 * 1024;
+const MIN_RESOLVED_REPLAY_REMAINING_MS: i64 = 1_000;
 
 #[derive(Deserialize)]
 pub struct StartQuery {
@@ -55,7 +67,7 @@ pub struct StartQuery {
     pub aac: Option<u8>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StartResponse {
     pub session_id: String,
     pub playlist_url: String,
@@ -92,7 +104,84 @@ pub struct StartResponse {
     /// (MEDIA-BADGES-PLAN §3.2). Absent when the source file vanished from
     /// the store mid-request: the client keeps whatever it had.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub delivered_dynamic_range: Option<&'static str>,
+    pub delivered_dynamic_range: Option<String>,
+}
+
+/// Owns a published worker until the replicated activation has a definitive
+/// outcome. Request futures are cancellation points at every store/network
+/// await; tying cleanup to this value prevents a disconnected client from
+/// leaving an encoder and its durable start claim behind.
+struct StartedSessionGuard {
+    cleanup: Option<StartedSessionCleanup>,
+    _replacement: Option<ClusterReplacementGuard>,
+}
+
+struct StartedSessionCleanup {
+    state: AppState,
+    owner_node_id: String,
+    incarnation_id: String,
+    session_id: String,
+    user_id: i64,
+    request_id: String,
+}
+
+impl StartedSessionGuard {
+    fn new(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
+    ) -> Self {
+        Self {
+            cleanup: Some(StartedSessionCleanup {
+                state,
+                owner_node_id,
+                incarnation_id,
+                session_id,
+                user_id,
+                request_id,
+            }),
+            _replacement: replacement,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+        self._replacement = None;
+    }
+}
+
+impl Drop for StartedSessionGuard {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            abort_started_session(
+                &cleanup.state,
+                &cleanup.owner_node_id,
+                &cleanup.incarnation_id,
+                &cleanup.session_id,
+            )
+            .await;
+            let _ = cleanup
+                .state
+                .store
+                .fail_media_session_request(
+                    cleanup.user_id,
+                    &cleanup.request_id,
+                    &cleanup.incarnation_id,
+                    unix_ms(),
+                )
+                .await;
+        }));
+    }
 }
 
 /// Everything a client must say to open a stream.
@@ -179,6 +268,16 @@ pub struct CreateSession {
     /// audio. It is carried into every seek/reopen by the client and is never
     /// written back to the media file.
     pub audio_offset_ms: Option<i64>,
+    /// `"vod"` asks for the film-addressed immutable presentation (plan
+    /// §2.7). Anything else — including absent, which is what every shipped
+    /// client sends — keeps today's live presentation. A request, never a
+    /// promise: a title the VOD presentation cannot serve falls back to the
+    /// live presentation, and the response's `vod` field says which one the
+    /// client actually got.
+    pub presentation: Option<String>,
+    /// With `presentation:"vod"`: the client's ceiling for one blocking
+    /// segment fetch, in seconds. Clamped server-side.
+    pub block_budget_secs: Option<f64>,
 }
 
 impl CreateSession {
@@ -213,6 +312,11 @@ impl CreateSession {
             subtitle_burn: self.subtitle_burn.filter(|s| *s >= 0),
             audio_offset_ms: self.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000),
             hdr10: self.hdr10 == Some(true),
+            presentation: match self.presentation.as_deref() {
+                Some("vod") => crate::transcode::Presentation::Vod,
+                _ => crate::transcode::Presentation::Live,
+            },
+            block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
         }
     }
 }
@@ -275,8 +379,10 @@ pub async fn create(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
-    if req.playback_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("playback_id is required".into()));
+    if !valid_playback_id(&req.playback_id) {
+        return Err(ApiError::BadRequest(
+            "playback_id must contain 1 to 128 safe characters".into(),
+        ));
     }
     // The source height answers three things now: Auto, the ladder in the
     // response, and the snap's source-height escape. One read, from the read
@@ -323,7 +429,18 @@ pub async fn create(
         Some(h) => crate::transcode::snap_height(h),
     }
     .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
+    let mut req = req;
     let native_subtitles = req.native_subtitles == Some(true);
+    if native_subtitles && req.presentation.as_deref() == Some("vod") {
+        // The multivariant playlist has no VOD arm yet (M4/M5 work beside
+        // the client flags); honoring both would hand the client a
+        // master.m3u8 URL that 404s on its first fetch.
+        tracing::info!(
+            file = id,
+            "vod presentation requested with native subtitles; keeping the live presentation"
+        );
+        req.presentation = None;
+    }
     let native_subtitle = req.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
         if let Some(index) = native_subtitle {
@@ -339,13 +456,352 @@ pub async fn create(
         }
     }
     let request = req.into_request(id, height);
-    let info = state
-        .transcode
-        .create_session(&request, &user.username)
-        .await
-        // A reused request id asking for a different stream is the client's
-        // mistake, not the server's; say which it is.
-        .map_err(|error| session_start_error(id, error))?;
+    if request
+        .request_id
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > 128)
+    {
+        return Err(ApiError::BadRequest(
+            "request_id must contain 1 to 128 characters".to_owned(),
+        ));
+    }
+    if !worker_session_request_is_valid(&request) {
+        return Err(ApiError::BadRequest(
+            "media session request exceeds the supported cluster contract".to_owned(),
+        ));
+    }
+    let fingerprint = request.durable_intent_fingerprint(user.id);
+    let now_ms = unix_ms();
+    let mut incarnation_id = uuid::Uuid::new_v4().to_string();
+    // Every create occupies a durable admission row. A caller-supplied key
+    // keeps public idempotency; an ordinary create uses its unguessable
+    // incarnation internally so omitting request_id cannot bypass the
+    // in-flight cap or allocate encoders before admission.
+    let request_claim_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| incarnation_id.clone());
+    match state
+        .store
+        .claim_media_session_request(
+            user.id,
+            &request_claim_id,
+            &fingerprint,
+            &request.playback_id,
+            &incarnation_id,
+            now_ms,
+            now_ms.saturating_add(60_000),
+        )
+        .await?
+    {
+        MediaSessionRequestClaim::Acquired {
+            incarnation_id: acquired,
+        } => incarnation_id = acquired,
+        MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
+            return serde_json::from_str::<StartResponse>(&route.response_json)
+                .map(Json)
+                .map_err(ApiError::from);
+        }
+        MediaSessionRequestClaim::Resolved(_) => {
+            return Err(ApiError::typed(
+                StatusCode::GONE,
+                "media_session_ended",
+                "this idempotent session was already released",
+            ));
+        }
+        MediaSessionRequestClaim::InFlight { .. } => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "media_session_starting",
+                "an identical session request is still starting; retry shortly",
+            ));
+        }
+        MediaSessionRequestClaim::Conflict => {
+            return Err(ApiError::Conflict(
+                "request_id was already used for a different session intent".to_owned(),
+            ));
+        }
+        MediaSessionRequestClaim::Overloaded => {
+            return Err(ApiError::ServiceUnavailable(
+                "too many session starts are already active for this user".to_owned(),
+            ));
+        }
+    }
+
+    let mut worker_request = request.clone();
+    worker_request.request_id = Some(incarnation_id.clone());
+    let remote_request = RemoteStartRequest {
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: incarnation_id.clone(),
+        user_id: user.id,
+        // The source snapshot a later takeover must match exactly (§7.3). A
+        // row we could not read records an impossible snapshot rather than a
+        // plausible one, so takeover refuses instead of reproducing a session
+        // against a file it never verified.
+        source_size: source.as_ref().map_or(0, |f| f.size),
+        source_mtime: source.as_ref().map_or(0, |f| f.mtime),
+        // Recorded from the same decision the worker will make, so a later
+        // takeover can tell whether this URL was ever serving a shape a
+        // successor is allowed to continue.
+        typeless_playlist: state.transcode.cluster_playlist_is_typeless().await,
+        request: worker_request,
+    };
+    let recipe_json = serde_json::to_string(&remote_request)?;
+    let placement_deadline = super::peer_transport::deadline_after(START_DEADLINE);
+
+    // A stall reopen must stay with its existing worker in P5: the normalized
+    // predecessor state is process-local and automatic migration does not
+    // become legal until the fenced P7 takeover protocol exists.
+    let mut expected_predecessor_incarnation_id = None;
+    let mut fence_predecessor = false;
+    let pinned_owner = if let Some(previous_session_id) = request
+        .previous_session_id
+        .as_deref()
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+    {
+        // Bypass the positive route cache: an ended predecessor may remain
+        // cached briefly, but a reopen must bind to the durable pointer state.
+        let durable = state.store.media_session_route(previous_session_id).await?;
+        if let Some(route) = durable {
+            if route.user_id != user.id
+                || route.state != "active"
+                || route.lease_expires_at_ms <= unix_ms()
+            {
+                let _ = state
+                    .store
+                    .fail_media_session_request(
+                        user.id,
+                        &request_claim_id,
+                        &incarnation_id,
+                        unix_ms(),
+                    )
+                    .await;
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "media_session_superseded",
+                    "the session being reopened is no longer current",
+                ));
+            }
+            fence_predecessor = true;
+            expected_predecessor_incarnation_id = Some(route.incarnation_id);
+            Some(route.owner_node_id)
+        } else if state
+            .transcode
+            .active_session_ids()
+            .await
+            .iter()
+            .any(|session_id| session_id == previous_session_id)
+        {
+            // A session created by the pre-P5 binary has no durable route.
+            // Its reopen state is nevertheless process-local, so pin that
+            // rolling-upgrade legacy predecessor to this node rather than
+            // ranking a peer that cannot possess it.
+            fence_predecessor = true;
+            Some(state.node_id.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut owner_candidates = if let Some(owner) = pinned_owner {
+        vec![owner]
+    } else if !state.media_pool.remote_placement_ready(&state).await {
+        vec![state.node_id.clone()]
+    } else {
+        match MediaOfferRequest::new(
+            source.as_ref().ok_or(ApiError::NotFound("file"))?,
+            height,
+            (request.start_seconds * 1_000.0).round().max(0.0) as i64,
+            request.audio_index,
+            request.subtitle_burn,
+            request.hdr10,
+        ) {
+            Ok(offer_request) => state
+                .media_pool
+                .offers(&state, offer_request)
+                .await
+                .offers
+                .into_iter()
+                .filter(|offer| offer.eligible)
+                .fold(Vec::new(), |mut candidates, offer| {
+                    if !candidates.contains(&offer.node_id) {
+                        candidates.push(offer.node_id);
+                    }
+                    candidates
+                }),
+            Err(_) => Vec::new(),
+        }
+    };
+    // Cold snapshots and one-node recovery retain the established local
+    // behavior. A non-empty ranked list is authoritative: an ineligible local
+    // offer must not bypass an eligible peer or capacity refusal.
+    if owner_candidates.is_empty() {
+        owner_candidates.push(state.node_id.clone());
+    }
+
+    let mut started = None;
+    let mut last_error = None;
+    for candidate in owner_candidates {
+        if tokio::time::Instant::now() >= placement_deadline {
+            last_error = Some(ApiError::ServiceUnavailable(
+                "media worker placement exceeded its common deadline".to_owned(),
+            ));
+            break;
+        }
+        let result = if candidate == state.node_id {
+            // Session creation owns a child process before publishing the map
+            // entry. An owned task reaches a verdict even if this request is
+            // cancelled, and its returned guard cleans the exact late worker
+            // if nobody receives it.
+            let transcode = Arc::clone(&state.transcode);
+            let worker_request = remote_request.request.clone();
+            let user_name = user.username.clone();
+            let guard_state = state.clone();
+            let guard_owner = candidate.clone();
+            let guard_incarnation = incarnation_id.clone();
+            let guard_request = request_claim_id.clone();
+            let guard_user = user.id;
+            let mut start_task = tokio::spawn(async move {
+                transcode
+                    .create_cluster_session(
+                        &worker_request,
+                        guard_user,
+                        &user_name,
+                        placement_deadline,
+                    )
+                    .await
+                    .map(|started| {
+                        let info = started.info;
+                        let session_id = info.session_id.clone();
+                        let response = RemoteStartResponse::from(info);
+                        let guard = StartedSessionGuard::new(
+                            guard_state,
+                            guard_owner,
+                            guard_incarnation,
+                            session_id,
+                            guard_user,
+                            guard_request,
+                            Some(started.replacement),
+                        );
+                        (response, guard)
+                    })
+            });
+            match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
+                Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
+                Ok(Err(error)) => Err(ApiError::Internal(format!(
+                    "local media worker task failed: {error}"
+                ))),
+                Err(_) => {
+                    tokio::spawn(async move {
+                        // Dropping a successful output drops its armed guard.
+                        let _ = start_task.await;
+                    });
+                    Err(ApiError::ServiceUnavailable(
+                        "local media worker exceeded the placement deadline".to_owned(),
+                    ))
+                }
+            }
+        } else {
+            state
+                .media_sessions
+                .start_remote(&candidate, &remote_request, placement_deadline)
+                .await
+                .map(|info| {
+                    let guard = StartedSessionGuard::new(
+                        state.clone(),
+                        candidate.clone(),
+                        incarnation_id.clone(),
+                        info.session_id.clone(),
+                        user.id,
+                        request_claim_id.clone(),
+                        None,
+                    );
+                    (info, guard)
+                })
+                .map_err(|error| {
+                    ApiError::ServiceUnavailable(format!(
+                        "media worker {candidate} could not start the session: {error:?}"
+                    ))
+                })
+        };
+        match result {
+            Ok((info, guard)) if info.is_valid() => {
+                started = Some((candidate, info, guard));
+                break;
+            }
+            Ok((_info, _guard)) => {
+                // The armed guard aborts an invalid local result just as the
+                // peer transport rejects and aborts an invalid remote result.
+                tracing::warn!(
+                    owner_node_id = %candidate,
+                    "media worker returned an invalid start contract"
+                );
+                last_error = Some(ApiError::ServiceUnavailable(format!(
+                    "media worker {candidate} returned an invalid start contract"
+                )));
+            }
+            Err(error) => {
+                tracing::debug!(owner_node_id = %candidate, "media worker start attempt failed");
+                last_error = Some(error);
+            }
+        }
+    }
+    let Some((owner_node_id, info, guard)) = started else {
+        let _ = state
+            .store
+            .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
+            .await;
+        return Err(last_error.unwrap_or_else(|| {
+            ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
+        }));
+    };
+    if owner_node_id == state.node_id {
+        let provisional_pin_ms =
+            i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
+        if !state
+            .transcode
+            .pin_shared_session(
+                &info.session_id,
+                &incarnation_id,
+                1,
+                unix_ms().saturating_add(provisional_pin_ms),
+            )
+            .await?
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "shared cache generation changed before session activation".to_owned(),
+            ));
+        }
+    }
+    match tokio::time::timeout(
+        OWNER_ASSIGNMENT_DEADLINE,
+        state.store.assign_media_session_request_owner(
+            user.id,
+            &request_claim_id,
+            &incarnation_id,
+            &owner_node_id,
+            unix_ms(),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            // The armed guard aborts the exact worker and fails this claim.
+            return Err(ApiError::ServiceUnavailable(
+                "session ownership changed while placement was being committed".to_owned(),
+            ));
+        }
+        Ok(Err(error)) => {
+            return Err(error.into());
+        }
+        Err(_) => {
+            return Err(ApiError::ServiceUnavailable(
+                "session ownership assignment timed out".to_owned(),
+            ));
+        }
+    }
     // The grade the session actually built, not the one the body asked for:
     // the server refuses the HDR10 rung for a source or a rung that cannot
     // prove it, and the badge has to follow the encoder.
@@ -358,14 +814,6 @@ pub async fn create(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    crate::playstart::note_playback_started(
-        &state,
-        user.id,
-        &user.username,
-        id,
-        method,
-        Some(&request.playback_id),
-    );
     let playlist_url = if native_subtitles {
         // Give the multivariant playlist its own path. AVPlayer caches HLS
         // resources by URL and can otherwise conflate `index.m3u8?native=1`
@@ -380,14 +828,14 @@ pub async fn create(
     } else {
         info.playlist_url
     };
-    Ok(Json(StartResponse {
-        session_id: info.session_id,
+    let response = StartResponse {
+        session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
         start_seconds: info.start_seconds,
         media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
         height: info.target_height,
-        encoder: info.encoder.to_owned(),
+        encoder: info.encoder.clone(),
         vod: info.vod,
         // Capped at what this node can actually serve for this file, not just
         // at the source height: an advertised rung is a promise, and the web
@@ -395,8 +843,249 @@ pub async fn create(
         // `capability_height_ceiling`.
         ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
-        delivered_dynamic_range: delivered,
-    }))
+        delivered_dynamic_range: delivered.map(str::to_owned),
+    };
+    let response_json = serde_json::to_string(&response)?;
+    let activation_now_ms = unix_ms();
+    let activation = MediaSessionActivation {
+        incarnation_id: incarnation_id.clone(),
+        session_id: info.session_id.clone(),
+        user_id: user.id,
+        playback_id: request.playback_id.clone(),
+        expected_predecessor_incarnation_id,
+        fence_predecessor,
+        request_id: Some(request_claim_id.clone()),
+        request_fingerprint: fingerprint,
+        owner_node_id: owner_node_id.clone(),
+        lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
+        recipe_json,
+        response_json,
+        media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
+        now_ms: activation_now_ms,
+    };
+    // Once activation begins, this owned task also owns the cleanup guard.
+    // A disconnected HTTP client cannot interrupt the commit-unknown
+    // reconciliation and accidentally kill an activated winner (or leak an
+    // unactivated worker).
+    let activation_state = state.clone();
+    tokio::spawn(async move {
+        let mut guard = guard;
+        match tokio::time::timeout(
+            ACTIVATION_STORE_DEADLINE,
+            activation_state.store.activate_media_session(&activation),
+        )
+        .await
+        {
+            Ok(Ok(Some(outcome))) => {
+                activation_state
+                    .media_sessions
+                    .cache_route(outcome.route.clone())
+                    .await;
+                if outcome.route.owner_node_id == activation_state.node_id {
+                    activation_state
+                        .media_sessions
+                        .seed_owned_lease(&outcome.route)
+                        .await;
+                }
+                guard.disarm();
+                if let Some(predecessor) = outcome.predecessor.as_ref() {
+                    stop_owned_session(&activation_state, predecessor).await;
+                }
+                Ok(outcome)
+            }
+            Ok(Ok(None)) => Err(ApiError::ServiceUnavailable(
+                "session ownership could not be activated".to_owned(),
+            )),
+            uncertain => {
+                let error = match uncertain {
+                    Ok(Err(error)) => error.into(),
+                    Err(_) => ApiError::ServiceUnavailable(
+                        "session activation outcome is still being reconciled".to_owned(),
+                    ),
+                    Ok(Ok(_)) => unreachable!("definitive activation outcomes returned above"),
+                };
+                let reconcile_deadline =
+                    tokio::time::Instant::now() + ACTIVATION_FAST_RECONCILIATION;
+                if let Some(route) =
+                    wait_for_exact_activation(&activation_state, &activation, reconcile_deadline)
+                        .await
+                {
+                    activation_state
+                        .media_sessions
+                        .cache_route(route.clone())
+                        .await;
+                    if route.owner_node_id == activation_state.node_id {
+                        activation_state
+                            .media_sessions
+                            .seed_owned_lease(&route)
+                            .await;
+                    }
+                    guard.disarm();
+                    Ok(MediaSessionActivationOutcome {
+                        route,
+                        predecessor: None,
+                    })
+                } else {
+                    // A timed-out replicated transaction may still commit
+                    // after the caller loses its response. Transfer ownership
+                    // to the bounded reconciler before disarming this guard.
+                    let reconcile_state = activation_state.clone();
+                    let reconcile_activation = activation.clone();
+                    tokio::spawn(async move {
+                        reconcile_or_abort_activation(reconcile_state, reconcile_activation, guard)
+                            .await;
+                    });
+                    Err(error)
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|error| ApiError::Internal(format!("media activation task failed: {error}")))??;
+    crate::playstart::note_playback_started(
+        &state,
+        user.id,
+        &user.username,
+        id,
+        method,
+        Some(&request.playback_id),
+    );
+    Ok(Json(response))
+}
+
+fn resolved_replay_is_live(route: &MediaSessionRoute, now_ms: i64) -> bool {
+    route.state == "active"
+        && route.lease_expires_at_ms > now_ms.saturating_add(MIN_RESOLVED_REPLAY_REMAINING_MS)
+}
+
+fn route_matches_activation(
+    route: &MediaSessionRoute,
+    activation: &MediaSessionActivation,
+) -> bool {
+    route.incarnation_id == activation.incarnation_id
+        && route.session_id == activation.session_id
+        && route.user_id == activation.user_id
+        && route.playback_id == activation.playback_id
+        && route.request_fingerprint == activation.request_fingerprint
+        && route.owner_node_id == activation.owner_node_id
+        && route.state == "active"
+        && route.lease_expires_at_ms > unix_ms()
+        && route.recipe_json == activation.recipe_json
+        && route.response_json == activation.response_json
+}
+
+async fn wait_for_exact_activation(
+    state: &AppState,
+    activation: &MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> Option<MediaSessionRoute> {
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(&activation.incarnation_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(route))) if route_matches_activation(&route, activation) => {
+                return Some(route)
+            }
+            Ok(Ok(Some(_))) => return None,
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Err(_) => return None,
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250).min(remaining)).await;
+    }
+}
+
+async fn reconcile_or_abort_activation(
+    state: AppState,
+    activation: MediaSessionActivation,
+    mut guard: StartedSessionGuard,
+) {
+    let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
+    if let Some(route) = wait_for_exact_activation(&state, &activation, deadline).await {
+        state.media_sessions.cache_route(route.clone()).await;
+        if route.owner_node_id == state.node_id {
+            state.media_sessions.seed_owned_lease(&route).await;
+        }
+        guard.disarm();
+    }
+    // Dropping the armed guard aborts the exact worker, fails its exact claim,
+    // and releases the replacement gate only after the full bounded verdict.
+}
+
+fn valid_playback_id(playback_id: &str) -> bool {
+    !playback_id.trim().is_empty()
+        && playback_id.len() <= 128
+        && !playback_id
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+}
+
+async fn abort_started_session(
+    state: &AppState,
+    owner_node_id: &str,
+    incarnation_id: &str,
+    session_id: &str,
+) {
+    if owner_node_id == state.node_id {
+        state
+            .transcode
+            .stop_session_for_request(incarnation_id, session_id, "cluster start aborted")
+            .await;
+    } else {
+        state
+            .media_sessions
+            .abort_remote(
+                owner_node_id,
+                &RemoteAbortRequest {
+                    incarnation_id: incarnation_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                },
+            )
+            .await;
+    }
+}
+
+async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
+    stop_owned_session_because(state, route, "superseded by cluster session").await
+}
+
+/// Same teardown with an honest reason: a client DELETE is a release, not a
+/// supersession, and the VOD tombstone cause keys off this string.
+async fn stop_owned_session_because(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    reason: &'static str,
+) {
+    state.media_sessions.cache_miss(&route.session_id).await;
+    if route.owner_node_id == state.node_id {
+        state
+            .transcode
+            .stop_session_for_request(&route.incarnation_id, &route.session_id, reason)
+            .await;
+    } else {
+        state
+            .media_sessions
+            .abort_remote(
+                &route.owner_node_id,
+                &RemoteAbortRequest {
+                    incarnation_id: route.incarnation_id.clone(),
+                    session_id: route.session_id.clone(),
+                },
+            )
+            .await;
+    }
 }
 
 fn session_start_error(file_id: i64, error: String) -> ApiError {
@@ -421,6 +1110,103 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
     ApiError::Internal(error)
 }
 
+async fn relay_if_remote(
+    state: &AppState,
+    session_id: &str,
+    resource: RelayResource,
+    headers: RelayHeaders,
+) -> Result<Option<Response>, ApiError> {
+    let Some(route) = state.media_sessions.route(session_id).await? else {
+        // A process upgraded with already-live sessions has no durable row;
+        // keep the established node-local capability behavior until reaping.
+        return Ok(None);
+    };
+    if route.state != "active" || route.lease_expires_at_ms <= unix_ms() {
+        return Err(ApiError::typed(
+            StatusCode::GONE,
+            "media_session_ended",
+            "this media session is no longer active",
+        ));
+    }
+    if route.owner_node_id == state.node_id {
+        return Ok(None);
+    }
+    state
+        .media_sessions
+        .relay(
+            &route.owner_node_id,
+            &RelayRequest {
+                session_id: session_id.to_owned(),
+                resource,
+                headers,
+            },
+        )
+        .await
+        .map(Some)
+        .map_err(|error| {
+            ApiError::ServiceUnavailable(format!("media worker relay unavailable: {error:?}"))
+        })
+}
+
+/// Execute an authenticated relay on the owning worker without performing a
+/// second route lookup that could proxy back to the ingress node.
+pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Response {
+    let result = match request.resource {
+        RelayResource::Status => status_local(state, &request.session_id)
+            .await
+            .map(IntoResponse::into_response),
+        RelayResource::Playlist { native, subtitle } => {
+            playlist_local(
+                state,
+                &request.session_id,
+                PlaylistQuery {
+                    native,
+                    subtitle,
+                    diagnostic: None,
+                },
+            )
+            .await
+        }
+        RelayResource::Master {
+            subtitle,
+            diagnostic,
+        } => {
+            master_playlist_response_local(
+                state,
+                &request.session_id,
+                PlaylistQuery {
+                    native: None,
+                    subtitle,
+                    diagnostic,
+                },
+            )
+            .await
+        }
+        RelayResource::VideoPlaylist => video_playlist_local(state, &request.session_id).await,
+        RelayResource::SubtitlePlaylist { index } => {
+            subtitle_playlist_local(state, &request.session_id, index).await
+        }
+        RelayResource::SubtitleSegment { index, segment } => {
+            subtitle_vtt_local(state, &request.session_id, index, &segment).await
+        }
+        RelayResource::Segment { segment } => {
+            segment_local(state, &request.session_id, &segment, &request.headers).await
+        }
+        RelayResource::Delete => {
+            state.media_sessions.cache_miss(&request.session_id).await;
+            state
+                .transcode
+                .stop_session(&request.session_id, "released through cluster relay")
+                .await;
+            return StatusCode::NO_CONTENT.into_response();
+        }
+    };
+    match result {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
 /// DELETE /api/v1/hls/:session — the player is done with this stream.
 ///
 /// Capability auth, like the playlist and segment routes: the session id *is*
@@ -432,10 +1218,40 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
 /// Idempotent: deleting a session that has already gone is a success, because
 /// the caller's intent ("this must not be running") is satisfied either way.
 pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<String>) -> StatusCode {
-    state
-        .transcode
-        .stop_session(&session, "released by client")
-        .await;
+    match state.media_sessions.route(&session).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            state
+                .transcode
+                .stop_session(&session, "released by client")
+                .await;
+            return StatusCode::NO_CONTENT;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "durable media-session route unavailable");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    }
+    let route = match state.store.end_media_session(&session, unix_ms()).await {
+        Ok(route) => route,
+        Err(error) => {
+            tracing::warn!(%error, "durable media-session release unavailable");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+    match route {
+        Some(route) => {
+            state.media_sessions.cache_route(route.clone()).await;
+            stop_owned_session_because(&state, &route, "released by client").await;
+        }
+        None => {
+            state.media_sessions.cache_miss(&session).await;
+            state
+                .transcode
+                .stop_session(&session, "released by client")
+                .await;
+        }
+    }
     StatusCode::NO_CONTENT
 }
 
@@ -476,6 +1292,8 @@ pub async fn start(
         // it keeps the SDR ladder it has always had.
         hdr10: None,
         audio_offset_ms: None,
+        presentation: None,
+        block_budget_secs: None,
     };
     create(
         AuthUser(user),
@@ -501,10 +1319,30 @@ pub async fn start(
 pub async fn status(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::Status,
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    status_local(&state, &session)
+        .await
+        .map(IntoResponse::into_response)
+}
+
+async fn status_local(
+    state: &AppState,
+    session: &str,
 ) -> Result<Json<crate::transcode::SessionInfo>, ApiError> {
     state
         .transcode
-        .session_status(&session)
+        .session_status(session)
         .await
         .map(Json)
         .ok_or(ApiError::NotFound("transcode session"))
@@ -592,12 +1430,42 @@ pub async fn playlist(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
     Query(query): Query<PlaylistQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if query.native != Some(1) {
-        return video_playlist(State(state), AxPath(session)).await;
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::Playlist {
+            native: query.native,
+            subtitle: query.subtitle,
+        },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
     }
-    let (context, file) = session_file(&state, &session).await?;
-    let context = exact_hls_context(&state, &session, context).await;
+    playlist_local(&state, &session, query).await
+}
+
+async fn playlist_local(
+    state: &AppState,
+    session: &str,
+    query: PlaylistQuery,
+) -> Result<Response, ApiError> {
+    // A VOD session has exactly one playlist artifact — the plan's immutable
+    // media playlist — whatever query arrived. VOD creates refuse native
+    // subtitles, so a `?native=1` here is a stale client habit, answered with
+    // the only playlist this session has rather than a 404.
+    if let Some(answer) = state.transcode.vod_playlist(session).await {
+        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        return Ok(playlist_response(bytes));
+    }
+    if query.native != Some(1) {
+        return video_playlist_local(state, session).await;
+    }
+    let (context, file) = session_file(state, session).await?;
+    let context = exact_hls_context(state, session, context).await;
     Ok(playlist_response(
         master_playlist(&file, query.subtitle, &context).into_bytes(),
     ))
@@ -612,9 +1480,31 @@ pub async fn master_playlist_response(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
     Query(query): Query<PlaylistQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(&state, &session).await?;
-    let context = exact_hls_context(&state, &session, context).await;
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::Master {
+            subtitle: query.subtitle,
+            diagnostic: query.diagnostic.clone(),
+        },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    master_playlist_response_local(&state, &session, query).await
+}
+
+async fn master_playlist_response_local(
+    state: &AppState,
+    session: &str,
+    query: PlaylistQuery,
+) -> Result<Response, ApiError> {
+    let (context, file) = session_file(state, session).await?;
+    let context = exact_hls_context(state, session, context).await;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
     // With no native text renditions, the wrapper buys this session nothing:
@@ -625,11 +1515,11 @@ pub async fn master_playlist_response(
     // multivariant subtitle group.
     if query.diagnostic.is_none() && should_serve_high_tier_media_playlist(&file, &context) {
         tracing::info!(
-            session_id = %session,
+            session = %crate::transcode::session_log_id(session),
             codecs = %context.codecs,
             "serving high-tier HEVC through the direct media-playlist envelope"
         );
-        return video_playlist(State(state), AxPath(session)).await;
+        return video_playlist_local(state, session).await;
     }
     Ok(playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
@@ -660,7 +1550,7 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
         }
     };
     tracing::warn!(
-        session = %session,
+        session = %crate::transcode::session_log_id(session),
         code = err.code(),
         retryable = err.retryable(),
         "HLS playlist request refused: {}",
@@ -673,13 +1563,39 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
 pub async fn video_playlist(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let bytes = state
-        .transcode
-        .playlist(&session)
-        .await
-        .map_err(|err| playlist_error(&session, err))?;
-    Ok(playlist_response(bytes))
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::VideoPlaylist,
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    video_playlist_local(&state, &session).await
+}
+
+async fn video_playlist_local(state: &AppState, session: &str) -> Result<Response, ApiError> {
+    if let Some(answer) = state.transcode.vod_playlist(session).await {
+        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        return Ok(playlist_response(bytes));
+    }
+    match state.transcode.playlist(session).await {
+        Ok(bytes) => Ok(playlist_response(bytes)),
+        Err(PlaylistError::SessionGone) if vod_resurrected(state, session).await => {
+            match state.transcode.vod_playlist(session).await {
+                Some(answer) => {
+                    let bytes = answer.map_err(|err| vod_error(session, err))?;
+                    Ok(playlist_response(bytes))
+                }
+                None => Err(playlist_error(session, PlaylistError::SessionGone)),
+            }
+        }
+        Err(err) => Err(playlist_error(session, err)),
+    }
 }
 
 /// One native WebVTT rendition's media playlist. Its segments mirror the
@@ -688,8 +1604,27 @@ pub async fn video_playlist(
 pub async fn subtitle_playlist(
     State(state): State<AppState>,
     AxPath((session, index)): AxPath<(String, i64)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let (_, file) = session_file(&state, &session).await?;
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::SubtitlePlaylist { index },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    subtitle_playlist_local(&state, &session, index).await
+}
+
+async fn subtitle_playlist_local(
+    state: &AppState,
+    session: &str,
+    index: i64,
+) -> Result<Response, ApiError> {
+    let (_, file) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -702,9 +1637,9 @@ pub async fn subtitle_playlist(
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
     let video = state
         .transcode
-        .playlist(&session)
+        .playlist(session)
         .await
-        .map_err(|err| playlist_error(&session, err))?;
+        .map_err(|err| playlist_error(session, err))?;
     Ok(playlist_response(
         subtitle_media_playlist(&video).into_bytes(),
     ))
@@ -717,8 +1652,31 @@ pub async fn subtitle_playlist(
 pub async fn subtitle_vtt(
     State(state): State<AppState>,
     AxPath((session, index, segment)): AxPath<(String, i64, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(&state, &session).await?;
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::SubtitleSegment {
+            index,
+            segment: segment.clone(),
+        },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    subtitle_vtt_local(&state, &session, index, &segment).await
+}
+
+async fn subtitle_vtt_local(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    segment: &str,
+) -> Result<Response, ApiError> {
+    let (context, file) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -736,49 +1694,44 @@ pub async fn subtitle_vtt(
     let sequence = i64::try_from(sequence).map_err(|_| ApiError::NotFound("subtitle segment"))?;
     let (segment_start, segment_end) = state
         .transcode
-        .segment_window(&session, sequence)
+        .segment_window(session, sequence)
         .await
         .ok_or(ApiError::NotFound("subtitle segment"))?;
-    let cached = crate::subtitles::vtt_path(&state.subs_dir, &file, index);
-    let (bytes, cache_control) = match tokio::fs::read(&cached).await {
-        Ok(bytes) => {
-            tracing::info!(
-                session_id = %session,
-                file_id = file.id,
-                index,
-                codec = %track.codec,
-                language = track.language.as_deref().unwrap_or("und"),
-                title = track.title.as_deref().unwrap_or(""),
-                start_seconds = context.start_seconds,
-                "serving native HLS WebVTT subtitle"
-            );
-            (bytes, "private, max-age=3600")
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // AVPlayer gives a subtitle segment only about two seconds to
-            // answer and blocks the muxed video while it waits. Extracting an
-            // embedded text track is a full-source scan that can legitimately
-            // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
-            // here turns healthy Dolby Vision, HDR and H.264 streams into a
-            // black screen. Publish a syntactically valid empty segment now
-            // and let the deduplicated cache extraction finish independently.
-            // `no-store` lets a player retry this window once the sidecar is
-            // ready instead of pinning the temporary empty answer.
-            crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-            tracing::debug!(
-                session_id = %session,
-                file_id = file.id,
-                index,
-                "serving an empty subtitle segment while its sidecar cache warms"
-            );
-            (b"WEBVTT\n\n".to_vec(), "no-store")
-        }
-        Err(error) => {
-            return Err(ApiError::Internal(format!(
-                "reading extracted subtitles: {error}"
-            )));
-        }
-    };
+    let (bytes, cache_control) =
+        match crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index).await {
+            Ok(Some(bytes)) => {
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    codec = %track.codec,
+                    language = track.language.as_deref().unwrap_or("und"),
+                    title = track.title.as_deref().unwrap_or(""),
+                    start_seconds = context.start_seconds,
+                    "serving native HLS WebVTT subtitle"
+                );
+                (bytes, "private, max-age=3600")
+            }
+            Ok(None) | Err(_) => {
+                // AVPlayer gives a subtitle segment only about two seconds to
+                // answer and blocks the muxed video while it waits. Extracting an
+                // embedded text track is a full-source scan that can legitimately
+                // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
+                // here turns healthy Dolby Vision, HDR and H.264 streams into a
+                // black screen. Publish a syntactically valid empty segment now
+                // and let the deduplicated cache extraction finish independently.
+                // `no-store` lets a player retry this window once the sidecar is
+                // ready instead of pinning the temporary empty answer.
+                crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
+                tracing::debug!(
+                    session = %crate::transcode::session_log_id(session),
+                    file_id = file.id,
+                    index,
+                    "serving an empty subtitle segment while its sidecar cache warms"
+                );
+                (b"WEBVTT\n\n".to_vec(), "no-store")
+            }
+        };
     Ok((
         StatusCode::OK,
         [
@@ -851,7 +1804,15 @@ async fn exact_hls_context(
     else {
         return context;
     };
-    let Some(opened) = state.transcode.segment(session, "init.mp4").await else {
+    // A fenced successor names its init after its ownership epoch, so the
+    // object to probe comes from the session, not from a literal. Asking for
+    // the wrong name does not fail fast: `segment` waits for a segment that
+    // will never be produced, stalling every playlist request for the full
+    // production wait before falling back to the scanner's guessed tier.
+    let Some(init_object) = state.transcode.session_init_object(session).await else {
+        return context;
+    };
+    let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
         return context;
     };
     // Initialization segments are a few KiB. Bound malformed input so a
@@ -1666,72 +2627,418 @@ fn slice_webvtt(
 pub async fn segment(
     State(state): State<AppState>,
     AxPath((session, seg)): AxPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::Segment {
+            segment: seg.clone(),
+        },
+        RelayHeaders::from_http(&headers),
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    segment_local(&state, &session, &seg, &RelayHeaders::from_http(&headers)).await
+}
 
-    let opened = state
+fn requested_byte_range(value: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let raw = raw.strip_prefix("bytes=").ok_or(())?;
+    if raw.contains(',') || len == 0 {
+        return Err(());
+    }
+    let (start, end) = raw.split_once('-').ok_or(())?;
+    let (start, end) = if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (len.saturating_sub(suffix.min(len)), len - 1)
+    } else {
+        let start = start.parse::<u64>().map_err(|_| ())?;
+        if start >= len {
+            return Err(());
+        }
+        let end = if end.is_empty() {
+            len - 1
+        } else {
+            end.parse::<u64>().map_err(|_| ())?.min(len - 1)
+        };
+        if end < start {
+            return Err(());
+        }
+        (start, end)
+    };
+    Ok(Some((start, end)))
+}
+
+fn segment_etag(session: &str, segment: &str, len: u64) -> String {
+    format!("\"{session}-{segment}-{len:x}\"")
+}
+
+fn etag_matches(request: Option<&str>, etag: &str) -> bool {
+    request.is_some_and(|request| {
+        request
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == "*" || candidate == etag)
+    })
+}
+
+/// Try to resurrect a reaped VOD session from its durable route (plan §2.5).
+/// Only an active, unexpired route this node owns qualifies — a released
+/// route (DELETE, supersession) stays dead, which is what keeps every
+/// terminal cause terminal.
+async fn vod_resurrected(state: &AppState, session: &str) -> bool {
+    let Ok(Some(route)) = state.media_sessions.route(session).await else {
+        return false;
+    };
+    if route.owner_node_id != state.node_id
+        || route.state != "active"
+        || route.lease_expires_at_ms <= unix_ms()
+    {
+        return false;
+    }
+    state
         .transcode
-        .segment(&session, &seg)
+        .vod_resurrect(&route.recipe_json, session, route.user_id)
         .await
-        .ok_or(ApiError::NotFound("segment"))?;
-    let content_type = segment_content_type(&seg);
-    if seg == "init.mp4" && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
-        let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
-        let mut delivery = opened.delivery;
-        let started = Instant::now();
-        match opened
-            .file
-            .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
-            .read_to_end(&mut init)
-            .await
-        {
-            Ok(bytes) => {
-                delivery.note_read(bytes as u64, started.elapsed());
-                // The body is buffered, so delivery is complete here — the
-                // gate above guarantees the bound could not truncate it.
-                // Unlike the streamed path below, a client that abandons this
-                // response is still recorded as fully delivered; the
-                // asymmetry is documented in docs/PLAYBACK.md.
-                delivery.finish();
-            }
-            Err(error) => {
-                delivery.fail(&error);
-                return Err(ApiError::Internal(error.to_string()));
-            }
+}
+
+/// Map a VOD serving refusal to its typed response (plan §2.3).
+fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiError {
+    use crate::vodserve::VodError;
+    let log = |code: &str, message: &str| {
+        tracing::warn!(
+            session = %crate::transcode::session_log_id(session),
+            code,
+            "vod request refused: {message}"
+        );
+    };
+    match err {
+        // The third outcome: the deadline passed with the segment still
+        // unproduced. Retryable by contract, and says so.
+        VodError::Pending { retry_after } => {
+            let secs = retry_after.as_secs().max(1);
+            log("segment_pending", "the segment is not materialized yet");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_pending",
+                format!("the segment is being produced; retry in {secs}s"),
+            )
         }
-        if let Ok((_, file)) = session_file(&state, &session).await {
-            if normalize_high_tier_hevc_init(&file, &mut init) {
-                tracing::info!(
-                    session_id = %session,
-                    "translated the HEVC High-tier initialization record for Apple HLS"
-                );
-            }
+        VodError::Busy => {
+            log("segment_wait_busy", "blocked-GET caps reached");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_wait_busy",
+                "too many blocked fetches for this session; retry shortly",
+            )
         }
+        VodError::ProducerFailed(reason) => {
+            log("producer_failed", &reason);
+            ApiError::typed(StatusCode::BAD_GATEWAY, "producer_failed", &reason)
+        }
+        VodError::Gone(cause) => {
+            log("media_session_ended", &format!("{cause:?}"));
+            ApiError::typed(
+                StatusCode::GONE,
+                "media_session_ended",
+                "this session has ended and will not resume",
+            )
+        }
+        VodError::Io(error) => ApiError::Internal(error.to_string()),
+    }
+}
+
+/// Serve one VOD segment (or the init) with the immutable-cache headers the
+/// plan's §2.1 URIs deserve. Range and conditional requests are honoured; the
+/// Apple High-tier init rewrite is applied exactly as on the live path.
+async fn vod_segment_response(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+    ready: crate::vodserve::SegmentReady,
+) -> Result<Response, ApiError> {
+    let mut ready = ready;
+    if ready.len == 0 {
+        return Err(ApiError::NotFound("segment"));
+    }
+    let content_type = segment_content_type(seg);
+    let etag = format!("\"{}\"", ready.etag);
+    if etag_matches(headers.if_none_match.as_deref(), &etag) {
         return Ok((
-            StatusCode::OK,
+            StatusCode::NOT_MODIFIED,
             [
-                (header::CONTENT_TYPE, content_type.to_owned()),
-                (header::CONTENT_LENGTH, init.len().to_string()),
+                (header::ETAG, etag),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
                 (
                     header::CACHE_CONTROL,
                     "private, max-age=3600, immutable".to_owned(),
                 ),
             ],
-            init,
         )
             .into_response());
     }
-    if seg == "init.mp4" && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
+    let requested_range = match requested_byte_range(headers.range.as_deref(), ready.len) {
+        Ok(range) => range,
+        Err(()) => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::ETAG, etag),
+                ],
+            )
+                .into_response());
+        }
+    };
+    // Small objects — the init above all — are answered from memory so the
+    // Apple rewrite can run; segments stream.
+    if crate::transcode::is_init_object(seg) && ready.len <= INIT_INSPECTION_LIMIT_BYTES {
+        let mut init = Vec::with_capacity(ready.len.min(64 * 1024) as usize);
+        ready
+            .file
+            .read_to_end(&mut init)
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if let Some(file_id) = state.transcode.vod_session_file_id(session).await {
+            if let Ok(Some(file)) = state.store.get_file(file_id).await {
+                if normalize_high_tier_hevc_init(&file, &mut init) {
+                    tracing::info!(
+                        session = %crate::transcode::session_log_id(session),
+                        "translated the HEVC High-tier initialization record for Apple HLS"
+                    );
+                }
+            }
+        }
+        let (status, body, content_range) = match requested_range {
+            Some((start, end)) => {
+                let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
+                let end = usize::try_from(end).map_err(|_| ApiError::NotFound("segment"))?;
+                if end >= init.len() {
+                    return Err(ApiError::NotFound("segment"));
+                }
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    init[start..=end].to_vec(),
+                    Some(format!("bytes {start}-{end}/{}", init.len())),
+                )
+            }
+            None => (StatusCode::OK, init, None),
+        };
+        let mut response = (StatusCode::OK, body).into_response();
+        *response.status_mut() = status;
+        let headers_mut = response.headers_mut();
+        headers_mut.insert(header::CONTENT_TYPE, content_type.parse().expect("mime"));
+        headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
+        headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
+        headers_mut.insert(
+            header::CACHE_CONTROL,
+            "private, max-age=3600, immutable".parse().expect("cache"),
+        );
+        if let Some(range) = content_range {
+            headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
+        }
+        return Ok(response);
+    }
+    let (status, len, content_range) = match requested_range {
+        Some((start, end)) => {
+            use tokio::io::AsyncSeekExt;
+            ready
+                .file
+                .seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            (
+                StatusCode::PARTIAL_CONTENT,
+                end - start + 1,
+                Some(format!("bytes {start}-{end}/{}", ready.len)),
+            )
+        }
+        None => (StatusCode::OK, ready.len, None),
+    };
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
+        tokio::io::AsyncReadExt::take(ready.file, len),
+    ));
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    let headers_mut = response.headers_mut();
+    headers_mut.insert(header::CONTENT_TYPE, content_type.parse().expect("mime"));
+    headers_mut.insert(header::CONTENT_LENGTH, len.into());
+    headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
+    headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
+    headers_mut.insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600, immutable".parse().expect("cache"),
+    );
+    if let Some(range) = content_range {
+        headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
+    }
+    Ok(response)
+}
+
+async fn segment_local(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+) -> Result<Response, ApiError> {
+    const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
+
+    // The VOD presentation's three-outcome contract dispatches first; `None`
+    // falls through to the live path untouched. A session neither registry
+    // knows may be a reaped VOD handle whose durable route is still live —
+    // resurrect it and ask once more before giving up.
+    let mut vod_answer = state.transcode.vod_segment(session, seg).await;
+    if vod_answer.is_none()
+        && state.transcode.session_status(session).await.is_none()
+        && vod_resurrected(state, session).await
+    {
+        vod_answer = state.transcode.vod_segment(session, seg).await;
+    }
+    if let Some(answer) = vod_answer {
+        return match answer {
+            Ok(Some(ready)) => vod_segment_response(state, session, seg, headers, ready).await,
+            Ok(None) => Err(ApiError::NotFound("segment")),
+            Err(err) => Err(vod_error(session, err)),
+        };
+    }
+
+    let mut opened = match state.transcode.segment(session, seg).await {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Err(ApiError::NotFound("segment")),
+        Err(crate::transcode::SegmentOpenError::Capacity) => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "response_snapshot_capacity",
+                "authenticated media response capacity is full; retry shortly",
+            ));
+        }
+    };
+    // A live media object is published only after bytes exist. Treat an empty
+    // file as an incomplete/corrupt publication instead of advertising the
+    // saturating `0..=0` calculation below as one byte and hanging the client.
+    if opened.len == 0 {
+        return Err(ApiError::NotFound("segment"));
+    }
+    let content_type = segment_content_type(seg);
+    let etag = segment_etag(session, seg, opened.len);
+    if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        opened.delivery.finish_without_body();
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (
+                    header::CACHE_CONTROL,
+                    "private, max-age=3600, immutable".to_owned(),
+                ),
+            ],
+        )
+            .into_response());
+    }
+    let requested_range = match requested_byte_range(headers.range.as_deref(), opened.len) {
+        Ok(range) => range,
+        Err(()) => {
+            opened.delivery.finish_without_body();
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_RANGE, format!("bytes */{}", opened.len)),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::ETAG, etag),
+                ],
+            )
+                .into_response());
+        }
+    };
+    if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+        let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
+        let mut delivery = opened.delivery;
+        let started = Instant::now();
+        let read_elapsed = match opened
+            .file
+            .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
+            .read_to_end(&mut init)
+            .await
+        {
+            Ok(_) => started.elapsed(),
+            Err(error) => {
+                delivery.fail(&error);
+                return Err(ApiError::Internal(error.to_string()));
+            }
+        };
+        if let Ok((_, file)) = session_file(state, session).await {
+            if normalize_high_tier_hevc_init(&file, &mut init) {
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    "translated the HEVC High-tier initialization record for Apple HLS"
+                );
+            }
+        }
+        let (status, body, content_range) = match requested_range {
+            Some((start, end)) => {
+                let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
+                let end = usize::try_from(end).map_err(|_| ApiError::NotFound("segment"))?;
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    init[start..=end].to_vec(),
+                    Some(format!("bytes {start}-{end}/{}", init.len())),
+                )
+            }
+            None => (StatusCode::OK, init, None),
+        };
+        // The storage inspection reads the complete init so it can normalize
+        // codec metadata, but client-delivery accounting follows only the
+        // bytes placed in this response (especially for a Range request).
+        delivery.expect_at_most(body.len() as u64);
+        delivery.note_read(body.len() as u64, read_elapsed);
+        delivery.finish();
+        let mut response = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, body.len())
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private, max-age=3600, immutable");
+        if let Some(content_range) = content_range {
+            response = response.header(header::CONTENT_RANGE, content_range);
+        }
+        return response
+            .body(Body::from(body))
+            .map_err(|error| ApiError::Internal(error.to_string()));
+    }
+    if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
-            session_id = %session,
+            session = %crate::transcode::session_log_id(session),
             init_bytes = opened.len,
             limit_bytes = APPLE_INIT_REWRITE_LIMIT_BYTES,
             "skipped Apple HEVC tier normalization because init.mp4 exceeds the inspection bound"
         );
     }
-    let opened_len = opened.len;
-    let reader = tokio_util::io::ReaderStream::new(opened.file);
-    let delivery = opened.delivery;
+    let (status, start, end) = requested_range
+        .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
+        .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
+    if start > 0 {
+        if let Err(error) = opened.file.seek(std::io::SeekFrom::Start(start)).await {
+            opened.delivery.fail(&error);
+            return Err(ApiError::Internal(error.to_string()));
+        }
+    }
+    let opened_len = end.saturating_sub(start).saturating_add(1);
+    let total_len = opened.len;
+    let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
+    let mut delivery = opened.delivery;
+    delivery.expect_at_most(opened_len);
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
     // an abandoned body is the `response_dropped` case, and it is the only one
@@ -1760,28 +3067,27 @@ pub async fn segment(
             }
         },
     );
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, content_type.to_owned()),
-            (header::CONTENT_LENGTH, opened_len.to_string()),
-            // A finished segment never changes: ffmpeg writes `.tmp` and
-            // renames, and nothing rewrites the final name. The URI carries a
-            // session id, so the bytes behind it are unique to this session and
-            // safe to hold — `private` because that id is a capability, and
-            // `immutable` so a reload or a retry costs nothing. (The playlist
-            // stays `no-store`: it grows for the session's whole life.)
-            (
-                header::CACHE_CONTROL,
-                "private, max-age=3600, immutable".to_owned(),
-            ),
-        ],
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, opened_len)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, etag)
+        // A finished segment never changes: ffmpeg writes `.tmp` and
+        // renames. The URI carries a capability-scoped session id.
+        .header(header::CACHE_CONTROL, "private, max-age=3600, immutable");
+    if status == StatusCode::PARTIAL_CONTENT {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total_len}"),
+        );
+    }
+    response
         // Streamed rather than buffered: a 4K copy segment is ~35 MB, and
         // reading it into memory before the first byte goes out is an
         // allocation and a copy per request for data on its way to a socket.
-        Body::from_stream(stream),
-    )
-        .into_response())
+        .body(Body::from_stream(stream))
+        .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
 /// MIME types from Apple's HLS authoring profile. An initialization section
@@ -1803,6 +3109,65 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+
+    #[test]
+    fn public_playback_ids_and_segment_ranges_are_bounded() {
+        assert!(valid_playback_id("player-a"));
+        assert!(!valid_playback_id("   "));
+        assert!(!valid_playback_id("player\r\nforged"));
+        assert!(!valid_playback_id(&"p".repeat(129)));
+
+        assert_eq!(requested_byte_range(None, 100), Ok(None));
+        assert_eq!(
+            requested_byte_range(Some("bytes=10-19"), 100),
+            Ok(Some((10, 19)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=90-"), 100),
+            Ok(Some((90, 99)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=-10"), 100),
+            Ok(Some((90, 99)))
+        );
+        assert_eq!(
+            requested_byte_range(Some("bytes=-200"), 100),
+            Ok(Some((0, 99)))
+        );
+        assert_eq!(requested_byte_range(Some("bytes=10-9"), 100), Err(()));
+        assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
+        assert_eq!(requested_byte_range(Some("bytes=0-1,3-4"), 100), Err(()));
+    }
+
+    #[test]
+    fn delayed_resolved_replay_rechecks_the_current_lease_boundary() {
+        let mut route = MediaSessionRoute {
+            incarnation_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000d2".to_owned(),
+            user_id: 7,
+            playback_id: "replay-player".to_owned(),
+            request_fingerprint: "d".repeat(64),
+            owner_node_id: "node-d".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: 2_001,
+            state: "active".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: 1,
+        };
+        assert!(resolved_replay_is_live(&route, 1_000));
+        assert!(!resolved_replay_is_live(&route, 1_001));
+        route.lease_expires_at_ms = 1_000;
+        assert!(
+            !resolved_replay_is_live(&route, 1_000),
+            "a read that returns after exact expiry must never answer a replay"
+        );
+    }
 
     // ---- segment delivery, through the real response ------------------------
     //
@@ -1833,6 +3198,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("drain".to_owned(), "seg00001.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");
@@ -1866,6 +3232,94 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
+        let dir = tempfile::tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
+        let body = vec![5_u8; 16 * 1024];
+        tokio::fs::write(dir.path().join("seg00004.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=1024-2047".parse().expect("range"));
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            headers,
+        )
+        .await
+        .expect("partial response");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 2_048)
+                .await
+                .expect("partial body")
+                .len(),
+            1_024
+        );
+        assert_eq!(fixture.delivered_bytes(), 1_024);
+
+        let mut conditional = HeaderMap::new();
+        conditional.insert(
+            header::IF_NONE_MATCH,
+            segment_etag("range", "seg00004.m4s", body.len() as u64)
+                .parse()
+                .expect("etag"),
+        );
+        let not_modified = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            conditional,
+        )
+        .await
+        .expect("conditional response");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+        let mut unsatisfiable = HeaderMap::new();
+        unsatisfiable.insert(
+            header::RANGE,
+            "bytes=999999-".parse().expect("invalid range value"),
+        );
+        let rejected = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            unsatisfiable,
+        )
+        .await
+        .expect("range response");
+        assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert!(
+            fixture.settle().await.is_empty(),
+            "valid partial and intentionally bodyless responses are not incomplete deliveries"
+        );
+
+        let init_dir = tempfile::tempdir().expect("init directory");
+        let init_fixture = HlsDeliveryFixture::publish(init_dir.path(), "init-range").await;
+        tokio::fs::write(init_dir.path().join("init.mp4"), vec![9_u8; 4_096])
+            .await
+            .expect("init bytes");
+        let mut init_headers = HeaderMap::new();
+        init_headers.insert(header::RANGE, "bytes=0-3".parse().expect("init range"));
+        let init_response = segment(
+            State(init_fixture.state.clone()),
+            AxPath(("init-range".to_owned(), "init.mp4".to_owned())),
+            init_headers,
+        )
+        .await
+        .expect("init partial response");
+        assert_eq!(
+            axum::body::to_bytes(init_response.into_body(), 16)
+                .await
+                .expect("init body")
+                .len(),
+            4
+        );
+        assert_eq!(init_fixture.delivered_bytes(), 4);
+        assert!(init_fixture.settle().await.is_empty());
+    }
+
     /// A client that walks away mid-segment is the case nothing else observes:
     /// the handler has already returned, the stream never reaches EOF, and no
     /// error is raised. Only `Drop` can name it, which also makes it the
@@ -1884,6 +3338,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("abandoned".to_owned(), "seg00002.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");
@@ -1939,6 +3394,7 @@ mod tests {
         let response = segment(
             State(fixture.state.clone()),
             AxPath(("unreadable".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
         )
         .await
         .expect("segment response");
@@ -2350,6 +3806,8 @@ mod tests {
             preserve_dolby_vision: None,
             hdr10: None,
             audio_offset_ms: Some(20_000),
+            presentation: None,
+            block_budget_secs: None,
         }
         .into_request(7, 1080);
 
@@ -2377,6 +3835,8 @@ mod tests {
             preserve_dolby_vision: None,
             hdr10: None,
             audio_offset_ms: None,
+            presentation: None,
+            block_budget_secs: None,
         }
         .into_request(5615, 2160);
         assert_eq!(request.subtitle_burn, Some(5));

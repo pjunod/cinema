@@ -246,6 +246,14 @@ test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "capabilityDiagnosticsExplainWhyDolbyVisionWasNotClaimed"
 
 [[fixes]]
+id = "android.playback-ledger-note-placement"
+commits = ["9cc4d912"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "private fun splitLedgerValue(value: String, facts: Int = 3)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackInfoOverlayTest.kt"
+test_anchor = "fun lightThemeStillShowsStructuredPlaybackDetails()"
+
+[[fixes]]
 id = "apple.stall-clock-regime-flap"
 commits = ["7ed1e5e"]
 source = "clients/apple/Sources/PlayerController.swift"
@@ -475,4 +483,36 @@ commits = ["05d276f5"]
 source = "clients/apple/Sources/PlayerView.swift"
 source_anchor = "enum TVPlaybackInfoPresentation"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testTVPlaybackInfoUsesTenFootScaleAndPlainHealthLabels"
+test_anchor = "testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale"
+
+[[fixes]]
+id = "clients.native-reader-lossless-route-ids"
+commits = ["5d4c0d5a"]
+source = "clients/apple/Sources/ReaderView.swift"
+source_anchor = "IDs are quoted deliberately"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "clients.media-failover-origin-validation"
+commits = ["f5fb37af"]
+source = "clients/apple/Sources/Session.swift"
+source_anchor = "static func canonicalOrigin("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate"
+
+[[fixes]]
+id = "apple.media-failover-transport-only"
+commits = ["1415ce13", "b8f11bc6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isTransportPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyATransportFailureMovesToAnotherNode"
+
+[[fixes]]
+id = "apple.media-failover-recovery-disjoint"
+commits = ["19e2d818"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isCompatibilityPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNoFailureIsBothAMediaVerdictAndANodeFault"

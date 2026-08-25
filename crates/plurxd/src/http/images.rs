@@ -15,8 +15,11 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{ArtworkPeerAuth, MembershipManager};
+use plurx_core::domain::Item;
 use plurx_core::error::StoreError;
+#[cfg(test)]
 use plurx_core::store::{ArtworkInventoryItem, Store};
+use sha2::{Digest, Sha256};
 
 use super::error::ApiError;
 use super::extract::AuthUser;
@@ -26,17 +29,20 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 const NODE_ID_HEADER: &str = "x-plurx-node-id";
 const TIMESTAMP_HEADER: &str = "x-plurx-artwork-time";
 const SIGNATURE_HEADER: &str = "x-plurx-artwork-signature";
-const MAX_ARTWORK_BYTES: u64 = 15 * 1024 * 1024;
+const MAX_ARTWORK_BYTES: u64 = plurx_core::metadata::MAX_ARTWORK_BYTES;
 const MATERIALIZE_CONCURRENCY: usize = 8;
+const PEER_RACE_CONCURRENCY: usize = 3;
+const PEER_RACE_DEADLINE: Duration = Duration::from_millis(3_250);
 const SOURCE_REPAIRS_PER_PASS: usize = 4;
 const SOURCE_REPAIR_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const SOURCE_REPAIR_LEASE: Duration = Duration::from_secs(5 * 60);
 const MATERIALIZE_INTERVAL: Duration = Duration::from_secs(60);
 const SOURCE_REPAIR_GRACE: Duration = Duration::from_secs(2 * 60);
 const ARTWORK_FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(3);
-const PEER_RACE_CONCURRENCY: usize = 3;
-const ORPHAN_ARTWORK_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
-const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const MATERIALIZE_ITEM_PAGE: i64 = 256;
+const CONTENT_ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+const ORPHAN_SCAN_LIMIT: usize = 10_000;
+const ORPHAN_REMOVE_LIMIT: usize = 256;
 
 /// Shared process-wide bounds for on-demand and background peer fetches.
 ///
@@ -79,7 +85,7 @@ impl ArtworkCoordinator {
     }
 
     async fn permit(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.permits).acquire_owned().await.ok()
+        Arc::clone(&self.permits).try_acquire_owned().ok()
     }
 
     fn client(&self) -> Option<reqwest::Client> {
@@ -119,7 +125,7 @@ pub async fn serve_peer(
     if !verified {
         return Err(ApiError::Unauthorized);
     }
-    serve_local_artwork(&state.artwork_dir, safe_name).await
+    serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await
 }
 
 /// Serve local artwork, or retrieve it from a reachable voter and materialize
@@ -130,8 +136,10 @@ pub(crate) async fn serve_cluster_artwork(
     filename: &str,
 ) -> Result<Response, ApiError> {
     let safe_name = safe_artwork_name(filename)?;
-    if let Ok(response) = serve_local_artwork(&state.artwork_dir, safe_name).await {
-        return Ok(response);
+    match serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await {
+        Ok(response) => return Ok(response),
+        Err(error) if is_artwork_capacity_error(&error) => return Err(error),
+        Err(_) => {}
     }
 
     let membership = state.membership.clone();
@@ -151,10 +159,31 @@ pub(crate) async fn serve_cluster_artwork(
         },
     )
     .await
+    .map_err(|_| artwork_capacity_error())?
     else {
         return Err(ApiError::NotFound("image"));
     };
-    Ok(artwork_response(&state.artwork_dir.join(safe_name), bytes))
+    Ok(admitted_artwork_response(
+        &state.artwork_dir.join(safe_name),
+        bytes,
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtworkCapacity;
+
+const ARTWORK_CAPACITY_CODE: &str = "artwork_response_capacity";
+
+fn artwork_capacity_error() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ARTWORK_CAPACITY_CODE,
+        "artwork response capacity is full; retry shortly",
+    )
+}
+
+fn is_artwork_capacity_error(error: &ApiError) -> bool {
+    matches!(error, ApiError::Typed { code, .. } if *code == ARTWORK_CAPACITY_CODE)
 }
 
 async fn fetch_and_materialize<F, Fut>(
@@ -162,18 +191,20 @@ async fn fetch_and_materialize<F, Fut>(
     artwork_dir: &FsPath,
     filename: &str,
     fetch: F,
-) -> Option<Vec<u8>>
+) -> Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>
 where
     F: FnOnce(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<u8>>>,
 {
-    tokio::time::timeout(
+    match tokio::time::timeout(
         ARTWORK_FETCH_TOTAL_TIMEOUT,
         fetch_and_materialize_inner(coordinator, artwork_dir, filename, fetch),
     )
     .await
-    .ok()
-    .flatten()
+    {
+        Ok(result) => result,
+        Err(_) => Ok(None),
+    }
 }
 
 async fn fetch_and_materialize_inner<F, Fut>(
@@ -181,34 +212,154 @@ async fn fetch_and_materialize_inner<F, Fut>(
     artwork_dir: &FsPath,
     filename: &str,
     fetch: F,
-) -> Option<Vec<u8>>
+) -> Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>
 where
     F: FnOnce(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Option<Vec<u8>>>,
 {
     let _filename = coordinator.filename(filename).await;
-    if let Ok(bytes) = tokio::fs::read(artwork_dir.join(filename)).await {
-        if !bytes.is_empty() {
-            return Some(bytes);
+    // This permit covers both the bounded local recheck and any peer response
+    // buffer. Local hits and misses therefore share one process-wide memory
+    // envelope instead of only limiting the network side of the operation.
+    let permit = coordinator.permit().await.ok_or(ArtworkCapacity)?;
+    match read_bounded_local_artwork(artwork_dir.join(filename)).await {
+        Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
+            return Ok(Some(AdmittedArtworkBytes {
+                bytes,
+                _permit: permit,
+            }));
         }
+        Some((_, identity)) if content_addressed_artwork_name(filename) => {
+            quarantine_corrupt_artwork(artwork_dir, filename, identity).await;
+        }
+        _ => {}
     }
-    let _permit = coordinator.permit().await?;
-    let client = coordinator.client()?;
-    let bytes = fetch(client).await?;
+    let Some(client) = coordinator.client() else {
+        return Ok(None);
+    };
+    let Some(bytes) = fetch(client).await else {
+        return Ok(None);
+    };
     if let Err(error) = install_artwork(artwork_dir, filename, &bytes).await {
         // The caller can still use the complete peer response. Log the failed
         // materialization so a read-only or full data directory is visible,
         // but do not turn working peer failover into another broken image.
         tracing::warn!(filename, %error, "cannot materialize peer artwork");
     }
-    Some(bytes)
+    Ok(Some(AdmittedArtworkBytes {
+        bytes,
+        _permit: permit,
+    }))
 }
 
-async fn serve_local_artwork(artwork_dir: &FsPath, filename: &str) -> Result<Response, ApiError> {
+async fn serve_local_artwork(
+    coordinator: &ArtworkCoordinator,
+    artwork_dir: &FsPath,
+    filename: &str,
+) -> Result<Response, ApiError> {
+    let permit = coordinator
+        .permit()
+        .await
+        .ok_or_else(artwork_capacity_error)?;
     let path = artwork_dir.join(filename);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) if !bytes.is_empty() => Ok(artwork_response(&path, bytes)),
+    match read_bounded_local_artwork(path.clone()).await {
+        Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
+            Ok(admitted_artwork_response(
+                &path,
+                AdmittedArtworkBytes {
+                    bytes,
+                    _permit: permit,
+                },
+            ))
+        }
+        Some((_, identity)) if content_addressed_artwork_name(filename) => {
+            quarantine_corrupt_artwork(artwork_dir, filename, identity).await;
+            Err(ApiError::NotFound("image"))
+        }
         _ => Err(ApiError::NotFound("image")),
+    }
+}
+
+async fn read_bounded_local_artwork(
+    path: std::path::PathBuf,
+) -> Option<(Vec<u8>, ArtworkFileIdentity)> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARTWORK_BYTES {
+            return None;
+        }
+        let expected = metadata.len();
+        let identity = artwork_file_identity(&metadata);
+        let mut bytes = Vec::with_capacity(expected as usize);
+        file.take(expected.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 == expected).then_some((bytes, identity))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn valid_materialized_artwork(artwork_dir: &FsPath, filename: &str) -> bool {
+    read_bounded_local_artwork(artwork_dir.join(filename))
+        .await
+        .is_some_and(|(bytes, _)| artwork_bytes_match_name(filename, &bytes))
+}
+
+async fn quarantine_corrupt_artwork(
+    artwork_dir: &FsPath,
+    filename: &str,
+    expected: ArtworkFileIdentity,
+) {
+    quarantine_corrupt_artwork_with(artwork_dir, filename, expected, None).await;
+}
+
+type AfterCorruptQuarantineRename = Option<Box<dyn FnOnce(&str) + Send + 'static>>;
+
+async fn quarantine_corrupt_artwork_with(
+    artwork_dir: &FsPath,
+    filename: &str,
+    expected: ArtworkFileIdentity,
+    after_rename: AfterCorruptQuarantineRename,
+) {
+    let quarantine = format!(".{filename}.corrupt-{}", uuid::Uuid::new_v4().simple());
+    if plurx_core::fs_secure::rename_child(artwork_dir, filename, &quarantine)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if let Some(after_rename) = after_rename {
+        after_rename(&quarantine);
+    }
+    let quarantined = read_bounded_local_artwork(artwork_dir.join(&quarantine)).await;
+    let still_corrupt = quarantined.as_ref().is_some_and(|(bytes, identity)| {
+        identity.same_inode(expected)
+            && identity.bytes == expected.bytes
+            && !artwork_bytes_match_name(filename, bytes)
+    });
+    if still_corrupt {
+        if let Err(error) = plurx_core::fs_secure::unlink_child(artwork_dir, &quarantine).await {
+            tracing::warn!(filename, %error, "could not remove corrupt artwork quarantine");
+        } else {
+            tracing::warn!(filename, "quarantined corrupt content-addressed artwork");
+        }
+    } else {
+        // The quarantine inode itself changed after we inspected the original.
+        // An exclusive rename preserves it when a newer target won the race,
+        // leaving the bounded orphan sweep—not this stale request—as the only
+        // authority allowed to remove the untrusted replacement.
+        let restored =
+            plurx_core::fs_secure::rename_child_noreplace(artwork_dir, &quarantine, filename).await;
+        tracing::warn!(
+            filename,
+            ?restored,
+            "artwork changed during corruption quarantine; preserved newer bytes"
+        );
     }
 }
 
@@ -221,7 +372,27 @@ fn safe_artwork_name(filename: &str) -> Result<&str, ApiError> {
         .ok_or_else(|| ApiError::BadRequest("invalid image name".into()))
 }
 
+struct AdmittedArtworkBytes {
+    bytes: Vec<u8>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsRef<[u8]> for AdmittedArtworkBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+fn admitted_artwork_response(path: &FsPath, bytes: AdmittedArtworkBytes) -> Response {
+    artwork_response_bytes(path, bytes::Bytes::from_owner(bytes))
+}
+
+#[cfg(test)]
 fn artwork_response(path: &FsPath, bytes: Vec<u8>) -> Response {
+    artwork_response_bytes(path, bytes.into())
+}
+
+fn artwork_response_bytes(path: &FsPath, bytes: bytes::Bytes) -> Response {
     let mime = mime_guess::from_path(path)
         .first_or_octet_stream()
         .to_string();
@@ -275,9 +446,10 @@ async fn fetch_peer_artwork_with_auth(
             None => tracing::warn!(peer, "ignoring invalid artwork peer URL"),
         }
     }
-    stream::iter(requests.into_iter().map(|(peer, url)| {
+    let requests = requests.into_iter().map(|(peer, url)| {
         let client = client.clone();
         let auth = auth.clone();
+        let filename = filename.to_owned();
         async move {
             let response = match client
                 .get(url)
@@ -323,16 +495,24 @@ async fn fetch_peer_artwork_with_auth(
                     }
                 }
             }
-            if !failed && !bytes.is_empty() {
+            if !failed && !bytes.is_empty() && artwork_bytes_match_name(&filename, &bytes) {
                 return Some(bytes);
             }
             None
         }
-    }))
-    .buffer_unordered(PEER_RACE_CONCURRENCY)
-    .filter_map(futures_util::future::ready)
-    .next()
+    });
+    tokio::time::timeout(PEER_RACE_DEADLINE, async {
+        let mut requests = stream::iter(requests).buffer_unordered(PEER_RACE_CONCURRENCY);
+        while let Some(bytes) = requests.next().await {
+            if bytes.is_some() {
+                return bytes;
+            }
+        }
+        None
+    })
     .await
+    .ok()
+    .flatten()
 }
 
 fn peer_auth_from_headers(headers: &HeaderMap) -> Option<ArtworkPeerAuth> {
@@ -362,9 +542,13 @@ async fn install_artwork(
     filename: &str,
     bytes: &[u8],
 ) -> Result<(), std::io::Error> {
-    tokio::fs::create_dir_all(artwork_dir).await?;
-    let destination = artwork_dir.join(filename);
-    plurx_core::metadata::write_artwork_atomically(&destination, bytes).await
+    if !artwork_bytes_match_name(filename, bytes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artwork bytes disagree with the content-addressed filename",
+        ));
+    }
+    plurx_core::fs_secure::atomic_write_child(artwork_dir, filename, bytes).await
 }
 
 #[derive(Clone, Debug)]
@@ -373,12 +557,30 @@ struct ArtworkReference {
     filename: String,
 }
 
-fn artwork_references(items: Vec<ArtworkInventoryItem>) -> Vec<ArtworkReference> {
+trait ArtworkPaths {
+    fn into_artwork_paths(self) -> (i64, Option<String>, Option<String>);
+}
+
+impl ArtworkPaths for Item {
+    fn into_artwork_paths(self) -> (i64, Option<String>, Option<String>) {
+        (self.id, self.poster_path, self.backdrop_path)
+    }
+}
+
+#[cfg(test)]
+impl ArtworkPaths for ArtworkInventoryItem {
+    fn into_artwork_paths(self) -> (i64, Option<String>, Option<String>) {
+        (self.id, self.poster_path, self.backdrop_path)
+    }
+}
+
+fn artwork_references<T: ArtworkPaths>(items: Vec<T>) -> Vec<ArtworkReference> {
     let mut references = BTreeMap::<String, i64>::new();
     for item in items {
-        for filename in [item.poster_path, item.backdrop_path].into_iter().flatten() {
+        let (item_id, poster_path, backdrop_path) = item.into_artwork_paths();
+        for filename in [poster_path, backdrop_path].into_iter().flatten() {
             if safe_artwork_name(&filename).is_ok() {
-                references.entry(filename).or_insert(item.id);
+                references.entry(filename).or_insert(item_id);
             }
         }
     }
@@ -393,11 +595,70 @@ pub(crate) struct MaterializeReport {
     pub references: usize,
     pub missing: usize,
     pub copied: usize,
+    pub deferred_capacity: usize,
     pub source_repairs: usize,
     pub unresolved: usize,
     pub orphans_removed: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtworkPullOutcome {
+    Copied,
+    Missing,
+    DeferredCapacity,
+}
+
+fn artwork_pull_outcome(
+    result: Result<Option<AdmittedArtworkBytes>, ArtworkCapacity>,
+) -> ArtworkPullOutcome {
+    match result {
+        Ok(Some(_)) => ArtworkPullOutcome::Copied,
+        Ok(None) => ArtworkPullOutcome::Missing,
+        Err(ArtworkCapacity) => ArtworkPullOutcome::DeferredCapacity,
+    }
+}
+
+fn suppress_deferred_artwork_repairs(
+    deferred_items: BTreeSet<i64>,
+    unresolved_by_item: &mut BTreeMap<i64, Vec<String>>,
+    repair_after: &mut HashMap<i64, Instant>,
+) {
+    for item_id in deferred_items {
+        unresolved_by_item.remove(&item_id);
+        repair_after.remove(&item_id);
+    }
+}
+
+fn retain_recent_artwork_repairs(repair_after: &mut HashMap<i64, Instant>, now: Instant) {
+    // A due timestamp is the signal to run repair, not an expired cache entry.
+    // Keep it through at least one full provider backoff window so paginated
+    // inventories can revisit large libraries; genuinely deleted item ids age
+    // out without resetting every still-missing item at the moment it is due.
+    repair_after.retain(|_, retry| {
+        retry
+            .checked_add(SOURCE_REPAIR_BACKOFF)
+            .is_some_and(|stale_after| stale_after > now)
+    });
+}
+
+fn due_artwork_repairs(
+    unresolved_by_item: BTreeMap<i64, Vec<String>>,
+    repair_after: &mut HashMap<i64, Instant>,
+    now: Instant,
+) -> BTreeMap<i64, Vec<String>> {
+    let mut repair_items = BTreeMap::new();
+    for (item_id, filenames) in unresolved_by_item {
+        let retry = repair_after
+            .entry(item_id)
+            .or_insert(now + SOURCE_REPAIR_GRACE);
+        if *retry <= now {
+            repair_items.insert(item_id, filenames);
+        }
+    }
+    repair_items
+}
+
+#[cfg(test)]
 fn managed_artwork_filename(filename: &str) -> bool {
     let path = FsPath::new(filename);
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
@@ -429,6 +690,7 @@ fn managed_artwork_filename(filename: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 async fn orphan_candidate_old_enough(path: &FsPath, grace: Duration) -> bool {
     tokio::fs::metadata(path)
         .await
@@ -439,6 +701,7 @@ async fn orphan_candidate_old_enough(path: &FsPath, grace: Duration) -> bool {
         .is_some_and(|age| age >= grace)
 }
 
+#[cfg(test)]
 async fn remove_orphan_candidate(
     store: &dyn Store,
     filename: &str,
@@ -473,6 +736,7 @@ async fn remove_orphan_candidate(
     }
 }
 
+#[cfg(test)]
 async fn sweep_orphan_artwork(store: &dyn Store, artwork_dir: &FsPath, grace: Duration) -> usize {
     let Ok(referenced) = store.items_with_artwork().await else {
         return 0;
@@ -507,35 +771,315 @@ async fn sweep_orphan_artwork(store: &dyn Store, artwork_dir: &FsPath, grace: Du
     removed
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtworkContentDigest<'a> {
+    Prefix16(&'a str),
+    Full64(&'a str),
+}
+
+fn supported_artwork_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp"
+    )
+}
+
+fn managed_artwork_stem(stem: &str) -> Option<&str> {
+    let (item_id, kind) = stem.split_once('-')?;
+    (item_id.parse::<i64>().ok()? > 0 && matches!(kind, "poster" | "backdrop")).then_some(kind)
+}
+
+/// Classify the two immutable artwork formats Plurx publishes. Keeping this
+/// parser exact is important: it decides both when served bytes need digest
+/// authentication and which unreferenced files the bounded orphan walker may
+/// delete.
+fn content_addressed_artwork_digest(filename: &str) -> Option<ArtworkContentDigest<'_>> {
+    let (stem, extension) = filename.rsplit_once('.')?;
+    if !supported_artwork_extension(extension) {
+        return None;
+    }
+    if let Some((managed, digest)) = stem.rsplit_once("-c") {
+        managed_artwork_stem(managed)?;
+        return (digest.len() == 16 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(ArtworkContentDigest::Prefix16(digest));
+    }
+    let (managed, digest) = stem.rsplit_once('-')?;
+    let kind = managed_artwork_stem(managed)?;
+    (kind == "poster" && digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(ArtworkContentDigest::Full64(digest))
+}
+
+fn content_addressed_artwork_name(filename: &str) -> bool {
+    content_addressed_artwork_digest(filename).is_some()
+}
+
+fn corrupt_artwork_quarantine_name(filename: &str) -> bool {
+    let Some((managed, suffix)) = filename
+        .strip_prefix('.')
+        .and_then(|name| name.rsplit_once(".corrupt-"))
+    else {
+        return false;
+    };
+    content_addressed_artwork_name(managed)
+        && suffix.len() == 32
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn temporary_artwork_orphan_name(filename: &str) -> bool {
+    filename.starts_with('.')
+        && (filename.ends_with(".part")
+            || filename.ends_with(".tmp")
+            || filename.contains(".tmp.")
+            || corrupt_artwork_quarantine_name(filename))
+}
+
+fn artwork_bytes_match_name(filename: &str, bytes: &[u8]) -> bool {
+    let Some(expected) = content_addressed_artwork_digest(filename) else {
+        return true;
+    };
+    let actual = hex::encode(Sha256::digest(bytes));
+    match expected {
+        ArtworkContentDigest::Prefix16(expected) => actual[..16].eq_ignore_ascii_case(expected),
+        ArtworkContentDigest::Full64(expected) => actual.eq_ignore_ascii_case(expected),
+    }
+}
+
+#[derive(Default)]
+struct ArtworkOrphanWalker {
+    entries: Option<tokio::fs::ReadDir>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArtworkFileIdentity {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    changed_secs: i64,
+    changed_nanos: i64,
+}
+
+impl ArtworkFileIdentity {
+    fn same_inode(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+}
+
+fn artwork_file_identity(metadata: &std::fs::Metadata) -> ArtworkFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    ArtworkFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        bytes: metadata.len(),
+        changed_secs: metadata.ctime(),
+        changed_nanos: metadata.ctime_nsec(),
+    }
+}
+
+struct ArtworkOrphanCandidate {
+    filename: String,
+    identity: ArtworkFileIdentity,
+    temporary: bool,
+}
+
+async fn secure_artwork_identity(path: std::path::PathBuf) -> Option<ArtworkFileIdentity> {
+    tokio::task::spawn_blocking(move || {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let metadata = file.metadata().ok()?;
+        metadata.is_file().then(|| artwork_file_identity(&metadata))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn sweep_content_orphans(state: &AppState, walker: &mut ArtworkOrphanWalker) -> usize {
+    if walker.entries.is_none() {
+        walker.entries = match tokio::fs::read_dir(&state.artwork_dir).await {
+            Ok(entries) => Some(entries),
+            Err(error) => {
+                tracing::warn!(path = %state.artwork_dir.display(), %error, "cannot scan artwork orphans");
+                None
+            }
+        };
+    }
+    let Some(entries) = walker.entries.as_mut() else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut scanned = 0;
+    let mut removed = 0;
+    let mut candidates = Vec::with_capacity(ORPHAN_REMOVE_LIMIT);
+    while scanned < ORPHAN_SCAN_LIMIT && candidates.len() < ORPHAN_REMOVE_LIMIT {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                walker.entries = None;
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(path = %state.artwork_dir.display(), %error, "cannot continue artwork orphan scan");
+                walker.entries = None;
+                break;
+            }
+        };
+        scanned += 1;
+        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let temporary = temporary_artwork_orphan_name(&filename);
+        if !temporary && !content_addressed_artwork_name(&filename) {
+            continue;
+        }
+        let Ok(metadata) = tokio::fs::symlink_metadata(entry.path()).await else {
+            continue;
+        };
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_none_or(|age| age < CONTENT_ORPHAN_GRACE)
+        {
+            continue;
+        }
+        candidates.push(ArtworkOrphanCandidate {
+            filename,
+            identity: artwork_file_identity(&metadata),
+            temporary,
+        });
+    }
+    let reference_candidates = candidates
+        .iter()
+        .filter(|candidate| !candidate.temporary)
+        .map(|candidate| candidate.filename.clone())
+        .collect::<Vec<_>>();
+    let referenced = match state
+        .store
+        .referenced_artwork_filenames(&reference_candidates)
+        .await
+    {
+        Ok(referenced) => referenced.into_iter().collect::<BTreeSet<_>>(),
+        Err(error) => {
+            tracing::warn!(%error, "cannot prefilter artwork orphan ownership");
+            return 0;
+        }
+    };
+    for candidate in candidates {
+        if referenced.contains(&candidate.filename) {
+            continue;
+        }
+        let quarantine = format!(".orphan.{}.part", uuid::Uuid::new_v4().simple());
+        if plurx_core::fs_secure::rename_child(&state.artwork_dir, &candidate.filename, &quarantine)
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let identity_matches = secure_artwork_identity(state.artwork_dir.join(&quarantine))
+            .await
+            .is_some_and(|identity| {
+                identity.same_inode(candidate.identity)
+                    && identity.bytes == candidate.identity.bytes
+            });
+        let referenced_after_quarantine = if candidate.temporary {
+            false
+        } else {
+            match state
+                .store
+                .artwork_filename_is_referenced(&candidate.filename)
+                .await
+            {
+                Ok(referenced) => referenced,
+                Err(error) => {
+                    tracing::warn!(filename = candidate.filename, %error, "cannot confirm quarantined artwork ownership");
+                    true
+                }
+            }
+        };
+        if !identity_matches || referenced_after_quarantine {
+            let _ = plurx_core::fs_secure::restore_child_noreplace(
+                &state.artwork_dir,
+                &quarantine,
+                &candidate.filename,
+            )
+            .await;
+        } else if plurx_core::fs_secure::unlink_child(&state.artwork_dir, &quarantine)
+            .await
+            .is_ok()
+        {
+            removed += 1;
+            if let Err(error) = state
+                .store
+                .prune_unreferenced_book_cover_origins(&candidate.filename)
+                .await
+            {
+                tracing::warn!(filename = candidate.filename, %error, "cannot prune orphaned Curator origin");
+            }
+        }
+    }
+    removed
+}
+
 /// Reconcile every filename named by replicated item rows onto this voter.
 /// Peer copies are preferred; source/provider repair is a bounded fallback for
 /// the case where the last node holding a file disappeared before convergence.
 async fn materialize_once(
     state: &AppState,
     repair_after: &mut HashMap<i64, Instant>,
+    item_cursor: &mut i64,
+    orphan_walker: &mut ArtworkOrphanWalker,
 ) -> Result<MaterializeReport, StoreError> {
+    let orphans_removed = sweep_content_orphans(state, orphan_walker).await;
     if !state.membership.is_replicated() {
-        return Ok(MaterializeReport::default());
+        return Ok(MaterializeReport {
+            orphans_removed,
+            ..Default::default()
+        });
     }
-
-    let references = artwork_references(state.store.items_with_artwork().await?);
+    let items = state
+        .store
+        .items_with_artwork_page(*item_cursor, MATERIALIZE_ITEM_PAGE)
+        .await?;
+    if items.is_empty() {
+        *item_cursor = 0;
+    } else {
+        *item_cursor = items.last().map_or(0, |item| item.id);
+    }
+    let references = artwork_references(items);
     let mut report = MaterializeReport {
         references: references.len(),
+        orphans_removed,
         ..Default::default()
     };
     let mut missing = Vec::new();
     for reference in references {
         let path = state.artwork_dir.join(&reference.filename);
-        if !tokio::fs::metadata(path)
-            .await
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-        {
+        // Steady-state reconciliation is an inventory operation, not a
+        // cryptographic scrub. Reading and hashing every referenced image on
+        // every voter each minute can consume gigabytes; request serving and
+        // peer installation authenticate content-addressed bytes when they are
+        // actually used or introduced.
+        let present = tokio::task::spawn_blocking(move || {
+            let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+            let metadata = file.metadata().ok()?;
+            (metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_ARTWORK_BYTES)
+                .then_some(())
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+        if !present {
             missing.push(reference);
         }
     }
     report.missing = missing.len();
+    let now = Instant::now();
+    retain_recent_artwork_repairs(repair_after, now);
     if missing.is_empty() {
-        repair_after.clear();
         return Ok(report);
     }
 
@@ -547,7 +1091,7 @@ async fn materialize_once(
         }
     };
     let peers = Arc::new(peers);
-    let pulls = stream::iter(missing.into_iter().map(|reference| {
+    let mut pulls = stream::iter(missing.into_iter().map(|reference| {
         let membership = state.membership.clone();
         let peers = Arc::clone(&peers);
         let artwork_dir = state.artwork_dir.clone();
@@ -555,53 +1099,54 @@ async fn materialize_once(
         async move {
             let filename = reference.filename.clone();
             let fetch_filename = filename.clone();
-            let copied = fetch_and_materialize(
-                &coordinator,
-                &artwork_dir,
-                &filename,
-                move |client| async move {
-                    fetch_peer_artwork(&client, &membership, &peers, &fetch_filename).await
-                },
-            )
-            .await
-            .is_some();
-            (reference, copied)
+            let outcome = artwork_pull_outcome(
+                fetch_and_materialize(
+                    &coordinator,
+                    &artwork_dir,
+                    &filename,
+                    move |client| async move {
+                        fetch_peer_artwork(&client, &membership, &peers, &fetch_filename).await
+                    },
+                )
+                .await,
+            );
+            (reference, outcome)
         }
     }))
-    .buffer_unordered(MATERIALIZE_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await;
+    .buffer_unordered(MATERIALIZE_CONCURRENCY);
 
     let now = Instant::now();
     let mut unresolved_by_item = BTreeMap::<i64, Vec<String>>::new();
+    let mut deferred_items = BTreeSet::new();
     let mut observed_items = BTreeSet::new();
-    for (reference, copied) in pulls {
+    while let Some((reference, outcome)) = pulls.next().await {
         observed_items.insert(reference.item_id);
-        if copied {
-            report.copied += 1;
-        } else {
-            report.unresolved += 1;
-            unresolved_by_item
-                .entry(reference.item_id)
-                .or_default()
-                .push(reference.filename);
+        match outcome {
+            ArtworkPullOutcome::Copied => report.copied += 1,
+            ArtworkPullOutcome::Missing => {
+                report.unresolved += 1;
+                unresolved_by_item
+                    .entry(reference.item_id)
+                    .or_default()
+                    .push(reference.filename);
+            }
+            ArtworkPullOutcome::DeferredCapacity => {
+                report.deferred_capacity += 1;
+                deferred_items.insert(reference.item_id);
+            }
         }
     }
+    // Capacity says nothing about peer availability. If any filename for an
+    // item was deferred, do not turn the partial observation into a provider
+    // repair/backoff decision; the next reconciliation pass retries it.
+    suppress_deferred_artwork_repairs(deferred_items, &mut unresolved_by_item, repair_after);
     for item_id in observed_items {
         if !unresolved_by_item.contains_key(&item_id) {
             repair_after.remove(&item_id);
         }
     }
 
-    let mut repair_items = BTreeMap::<i64, Vec<String>>::new();
-    for (item_id, filenames) in unresolved_by_item {
-        let retry = repair_after
-            .entry(item_id)
-            .or_insert(now + SOURCE_REPAIR_GRACE);
-        if *retry <= now {
-            repair_items.insert(item_id, filenames);
-        }
-    }
+    let repair_items = due_artwork_repairs(unresolved_by_item, repair_after, now);
 
     for (item_id, filenames) in repair_items.into_iter().take(SOURCE_REPAIRS_PER_PASS) {
         let local_deadline = tokio::time::Instant::now() + SOURCE_REPAIR_LEASE;
@@ -692,12 +1237,8 @@ async fn materialize_once(
                 }
                 let materialized =
                     futures_util::future::join_all(filenames.into_iter().map(|filename| {
-                        let path = state.artwork_dir.join(&filename);
-                        async move {
-                            tokio::fs::metadata(path)
-                                .await
-                                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-                        }
+                        let artwork_dir = state.artwork_dir.clone();
+                        async move { valid_materialized_artwork(&artwork_dir, &filename).await }
                     }))
                     .await
                     .into_iter()
@@ -736,63 +1277,58 @@ async fn materialize_once(
 }
 
 pub(crate) async fn materialize_loop(state: AppState) {
-    if !state.membership.is_replicated() {
-        return;
-    }
     let mut repair_after = HashMap::new();
+    let mut item_cursor = 0;
+    let mut orphan_walker = ArtworkOrphanWalker::default();
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut next_orphan_sweep = Instant::now() + ORPHAN_SWEEP_INTERVAL;
     loop {
-        match state.membership.local_node_is_active_voter().await {
-            Ok(false) => match state.membership.local_node_is_committed_voter().await {
-                Ok(false) => {
-                    tracing::info!("stopping artwork reconciliation on removed voter");
-                    break;
-                }
-                Ok(true) => {
-                    // Membership changes fence the row before changing the
-                    // Raft set. Wait for either commit or rollback without
-                    // performing provider work in that transition window.
-                    tokio::time::sleep(MATERIALIZE_INTERVAL).await;
-                    continue;
-                }
+        if state.membership.is_replicated() {
+            match state.membership.local_node_is_active_voter().await {
+                Ok(false) => match state.membership.local_node_is_committed_voter().await {
+                    Ok(false) => {
+                        tracing::info!("stopping artwork reconciliation on removed voter");
+                        break;
+                    }
+                    Ok(true) => {
+                        // Membership changes fence the row before changing the
+                        // Raft set. Wait for either commit or rollback without
+                        // performing provider work in that transition window.
+                        tokio::time::sleep(MATERIALIZE_INTERVAL).await;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            code = error.code(),
+                            "cannot verify artwork voter membership"
+                        );
+                        tokio::time::sleep(MATERIALIZE_INTERVAL).await;
+                        continue;
+                    }
+                },
+                Ok(true) => {}
                 Err(error) => {
                     tracing::warn!(
                         code = error.code(),
-                        "cannot verify artwork voter membership"
+                        "cannot verify artwork reconciliation authority"
                     );
                     tokio::time::sleep(MATERIALIZE_INTERVAL).await;
                     continue;
                 }
-            },
-            Ok(true) => {}
-            Err(error) => {
-                tracing::warn!(
-                    code = error.code(),
-                    "cannot verify artwork reconciliation authority"
-                );
-                tokio::time::sleep(MATERIALIZE_INTERVAL).await;
-                continue;
             }
         }
-        let mut outcome = materialize_once(&state, &mut repair_after).await;
-        if Instant::now() >= next_orphan_sweep {
-            let removed = sweep_orphan_artwork(
-                state.store.as_ref(),
-                &state.artwork_dir,
-                ORPHAN_ARTWORK_GRACE,
-            )
-            .await;
-            next_orphan_sweep = Instant::now() + ORPHAN_SWEEP_INTERVAL;
-            if let Ok(report) = &mut outcome {
-                report.orphans_removed = removed;
-            }
-        }
-        match outcome {
+        match materialize_once(
+            &state,
+            &mut repair_after,
+            &mut item_cursor,
+            &mut orphan_walker,
+        )
+        .await
+        {
             Ok(report) if report.missing > 0 || report.orphans_removed > 0 => tracing::info!(
                 references = report.references,
                 missing = report.missing,
                 copied = report.copied,
+                deferred_capacity = report.deferred_capacity,
                 source_repairs = report.source_repairs,
                 unresolved = report.unresolved,
                 orphans_removed = report.orphans_removed,
@@ -852,6 +1388,92 @@ mod tests {
         assert!(!managed_artwork_filename("84-poster-short.jpg"));
         assert!(!managed_artwork_filename("0-poster.jpg"));
         assert!(!managed_artwork_filename("-84-poster.jpg"));
+    }
+
+    #[test]
+    fn bounded_orphan_classifier_authenticates_both_generation_formats() {
+        let bytes = b"immutable artwork generation";
+        let digest = hex::encode(Sha256::digest(bytes));
+        let scoped = format!("84-poster-c{}.jpg", &digest[..16]);
+        let curator = format!("84-poster-{digest}.webp");
+
+        assert!(content_addressed_artwork_name(&scoped));
+        assert!(content_addressed_artwork_name(&curator));
+        assert!(artwork_bytes_match_name(&scoped, bytes));
+        assert!(artwork_bytes_match_name(&curator, bytes));
+        assert!(!artwork_bytes_match_name(&scoped, b"corrupt"));
+        assert!(!artwork_bytes_match_name(&curator, b"corrupt"));
+
+        assert!(!content_addressed_artwork_name(&format!(
+            "84-backdrop-{digest}.jpg"
+        )));
+        assert!(!content_addressed_artwork_name(&format!(
+            "family-poster-{digest}.jpg"
+        )));
+        assert!(!content_addressed_artwork_name(
+            "84-poster-c0123456789abcdef.txt"
+        ));
+    }
+
+    #[test]
+    fn orphan_classifier_only_accepts_exact_corrupt_quarantine_shape() {
+        let digest = "a".repeat(64);
+        let managed = format!("84-poster-{digest}.webp");
+        let quarantine = format!(".{managed}.corrupt-{}", "b".repeat(32));
+        assert!(corrupt_artwork_quarantine_name(&quarantine));
+        assert!(temporary_artwork_orphan_name(&quarantine));
+        assert!(!temporary_artwork_orphan_name(&format!(
+            ".README.txt.corrupt-{}",
+            "b".repeat(32)
+        )));
+        assert!(!temporary_artwork_orphan_name(&format!(
+            ".{managed}.corrupt-too-short"
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_corruption_restore_leaves_a_sweep_eligible_quarantine() {
+        let directory = tempfile::tempdir().expect("artwork");
+        let digest = hex::encode(Sha256::digest(b"authenticated artwork"));
+        let filename = format!("84-poster-{digest}.webp");
+        let path = directory.path().join(&filename);
+        std::fs::write(&path, b"corrupt original").expect("corrupt original");
+        let expected = artwork_file_identity(&std::fs::metadata(&path).expect("metadata"));
+        let swap_directory = directory.path().to_path_buf();
+        let swap_filename = filename.clone();
+
+        quarantine_corrupt_artwork_with(
+            directory.path(),
+            &filename,
+            expected,
+            Some(Box::new(move |quarantine| {
+                std::fs::remove_file(swap_directory.join(quarantine))
+                    .expect("replace quarantine inode");
+                std::fs::write(swap_directory.join(quarantine), b"changed quarantine")
+                    .expect("changed quarantine");
+                std::fs::write(swap_directory.join(&swap_filename), b"newer target")
+                    .expect("competing target");
+            })),
+        )
+        .await;
+
+        assert_eq!(std::fs::read(&path).expect("new target"), b"newer target");
+        let quarantines = std::fs::read_dir(directory.path())
+            .expect("artwork entries")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|entry| entry != &filename)
+            .collect::<Vec<_>>();
+        assert_eq!(quarantines.len(), 1);
+        assert!(
+            temporary_artwork_orphan_name(&quarantines[0]),
+            "a failed no-replace restore must remain eligible for bounded cleanup"
+        );
     }
 
     #[tokio::test]
@@ -948,7 +1570,7 @@ mod tests {
         let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
         let hits = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
-        for _ in 0..32 {
+        for _ in 0..MATERIALIZE_CONCURRENCY {
             let coordinator = Arc::clone(&coordinator);
             let directory = Arc::clone(&directory);
             let hits = Arc::clone(&hits);
@@ -964,11 +1586,13 @@ mod tests {
                     },
                 )
                 .await
+                .expect("artwork admission")
                 .expect("materialized bytes")
             }));
         }
         for task in tasks {
-            assert_eq!(task.await.expect("request task"), b"one peer response");
+            let bytes = task.await.expect("request task");
+            assert_eq!(bytes.as_ref(), b"one peer response");
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1005,13 +1629,139 @@ mod tests {
                     }
                 })
                 .await
-                .expect("bounded fetch")
+                .map(|bytes| bytes.expect("bounded fetch"))
             }));
         }
+        let mut admitted = 0usize;
+        let mut rejected = 0usize;
         for task in tasks {
-            task.await.expect("request task");
+            match task.await.expect("request task") {
+                Ok(_) => admitted += 1,
+                Err(ArtworkCapacity) => rejected += 1,
+            }
         }
         assert_eq!(maximum.load(Ordering::SeqCst), MATERIALIZE_CONCURRENCY);
+        assert_eq!(admitted, MATERIALIZE_CONCURRENCY);
+        assert_eq!(rejected, 24 - MATERIALIZE_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn local_artwork_hits_share_the_global_buffer_bound() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
+        tokio::fs::write(directory.path().join("bounded-local.jpg"), b"local artwork")
+            .await
+            .expect("local artwork");
+        let mut held = Vec::new();
+        for _ in 0..MATERIALIZE_CONCURRENCY {
+            held.push(coordinator.permit().await.expect("admission permit"));
+        }
+
+        let request_coordinator = Arc::clone(&coordinator);
+        let request_directory = Arc::clone(&directory);
+        let mut request = tokio::spawn(async move {
+            serve_local_artwork(
+                &request_coordinator,
+                request_directory.path(),
+                "bounded-local.jpg",
+            )
+            .await
+        });
+        let response = tokio::time::timeout(Duration::from_millis(20), &mut request)
+            .await
+            .expect("capacity rejection must be prompt")
+            .expect("local request task")
+            .expect_err("full response-buffer budget must reject admission");
+        assert!(is_artwork_capacity_error(&response));
+        drop(held);
+        let response = serve_local_artwork(&coordinator, directory.path(), "bounded-local.jpg")
+            .await
+            .expect("local response after capacity release");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut retained = Vec::new();
+        for _ in 1..MATERIALIZE_CONCURRENCY {
+            retained.push(coordinator.permit().await.expect("remaining permit"));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), coordinator.permit())
+                .await
+                .expect("capacity result must be prompt")
+                .is_none(),
+            "the response body must retain admission until the client drops it"
+        );
+        drop(response);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), coordinator.permit())
+                .await
+                .expect("released response permit")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_response_capacity_defers_reconciliation_repairs() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = tempfile::tempdir().expect("artwork directory");
+        let mut held = Vec::new();
+        for _ in 0..MATERIALIZE_CONCURRENCY {
+            held.push(coordinator.permit().await.expect("hold response permit"));
+        }
+        let outcome = artwork_pull_outcome(
+            fetch_and_materialize(&coordinator, directory.path(), "capacity.jpg", |_| async {
+                Some(b"peer bytes".to_vec())
+            })
+            .await,
+        );
+        assert_eq!(outcome, ArtworkPullOutcome::DeferredCapacity);
+
+        let item_id = 42;
+        let mut unresolved = BTreeMap::from([(item_id, vec!["capacity.jpg".to_owned()])]);
+        let mut repair_after = HashMap::from([(item_id, Instant::now())]);
+        suppress_deferred_artwork_repairs(
+            BTreeSet::from([item_id]),
+            &mut unresolved,
+            &mut repair_after,
+        );
+        assert!(unresolved.is_empty());
+        assert!(repair_after.is_empty());
+        drop(held);
+    }
+
+    #[test]
+    fn missing_artwork_becomes_repairable_after_the_grace_pass() {
+        let item_id = 77;
+        let missing = || BTreeMap::from([(item_id, vec!["77-poster.jpg".to_owned()])]);
+        let first_pass = Instant::now();
+        let mut repair_after = HashMap::new();
+        assert!(due_artwork_repairs(missing(), &mut repair_after, first_pass).is_empty());
+        assert_eq!(
+            repair_after.get(&item_id).copied(),
+            Some(first_pass + SOURCE_REPAIR_GRACE)
+        );
+
+        let after_grace = first_pass + SOURCE_REPAIR_GRACE + Duration::from_millis(1);
+        retain_recent_artwork_repairs(&mut repair_after, after_grace);
+        let due = due_artwork_repairs(missing(), &mut repair_after, after_grace);
+        assert_eq!(due.get(&item_id), Some(&vec!["77-poster.jpg".to_owned()]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_repair_validation_rejects_symlinks_and_oversized_outputs() {
+        let directory = tempfile::tempdir().expect("artwork directory");
+        let outside = tempfile::NamedTempFile::new().expect("outside artwork");
+        std::fs::write(outside.path(), b"outside bytes").expect("outside bytes");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("symlink.jpg"))
+            .expect("symlink output");
+        assert!(!valid_materialized_artwork(directory.path(), "symlink.jpg").await);
+
+        let oversized = std::fs::File::create(directory.path().join("oversized.jpg"))
+            .expect("oversized output");
+        oversized
+            .set_len(MAX_ARTWORK_BYTES + 1)
+            .expect("extend sparse artwork");
+        assert!(!valid_materialized_artwork(directory.path(), "oversized.jpg").await);
     }
 
     #[test]

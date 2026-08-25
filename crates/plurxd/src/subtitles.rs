@@ -207,12 +207,25 @@ enum Flight {
 /// cache is read again, under the lock, before anyone is allowed to own the
 /// work. (A failed extraction leaves neither, and the next request correctly
 /// retries it.)
-async fn enlist(cached: &Path) -> Flight {
+async fn valid_sidecar(cached: &Path, max_bytes: u64) -> bool {
+    let cached = cached.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&cached).ok()?;
+        let metadata = file.metadata().ok()?;
+        (metadata.is_file() && metadata.len() > 0 && metadata.len() <= max_bytes).then_some(())
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+async fn enlist(cached: &Path, max_bytes: u64) -> Flight {
     let mut active = extractions().lock().await;
     if let Some(flight) = active.get(cached) {
         return Flight::Join(Arc::clone(flight));
     }
-    if tokio::fs::metadata(cached).await.is_ok() {
+    if valid_sidecar(cached, max_bytes).await {
         return Flight::Published;
     }
     // Disk beats the memo: a published sidecar is the truth about a key, and
@@ -236,6 +249,68 @@ pub async fn ensure_vtt(dir: &Path, file: &MediaFile, index: i64) -> Result<Path
     .await
 }
 
+/// Return the complete sidecar bytes from the same no-follow handle that was
+/// bounded. HTTP consumers must use this instead of validating a pathname and
+/// reopening it, which would let a symlink/oversized replacement win between
+/// the two operations.
+pub async fn ensure_vtt_bytes(dir: &Path, file: &MediaFile, index: i64) -> Result<Vec<u8>, String> {
+    let path = ensure_vtt(dir, file, index).await?;
+    read_vtt_path(&path, MAX_SIDECAR_BYTES)
+        .await?
+        .ok_or_else(|| "published subtitle sidecar is no longer valid".to_owned())
+}
+
+/// Read a warm sidecar without launching extraction. Used by AVPlayer's
+/// short-deadline segmented subtitle route, where a cache miss must return an
+/// empty segment immediately and warm in the background.
+pub async fn read_cached_vtt(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Option<Vec<u8>>, String> {
+    read_vtt_path(&vtt_path(dir, file, index), MAX_SIDECAR_BYTES).await
+}
+
+async fn read_vtt_path(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
+    match plurx_core::fs_secure::read_bounded_regular(path, max_bytes).await {
+        Ok(bytes) if !bytes.is_empty() => Ok(Some(bytes)),
+        Ok(_) => Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(format!("reading subtitle sidecar: {error}")),
+    }
+}
+
+/// Hold the exact bounded subtitle inode for ffmpeg burn-in. The caller passes
+/// this descriptor through `/dev/fd/5`; later pathname replacement cannot
+/// change the bytes libass consumes.
+pub async fn ensure_vtt_file(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+) -> Result<std::fs::File, String> {
+    let path = ensure_vtt(dir, file, index).await?;
+    tokio::task::spawn_blocking(move || {
+        let handle = plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+            .map_err(|error| format!("opening subtitle sidecar: {error}"))?;
+        let metadata = handle
+            .metadata()
+            .map_err(|error| format!("reading subtitle sidecar metadata: {error}"))?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_SIDECAR_BYTES {
+            return Err("published subtitle sidecar is not a bounded regular file".to_owned());
+        }
+        Ok(handle)
+    })
+    .await
+    .map_err(|error| format!("subtitle sidecar open worker failed: {error}"))?
+}
+
 /// Start materialising a sidecar without holding the caller open.
 ///
 /// Native HLS uses this before returning an empty cold-cache segment. AVPlayer
@@ -245,7 +320,7 @@ pub async fn ensure_vtt(dir: &Path, file: &MediaFile, index: i64) -> Result<Path
 /// lets later segments pick up the finished captions.
 pub async fn warm_vtt(dir: &Path, file: &MediaFile, index: i64) {
     let cached = vtt_path(dir, file, index);
-    if tokio::fs::metadata(&cached).await.is_ok() {
+    if valid_sidecar(&cached, MAX_SIDECAR_BYTES).await {
         return;
     }
     if !warmups().lock().await.insert(cached.clone()) {
@@ -290,14 +365,17 @@ where
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
     let cached = vtt_path(dir, file, index);
-    if tokio::fs::metadata(&cached).await.is_ok() {
+    if valid_sidecar(&cached, limits.max_sidecar_bytes).await {
         return Ok(cached);
     }
 
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("creating subtitle cache: {e}"))?;
-    let (flight, owner) = match enlist(&cached).await {
+    let directory = plurx_core::fs_secure::SecureDirectory::open(dir)
+        .await
+        .map_err(|error| format!("opening subtitle cache: {error}"))?;
+    let (flight, owner) = match enlist(&cached, limits.max_sidecar_bytes).await {
         Flight::Published => return Ok(cached),
         // An in-flight extraction outranks the memo; a remembered failure
         // outranks starting the scan over again.
@@ -311,7 +389,6 @@ where
         let cached_for_task = cached.clone();
         let flight_for_task = Arc::clone(&flight);
         let file = file.clone();
-        let dir = dir.to_owned();
         tokio::spawn(async move {
             let started = std::time::Instant::now();
             tracing::info!(
@@ -319,9 +396,16 @@ where
                 index,
                 "extracting embedded text subtitle to the sidecar cache"
             );
-            let result =
-                publish_extraction(&dir, &cached_for_task, &tmp, &file, index, limits, extract)
-                    .await;
+            let result = publish_extraction(
+                &directory,
+                &cached_for_task,
+                &tmp,
+                &file,
+                index,
+                limits,
+                extract,
+            )
+            .await;
             match &result {
                 Ok(_) => {
                     tracing::info!(
@@ -383,7 +467,7 @@ async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), Str
 }
 
 async fn publish_extraction<F, Fut>(
-    dir: &Path,
+    directory: &plurx_core::fs_secure::SecureDirectory,
     cached: &Path,
     tmp: &Path,
     file: &MediaFile,
@@ -395,6 +479,14 @@ where
     F: FnOnce(PathBuf, MediaFile, i64) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
+    let cached_name = cached
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "subtitle cache path has no safe filename".to_owned())?;
+    let tmp_name = tmp
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "subtitle temp path has no safe filename".to_owned())?;
     // A timeout here rather than around the whole task: expiring drops the
     // extractor future (killing its child) while this frame still owns the
     // temp file and can delete it, so a wedge leaves the cache dir as clean as
@@ -410,33 +502,42 @@ where
             )),
         };
     if let Err(e) = extracted {
-        let _ = tokio::fs::remove_file(tmp).await;
+        let _ = directory.unlink_child(tmp_name).await;
         return Err(e);
     }
-    // Checked before the rename, so an oversized sidecar is never visible
-    // under its cache name: publishing it would commit the daemon to re-reading
-    // it for every segment request until the cache is trimmed.
-    let size = tokio::fs::metadata(tmp).await.map(|m| m.len()).unwrap_or(0);
-    if size > limits.max_sidecar_bytes {
-        let _ = tokio::fs::remove_file(tmp).await;
+    // Read through the held directory capability before publication, so an
+    // oversized or symlink-swapped temp file is never visible under its cache
+    // name: publishing it would commit the daemon to re-reading it for every
+    // segment request until the cache is trimmed.
+    let bytes = match directory
+        .read_bounded_child(tmp_name, limits.max_sidecar_bytes)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = directory.unlink_child(tmp_name).await;
+            return Err(format!("reading extracted subtitle sidecar: {error}"));
+        }
+    };
+    let size = bytes.len() as u64;
+    if size == 0 || size > limits.max_sidecar_bytes {
+        let _ = directory.unlink_child(tmp_name).await;
+        if size == 0 {
+            return Err("subtitle extraction produced an empty sidecar".to_owned());
+        }
         return Err(format!(
             "subtitle sidecar is {size} bytes, above the {} byte cap",
             limits.max_sidecar_bytes
         ));
     }
-    match tokio::fs::rename(&tmp, &cached).await {
-        Ok(()) => {}
-        // Two racing misses produce identical bytes. If the peer published
-        // first, its file is the answer and this temp is disposable.
-        Err(_) if tokio::fs::metadata(&cached).await.is_ok() => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(format!("publishing subtitle cache: {e}"));
-        }
+    if let Err(error) = directory.atomic_write_child(cached_name, &bytes).await {
+        let _ = directory.unlink_child(tmp_name).await;
+        return Err(format!("publishing subtitle cache: {error}"));
     }
-    prune(dir).await;
+    let _ = directory.unlink_child(tmp_name).await;
+    if let Some(dir) = cached.parent() {
+        prune(dir).await;
+    }
     Ok(cached.to_owned())
 }
 
@@ -582,6 +683,153 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn concurrent_invalid_sidecar_repair_cannot_remove_the_replacement() {
+        let dir = tempfile::tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        tokio::fs::write(&cached, vec![b'x'; 65])
+            .await
+            .expect("oversized stale sidecar");
+        let limits = ExtractionLimits {
+            max_sidecar_bytes: 64,
+            ..ExtractionLimits::default()
+        };
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let first = {
+            let dir = dir.path().to_owned();
+            let file = file.clone();
+            let runs = Arc::clone(&runs);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                ensure_vtt_bounded(&dir, &file, 0, limits, move |tmp, _, _| async move {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    let _permit = release.acquire().await.expect("release repair");
+                    tokio::fs::write(tmp, b"WEBVTT\n")
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+            })
+        };
+        started_rx.await.expect("repair started");
+        let second = {
+            let dir = dir.path().to_owned();
+            let file = file.clone();
+            let runs = Arc::clone(&runs);
+            tokio::spawn(async move {
+                ensure_vtt_bounded(&dir, &file, 0, limits, move |_, _, _| async move {
+                    runs.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                    Err("concurrent repair must join the owner".to_owned())
+                })
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        release.add_permits(1);
+        assert_eq!(
+            first.await.expect("first waiter").expect("first repair"),
+            cached
+        );
+        assert_eq!(
+            second.await.expect("second waiter").expect("joined repair"),
+            cached
+        );
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            tokio::fs::read(&cached).await.expect("published sidecar"),
+            b"WEBVTT\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_sidecar_reads_reject_a_symlink_replacement() {
+        let dir = tempfile::tempdir().expect("cache");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        std::fs::write(outside.path(), b"outside subtitle bytes").expect("outside bytes");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        tokio::fs::write(&cached, b"WEBVTT\n\noriginal\n")
+            .await
+            .expect("warm sidecar");
+        tokio::fs::remove_file(&cached)
+            .await
+            .expect("remove warm path");
+        std::os::unix::fs::symlink(outside.path(), &cached).expect("replace with symlink");
+
+        let observed = read_cached_vtt(dir.path(), &file, 0).await;
+        assert!(
+            !matches!(observed, Ok(Some(bytes)) if bytes == b"outside subtitle bytes"),
+            "the HTTP path must never follow a replacement sidecar symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn burn_in_keeps_the_exact_bounded_sidecar_handle() {
+        use std::io::{Read, Seek};
+
+        let dir = tempfile::tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        let original = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\noriginal\n";
+        tokio::fs::write(&cached, original)
+            .await
+            .expect("warm sidecar");
+        let mut held = ensure_vtt_file(dir.path(), &file, 0)
+            .await
+            .expect("held subtitle handle");
+        let replacement = dir.path().join("replacement.vtt");
+        tokio::fs::write(&replacement, b"WEBVTT\n\nreplacement\n")
+            .await
+            .expect("replacement bytes");
+        tokio::fs::rename(&replacement, &cached)
+            .await
+            .expect("replace sidecar path");
+
+        held.rewind().expect("rewind held sidecar");
+        let mut bytes = Vec::new();
+        held.read_to_end(&mut bytes).expect("read held sidecar");
+        assert_eq!(bytes, original);
+        assert_ne!(
+            tokio::fs::read(&cached).await.expect("replacement"),
+            original
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn extraction_never_publishes_a_symlink_swapped_temp_file() {
+        let dir = tempfile::tempdir().expect("cache");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        std::fs::write(outside.path(), b"WEBVTT\n\noutside\n").expect("outside bytes");
+        let file = media_file(dir.path().join("source.mkv"));
+        let outside_path = outside.path().to_owned();
+        let result = ensure_vtt_bounded(
+            dir.path(),
+            &file,
+            0,
+            ExtractionLimits::default(),
+            move |tmp, _, _| async move {
+                std::os::unix::fs::symlink(outside_path, tmp).map_err(|error| error.to_string())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(tokio::fs::symlink_metadata(vtt_path(dir.path(), &file, 0))
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(outside.path()).expect("outside survives"),
+            b"WEBVTT\n\noutside\n"
+        );
+    }
+
     /// Real time, deliberately: the bounds under test are injected small, so
     /// the suite proves them in milliseconds without a paused clock — which
     /// here would be a trap, since every task in this test parks in file IO
@@ -724,6 +972,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_empty_sidecar_is_rejected_and_negative_memoized() {
+        let dir = tempfile::tempdir().expect("cache");
+        let file = media_file(dir.path().join("source.mkv"));
+        let cached = vtt_path(dir.path(), &file, 0);
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let limits = ExtractionLimits {
+            negative_ttl: Duration::from_secs(60),
+            ..ExtractionLimits::default()
+        };
+
+        let runs_for_first = Arc::clone(&runs);
+        let why = ensure_vtt_bounded(dir.path(), &file, 0, limits, move |tmp, _, _| async move {
+            runs_for_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::fs::write(tmp, b"")
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect_err("an empty sidecar is not publishable");
+        assert!(why.contains("empty"), "the error identifies empty output");
+        assert!(!cached.exists(), "empty output must not be published");
+
+        let runs_for_repeat = Arc::clone(&runs);
+        let repeated =
+            ensure_vtt_bounded(dir.path(), &file, 0, limits, move |_, _, _| async move {
+                runs_for_repeat.fetch_add(100, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+        assert!(repeated.is_err(), "the negative memo suppresses a rescan");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        forget_failure(&cached).await;
+    }
+
     /// P2-4: the sidecar is re-read whole for every segment request, so a
     /// pathological track must be refused at publish — and refused the way any
     /// other failure is, leaving neither a cache entry nor a temp file.
@@ -785,7 +1068,7 @@ mod tests {
             "no flight is registered for a retired extraction"
         );
         assert!(
-            matches!(enlist(&cached).await, Flight::Published),
+            matches!(enlist(&cached, MAX_SIDECAR_BYTES).await, Flight::Published),
             "a published sidecar must never be re-owned"
         );
         assert!(
@@ -796,8 +1079,14 @@ mod tests {
         // The other two arms still work: an unpublished key is owned once and
         // joined thereafter.
         let missing = vtt_path(dir.path(), &file, 1);
-        assert!(matches!(enlist(&missing).await, Flight::Own(_)));
-        assert!(matches!(enlist(&missing).await, Flight::Join(_)));
+        assert!(matches!(
+            enlist(&missing, MAX_SIDECAR_BYTES).await,
+            Flight::Own(_)
+        ));
+        assert!(matches!(
+            enlist(&missing, MAX_SIDECAR_BYTES).await,
+            Flight::Join(_)
+        ));
         extractions().lock().await.remove(&missing);
     }
 }

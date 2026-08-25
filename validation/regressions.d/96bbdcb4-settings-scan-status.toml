@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["96bbdcb4"]
+points = ["cluster.page-reads", "server.api", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The retained paused-time Rust regression drives the authority-read retry boundary directly and proves that one replicated-store timeout is retried exactly once while a non-timeout error is returned without retry. The shipped Settings regression compares a node-local scan timeout with durable last-scan history, hides only a superseded failure, preserves newer and live failures, and pins the same projection in the initial render and polling paths."

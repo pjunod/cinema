@@ -18,6 +18,11 @@ data class Server(
 )
 
 @Serializable
+data class ClusterIngress(
+    val node_urls: List<String> = emptyList(),
+)
+
+@Serializable
 data class LoginReq(
     val username: String,
     val password: String,

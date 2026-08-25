@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0b8e03f6"]
+points = ["core.media", "persistence.upgrades"]
+checks = ["rust-gate"]
+reason = "`rendition_plan_contract_runs_through_dyn_store` runs the whole contract against both durable backends: a missing plan reads as None, the first write under a key reports that it stored, a second write under that key reports that it did not and the first plan is still what reads back, a resized file and a repiped source both stop matching, and forgetting one file's plans leaves another file's alone. A backend that upserted -- the shape every other node-local table here uses -- fails on the second write and again on the re-read. `a_truncated_blob_is_an_error_rather_than_a_short_plan` requires a partial blob to refuse rather than yield a plan that stops partway through a film. `a_plan_from_another_version_is_a_miss_not_a_misread` requires a version mismatch to miss rather than unpack under this binary's layout. `sidecar_v4_keeps_everything_it_has_across_the_v5_upgrade` starts at v4 -- not v1, which is how the v4 bump dropped a v3 sidecar's priors unnoticed -- and requires both the priors and the fragment index to survive; `populated_v14_sqlite_import_has_exact_three_voter_parity` covers the SQLite side, with the new table modelled in the v14 downgrade fixture so it is a real upgrade path rather than a current-schema database wearing an old version."

@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P2 delivered; P3 is next ·
+**Status:** P0–P8 delivered ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`
@@ -332,6 +332,7 @@ CREATE TABLE pretranscode_jobs (
                           state IN ('queued', 'running', 'ready', 'failed',
                                     'cancelled')),
     owner_node_id     TEXT,
+    staging_node_id   TEXT,
     fence             INTEGER NOT NULL DEFAULT 0,
     lease_expires_ms  INTEGER,
     attempts          INTEGER NOT NULL DEFAULT 0,
@@ -339,12 +340,21 @@ CREATE TABLE pretranscode_jobs (
     last_error_code   TEXT,
     recipe_hash       TEXT,
     storage_id        TEXT,
+    relative_dir      TEXT,
+    manifest_digest   TEXT,
     created_at_ms     INTEGER NOT NULL,
     updated_at_ms     INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX pretranscode_jobs_due
-    ON pretranscode_jobs(state, not_before_ms, priority, created_at_ms);
+    ON pretranscode_jobs(
+        state, not_before_ms, priority DESC, created_at_ms, id);
+
+CREATE INDEX pretranscode_jobs_dedupe
+    ON pretranscode_jobs(dedupe_key, state);
+
+CREATE INDEX pretranscode_jobs_staging
+    ON pretranscode_jobs(staging_node_id, state, id);
 
 CREATE UNIQUE INDEX pretranscode_jobs_active
     ON pretranscode_jobs(dedupe_key)
@@ -352,6 +362,12 @@ CREATE UNIQUE INDEX pretranscode_jobs_active
 ```
 
 `dedupe_key` covers file id · size · mtime · target height · policy generation.
+Policy generation hashes the cache recipe/output-contract version plus the
+cluster-wide requested encoder, rate-control, audio language, subtitle
+language, and subtitle-mode policy snapshot. Language aliases are normalized.
+A mutable policy change therefore creates new work instead of letting a ready
+row for obsolete bytes suppress it, while a spelling-only language change or
+a different scheduler node's local hardware does not invent a new generation.
 The worker still builds the canonical node-local `Recipe` immediately before
 claiming cache output; the queue is scheduling identity, not byte identity.
 Track selection and validated effective rate control continue through the
@@ -370,12 +386,32 @@ candidate generation may create a new active row for the same dedupe key.
 Eviction therefore rewarms, while the partial unique index still prevents two
 active copies.
 
+Production decoder capability comes from the boot-time `ffmpeg -decoders`
+inventory, encoder and tone-map facts come from the existing behavioral boot
+probes, and scratch capacity is the cache filesystem's current available bytes
+minus a 512 MiB emergency reserve. Candidate scratch is the full-title peak
+ladder estimate plus 64 MiB generation overhead, never zero. Dolby Vision is
+not queued under the ordinary HDR bit; it remains on the live path until the
+claim contract can name the RPU renderer proof.
+
+Queue retention is bounded: admission stops at 4,096 active or 10,000 total
+rows, every enqueue prunes up to 512 ready generations whose complete local
+location is gone, and only the newest 4,096 failed/cancelled dedupe tombstones
+are retained. Terminal transitions clear capability/policy and staging
+payloads while retaining the dedupe/source identity needed for suppression.
+Claim scans use bounded 128-row keyset pages, so incompatible
+high-priority work cannot hide a compatible lower row.
+
 ### 5.2 Queue claims allocate their own fence atomically
 
 `claim_pretranscode_job(node, capabilities, now)` moves one due row to running,
 increments its fence, and returns its immutable source snapshot. Renew,
-complete, yield, and fail compare id · owner · fence in their update. Staging
-and final directories include the job fence/generation. The worker completes
+complete, yield, and fail compare id · owner · fence in their update. Node-local
+source-open failures yield without attempts and enter a bounded process-local
+claim exclusion; they never make a replicated path look mounted on every node,
+and they do not prevent another worker claiming immediately. Node-local
+staging uses a job-stable identity so the same node can resume numbered parts;
+the final directory includes the job fence/generation. The worker completes
 the filesystem rename first, then one fenced transaction publishes that exact
 generation's cache-location row and completes the job. An expired worker may
 leave unreferenced bytes, but cannot replace an authoritative URI or publish a
@@ -386,6 +422,13 @@ complete cache location plus `state='ready'`, `recipe_hash`, and `storage_id`.
 A successor checks for that canonical result before encoding. No state may say
 ready without a complete location or running after its own completed location
 was accepted.
+
+The process-local cache ownership registry pins both a reused recipe and a
+newly renamed queue generation until that transaction finishes. Housekeeping
+therefore cannot delete bytes in either publication gap. The nullable
+authoritative manifest digest lives on the cache location itself and is
+written in the same fenced transaction; cache start compares the loaded
+manifest to that digest. Null is the explicit legacy-cache path.
 
 Completion also writes an immutable generation manifest containing format
 version, generation id, object count, ordered names/sizes/digests, and one
@@ -554,10 +597,13 @@ CREATE TABLE media_session_requests (
     request_id          TEXT NOT NULL CHECK (
                             length(request_id) BETWEEN 1 AND 128),
     request_fingerprint TEXT NOT NULL,
+    playback_id         TEXT NOT NULL CHECK (
+                            length(playback_id) BETWEEN 1 AND 128),
     state               TEXT NOT NULL CHECK (
                             state IN ('starting', 'resolved', 'failed')),
     claim_expires_at_ms INTEGER NOT NULL,
-    incarnation_id      TEXT,
+    incarnation_id      TEXT NOT NULL,
+    owner_node_id       TEXT,
     response_json       TEXT,
     updated_at_ms       INTEGER NOT NULL,
     PRIMARY KEY (user_id, request_id)
@@ -579,10 +625,16 @@ CREATE TABLE media_playback_pointers (
 An identical request retry waits only to the bounded claim deadline and then
 returns the persisted, versioned normalized response or safely recovers the
 same incarnation. A fingerprint conflict retains the current conflict error.
-A missing request id remains a fresh, non-idempotent attempt, matching today's
-POST and deprecated GET bridge; it skips `media_session_requests` but still
-uses user-scoped playback supersession. Requiring request ids waits for a
-versioned public API and migrated clients.
+A missing public request id remains a fresh, non-idempotent attempt, matching
+today's POST and deprecated GET bridge. The server still claims its random
+incarnation as an internal request id before worker allocation, so ordinary
+creates cannot bypass per-user admission; only caller-visible replay semantics
+remain absent. Requiring public request ids waits for a versioned API and
+migrated clients.
+The durable fingerprint is scoped by immutable `user_id` plus the byte- and
+timeline-affecting request intent. The mutable display username is deliberately
+excluded, so renaming an account cannot turn a retry into a conflict; the
+legacy process-local retry map keeps its established username scope.
 A request is normalized and length-checked before any consensus write. Limit
 each user to 32 in-flight claims and 64 current/starting incarnations, with an
 explicit stable overload error. Prune abandoned `starting` rows after their
@@ -590,11 +642,38 @@ claim deadline plus recovery window, failed rows after one hour, resolved rows
 after the 24-hour retry window, and obsolete playback pointers with their ended
 incarnations. Rate/spam tests assert bounded rows and WAL under endlessly
 unique authenticated ids.
+Claim recovery CASes the exact expired `starting` row before returning
+`InFlight`; it does not depend on that row landing inside a globally bounded
+maintenance page. Failed and expired attempts apply the same in-flight,
+current-session, and retained-session admission bounds on both backends.
+A replacement for the exact current `(user_id, playback_id)` discounts that
+one predecessor from the 64-current check during both first claim and expired
+claim recovery. Activation repeats the same exclusion inside its transaction,
+so a user at the cap may replace one stream but cannot grow to 65.
 A new request for the same user/playback atomically changes the pointer and
 ends the predecessor. Two users may use the same playback id without sharing
-state. The selected worker receives no user bearer; the signed internal
-request carries only the already-authorized user id and resolves the current
-display name from replicated user state.
+state. A stall reopen additionally compares the pointer with the exact durable
+predecessor it named; a rolling-upgrade reopen of a process-local legacy
+session compares against an absent pointer, so either form loses rather than
+superseding a newer start. The selected worker receives no user bearer; the
+signed internal request carries only the already-authorized user id and
+resolves the current display name from replicated user state.
+
+Cluster starts serialize replacement by immutable `user_id` plus playback id
+through a bounded process-local gate. The gate covers predecessor reap, worker
+start, durable activation, local lease seeding, and any commit-unknown
+reconciliation; it is released only after the exact worker is accepted or
+aborted. This still reaps the old local worker before admission, which lets a
+one-slot encoder replace itself without deadlocking. A racing replacement may
+wait at most three seconds for that gate and must still be inside the caller's
+common placement deadline before it can reap anything. The worker carries that
+deadline through request claim recovery and normalization, then checks it again
+immediately before either transcode or copy-video predecessor reap. Session-map
+and child-transition acquisition use that same deadline, with a final check
+under both retirement locks before the predecessor is marked retired. The
+activation and its cleanup guard run in an owned task, so client disconnects,
+placement deadlines, renames, and racing starts cannot strand an encoder or
+publish a route to a worker another attempt already killed.
 
 ## 7. Owner proxy and takeover — the capability URL stays stable
 
@@ -626,6 +705,12 @@ CREATE TABLE media_sessions (
 
 CREATE INDEX media_sessions_owner
     ON media_sessions(owner_node_id, state, lease_expires_at_ms);
+CREATE INDEX media_sessions_user
+    ON media_sessions(user_id, state, lease_expires_at_ms);
+CREATE INDEX media_sessions_expiry
+    ON media_sessions(state, lease_expires_at_ms, incarnation_id);
+CREATE INDEX media_sessions_retention
+    ON media_sessions(state, updated_at_ms, incarnation_id);
 ```
 
 The server never reuses an incarnation id. After the request-retry window and
@@ -651,14 +736,30 @@ explicit wire decision.
 ### 7.2 Proxy first; redirects wait for clients that carry node lists
 
 An external playlist, segment, subtitle, status, or delete request checks the
-local session map, then a bounded in-memory `session_id → owner/epoch` routing
-cache populated at creation or the first owner lookup. Ordinary playlist and
-segment requests use that cache without reading Raft. TTL expiry,
+local session map, then a fixed 4,096-entry in-memory
+`session_id → active owner/epoch or miss` routing cache populated at creation
+or the first owner lookup. Its 32 deterministic query shards single-flight the
+same capability and bound concurrent Store reads during random-capability
+spray; one three-second deadline covers cache admission, shard admission,
+the Store read, and cache publication. A fixed generation table prevents a
+read begun before activation or fencing from publishing afterward, even when
+the one-second cache entry has expired or been evicted. Both active and negative
+answers expire after one second, and activation immediately overwrites a
+cached miss. Ordinary playlist and segment requests use that cache without
+reading Raft. TTL expiry,
 `wrong_owner`, lease-expired, and takeover notifications trigger one consistent
 owner-row repair before retry. The ingress streams the signed peer response,
 preserving status · content type · content length · range semantics · ETag ·
 cache control. Do not buffer a segment in memory and do not expose an internal
 address to the client.
+
+Missing, terminal, and expired rows enter the cache only as negative answers;
+ending or superseding a route overwrites any local positive entry immediately.
+Another ingress that already validated the random bearer
+capability may finish authorizing from that entry only until its one-second
+monotonic TTL expires; owner fencing and best-effort exact worker abort run in
+parallel. This bounded media-capability revocation window is explicit and does
+not apply to household token/API-key authorization, which remains immediate.
 
 These are typed proxies, not a general header tunnel. Requests allow only the
 route's Range and conditional headers; responses allow only the documented
@@ -669,12 +770,17 @@ method, normalized path, query, body digest, timestamp, and nonce. Tests send
 forbidden headers and secrets and assert that neither peer requests nor logs
 contain them.
 
-P5 also removes raw capability/session ids from daemon logs, traces, metrics,
-and peer diagnostics. Those surfaces use a non-secret correlation id or keyed
-digest; tests assert that neither a full capability URL nor its raw session id
-appears on success, error, proxy, delete, or drain paths.
+P5 also removes raw capability/session ids from structured daemon telemetry and
+HTTP trace targets. Those surfaces use a non-secret one-way correlation value,
+and ffmpeg receives an independent scratch-directory id rather than the bearer
+UUID. Captured command and stderr fixtures prove that their emitted messages
+replace both a raw UUID and a complete capability URL before logging; static
+use coverage retains the correlation helper on the other session log fields.
 
-DELETE first calls `end_session` on the authoritative state machine. That CAS
+DELETE first performs the same bounded active-route admission as every other
+capability path, so random UUIDs are served from the negative cache instead of
+amplifying writes. An admitted capability then calls `end_session` on the
+authoritative state machine. That CAS
 marks the incarnation ended and invalidates renewal/takeover before returning;
 stopping the observed worker is best-effort cleanup. Repeated deletes are
 idempotent, and a delete racing takeover resolves to ended without a replacement
@@ -859,6 +965,60 @@ a corrupt requested object without an offer-time full walk; one live start preem
 speculative work inside five seconds; the resulting local cache hit starts
 with no ffmpeg child.
 
+**Delivered:** SQLite v24 and replicated schema v9 add the bounded
+`pretranscode_jobs` queue. The existing `candidate:pretranscode` singleton now
+does only immutable source ranking and fenced enqueue; every voter
+independently claims the highest-priority row its decoder, encoder family, HLS
+contract, tone-map, output-grade, and scratch capabilities satisfy. The
+generation key includes normalized audio/subtitle preferences as well as the
+requested encoder and rate-control policy. Job leases last 30 s and renew every
+10 s; an in-flight renewal is raced against the exact local expiry and
+self-fences if consensus has not answered in time or its response arrives on
+the deadline. Each claimant opens/stats the immutable source snapshot before
+ffmpeg; an unreadable mount is a bounded node-local refusal, not a global
+failure attempt. Claim takeover advances a row-local fence, completion checks
+the exact source generation and fence, and the ready state plus node-local
+cache location commit in one transaction.
+
+Yielded work keeps a job-stable staging identity on its current node, so the
+existing numbered-part checkpoint resumes there. A different node that takes
+over receives the durable staging identity but starts from zero because the
+bytes never travelled; its final generation path includes the new fence. Queue
+staging is now part of cache housekeeping's fail-closed ownership inventory,
+so a sweep neither deletes live checkpoints nor preserves a predecessor's
+abandoned copy after takeover. Queue-shaped staging and final paths are
+reconciled from the authoritative queue inventory even after a restart with an
+empty cache-location inventory. Publication holds both recipe-eviction and
+final-path guards through fenced completion. Empty queue polls only remeasure
+free space and attempt a cheap claim; producer-enabled nodes separately
+rate-limit one bounded local cache sweep to every 15 minutes even when the
+queue stays empty, while the normal cleanup schedule remains a backstop.
+Source deletion cancels active rows, and local
+eviction makes a formerly ready dedupe key eligible again. Missing ready
+locations and old terminal history are pruned under the singleton enqueue
+fence, with hard active/total admission ceilings.
+
+Every new distributed generation carries a bounded authenticated object
+manifest. Cache offer/start reads only that small file; playlist and segment
+handlers authenticate the exact bytes or file handle they return. Scheduled
+housekeeping rotates presence heartbeats through at most 128 locations and
+deep-verifies as many as 4,096 objects under one 132 MiB plus two-byte
+EOF-probe physical-read ceiling and a two-second wall-clock ceiling. It
+durably sorts the location that consumed deep I/O behind presence-only peers,
+so one maximum-sized object cannot monopolize later passes. It persists object cursors in
+one backend batch, yields between objects when playback arrives, and removes
+only the exact corrupt location before orphan cleanup may touch its bytes.
+Unsafe relative paths are invalidated without filesystem deletion. Offline
+leases fail coherently when their exact authoritative generation is removed;
+a stale reader cannot fail a package after a replacement wins the location
+race. The fenced digest is stored with the cache location, so replacing both
+bytes and their self-declared manifest cannot manufacture a valid generation.
+Legacy local cache entries remain readable without a manifest. Production
+still uses the shipped background admission lane, five-second live handoff,
+track/recipe selection, stop control, and cached-session path with no child
+process. Shared cache, remote offers, and live placement remain deferred to
+P4–P6.
+
 ### 8.5 P4 — publish media snapshots and bounded offers
 
 After PR #420, refactor its peer client into a shared authenticated transport,
@@ -870,10 +1030,37 @@ peer cannot exceed the 200 ms offer budget · heterogeneous fixtures reject an
 incapable idle node and prefer a byte-verified cache holder · scratch-full,
 stale-source, and saturated-egress nodes do not win.
 
+**Delivered:** voter requests now bind sender, target, timestamp, random nonce,
+method, normalized route, and raw-body digest to the durable node key; a
+bounded per-sender window rejects replay of an already accepted signed nonce
+without conflating identical concurrent requests. The daemon polls
+privacy-safe capability snapshots every ten seconds, gives each response only
+the remainder of its signed fifteen-second lifetime, and collects only reachable
+peers immediately under one common bounded transport deadline, so failed early
+peers cannot starve a healthy later voter. Successful snapshots are marked
+`Cache-Control: private, no-store`. The daemon shortlists heterogeneous peers
+from memory and collects non-reserving offers under one common 200 ms deadline.
+Admin diagnostics expose the directory and ranked reasons, while the live start
+path remains unchanged. A cache advantage requires the exact complete
+generation's fenced manifest and verified VOD playlist. Cache scratch capacity
+is sampled by one non-accumulating background OS worker and expires fail-closed,
+keeping a hard cache mount and an indefinitely stale positive result out of the
+async offer deadline. When a reachable remote candidate exists, tracked child
+processes refresh command-safe absolute projections of both absolute and
+cwd-relative library roots under one common deadline. Probing `root/.` forces
+command-line symlinks to resolve to directories. A timed-out probe is signalled
+but remains registered until the OS confirms exit; the fixed global process
+bound reserves one complete configured generation beyond the root limit, so
+one retired generation cannot block its replacement. Offer
+fan-out consults only that age-limited signal, replicated media facts, recent
+file availability, local capacity, and local cache bytes, so an offer never
+opens a candidate source path. Requested audio and subtitle indices must exist
+in the exact replicated file snapshot before a node can answer eligible.
+
 ### 8.6 P5 — place and proxy new HLS sessions
 
 Add cluster-wide session idempotency, remote start, owner lookup, and streamed
-playlist/segment/status/delete proxying. Implement the bounded two-second
+playlist/segment/status/delete proxying. Implement the bounded three-second
 per-owner batch that renews session liveness; it need not publish takeover
 frontiers yet. Keep failover disabled: an owner that actually expires still
 produces the existing terminal error until §8.8. At drain start, a node stops
@@ -891,6 +1078,38 @@ bounded; forbidden proxy headers and raw capability ids never cross or enter
 logs; authoritative delete wins against a concurrent
 start and reaches the worker; healthy sessions remain live beyond the lease;
 a draining node receives no starts and cannot be removed while it owns one.
+
+**Delivered:** new HLS sessions rank eligible offers, start locally or through
+exact-auth peer control, activate one durable owner, and stream typed relay
+responses through any ingress. Twelve-second owner leases renew in bounded
+parallel batches; work without the complete renewal window and every
+commit-unknown result self-fence the exact worker. Stale durable settlement is
+deduplicated and capped, and removed or exhausted Hiqlite lease owners cannot
+activate through a retained row. Public and peer starts share one bounded wire
+contract; local and remote worker responses pass the same validation. All
+placement, owner-assignment, activation, reconciliation, lookup, and renewal
+waits have explicit deadlines, and the remote worker's activation watcher
+strictly outlives the complete ingress timeline. Fenced workers stop renewing
+even while child teardown waits on a transition lock. SQLite route/inventory
+lookups use the read pool, while active/negative route caching bounds Hiqlite
+read pressure. Stale-session settlement attempts also time out and release
+their in-flight tracking state into the same fixed 64-slot retry boundary.
+Failed attempts use a 30-second exponential backoff capped at five minutes,
+and retry state is retained only while the durable route remains visible. This
+allows an idempotent later retry after an unknown commit result without queuing
+another uncancellable Store operation on every three-second lease tick. A due
+retry converts its exact retained slot back to in-flight before any fresh stale
+row is admitted, so route ordering cannot expand the shared boundary.
+
+Remote placement remains an explicit cluster-wide opt-in. An admin enables it
+with `PUT /api/v1/settings` and
+`{"cluster_media_pool_enabled": true}`; the write is refused until every
+committed voter is reachable with a fresh current-protocol snapshot, while
+disabling always succeeds. `GET /api/v1/cluster/media` reports
+`remote_placement_enabled`, `remote_placement_rollout_ready`, and
+`remote_placement_ready` separately so operators can distinguish policy from
+rollout health. Every actual start rechecks both the replicated setting and
+the all-voter gate.
 
 ### 8.7 P6 — add verified shared-cache roots as an optional fast path
 
@@ -911,6 +1130,17 @@ offline package/download pins also prevent deletion; pin acquisition racing GC
 has one winner; loss after startup disables shared classification; rolling
 rollback ignores node-local keys safely.
 
+**Delivered:** SQLite v26 and replicated schema v11 add storage/generation
+identity, verified storage membership, and typed consumer pins while retaining
+the legacy producer key for rolling writes. Every voter proves a configured
+mount with an authenticated two-way canary before direct reads or portable
+publication; manifest-fenced local generations remain ready if that copy fails.
+Media-session owner renewals extend exact pins, supersession/end/maintenance
+release them, offline package and download lifecycles pin transactionally, and
+lease-fenced GC serializes retirement against pin acquisition. Runtime shared
+I/O or integrity loss marks membership suspect and returns routing to verified
+node-local holders until a later canary succeeds.
+
 ### 8.8 P7 — implement web session takeover
 
 Extend the existing owner-liveness batch with frontiers/sequence state,
@@ -927,6 +1157,63 @@ old disk disappears. An incapable survivor cannot claim; delete racing takeover
 leaves no replacement child; 80 concurrent sessions stay within the named Raft
 budget.
 
+**Delivered:** owner renewals now publish bounded monotone produced, fetched,
+and next-sequence frontiers. Expired active routes remain recoverable for one
+minute and eligible survivors start a bounded-overlap provisional worker before
+an exact owner/epoch/lease CAS advances the fence. The winner retains the
+stable public session bearer, starts at the next unused segment sequence, uses
+a generation-specific fMP4 map, and publishes exactly one HLS discontinuity;
+losers stop their provisional workers. The separately gated rollout is off by
+default, requires effective P5 placement readiness, and disabling placement
+also disables takeover. Direct-play range delivery remains stateless through a
+healthy ingress.
+
+**Not delivered, and not claimed:** the ten-second budget above. Detection
+cannot begin before the owner's lease expires, and P5 shipped
+`LEASE_TTL_MS = 12_000` / `LEASE_INTERVAL = 3 s` rather than the 6 s/2 s §4.4
+specifies. Abrupt owner loss is therefore observed 9–12 s later, before any
+takeover work starts; add the two-second contest tick and the eight-second
+takeover deadline and the floor is above ten seconds by construction. P7 does
+not retune those constants — they govern every fenced singleton, not just
+media sessions, and moving them belongs with a measurement rather than with
+this milestone, which is operations and client consumption rather than lease
+tuning. It is the one acceptance clause this plan leaves open: either §4.4's
+values are adopted and measured, or §8.8's number is amended to the one the
+constants permit. Nothing else in P0-P8 depends on which.
+
+Four implementation facts the contract above does not fix, recorded because
+they constrain anything built on top:
+
+- **The epoch sequence range is a million wide, and bounded.** "Starts
+  numbering at the replicated `media_sequence`" is a floor, not the value: the
+  successor starts at `max(media_sequence, owner_epoch × 1,000,000)`, so no
+  epoch can name a URI another epoch used even for segments the expired owner
+  produced after its last successful heartbeat. The ceiling is ffmpeg's — the
+  HLS muxer carries the segment number through a C `int`, so a floor above
+  `i32::MAX` is truncated into a negative filename that nothing will serve.
+  A takeover whose floor would cross that line is refused rather than
+  published.
+- **A generation-specific init object is `init-e{epoch}.mp4`.** Epoch 1 keeps
+  the historical `init.mp4`, so no existing URL changes meaning. Every
+  filename allowlist, exact-codec probe, and Apple tier rewrite recognises the
+  generation form, because a URI advertised in `EXT-X-MAP` that the serving
+  path will not return is worse than no failover at all.
+- **A session a successor may republish serves the typeless sliding shape from
+  its first response.** A replacement playlist renumbers and drops the
+  predecessor's prefix, which RFC 8216 §6.2.1 forbids an EVENT playlist from
+  doing. Changing shape at failover would break the invariant on exactly the
+  client the acceptance corpus ends with, so the shape is chosen once, at
+  creation, from whether takeover is enabled — and recorded on the recipe, so
+  a session that predates the switch being turned on is refused a takeover
+  rather than having its semantics changed underneath a running player.
+- **A successor overlaps one whole segment of its own shape, not a fixed
+  margin.** `fetched_through_ms` advances to a segment's end when the client
+  *requests* it, so an owner lost mid-response has published a frontier ahead
+  of what the viewer holds — by up to `COPY_SEGMENT_MAX_SECS` on a remux. The
+  overlap is that segment plus two seconds; the cost is media the viewer sees
+  twice across the discontinuity, which is the right side of the trade against
+  media nothing ever produces.
+
 ### 8.9 P8 — finish operations and native-client consumption
 
 Add load-balancer/keepalived/Kubernetes routing examples, cluster media status,
@@ -938,6 +1225,31 @@ codec-compatibility fallback ladders.
 **Acceptance:** PR CI plus the named physical-device corpus passes; one-voter
 mode retains the same routes and no peer polling; an operator can explain every
 placement, proxy, queue, fence rejection, and takeover from Settings/metrics.
+
+**Delivered:** `GET /api/v1/cluster/ingress` publishes at most eight reachable
+node-specific origins to a signed-in caller. It is its own route rather than a
+field on `/api/v1/server` because that endpoint is what a client uses to
+identify a server it has not decided to trust — it is probed without a
+credential, and the cluster's topology is not something an anonymous prober
+should enumerate. Apple and Android retry the unchanged media path through
+those origins on an explicit transport-failure allowlist, without moving the
+account origin and without consuming a codec/HDR fallback; a candidate whose
+scheme is weaker than the session's own is refused, because the account
+credential travels with the retry. Cluster media diagnostics expose
+placement/takeover policy, effective readiness, active local sessions, and
+per-node capacity snapshots; takeover outcome counters and duration histograms
+are exported to Prometheus. Concrete HAProxy, keepalived, and Kubernetes
+routing examples use `/readyz`, and the operations runbook defines sticky
+routing, one-voter drain/re-admit, permanent-leave separation, and the exact
+backup/restore boundary.
+
+**Not delivered:** the acceptance sentence's Settings surface — the operator
+reads placement, takeover and fence outcomes from the admin
+`/api/v1/cluster/media` JSON and from `/metrics`, not from the web UI. The
+named physical-device corpus and the eighty-session Raft budget remain
+unmeasured here; both need hardware this milestone did not run on. And
+`local_active_sessions` counts transcode and remux sessions only, so it is a
+drain signal for those and not for direct play.
 
 ## 9. Failure behavior — degraded must remain correct
 
@@ -1005,8 +1317,8 @@ Configuration introduced by this plan:
 |---|---|---|---|
 | `cluster.media_pool_enabled` | replicated policy | `0` | Enable remote offer selection and start forwarding after every voter is compatible |
 | `cluster.session_takeover_enabled` | replicated policy | `0` | Enable owner lease expiry and replacement generation after the failover corpus passes |
-| `cluster.shared_cache_dir` | node-local TOML | empty | Optional completed-cache root mounted on multiple nodes |
-| `cluster.shared_cache_id` | node-local TOML | empty | Operator-chosen identity confirmed by the two-way canary; same path text is insufficient |
+| `cluster.shared_cache_dir` | node-local config | empty | Optional completed-cache root mounted on multiple nodes; `PLURX_SHARED_CACHE_DIR` is the environment equivalent |
+| `cluster.shared_cache_id` | node-local config | empty | Operator-chosen identity confirmed by the two-way canary; `PLURX_SHARED_CACHE_ID` is the environment equivalent and same path text is insufficient |
 
 Shared paths remain node-local configuration; secrets and filesystem layout
 never enter replicated settings.

@@ -458,11 +458,7 @@ impl TmdbClient {
         // once per poster and once per backdrop, so it absorbs the bulk of a
         // scan's requests and is where a rate limit lands first.
         let resp = self.send_with_retry(|| self.http.get(&url)).await?;
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| MetadataError::Http(e.to_string()))?;
-        Ok(bytes.to_vec())
+        super::bounded_artwork_response(resp).await
     }
 }
 

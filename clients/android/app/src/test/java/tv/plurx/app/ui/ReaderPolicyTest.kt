@@ -22,8 +22,12 @@ class ReaderPolicyTest {
         assertFalse(checkNotNull(shell).contains("bearer"))
 
         val script = NativeReaderHandoff.startScript("bearer\"\\line", 9, 90)
-        assertEquals("window.startNativeReader(\"bearer\\\"\\\\line\",9,90);", script)
+        assertEquals("window.startNativeReader(\"bearer\\\"\\\\line\",\"9\",\"90\");", script)
         assertNotNull(script)
+        assertEquals(
+            "window.startNativeReader(\"bearer\",\"${Long.MAX_VALUE}\",\"${Long.MAX_VALUE}\");",
+            NativeReaderHandoff.startScript("bearer", Long.MAX_VALUE, Long.MAX_VALUE),
+        )
     }
 
     @Test

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cd674760"]
+points = ["core.media", "cluster.auth", "cluster.page-reads"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained replicated Store contracts bootstrap independent Hiqlite handles on one current schema and reject reapplying the v10-to-v11 shared-cache ALTER statements."

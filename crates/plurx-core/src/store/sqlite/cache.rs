@@ -9,14 +9,15 @@ use async_trait::async_trait;
 use rusqlite::{params, OptionalExtension};
 
 use super::SqliteStore;
-use crate::domain::CachedTranscode;
+use crate::domain::{CacheManifestCheck, CachedTranscode};
 use crate::error::StoreError;
 use crate::store::TranscodeCacheStore;
 
 /// The columns a [`CachedTranscode`] is built from, in order. One list so a
 /// query and its row-reader cannot drift.
 const CACHE_COLS: &str = "l.recipe_hash, r.file_id, l.storage_class, \
-                          l.relative_dir, l.bytes, l.complete, l.last_used_at";
+                          l.relative_dir, l.bytes, l.complete, l.manifest_digest, \
+                          l.scrub_object_index, l.last_used_at";
 
 fn cache_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedTranscode> {
     Ok(CachedTranscode {
@@ -26,7 +27,9 @@ fn cache_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedTranscode> 
         relative_dir: row.get(3)?,
         bytes: row.get(4)?,
         complete: row.get::<_, i64>(5)? != 0,
-        last_used_at: row.get(6)?,
+        manifest_digest: row.get(6)?,
+        scrub_object_index: row.get(7)?,
+        last_used_at: row.get(8)?,
     })
 }
 
@@ -183,6 +186,79 @@ impl TranscodeCacheStore for SqliteStore {
         .await
     }
 
+    async fn cache_manifest_candidates(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CachedTranscode>, StoreError> {
+        let node = node_id.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {CACHE_COLS}
+                 FROM transcode_cache_locations l
+                 JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
+                 WHERE l.node_id = ?1 AND l.storage_class = 'local'
+                   AND l.complete = 1 AND l.manifest_digest IS NOT NULL
+                 ORDER BY l.last_seen_at ASC, l.rowid ASC
+                 LIMIT ?2"
+            ))?;
+            let rows = stmt
+                .query_map(params![node, limit], cache_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn mark_cache_manifests_checked(
+        &self,
+        checks: &[CacheManifestCheck],
+    ) -> Result<usize, StoreError> {
+        if checks.len() > 128
+            || checks.iter().any(|check| {
+                check.recipe_hash.is_empty()
+                    || check.node_id.is_empty()
+                    || check.storage_class.is_empty()
+                    || check.relative_dir.is_empty()
+                    || check.manifest_digest.len() != 64
+                    || check.next_object_index < 0
+                    || check.observed_at < 0
+            })
+        {
+            return Err(StoreError::Task(
+                "invalid cache manifest cursor batch".to_owned(),
+            ));
+        }
+        if checks.is_empty() {
+            return Ok(0);
+        }
+        let checks = checks.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0usize;
+            for check in checks {
+                changed += tx.execute(
+                    "UPDATE transcode_cache_locations
+                        SET last_seen_at = ?7, scrub_object_index = ?6
+                       WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3
+                         AND relative_dir = ?4 AND manifest_digest = ?5 AND complete = 1",
+                    params![
+                        check.recipe_hash,
+                        check.node_id,
+                        check.storage_class,
+                        check.relative_dir,
+                        check.manifest_digest,
+                        check.next_object_index,
+                        check.observed_at,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+        .await
+    }
+
     async fn stale_cache_claims(
         &self,
         node_id: &str,
@@ -204,7 +280,9 @@ impl TranscodeCacheStore for SqliteStore {
                        WHERE p.file_id = r.file_id
                          AND p.node_id = l.node_id
                          AND p.state IN ('queued', 'preparing')
-                   )"
+                   )
+                 ORDER BY l.last_seen_at, l.rowid
+                 LIMIT 256"
             ))?;
             let rows = stmt
                 .query_map(params![node, older_than_unix], cache_from_row)?
@@ -227,6 +305,134 @@ impl TranscodeCacheStore for SqliteStore {
                 .query_map([node], cache_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
+        })
+        .await
+    }
+
+    async fn cache_ownership_inventory(
+        &self,
+        node_id: &str,
+    ) -> Result<crate::domain::CacheOwnershipInventory, StoreError> {
+        const MAX_OWNERS: usize = 10_000;
+        let node = node_id.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {CACHE_COLS}
+                 FROM transcode_cache_locations l
+                 JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
+                 WHERE l.node_id = ?1
+                 ORDER BY l.recipe_hash, l.storage_class
+                 LIMIT ?2"
+            ))?;
+            let mut rows = stmt
+                .query_map(params![node, (MAX_OWNERS + 1) as i64], cache_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let complete = rows.len() <= MAX_OWNERS;
+            rows.truncate(MAX_OWNERS);
+            Ok(crate::domain::CacheOwnershipInventory { rows, complete })
+        })
+        .await
+    }
+
+    async fn cache_candidate_owners(
+        &self,
+        node_id: &str,
+        relative_dirs: &[String],
+        incomplete_recipes: &[String],
+    ) -> Result<Vec<CachedTranscode>, StoreError> {
+        const MAX_CANDIDATES: usize = 256;
+        if relative_dirs.len() > MAX_CANDIDATES || incomplete_recipes.len() > MAX_CANDIDATES {
+            return Err(StoreError::Task(
+                "cache ownership recheck exceeds its bounded batch".to_owned(),
+            ));
+        }
+        let node = node_id.to_owned();
+        let relative_dirs = serde_json::to_string(relative_dirs)
+            .map_err(|error| StoreError::Task(format!("encoding cache paths: {error}")))?;
+        let incomplete_recipes = serde_json::to_string(incomplete_recipes)
+            .map_err(|error| StoreError::Task(format!("encoding cache recipes: {error}")))?;
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {CACHE_COLS}
+                   FROM transcode_cache_locations l
+                   JOIN transcode_cache_recipes r ON r.recipe_hash = l.recipe_hash
+                  WHERE l.node_id = ?1 AND l.storage_class = 'local'
+                    AND (l.relative_dir IN (SELECT value FROM json_each(?2))
+                         OR (l.complete = 0 AND l.recipe_hash IN
+                             (SELECT value FROM json_each(?3))))"
+            ))?;
+            let rows = stmt
+                .query_map(
+                    params![node, relative_dirs, incomplete_recipes],
+                    cache_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into);
+            rows
+        })
+        .await
+    }
+
+    async fn invalidate_cache_entry(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        storage_class: &str,
+        relative_dir: &str,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let (hash, node, class, relative, manifest) = (
+            recipe_hash.to_owned(),
+            node_id.to_owned(),
+            storage_class.to_owned(),
+            relative_dir.to_owned(),
+            manifest_digest.map(str::to_owned),
+        );
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // Integrity retirement owns the dependent offline lifecycle too.
+            // Gate it on the exact location before deletion so a stale reader
+            // cannot fail packages backed by a replacement generation.
+            tx.execute(
+                "UPDATE offline_packages
+                    SET state = 'failed', phase = 'integrity',
+                        error_code = 'cache_integrity',
+                        error_message = 'Prepared media failed its generation integrity check.',
+                        updated_at = unixepoch()
+                  WHERE node_id = ?2 AND recipe_hash = ?1 AND state = 'ready'
+                    AND EXISTS (
+                        SELECT 1 FROM transcode_cache_locations location
+                         WHERE location.recipe_hash = ?1 AND location.node_id = ?2
+                           AND location.storage_class = ?3 AND location.relative_dir = ?4
+                           AND location.manifest_digest IS ?5)",
+                params![hash, node, class, relative, manifest],
+            )?;
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE EXISTS (
+                    SELECT 1 FROM transcode_cache_locations location
+                     WHERE location.recipe_hash = ?1 AND location.node_id = ?2
+                       AND location.storage_class = ?3 AND location.relative_dir = ?4
+                       AND location.manifest_digest IS ?5
+                       AND cache_consumer_pins.storage_id = location.storage_id
+                       AND cache_consumer_pins.recipe_hash = location.recipe_hash
+                       AND cache_consumer_pins.generation_id = location.generation_id)",
+                params![hash, node, class, relative, manifest],
+            )?;
+            let changed = tx.execute(
+                "DELETE FROM transcode_cache_locations
+                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3
+                    AND relative_dir = ?4 AND manifest_digest IS ?5",
+                params![hash, node, class, relative, manifest],
+            )?;
+            tx.execute(
+                "DELETE FROM transcode_cache_recipes WHERE recipe_hash = ?1
+                   AND NOT EXISTS (SELECT 1 FROM transcode_cache_locations
+                                    WHERE recipe_hash = ?1)",
+                [hash],
+            )?;
+            tx.commit()?;
+            Ok(changed == 1)
         })
         .await
     }

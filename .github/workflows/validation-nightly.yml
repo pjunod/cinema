@@ -20,7 +20,7 @@ jobs:
     # The deep tier is the gate's own evidence run one level further, so it uses
     # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
     # gets covered. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -33,10 +33,12 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Install browser prerequisites
+      - name: Verify Playwright and install its pinned browser
         run: |
-          python3 -m pip install playwright
-          python3 -m playwright install --with-deps chromium
+          requirement=playwright==1.62.0
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
       - name: Run every scheduled validation
         run: make validate-nightly
       - name: Upload deep-validation evidence
@@ -53,7 +55,7 @@ jobs:
 
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -106,9 +108,9 @@ jobs:
   ffmpeg8-pacing:
     name: pacing capability contract on ffmpeg 8
     # The container tag is the pin here — `ubuntu:26.04` is where ffmpeg 8 comes
-    # from, and it moves only when this line does. The host image is pinned too
-    # so the two cannot drift independently.
-    runs-on: ubuntu-24.04
+    # from, and it moves only when this line does. The host VM image is pinned
+    # separately by the runner playbook.
+    runs-on: [self-hosted, Linux, X64, lab, general]
     container: ubuntu:26.04
     timeout-minutes: 45
     steps:
@@ -144,7 +146,7 @@ jobs:
     name: report-only weekly mutation spot-check
     # Mutants are judged by whether the suite kills them, and the suite spawns
     # ffmpeg, so this needs the same pinned build. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

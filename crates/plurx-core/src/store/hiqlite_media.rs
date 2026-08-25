@@ -1,6 +1,6 @@
 //! Replicated media catalogue implementation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -10,12 +10,12 @@ use hiqlite::Row;
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient};
 use super::{
     ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
-    WatchStore,
+    WatchStore, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::{
-    sort_title_for, ArtworkAttempt, BookMetadataPatch, InProgressItem, Item, ItemEdit, ItemKind,
-    ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem, ProbeResult, RecentItem,
-    WatchRollup, WatchState,
+    sort_title_for, ArtworkAttempt, BookMetadataPatch, HomePreviewPage, InProgressItem, Item,
+    ItemEdit, ItemKind, ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem,
+    ProbeResult, RecentItem, WatchRollup, WatchState,
 };
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
@@ -64,6 +64,20 @@ struct ItemRow {
     book_work_id: Option<String>,
     book_edition_id: Option<String>,
     book_metadata_source: Option<String>,
+}
+
+struct ItemTitleRow {
+    item_id: i64,
+    title: String,
+}
+
+impl From<&mut Row<'_>> for ItemTitleRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            item_id: row.get("item_id"),
+            title: row.get("title"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for ArtworkInventoryItem {
@@ -173,6 +187,20 @@ struct RecentItemRow {
     season_poster: Option<String>,
 }
 
+struct HomePreviewRow {
+    item: ItemRow,
+    library_total: i64,
+}
+
+impl From<&mut Row<'_>> for HomePreviewRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            item: ItemRow::from(&mut *row),
+            library_total: row.get("library_total"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for RecentItemRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -197,6 +225,18 @@ impl TryFrom<RecentItemRow> for RecentItem {
 
 struct CountRow {
     count: i64,
+}
+
+struct ArtworkFilenameRow {
+    filename: String,
+}
+
+impl From<&mut Row<'_>> for ArtworkFilenameRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            filename: row.get("filename"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for CountRow {
@@ -618,6 +658,32 @@ async fn pairs(client: &TimedClient, sql: &'static str) -> Result<Vec<(String, i
     Ok(values)
 }
 
+async fn local_scalar(client: &TimedClient, sql: &'static str) -> Result<i64, StoreError> {
+    client
+        .query_map::<ScalarRow, _>(sql, params!())
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .next()
+        .map(|row| row.value)
+        .ok_or_else(|| StoreError::Database("aggregate query returned no row".to_owned()))
+}
+
+async fn local_pairs(
+    client: &TimedClient,
+    sql: &'static str,
+) -> Result<Vec<(String, i64)>, StoreError> {
+    let mut values: Vec<_> = client
+        .query_map::<PairRow, _>(sql, params!())
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .map(|row| (row.label, row.count))
+        .collect();
+    values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    Ok(values)
+}
+
 #[cfg(test)]
 mod query_helper_tests {
     use super::*;
@@ -643,6 +709,358 @@ mod query_helper_tests {
         ] {
             assert!(error.to_string().contains("expected $1, found $2"));
         }
+    }
+}
+
+impl HiqliteAuthStore {
+    pub(super) async fn local_get_item(&self, id: i64) -> Result<Option<Item>, StoreError> {
+        one_item(
+            self.client()
+                .query_map::<ItemRow, _>(
+                    format!("SELECT {ITEM_COLS} FROM items WHERE id = $1"),
+                    params!(id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_get_item_children(
+        &self,
+        parent_id: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        items(
+            self.client()
+                .query_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {ITEM_COLS} FROM items WHERE parent_id = $1 \
+                         ORDER BY (kind = 'folder') DESC, season_number, episode_number, \
+                         (recorded_at IS NULL), recorded_at, sort_title"
+                    ),
+                    params!(parent_id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_list_top_items_in_genre(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        let order = match sort {
+            ItemSort::Title => "sort_title ASC",
+            ItemSort::Added => "added_at DESC, id DESC",
+            ItemSort::Year => "year IS NULL, year DESC, sort_title ASC",
+            ItemSort::Resolution => {
+                "COALESCE((SELECT MAX(f.height) FROM files f WHERE f.item_id = items.id), -1) DESC, sort_title ASC"
+            }
+            ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
+        };
+        const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
+             WHERE value = $2 COLLATE NOCASE))";
+        let count = self
+            .client()
+            .query_map::<CountRow, _>(
+                format!(
+                    "SELECT COUNT(*) AS count FROM items \
+                     WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
+                ),
+                params!(library_id, genre),
+            )
+            .await
+            .map_err(database_error)?;
+        let total = count
+            .first()
+            .ok_or_else(|| StoreError::Database("item count returned no row".to_owned()))?
+            .count;
+        let page_sql = format!(
+            "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
+             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
+             ORDER BY {order} LIMIT $3 OFFSET $4"
+        );
+        validate_sql(&page_sql)?;
+        let page = items(
+            self.client()
+                .query_map::<ItemRow, _>(page_sql, params!(library_id, genre, limit, offset))
+                .await
+                .map_err(database_error)?,
+        )?;
+        Ok(ItemPage { items: page, total })
+    }
+
+    pub(super) async fn local_home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        let limit_per_library = limit_per_library.clamp(1, 24);
+        let sql = format!(
+            "WITH ranked AS (
+                 SELECT id, library_id,
+                        COUNT(*) OVER (PARTITION BY library_id) AS library_total,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY library_id
+                            ORDER BY added_at DESC, id DESC
+                        ) AS preview_rank
+                   FROM items
+                  WHERE {TOP_LEVEL_ITEM_PREDICATE}
+             ), selected AS (
+                 SELECT id, library_id, library_total, preview_rank
+                   FROM ranked
+                  WHERE preview_rank <= $1
+             )
+             SELECT {}, selected.library_total
+               FROM selected
+               JOIN items i ON i.id = selected.id
+              ORDER BY selected.library_id, selected.preview_rank",
+            item_cols("i")
+        );
+        validate_sql(&sql)?;
+        let rows = self
+            .client()
+            .query_map::<HomePreviewRow, _>(sql, params!(limit_per_library))
+            .await
+            .map_err(database_error)?;
+        let mut pages: Vec<HomePreviewPage> = Vec::new();
+        for row in rows {
+            let item: Item = row.item.try_into()?;
+            match pages.last_mut() {
+                Some(page) if page.library_id == item.library_id => page.items.push(item),
+                _ => pages.push(HomePreviewPage {
+                    library_id: item.library_id,
+                    items: vec![item],
+                    total: row.library_total,
+                }),
+            }
+        }
+        Ok(pages)
+    }
+
+    pub(super) async fn local_recently_added(
+        &self,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        let sql = format!(
+            "WITH ranked AS ( \
+                 SELECT {i}, show.title AS rail_show_title, \
+                        season.poster_path AS rail_season_poster, \
+                        ROW_NUMBER() OVER (PARTITION BY CASE \
+                            WHEN i.kind = 'episode' AND show.id IS NOT NULL \
+                            THEN 'show:' || show.id ELSE 'item:' || i.id END \
+                            ORDER BY i.added_at DESC, COALESCE(season.season_number, -1) DESC, \
+                            COALESCE(i.episode_number, -1) DESC, i.id DESC) AS rail_rank \
+                 FROM items i \
+                 LEFT JOIN items season ON season.id = i.parent_id AND i.kind = 'episode' \
+                 LEFT JOIN items show ON show.id = season.parent_id \
+                 WHERE i.kind IN ('movie','episode','video','folder','book','audiobook') \
+                   AND ($1 IS NULL OR i.library_id = $1) \
+             ) \
+             SELECT {r}, r.rail_show_title, r.rail_season_poster \
+             FROM ranked r WHERE r.rail_rank = 1 \
+             ORDER BY r.added_at DESC, r.id DESC LIMIT $2",
+            i = item_cols("i"),
+            r = item_cols("r")
+        );
+        recent_items(
+            self.client()
+                .query_map::<RecentItemRow, _>(sql, params!(library_id, limit))
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
+        one_file(
+            self.client()
+                .query_map::<FileRow, _>(
+                    format!("SELECT {FILE_COLS} FROM files WHERE id = $1"),
+                    params!(id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_files_for_item(
+        &self,
+        item_id: i64,
+    ) -> Result<Vec<MediaFile>, StoreError> {
+        files(
+            self.client()
+                .query_map::<FileRow, _>(
+                    format!(
+                        "SELECT {FILE_COLS} FROM files WHERE item_id = $1 \
+                         ORDER BY height DESC, bitrate DESC, path"
+                    ),
+                    params!(item_id),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
+    pub(super) async fn local_child_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, i64>, StoreError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = ids_json(ids)?;
+        Ok(self
+            .client()
+            .query_map::<ItemValueRow, _>(
+                "SELECT parent_id AS item_id, COUNT(*) AS value FROM items \
+                 WHERE parent_id IN (SELECT value FROM json_each($1)) GROUP BY parent_id",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.item_id, row.value))
+            .collect())
+    }
+
+    pub(super) async fn local_item_max_heights(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, i64>, StoreError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = ids_json(ids)?;
+        Ok(self
+            .client()
+            .query_map::<ItemValueRow, _>(
+                "SELECT item_id, MAX(height) AS value FROM files \
+                 WHERE height IS NOT NULL \
+                   AND item_id IN (SELECT value FROM json_each($1)) GROUP BY item_id",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.item_id, row.value))
+            .collect())
+    }
+
+    pub(super) async fn local_item_media_facts(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, MediaFacts>, StoreError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids = ids_json(ids)?;
+        Ok(self
+            .client()
+            .query_map::<FactsSqlRow, _>(
+                "WITH ranked AS ( \
+                         SELECT item_id, \
+                                COUNT(*) OVER (PARTITION BY item_id) AS files, \
+                                SUM(size) OVER (PARTITION BY item_id) AS bytes, \
+                                ROW_NUMBER() OVER (PARTITION BY item_id \
+                                    ORDER BY COALESCE(height, 0) DESC, \
+                                             COALESCE(bitrate, 0) DESC, size DESC, id ASC) AS pick, \
+                                container, video_codec, height, hdr, hdr_format, audio_streams \
+                         FROM files WHERE item_id IN (SELECT value FROM json_each($1)) \
+                     ) \
+                     SELECT item_id, files, bytes, container, video_codec, height, hdr, \
+                            hdr_format, audio_streams FROM ranked WHERE pick = 1",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| {
+                let facts = FactsRow {
+                    files: row.files,
+                    bytes: row.bytes,
+                    container: row.container,
+                    video_codec: row.video_codec,
+                    height: row.height,
+                    hdr: row.hdr,
+                    hdr_format: row.hdr_format,
+                    audio: serde_json::from_str(&row.audio_streams).unwrap_or_default(),
+                };
+                (row.item_id, MediaFacts::from(facts))
+            })
+            .collect())
+    }
+
+    pub(super) async fn local_get_file_probe_json(
+        &self,
+        file_id: i64,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .client()
+            .query_map::<ProbeJsonRow, _>(
+                "SELECT probe_json FROM files WHERE id = $1",
+                params!(file_id),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .and_then(|row| row.probe_json))
+    }
+
+    pub(super) async fn local_media_shape(&self) -> Result<MediaShape, StoreError> {
+        let probed = local_scalar(
+            self.client(),
+            "SELECT COUNT(*) AS value FROM files WHERE video_codec IS NOT NULL",
+        )
+        .await?;
+        let unprobed = local_scalar(
+            self.client(),
+            "SELECT COUNT(*) AS value FROM files WHERE video_codec IS NULL",
+        )
+        .await?;
+        let hdr = local_pairs(
+            self.client(),
+            "SELECT COALESCE(NULLIF(hdr,''),'sdr') AS label, COUNT(*) AS count \
+             FROM files WHERE video_codec IS NOT NULL GROUP BY 1",
+        )
+        .await?;
+        let hdr_4k = local_pairs(
+            self.client(),
+            "SELECT COALESCE(NULLIF(hdr,''),'sdr') AS label, COUNT(*) AS count \
+             FROM files WHERE video_codec IS NOT NULL AND height >= 1600 GROUP BY 1",
+        )
+        .await?;
+        let codecs = local_pairs(
+            self.client(),
+            "SELECT LOWER(video_codec) AS label, COUNT(*) AS count \
+             FROM files WHERE video_codec IS NOT NULL GROUP BY 1",
+        )
+        .await?;
+        let over_segmented_floor = local_scalar(
+            self.client(),
+            "SELECT COUNT(*) AS value FROM files WHERE bitrate >= 40000000",
+        )
+        .await?;
+        let max_bitrate = self
+            .client()
+            .query_map::<OptionalScalarRow, _>("SELECT MAX(bitrate) AS value FROM files", params!())
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .and_then(|row| row.value);
+        Ok(MediaShape {
+            probed,
+            unprobed,
+            hdr,
+            hdr_4k,
+            codecs,
+            over_segmented_floor,
+            max_bitrate,
+        })
     }
 }
 
@@ -847,6 +1265,26 @@ impl MediaStore for HiqliteAuthStore {
         )
     }
 
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let ids = serde_json::to_string(ids)
+            .map_err(|error| StoreError::Task(format!("encode item title ids: {error}")))?;
+        Ok(self
+            .client()
+            .query_consistent_map::<ItemTitleRow, _>(
+                "SELECT id AS item_id, title FROM items \
+                 WHERE id IN (SELECT value FROM json_each($1)) ORDER BY id",
+                params!(ids),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.item_id, row.title))
+            .collect())
+    }
+
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
         items(
             self.client()
@@ -875,17 +1313,81 @@ impl MediaStore for HiqliteAuthStore {
             .map_err(database_error)
     }
 
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError> {
+        if after_item_id < 0 || !(1..=256).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid artwork inventory page".to_owned(),
+            ));
+        }
+        items(
+            self.client()
+                .query_consistent_map::<ItemRow, _>(
+                    format!(
+                        "SELECT {i} FROM items i
+                         WHERE i.id > $1
+                           AND (i.poster_path IS NOT NULL OR i.backdrop_path IS NOT NULL)
+                         ORDER BY i.id LIMIT $2",
+                        i = item_cols("i")
+                    ),
+                    params!(after_item_id, limit),
+                )
+                .await
+                .map_err(database_error)?,
+        )
+    }
+
     async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError> {
-        let rows = self
+        Ok(self
             .client()
             .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM items \
-                 WHERE poster_path = $1 OR backdrop_path = $1",
+                "SELECT 1 AS count FROM items
+                  WHERE poster_path = $1 OR backdrop_path = $1
+                  LIMIT 1",
                 params!(filename),
             )
             .await
-            .map_err(database_error)?;
-        Ok(rows.first().is_some_and(|row| row.count > 0))
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .is_some())
+    }
+
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if filenames.len() > 256
+            || filenames
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 512)
+        {
+            return Err(StoreError::Task(
+                "invalid artwork reference batch".to_owned(),
+            ));
+        }
+        if filenames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(filenames).map_err(database_error)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<ArtworkFilenameRow, _>(
+                "SELECT poster_path AS filename FROM items
+                  WHERE poster_path IN (SELECT value FROM json_each($1))
+                 UNION
+                 SELECT backdrop_path AS filename FROM items
+                  WHERE backdrop_path IN (SELECT value FROM json_each($1))",
+                params!(encoded),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| row.filename)
+            .collect())
     }
 
     async fn list_top_items_in_genre(
@@ -905,8 +1407,6 @@ impl MediaStore for HiqliteAuthStore {
             }
             ItemSort::Recorded => "(recorded_at IS NULL), recorded_at DESC, sort_title ASC",
         };
-        const TOP: &str = "(kind IN ('movie','show','book','audiobook') OR \
-             (kind IN ('folder','video','photo') AND parent_id IS NULL))";
         const GENRE: &str = "($2 IS NULL OR EXISTS (SELECT 1 FROM json_each(items.genres) \
              WHERE value = $2 COLLATE NOCASE))";
         let count = self
@@ -914,7 +1414,7 @@ impl MediaStore for HiqliteAuthStore {
             .query_consistent_map::<CountRow, _>(
                 format!(
                     "SELECT COUNT(*) AS count FROM items \
-                     WHERE library_id = $1 AND {TOP} AND {GENRE}"
+                     WHERE library_id = $1 AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE}"
                 ),
                 params!(library_id, genre),
             )
@@ -925,7 +1425,8 @@ impl MediaStore for HiqliteAuthStore {
             .ok_or_else(|| StoreError::Database("item count returned no row".to_owned()))?
             .count;
         let page_sql = format!(
-            "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 AND {TOP} AND {GENRE} \
+            "SELECT {ITEM_COLS} FROM items WHERE library_id = $1 \
+             AND {TOP_LEVEL_ITEM_PREDICATE} AND {GENRE} \
              ORDER BY {order} LIMIT $3 OFFSET $4"
         );
         validate_sql(&page_sql)?;
@@ -939,6 +1440,53 @@ impl MediaStore for HiqliteAuthStore {
                 .map_err(database_error)?,
         )?;
         Ok(ItemPage { items: page, total })
+    }
+
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        let limit_per_library = limit_per_library.clamp(1, 24);
+        let sql = format!(
+            "WITH ranked AS (
+                 SELECT id, library_id,
+                        COUNT(*) OVER (PARTITION BY library_id) AS library_total,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY library_id
+                            ORDER BY added_at DESC, id DESC
+                        ) AS preview_rank
+                   FROM items
+                  WHERE {TOP_LEVEL_ITEM_PREDICATE}
+             ), selected AS (
+                 SELECT id, library_id, library_total, preview_rank
+                   FROM ranked
+                  WHERE preview_rank <= $1
+             )
+             SELECT {}, selected.library_total
+               FROM selected
+               JOIN items i ON i.id = selected.id
+              ORDER BY selected.library_id, selected.preview_rank",
+            item_cols("i")
+        );
+        validate_sql(&sql)?;
+        let rows = self
+            .client()
+            .query_consistent_map::<HomePreviewRow, _>(sql, params!(limit_per_library))
+            .await
+            .map_err(database_error)?;
+        let mut pages: Vec<HomePreviewPage> = Vec::new();
+        for row in rows {
+            let item: Item = row.item.try_into()?;
+            match pages.last_mut() {
+                Some(page) if page.library_id == item.library_id => page.items.push(item),
+                _ => pages.push(HomePreviewPage {
+                    library_id: item.library_id,
+                    items: vec![item],
+                    total: row.library_total,
+                }),
+            }
+        }
+        Ok(pages)
     }
 
     async fn recently_added(
@@ -1218,7 +1766,15 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15";
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17))";
+        let (origin_key, origin_value) = patch
+            .required_origin
+            .as_ref()
+            .map_or((None, None), |(key, value)| {
+                (Some(key.as_str()), Some(value.as_str()))
+            });
         let changed = if let Some(fence) = repair_fence {
             self.execute(
                 "UPDATE items SET \
@@ -1236,10 +1792,13 @@ impl MediaStore for HiqliteAuthStore {
                    AND book_work_id IS $12 \
                    AND book_metadata_source IS $13 \
                    AND book_edition_id IS $14 \
-                   AND poster_path IS $15 AND $16 = $9 \
+                   AND poster_path IS $15 \
+                   AND ($16 IS NULL OR EXISTS (\
+                     SELECT 1 FROM settings WHERE key = $16 AND value = $17)) \
+                   AND $18 = $9 \
                    AND EXISTS (SELECT 1 FROM cluster_artwork_repairs \
-                     WHERE item_id = $16 AND owner_node_id = $17 AND leader_term = $18 \
-                       AND generation = $19)",
+                     WHERE item_id = $18 AND owner_node_id = $19 AND leader_term = $20 \
+                       AND generation = $21)",
                 params!(
                     patch.title.as_deref(),
                     sort_title,
@@ -1256,6 +1815,8 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
                     expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value,
                     fence.item_id,
                     fence.owner_node_id.as_str(),
                     fence.leader_term,
@@ -1281,7 +1842,9 @@ impl MediaStore for HiqliteAuthStore {
                     expected.book_work_id.as_deref(),
                     expected.book_metadata_source.as_deref(),
                     expected.book_edition_id.as_deref(),
-                    expected.poster_path.as_deref()
+                    expected.poster_path.as_deref(),
+                    origin_key,
+                    origin_value
                 ),
             )
             .await?
@@ -1882,6 +2445,9 @@ impl MediaStore for HiqliteAuthStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = super::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let expected = self
             .client()
             .query_consistent_map::<RootFingerprintRow, _>(

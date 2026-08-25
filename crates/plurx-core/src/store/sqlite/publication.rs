@@ -21,11 +21,11 @@ impl FencedPublicationStore for SqliteStore {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             put_setting(conn, &key, &value)
         })
         .await
@@ -36,11 +36,11 @@ impl FencedPublicationStore for SqliteStore {
         key: &str,
         value: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             Ok(conn.execute(
                 "INSERT INTO settings (key, value, updated_at)
                  VALUES (?1, ?2, unixepoch()) ON CONFLICT(key) DO NOTHING",
@@ -57,12 +57,12 @@ impl FencedPublicationStore for SqliteStore {
         expected_item_id: i64,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let key = key.to_owned();
         let value = value.to_owned();
         let repair_fence = repair_fence.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             Ok(conn.execute(
                 "INSERT INTO settings (key, value, updated_at)
                  SELECT ?1, ?2, unixepoch() WHERE ?3 = ?4 AND EXISTS (
@@ -89,9 +89,9 @@ impl FencedPublicationStore for SqliteStore {
         id: i64,
         refreshed: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE libraries
                  SET last_scan_at = unixepoch(),
@@ -108,10 +108,10 @@ impl FencedPublicationStore for SqliteStore {
         &self,
         item: &NewItem,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError> {
         let item = item.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             let sort_title = if item.kind == ItemKind::Folder {
                 item.title.to_lowercase()
             } else {
@@ -143,10 +143,10 @@ impl FencedPublicationStore for SqliteStore {
         item_id: i64,
         patch: &MetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let patch = patch.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_metadata(conn, item_id, &patch)
         })
         .await
@@ -158,11 +158,11 @@ impl FencedPublicationStore for SqliteStore {
         patch: &MetadataPatch,
         repair_fence: &ArtworkRepairFence,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let patch = patch.clone();
         let repair_fence = repair_fence.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_metadata_if_artwork_current(conn, item_id, &patch, &repair_fence)
         })
         .await
@@ -173,10 +173,10 @@ impl FencedPublicationStore for SqliteStore {
         item_id: i64,
         patch: &BookMetadataPatch,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let patch = patch.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_book_metadata(conn, item_id, &patch)
         })
         .await
@@ -188,12 +188,12 @@ impl FencedPublicationStore for SqliteStore {
         patch: &BookMetadataPatch,
         repair_fence: Option<&ArtworkRepairFence>,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let expected = expected.clone();
         let patch = patch.clone();
         let repair_fence = repair_fence.cloned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             apply_book_metadata_if_current(conn, &expected, &patch, repair_fence.as_ref())
         })
         .await
@@ -203,9 +203,9 @@ impl FencedPublicationStore for SqliteStore {
         &self,
         item_id: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE items SET nfo_seeded_at = unixepoch() WHERE id = ?1",
                 params![item_id],
@@ -223,11 +223,11 @@ impl FencedPublicationStore for SqliteStore {
         mtime: i64,
         probe: &ProbeResult,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<i64, StoreError> {
         let path = path.to_owned();
         let probe = probe.clone();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             upsert_file(conn, item_id, &path, size, mtime, &probe)
         })
         .await
@@ -239,10 +239,10 @@ impl FencedPublicationStore for SqliteStore {
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<RootFingerprintStatus, StoreError> {
         let fingerprint = fingerprint.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             ensure_library_root_fingerprint(conn, library_id, &fingerprint, allow_establish)
         })
         .await
@@ -255,11 +255,14 @@ impl FencedPublicationStore for SqliteStore {
         gone_file_ids: &[i64],
         prune_limit: u64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError> {
+        if let Some(refusal) = crate::store::reconcile_payload_refusal(gone_file_ids, prune_limit) {
+            return Ok(refusal);
+        }
         let root_fingerprint = root_fingerprint.to_owned();
         let ids = gone_file_ids.to_vec();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             reconcile_library(conn, library_id, &root_fingerprint, &ids, prune_limit)
         })
         .await
@@ -273,12 +276,12 @@ impl FencedPublicationStore for SqliteStore {
         node_id: &str,
         relative_dir: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<bool, StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let relative_dir = relative_dir.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
                  VALUES (?1, ?2, ?3) ON CONFLICT(recipe_hash) DO NOTHING",
@@ -304,11 +307,11 @@ impl FencedPublicationStore for SqliteStore {
         recipe_hash: &str,
         node_id: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE transcode_cache_locations SET last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND complete = 0",
@@ -326,12 +329,12 @@ impl FencedPublicationStore for SqliteStore {
         relative_dir: &str,
         bytes: i64,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let relative_dir = relative_dir.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "UPDATE transcode_cache_locations
                  SET relative_dir = ?3, complete = 1, bytes = ?4,
@@ -350,12 +353,12 @@ impl FencedPublicationStore for SqliteStore {
         node_id: &str,
         storage_class: &str,
         lease: &Lease,
-        observed_at_unix_ms: i64,
+        replacement: &Lease,
     ) -> Result<(), StoreError> {
         let hash = recipe_hash.to_owned();
         let node = node_id.to_owned();
         let storage_class = storage_class.to_owned();
-        self.with_fenced_conn(lease, observed_at_unix_ms, move |conn| {
+        self.with_fenced_conn(lease, replacement, move |conn| {
             conn.execute(
                 "DELETE FROM transcode_cache_locations
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = ?3",
@@ -467,14 +470,22 @@ fn apply_book_metadata_if_current(
          WHERE id = ?1 AND kind IN ('book', 'audiobook')
            AND title = ?9 AND author IS ?10 AND book_work_id IS ?11
            AND book_metadata_source IS ?12 AND book_edition_id IS ?13
-           AND poster_path IS ?14";
+           AND poster_path IS ?14
+           AND (?15 IS NULL OR EXISTS (
+             SELECT 1 FROM settings WHERE key = ?15 AND value = ?16))";
+    let (origin_key, origin_value) = patch
+        .required_origin
+        .as_ref()
+        .map_or((None, None), |(key, value)| {
+            (Some(key.as_str()), Some(value.as_str()))
+        });
     let changed = if let Some(fence) = repair_fence {
         conn.execute(
             &format!(
-                "{base_sql} AND ?15 = ?1 AND EXISTS (
+                "{base_sql} AND ?17 = ?1 AND EXISTS (
                    SELECT 1 FROM cluster_artwork_repairs
-                   WHERE item_id = ?15 AND owner_node_id = ?16 AND leader_term = ?17
-                     AND generation = ?18)"
+                   WHERE item_id = ?17 AND owner_node_id = ?18 AND leader_term = ?19
+                     AND generation = ?20)"
             ),
             params![
                 expected.id,
@@ -491,6 +502,8 @@ fn apply_book_metadata_if_current(
                 expected.book_metadata_source,
                 expected.book_edition_id,
                 expected.poster_path,
+                origin_key,
+                origin_value,
                 fence.item_id,
                 fence.owner_node_id,
                 fence.leader_term,
@@ -515,6 +528,8 @@ fn apply_book_metadata_if_current(
                 expected.book_metadata_source,
                 expected.book_edition_id,
                 expected.poster_path,
+                origin_key,
+                origin_value,
             ],
         )?
     };
@@ -866,14 +881,19 @@ mod tests {
             })
             .await
             .expect("artwork fence fixture");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_millis() as i64;
         let first = match store
-            .acquire_lease("provider:artwork", "node-a", 100, 300)
+            .acquire_lease("provider:artwork", "node-a", now_ms, now_ms + 120_000)
             .await
             .expect("job lease")
         {
             LeaseClaim::Acquired(lease) => lease,
             held => panic!("job lease was unexpectedly held: {held:?}"),
         };
+        let mut current_lease = first.clone();
         let repair = ArtworkRepairFence {
             item_id,
             owner_node_id: "node-a".to_owned(),
@@ -885,6 +905,7 @@ mod tests {
             .await
             .expect("read original")
             .expect("book exists");
+        let replacement = current_lease.publication_successor().expect("successor");
         assert!(store
             .apply_book_metadata_if_current_fenced(
                 &original,
@@ -895,13 +916,16 @@ mod tests {
                     edition_id: Some("current-edition".to_owned()),
                     poster_path: Some("current.jpg".to_owned()),
                     source: crate::domain::BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 Some(&repair),
-                &first,
-                150,
+                &current_lease,
+                &replacement,
             )
             .await
             .expect("current dual-fenced publication"));
+        current_lease = replacement;
+        let replacement = current_lease.publication_successor().expect("successor");
         assert!(
             !store
                 .apply_book_metadata_if_current_fenced(
@@ -913,15 +937,17 @@ mod tests {
                         edition_id: None,
                         poster_path: None,
                         source: crate::domain::BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     Some(&repair),
-                    &first,
-                    151,
+                    &current_lease,
+                    &replacement,
                 )
                 .await
                 .expect("stale snapshot result"),
             "a stale full-field snapshot must lose"
         );
+        current_lease = replacement;
         let current = store
             .get_item(item_id)
             .await
@@ -937,6 +963,7 @@ mod tests {
             })
             .await
             .expect("advance artwork generation");
+        let replacement = current_lease.publication_successor().expect("successor");
         assert!(
             !store
                 .apply_book_metadata_if_current_fenced(
@@ -948,17 +975,20 @@ mod tests {
                         edition_id: None,
                         poster_path: None,
                         source: crate::domain::BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     Some(&repair),
-                    &first,
-                    152,
+                    &current_lease,
+                    &replacement,
                 )
                 .await
                 .expect("stale artwork result"),
             "an obsolete artwork generation must lose"
         );
+        current_lease = replacement;
+        let stale_job_lease = current_lease.clone();
         let renewed = store
-            .renew_lease(&first, 160, 400)
+            .renew_lease(&current_lease, now_ms + 160, now_ms + 180_000)
             .await
             .expect("renew result")
             .expect("renewed lease");
@@ -966,6 +996,9 @@ mod tests {
             generation: 2,
             ..repair
         };
+        let stale_replacement = stale_job_lease
+            .publication_successor()
+            .expect("stale successor");
         assert!(matches!(
             store
                 .apply_book_metadata_if_current_fenced(
@@ -977,14 +1010,16 @@ mod tests {
                         edition_id: None,
                         poster_path: None,
                         source: crate::domain::BookMetadataSource::Curator,
+                        required_origin: None,
                     },
                     Some(&current_repair),
-                    &first,
-                    170,
+                    &stale_job_lease,
+                    &stale_replacement,
                 )
                 .await,
             Err(StoreError::FenceRejected { .. })
         ));
+        let replacement = renewed.publication_successor().expect("successor");
         assert!(store
             .apply_book_metadata_if_current_fenced(
                 &current,
@@ -995,10 +1030,11 @@ mod tests {
                     edition_id: None,
                     poster_path: None,
                     source: crate::domain::BookMetadataSource::Curator,
+                    required_origin: None,
                 },
                 Some(&current_repair),
                 &renewed,
-                171,
+                &replacement,
             )
             .await
             .expect("successor dual-fenced publication"));
