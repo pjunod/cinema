@@ -1139,7 +1139,7 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
-| `PLURX_SERVER_NAME` | `server.name` | `plurx` | Human-visible server name |
+| `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
 | `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional persistent node-local artwork/cache/offline root; empty preserves the legacy layout under `data_dir` |
@@ -1221,14 +1221,22 @@ VPN, routed subnet, or Docker bridge. The tracked Compose stack therefore keeps
 `plurxd` on ordinary or external networks and runs `plurx-discovery` as a
 host-network companion. The companion fetches the public server identity at
 `http://127.0.0.1:32400`, then publishes that same `_plurx._tcp` service on the
-physical LAN. Do not expose UDP 5353 to the internet.
+physical LAN. In cluster mode each Bonjour record has the shared logical `id`
+and name plus its local `node_id`, node-derived hostname, and distinct service
+label. GDM likewise publishes the node id as Plex `Resource-Identifier`, keeps
+the logical id in `Logical-Identifier`, and returns that node id from the Plex
+`/identity` facade. Native `/api/v1/server` continues to expose the logical
+`instance_id` for grouping all voters. A never-joined install keeps the legacy
+single-record bytes. Do not expose UDP 5353 to the internet.
 
 The Compose companion shares the host's UTS namespace only to read its
-hostname. If `PLURX_SERVER_NAME` is the generic default `plurx`, that hostname
-is the discovery label; an explicit server name replaces it. The LAN address
-is appended in either case (`m6 · 192.168.1.20`), so a picker remains
-identifiable even when several machines have similar names. This avoids making
-every host override repeat its own machine identity.
+hostname. On a never-joined install, if the durable server name is the generic
+default `plurx`, that hostname is the discovery label; an explicit name
+replaces it. The LAN address is appended in either case (`m6 ·
+192.168.1.20`). Cluster records instead use the replicated logical name plus a
+short local-node suffix. Rename the logical server through the admin settings
+API so every voter converges; changing a joining node's TOML seed does not
+rename it.
 
 Do not add `network_mode: host` to `plurxd`: Compose rejects a service that also
 has a `networks:` attachment. The companion is a different service, so an

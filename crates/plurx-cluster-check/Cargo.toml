@@ -15,6 +15,7 @@ hex = { workspace = true }
 jsonschema = { workspace = true }
 libc = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["cluster-read-cost-validation", "cluster-validation"] }
+plurx-compat-plex = { path = "../plurx-compat-plex" }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

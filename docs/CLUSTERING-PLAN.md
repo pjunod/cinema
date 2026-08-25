@@ -367,11 +367,12 @@ client already has the current node list; self-fence remains the default,
 because stale serving hides failed writes.
 
 Each node advertises a hostname derived from `node.id`, not `instance.id`.
-mDNS and GDM include the logical server id, node id, protocol version, and
-healthy node list. `server.name` moves into replicated settings; the config
-value is only the bootstrap seed. One service instance represents the logical
-server while node-specific records remain addressable without hostname
-collision.
+Bonjour includes the logical server id, node id, protocol version, and
+replicated name. GDM uses the node id as Plex `Resource-Identifier` so Plex
+clients do not deduplicate the voters, and retains the logical server id in
+`Logical-Identifier`. `server.name` moves into replicated settings; the config
+value is only the bootstrap seed. Node-specific records therefore remain
+addressable without losing their logical-server grouping.
 
 Replicated state never implies local bytes exist. Segment and artwork requests
 proxy to a known holder when local bytes are absent. Artwork repair is per-node
@@ -851,6 +852,21 @@ None of this exists on a single-node SQLite install. There is no node to
 remove, no survivor to re-home onto, and no SQLite table backs the probe
 protocol. Its offline behavior is unchanged and remains a valid rollback
 target.
+
+**M3d delivered.** `server.name` is now a replicated setting. The node-local
+TOML value atomically seeds an empty store, preserving an existing install's
+name on upgrade; after that, the replicated winner is authoritative and a
+joining node's config cannot rename the server. An admin rename writes through
+the `Store` boundary and converges on every voter. Cluster-enabled processes
+publish one record per `node.id`: Bonjour uses a node-derived hostname,
+node-suffixed service label, and `node_id` TXT property. GDM publishes the node
+id as Plex `Resource-Identifier`, repeats it in `Node-Identifier`, and retains
+the replicated `instance.id` in `Logical-Identifier`; the Plex `/identity`
+facade returns the same node id clients discovered. Native APIs retain the
+logical `instance.id` and name. A never-joined install omits the node fields and
+keeps its historical discovery bytes. The host-network `plurxd advertise`
+companion reads this complete public identity from the daemon, so it applies
+the same clustered-versus-legacy rule without opening the replicated store.
 
 **Acceptance:** grow one node to three without changing `instance.id`; reject
 expired/reused tokens and public cleartext binds; advertise three distinct

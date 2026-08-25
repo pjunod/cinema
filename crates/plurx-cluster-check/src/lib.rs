@@ -683,7 +683,7 @@ async fn controller() -> Result<()> {
     run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
     run_failure_case(FailureTarget::Leader).await?;
-    println!("cluster-check: all M1b/M1c/M1d/M3/M4 serving contracts passed");
+    println!("cluster-check: all M1b/M1c/M1d/M3/M3d/M4 serving contracts passed");
     Ok(())
 }
 
@@ -2948,6 +2948,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     {
         bail!("three-voter membership status was not healthy: {status:?}");
     }
+    prove_cluster_discovery(&mut cluster).await?;
     let activity_peers = match cluster.request(1, Request::ActivityPeers).await? {
         Response::ActivityPeers { peers } => peers,
         response => bail!("unexpected activity-peer response: {response:?}"),
@@ -4592,6 +4593,91 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
     Ok(())
 }
 
+/// M3d: real voter processes must converge on one logical name while exposing
+/// distinct node records through both LAN discovery projections.
+async fn prove_cluster_discovery(cluster: &mut ClusterProcesses) -> Result<()> {
+    let seeds = ["Living Room", "wrong-node-two", "wrong-node-three"];
+    let mut node_ids = BTreeSet::new();
+    let mut mdns_names = BTreeSet::new();
+    for (index, seed_name) in seeds.iter().enumerate() {
+        let node = u64::try_from(index + 1)?;
+        match cluster
+            .request(
+                node,
+                Request::Advertisement {
+                    seed_name: (*seed_name).to_owned(),
+                },
+            )
+            .await?
+        {
+            Response::Advertisement {
+                instance_id,
+                node_id,
+                name,
+                gdm,
+                mdns_name,
+                mdns_instance_id,
+                mdns_node_id,
+            } => {
+                if instance_id != INSTANCE_ID
+                    || mdns_instance_id != INSTANCE_ID
+                    || name != "Living Room"
+                    || mdns_node_id != node_id
+                    || !mdns_name.starts_with("Living Room · ")
+                    || !gdm.contains(&format!("Resource-Identifier: {node_id}\r\n"))
+                    || !gdm.contains(&format!("Logical-Identifier: {INSTANCE_ID}\r\n"))
+                    || !gdm.contains(&format!("Node-Identifier: {node_id}\r\n"))
+                    || !gdm.contains("Name: Living Room\r\n")
+                {
+                    bail!("voter {node} advertised inconsistent discovery identity");
+                }
+                mdns_names.insert(mdns_name);
+                node_ids.insert(node_id);
+            }
+            response => bail!("unexpected voter {node} advertisement: {response:?}"),
+        }
+    }
+    if node_ids.len() != 3 || mdns_names.len() != 3 {
+        bail!(
+            "three voters did not advertise three distinct node records: node_ids={node_ids:?}, mdns_names={mdns_names:?}"
+        );
+    }
+
+    cluster
+        .request(
+            2,
+            Request::RenameServer {
+                name: "Cinema".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    for node in 1..=3 {
+        match cluster
+            .request(
+                node,
+                Request::Advertisement {
+                    seed_name: "ignored-after-bootstrap".to_owned(),
+                },
+            )
+            .await?
+        {
+            Response::Advertisement {
+                name,
+                mdns_name,
+                gdm,
+                ..
+            } if name == "Cinema"
+                && mdns_name.starts_with("Cinema · ")
+                && gdm.contains("Name: Cinema\r\n") => {}
+            response => {
+                bail!("renamed discovery identity did not converge on voter {node}: {response:?}")
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn offline_summary(
     cluster: &mut ClusterProcesses,
     observer: u64,
@@ -5504,6 +5590,12 @@ pub enum Request {
         request: FinalizeJoinRequest,
     },
     MembershipStatus,
+    Advertisement {
+        seed_name: String,
+    },
+    RenameServer {
+        name: String,
+    },
     SignActivityRequest {
         target_node_id: String,
         timestamp_ms: i64,
@@ -5799,6 +5891,15 @@ pub enum Response {
     },
     MembershipStatus {
         status: MembershipStatus,
+    },
+    Advertisement {
+        instance_id: String,
+        node_id: String,
+        name: String,
+        gdm: String,
+        mdns_name: String,
+        mdns_instance_id: String,
+        mdns_node_id: String,
     },
     ArtworkPeerUrls {
         urls: Vec<String>,
@@ -7343,6 +7444,37 @@ async fn handle_request(
             .await
             .map(|status| Response::MembershipStatus { status })
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::Advertisement { seed_name } => {
+            let name = store_ref(store)?
+                .get_or_init_setting(plurx_core::store::keys::SERVER_NAME, &seed_name)
+                .await?;
+            let node_id = format!("node-{}", launch.node_id);
+            let advertisement = plurx_compat_plex::gdm::Advertisement {
+                instance_id: INSTANCE_ID,
+                name: &name,
+                node_id: Some(&node_id),
+            };
+            let gdm = String::from_utf8(plurx_compat_plex::gdm::response_for(
+                &advertisement,
+                "0.2.7",
+                32400,
+            ))?;
+            Ok(Response::Advertisement {
+                instance_id: INSTANCE_ID.to_owned(),
+                node_id: node_id.clone(),
+                name: name.clone(),
+                gdm,
+                mdns_name: format!("{name} · node{}", launch.node_id),
+                mdns_instance_id: INSTANCE_ID.to_owned(),
+                mdns_node_id: node_id,
+            })
+        }
+        Request::RenameServer { name } => {
+            store_ref(store)?
+                .put_setting(plurx_core::store::keys::SERVER_NAME, &name)
+                .await?;
+            Ok(Response::Ok)
+        }
         Request::SignActivityRequest {
             target_node_id,
             timestamp_ms,
