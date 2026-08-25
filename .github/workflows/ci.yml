@@ -621,6 +621,10 @@ jobs:
       # routine validation does not exhaust the repository artifact quota.
       - name: Retain release binary for push and tag runs
         if: github.event_name == 'push'
+        # The build itself is the validation verdict. Artifact retention is
+        # best-effort because repository quota exhaustion must not fail an
+        # otherwise successful release build (or block tag publication).
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: plurxd-${{ matrix.target }}

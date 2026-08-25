@@ -428,6 +428,7 @@ class OperationsContractCase(unittest.TestCase):
         build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
         self.assertIn("name: Retain release binary for push and tag runs", build)
         self.assertIn("if: github.event_name == 'push'", build)
+        self.assertIn("continue-on-error: true", build)
         self.assertIn("name: plurxd-${{ matrix.target }}", build)
 
     def test_release_registry_and_weekly_readiness_match_ci(self):
