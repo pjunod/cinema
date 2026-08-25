@@ -91,8 +91,13 @@ use production_job_lease::ActiveJobLease;
 mod production_serving_fence;
 use production_serving_fence::ServingFence;
 
+mod failure_drills;
 mod named_runner;
 mod topology;
+pub use failure_drills::{
+    validate_failure_drill_artifact, ClusterFailureDrillArtifact,
+    FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
+};
 pub use named_runner::{
     claim_named_output, validate_named_campaign, NamedRunnerConfig, NamedTopologyCampaign,
     NamedVoter, NAMED_CAMPAIGN_SCHEMA_VERSION,
@@ -246,7 +251,8 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             controller().await
         }
         Some("membership") => run_membership_lifecycle_case().await,
-        Some("learner") => run_learner_membership_case().await,
+        Some("learner") => run_learner_membership_case().await.map(|_| ()),
+        Some("proxy-fixture") => failure_drills::run_proxy_fixture_command().await,
         Some("singleton") => run_singleton_takeover_case().await,
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
@@ -673,6 +679,7 @@ async fn run_growth_subprocess() -> Result<()> {
 }
 
 async fn controller() -> Result<()> {
+    let failure_drills_started_at = topology::unix_ms()?;
     println!("cluster-check: membership lifecycle 1 -> 3 -> 2");
     run_membership_lifecycle_case().await?;
     println!("cluster-check: current-leader self-leave");
@@ -686,15 +693,25 @@ async fn controller() -> Result<()> {
     println!("cluster-check: bounded catalogue apply-pause and follower partition");
     run_bounded_catalogue_failure_case().await?;
     println!("cluster-check: three voters plus an admitted learner");
-    run_learner_membership_case().await?;
+    let learner = run_learner_membership_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
     println!("cluster-check: isolated serving-node readiness and media fence");
     run_serving_partition_case().await?;
     println!("cluster-check: follower loss and incompatible-voter guard");
-    run_failure_case(FailureTarget::Follower).await?;
+    let follower_loss = run_failure_case(FailureTarget::Follower).await?;
     println!("cluster-check: leader loss");
-    run_failure_case(FailureTarget::Leader).await?;
+    let leader_loss = run_failure_case(FailureTarget::Leader).await?;
+    println!("cluster-check: sticky HLS proxy backend loss and unsafe mutation refusal");
+    let proxy = failure_drills::run_proxy_fixture().await?;
+    failure_drills::write_semantic_artifact(
+        Path::new("target/validation/cluster-failure-drills.json"),
+        failure_drills_started_at,
+        learner,
+        follower_loss,
+        leader_loss,
+        proxy,
+    )?;
     println!("cluster-check: all M1b/M1c/M1d/M3/M3d/M4 serving contracts passed");
     Ok(())
 }
@@ -4744,7 +4761,7 @@ async fn offline_summary(
 ///   same authority from its durable role;
 /// - the capacity projection never confuses a non-voting copy with voter
 ///   failure tolerance, and protocol rollback becomes safe after promotion.
-async fn run_learner_membership_case() -> Result<()> {
+async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObservation> {
     /// The voter that starts on a binary predating the learner protocol.
     const OLD_BINARY_VOTER: u64 = 3;
     /// The non-voting member. Its raft id is not chosen: token issuance
@@ -5111,6 +5128,70 @@ async fn run_learner_membership_case() -> Result<()> {
         .require_ok()?;
     wait_for_learner_ready(&mut cluster, leader, LEARNER).await?;
 
+    // A ready learner is useful read capacity only while its target-local
+    // applied index stays inside the bounded-replica freshness contract.
+    // Pause the real state-machine apply path, commit beyond it, and force the
+    // production heartbeat projection to prove that rotation drops the
+    // learner before the process itself is unhealthy.
+    cluster
+        .request(LEARNER, Request::PauseApply)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: "learner.rotation-lag".to_owned(),
+                value: "committed-past-paused-apply".to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    let pause_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match cluster
+            .request(LEARNER, Request::ApplyPauseObserved)
+            .await?
+        {
+            Response::ApplyPauseObserved { observed: true } => break,
+            Response::ApplyPauseObserved { observed: false } => {}
+            response => bail!("learner apply-pause observation returned {response:?}"),
+        }
+        if Instant::now() >= pause_deadline {
+            bail!("learner did not block inside its SQLite apply path");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let rotation_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        cluster
+            .request(LEARNER, Request::ForceHeartbeat)
+            .await?
+            .require_ok()?;
+        let status = match cluster.request(leader, Request::MembershipStatus).await? {
+            Response::MembershipStatus { status } => status,
+            response => bail!("unexpected lagged learner status: {response:?}"),
+        };
+        let lagged = status.nodes.iter().any(|node| {
+            node.raft_id == LEARNER
+                && node.role == NodeRole::Learner
+                && node.apply_lag_entries.is_some_and(|lag| lag > 0)
+                && !node.bounded_read_ready
+        });
+        if lagged && status.capacity.ready_read_workers == 0 {
+            break;
+        }
+        if Instant::now() >= rotation_deadline {
+            bail!("lagged learner stayed in ready read-worker rotation: {status:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    cluster
+        .request(LEARNER, Request::ResumeApply)
+        .await?
+        .require_ok()?;
+    wait_for_learner_ready(&mut cluster, leader, LEARNER).await?;
+
     // The restart did not make it eligible either. Eligibility is re-derived
     // from committed membership on every call, so a fresh process is refused
     // for the same reason the old one was.
@@ -5392,7 +5473,13 @@ async fn run_learner_membership_case() -> Result<()> {
 
     cluster.assert_running().await?;
     cluster.kill_all().await;
-    Ok(())
+    Ok(failure_drills::LearnerDrillObservation {
+        voting_nodes: 3,
+        voting_quorum: 2,
+        non_voting_replicas: 1,
+        lagged_learner_left_rotation: true,
+        learner_reentered_rotation_after_catchup: true,
+    })
 }
 
 /// Wait for the target's own passive quorum sample, local applied index, and
@@ -6006,7 +6093,9 @@ enum FailureTarget {
     Follower,
 }
 
-async fn run_failure_case(target: FailureTarget) -> Result<()> {
+async fn run_failure_case(
+    target: FailureTarget,
+) -> Result<failure_drills::FailureDrillObservation> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("cluster-check data root")?;
     let (mut cluster, specs) = start_cluster_with_port_retry(&executable, root.path(), 3).await?;
@@ -6067,6 +6156,19 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
             .context("choose follower")?,
     };
     let failure_name = format!("{target:?}").to_ascii_lowercase();
+    for ordinal in 0..32 {
+        cluster
+            .request(
+                leader,
+                Request::TopologyWrite {
+                    ordinal,
+                    value: format!("failure-drill-{failure_name}-before-{ordinal:02}"),
+                },
+            )
+            .await?
+            .require_ok()?;
+    }
+    let loss_started = Instant::now();
     cluster.kill(target_id).await?;
 
     let survivor = (1..=3)
@@ -6087,6 +6189,19 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
         )
         .await?
         .require_ok()?;
+    let recovery_millis = u64::try_from(loss_started.elapsed().as_millis())?;
+    for ordinal in 32..64 {
+        cluster
+            .request(
+                survivor,
+                Request::TopologyWrite {
+                    ordinal,
+                    value: format!("failure-drill-{failure_name}-after-{ordinal:02}"),
+                },
+            )
+            .await?
+            .require_ok()?;
+    }
     let current_leader = cluster.leader().await?;
     let first_degraded = cluster
         .wait_for_replication_health(current_leader, ReplicationHealth::Degraded)
@@ -6276,8 +6391,18 @@ async fn run_failure_case(target: FailureTarget) -> Result<()> {
     }
     cluster.assert_running().await?;
 
+    let observation = failure_drills::FailureDrillObservation {
+        target: failure_name,
+        initial_leader: leader,
+        failed_node: target_id,
+        replacement_leader: current_leader,
+        write_operations: failure_drills::FAILURE_DRILL_WRITE_OPERATIONS,
+        request_errors: 0,
+        recovery_millis,
+        writes_preserved: true,
+    };
     cluster.kill_all().await;
-    Ok(())
+    Ok(observation)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -95,7 +95,7 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	  single_voter_cost_stays_inside_the_m0_budget -- --ignored --exact --nocapture
 
 .PHONY: cluster-check
-cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failure contracts
+cluster-check: ## Run WAL recovery plus M1b-P7 durable-state, growth, proxy, and failure contracts
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
@@ -155,6 +155,8 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	  --test harness compacted_growth_gate -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  topology::tests::topology_artifact -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  failure_drills::tests --lib -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  named_runner::tests --lib -- --nocapture
 	$(CARGO) test --locked -p plurxd --test cluster_activity -- --nocapture
