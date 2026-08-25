@@ -206,7 +206,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
     # The first cold lab run reached the final three-voter proof but crossed
     # the old 25-minute guard while building the command-profile dependency
     # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
@@ -230,6 +230,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: hiqlite-cluster-auth
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
       - name: Run separate-process replica and failure contracts
         if: needs.scope.outputs.cluster_auth == 'true'
         run: make cluster-check
