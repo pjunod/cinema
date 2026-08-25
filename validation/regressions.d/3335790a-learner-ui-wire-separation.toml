@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3335790a"]
+points = ["cluster.auth", "server.api", "web.experience"]
+checks = ["cluster-auth", "rust-gate", "api-wire", "web-membership"]
+reason = "The web membership test requires the Read worker control to call the dedicated learner issuance endpoint and the Voting member control to call the closed voter endpoint, with neither request sending a client-chosen role. The server route-matrix test also pins learner issuance as an ineligible learner-originated mutation, while the rendered copy retains the distinct capacity role and one-time token handling."
