@@ -490,8 +490,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "offline", "media", _, _, _]
                 | ["api", "v1", "offline", "media", _, "subs", _, _]
                 | ["api", "v1", "publication", _, _]
-        ) || (segments.len() >= 6
-            && segments[0..3] == ["api", "v1", "publication"]));
+        ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let node_local_create = method == Method::POST
         && matches!(
             segments.as_slice(),
