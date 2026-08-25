@@ -392,7 +392,7 @@ test("a roster row shows hostname and advertised host without listener ports", (
   assert.match(row, /node-a/);
   assert.match(row, />7</);
   assert.match(row, /voter/);
-  assert.match(row, /reachable/);
+  assert.match(row, /fresh/);
   // Listener ports and internal field names remain private.
   for (const leak of [":32401", ":32402", "http://", "raft_address", "api_address"]) {
     assert.equal(row.includes(leak), false, `roster row exposes ${leak}`);
@@ -454,10 +454,10 @@ test("the action flex row stays inside its table cell", () => {
   );
 });
 
-test("an unreachable node says so rather than showing a blank", () => {
+test("a stale node heartbeat says so rather than claiming a network probe", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(node("node-c", 3, "voter", { reachable: false }));
-  assert.match(row, /not reachable/);
+  assert.match(row, /stale/);
 });
 
 test("loopback is shown as localhost beside the short hostname", () => {

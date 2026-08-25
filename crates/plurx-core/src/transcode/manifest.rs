@@ -1155,6 +1155,7 @@ impl GenerationManifest {
         // blocking file write is still in flight. Drain that write before
         // Linux seals the memfd; otherwise the seal can win the race, leave
         // an empty snapshot, and defer the write failure behind the seek.
+        #[cfg(target_os = "linux")]
         snapshot
             .flush()
             .await
