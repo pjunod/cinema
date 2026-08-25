@@ -372,6 +372,8 @@ class OperationsContractCase(unittest.TestCase):
         # The emulator restores a cached AVD snapshot and never saves over it.
         self.assertIn("key: avd-35-google_apis-pixel_7_pro", workflow)
         self.assertIn("-no-snapshot-save", workflow)
+        self.assertIn("uninstall tv.plurx.app.test", makefile)
+        self.assertIn("uninstall tv.plurx.app", makefile)
 
         # The semantic proof reuses the cluster job's root target instead of
         # compiling the same Hiqlite/OpenRaft dependency graph a second time.
@@ -431,6 +433,7 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
+        high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
         android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
         hosted_linux = "    runs-on: ubuntu-latest"
         apple = "    runs-on: macos-15"
@@ -450,6 +453,8 @@ class OperationsContractCase(unittest.TestCase):
                 expected = general
                 if path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
+                elif path == ".github/workflows/ci.yml" and name == "docker":
+                    expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",

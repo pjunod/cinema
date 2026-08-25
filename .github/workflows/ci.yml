@@ -549,7 +549,7 @@ jobs:
   # PR / branch smoke test that the image both builds and runs, without publishing.
   docker:
     name: docker runtime smoke
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     needs: [scope, preflight]
     if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 30
