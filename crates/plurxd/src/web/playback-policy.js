@@ -552,6 +552,23 @@
       : "prompt";
   }
 
+  // Bind a transcode restart to the exact session that stalled. The server
+  // owns Auto rung normalization, so a plain create would only reproduce the
+  // same unsustainable rung and spend the client's one recovery attempt.
+  function stallReopenSessionOptions({
+    options = {},
+    forceReopen = false,
+    method = null,
+    sessionId = null,
+  } = {}) {
+    const result = { ...options };
+    if (forceReopen && method === "transcode" && sessionId) {
+      result.previous_session_id = sessionId;
+      result.reopen_reason = "stall";
+    }
+    return result;
+  }
+
   function fallbackResetBeforeOpen({ reason }) {
     return ["stall-recovery", "stall-manual", "auto-supply"].includes(reason);
   }
@@ -909,6 +926,7 @@
     initialRoute,
     fallbackAction,
     stallRecoveryAction,
+    stallReopenSessionOptions,
     fallbackResetBeforeOpen,
     parseStreamFailure,
     streamFailureOverlay,

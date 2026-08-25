@@ -205,8 +205,7 @@ fn run(
                             wal.roll_over(wal_size, &mut buf)?;
                             {
                                 let mut lock = wal_locked.write().unwrap();
-                                lock.active = wal.active;
-                                lock.clone_files_from_no_mmap(&wal.files);
+                                lock.refresh_from_no_mmap(&wal);
                             }
                             active = wal.active();
                         }
@@ -255,8 +254,7 @@ fn run(
                     wal.roll_over(wal_size, &mut buf)?;
                     {
                         let mut lock = wal_locked.write().unwrap();
-                        lock.active = wal.active;
-                        lock.clone_files_from_no_mmap(&wal.files);
+                        lock.refresh_from_no_mmap(&wal);
                     }
                 }
             }
@@ -287,21 +285,33 @@ fn run(
 
                 buf.clear();
                 buf_logs.clear();
-                match wal.shift_delete_logs(from, until, wal_size, &mut buf, &mut buf_logs) {
-                    Ok(_) => {
-                        // the last_log may be none if logs are truncated
-                        if last_log.is_some() {
-                            meta.write()?.last_purged_log_id = last_log;
-                            Metadata::write(meta.clone(), &wal.base_path)?;
+                let result = {
+                    // Take the exclusive layout guard before deleting,
+                    // recreating, or truncating any WAL path. Readers retain
+                    // the shared guard from refresh through mmap/read, so an
+                    // old incarnation can never open a replacement pathname.
+                    let mut layout = wal_locked.write().unwrap();
+                    match wal.shift_delete_logs(
+                        from,
+                        until,
+                        wal_size,
+                        &mut buf,
+                        &mut buf_logs,
+                    ) {
+                        Ok(_) => {
+                            // the last_log may be none if logs are truncated
+                            if last_log.is_some() {
+                                meta.write()?.last_purged_log_id = last_log;
+                                Metadata::write(meta.clone(), &wal.base_path)?;
+                            }
+                            layout.refresh_from_no_mmap(&wal);
+                            Ok(())
                         }
-                        {
-                            let mut lock = wal_locked.write().unwrap();
-                            lock.active = wal.active;
-                            lock.clone_files_from_no_mmap(&wal.files);
-                        }
-                        ack.send(Ok(())).unwrap();
+                        Err(err) => Err(err),
                     }
-                    Err(err) => ack.send(Err(err)).unwrap(),
+                };
+                if ack.send(result).is_err() {
+                    debug!("WAL remove response receiver closed before completion");
                 }
             }
             Action::Vote { value, ack } => {
@@ -360,6 +370,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const WAL_SIZE: u32 = 2 * 1024 * 1024;
+    type TestWriter = (
+        flume::Sender<Action>,
+        Arc<RwLock<Metadata>>,
+        Arc<RwLock<WalFileSet>>,
+    );
 
     fn test_path(name: &str) -> String {
         let nonce = SystemTime::now()
@@ -369,14 +384,12 @@ mod tests {
         format!("test_data/{name}-{}-{nonce}", std::process::id())
     }
 
-    fn start_writer(
-        base_path: &str,
-    ) -> Result<(flume::Sender<Action>, Arc<RwLock<Metadata>>), Error> {
+    fn start_writer(base_path: &str) -> Result<TestWriter, Error> {
         fs::create_dir_all(base_path)?;
         let lockfile = LockFile::create(base_path)?;
         lockfile.lock()?;
         let meta = Arc::new(RwLock::new(Metadata::read_or_create(base_path)?));
-        let (writer, _) = spawn(
+        let (writer, wal) = spawn(
             base_path.to_owned(),
             lockfile,
             LogSync::Immediate,
@@ -384,7 +397,7 @@ mod tests {
             false,
             meta.clone(),
         )?;
-        Ok((writer, meta))
+        Ok((writer, meta, wal))
     }
 
     fn stop_writer(writer: flume::Sender<Action>) {
@@ -398,7 +411,7 @@ mod tests {
         let base_path = test_path("single-file-snapshot-tail");
         let _ = fs::remove_dir_all(&base_path);
 
-        let (writer, meta) = start_writer(&base_path)?;
+        let (writer, meta, _wal) = start_writer(&base_path)?;
         let first_retained = LogId {
             leader_id: LeaderId {
                 term: 1,
@@ -423,7 +436,7 @@ mod tests {
         assert!(meta.read().unwrap().last_purged_log_id.is_none());
         stop_writer(writer);
 
-        let (writer, meta) = start_writer(&base_path)?;
+        let (writer, meta, _wal) = start_writer(&base_path)?;
         let bytes = meta
             .read()
             .unwrap()
@@ -435,6 +448,122 @@ mod tests {
         assert_eq!(restored.index, 9_999);
         stop_writer(writer);
 
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_purge_waits_for_an_unmapped_reader_before_reusing_the_wal_path(
+    ) -> Result<(), Error> {
+        let base_path = test_path("full-purge-reader-layout-guard");
+        let _ = fs::remove_dir_all(&base_path);
+
+        let (writer, meta, wal_locked) = start_writer(&base_path)?;
+        let first = LogId {
+            leader_id: LeaderId {
+                term: 1,
+                node_id: 1_u64,
+            },
+            index: 1,
+        };
+        let (entry_tx, entry_rx) = flume::bounded(2);
+        let (append_ack, append_rx) = oneshot::channel();
+        writer.send(Action::Append {
+            rx: entry_rx,
+            callback: Box::new(|| {}),
+            ack: append_ack,
+        }).unwrap();
+        entry_tx
+            .send(Some((first.index, serialize(&first)?)))
+            .unwrap();
+        entry_tx.send(None).unwrap();
+        append_rx.blocking_recv().unwrap()?;
+
+        let layout = wal_locked.read().unwrap();
+        let mut reader = layout.clone_no_map();
+        let (remove_ack, mut remove_rx) = oneshot::channel();
+        writer.send(Action::Remove {
+            from: 0,
+            until: first.index,
+            last_log: Some(serialize(&first)?),
+            ack: remove_ack,
+        }).unwrap();
+
+        // Fill the writer queue behind Remove. Success proves the writer has
+        // received Remove and is waiting on the layout guard held above.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut queued = Action::Sync;
+        loop {
+            match writer.try_send(queued) {
+                Ok(()) => break,
+                Err(flume::TrySendError::Full(action)) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "writer did not begin the remove action"
+                    );
+                    queued = action;
+                    thread::yield_now();
+                }
+                Err(flume::TrySendError::Disconnected(_)) => {
+                    panic!("writer disconnected during remove")
+                }
+            }
+        }
+        assert!(matches!(
+            remove_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        // The old identity has no mmap yet. If Remove unlinked/recreated the
+        // pathname before taking its exclusive guard, this mmap would attach
+        // the replacement inode to the old metadata and the read would fail.
+        reader.active().mmap()?;
+        let mut memo = None;
+        let mut records = Vec::with_capacity(1);
+        reader
+            .active()
+            .read_logs(1, 1, &mut memo, &mut records)?;
+        assert_eq!(records.len(), 1);
+
+        drop(layout);
+        remove_rx.blocking_recv().unwrap()?;
+
+        let replacement = LogId {
+            leader_id: first.leader_id,
+            index: 10_001,
+        };
+        let (entry_tx, entry_rx) = flume::bounded(2);
+        let (append_ack, append_rx) = oneshot::channel();
+        writer.send(Action::Append {
+            rx: entry_rx,
+            callback: Box::new(|| {}),
+            ack: append_ack,
+        }).unwrap();
+        entry_tx
+            .send(Some((replacement.index, serialize(&replacement)?)))
+            .unwrap();
+        entry_tx.send(None).unwrap();
+        append_rx.blocking_recv().unwrap()?;
+
+        {
+            let layout = wal_locked.read().unwrap();
+            reader.refresh_from_no_mmap(&layout);
+            reader.active().mmap()?;
+            records.clear();
+            reader.active().read_logs(
+                replacement.index,
+                replacement.index,
+                &mut memo,
+                &mut records,
+            )?;
+        }
+        assert_eq!(records.len(), 1);
+
+        stop_writer(writer);
+        drop(reader);
+        drop(wal_locked);
+        drop(meta);
         fs::remove_dir_all(base_path)?;
         Ok(())
     }
