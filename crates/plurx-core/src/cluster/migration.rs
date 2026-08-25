@@ -595,6 +595,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
         activation_marker,
         role,
+        config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -1485,6 +1486,7 @@ async fn open_active_store_with_key(
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
         role,
+        config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -5426,6 +5428,7 @@ pub mod status {
     //! M3; this module only turns the backend and Raft metrics the daemon already
     //! has into an honest answer about watch-state convergence.
 
+    use std::collections::BTreeSet;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -6440,17 +6443,27 @@ pub mod status {
                 .expect("replicated monitor must carry a client");
             let status = match client.metrics_db().await {
                 Ok(metrics) => {
+                    let voter_ids = metrics
+                        .membership_config
+                        .voter_ids()
+                        .collect::<BTreeSet<_>>();
                     let peer_matched_indexes = metrics.replication.as_ref().map(|replication| {
                         replication
                             .iter()
-                            .filter(|(node_id, _)| **node_id != metrics.id)
+                            // Learner catch-up is reported per node by the
+                            // membership projection. It must never make the
+                            // voter replication status claim that quorum
+                            // redundancy is degraded.
+                            .filter(|(node_id, _)| {
+                                **node_id != metrics.id && voter_ids.contains(node_id)
+                            })
                             .map(|(_, applied)| applied.as_ref().map(|log| log.index))
                             .collect()
                     });
                     let observation = ReplicationObservation {
                         running: metrics.running_state.is_ok(),
                         leader_known: metrics.current_leader.is_some(),
-                        voter_count: metrics.membership_config.voter_ids().count(),
+                        voter_count: voter_ids.len(),
                         last_log_index: metrics.last_log_index,
                         last_applied_term: metrics
                             .last_applied

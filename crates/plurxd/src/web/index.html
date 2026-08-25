@@ -10216,15 +10216,15 @@ function clusterStateView(cluster){
         "replication status on the System tab and inspect the server logs before restarting anything."};
   const nodes=cluster.nodes||[];
   const voters=nodes.filter(n=>n.is_voter).length;
-  const learners=nodes.filter(n=>n.role==="learner").length;
+  const learnerNodes=nodes.filter(n=>n.role==="learner"&&!n.is_voter);
+  const learners=learnerNodes.length;
+  const readyLearners=learnerNodes.filter(n=>n.bounded_read_ready).length;
   const joiningVoters=nodes.filter(n=>n.role==="voter"&&!n.is_voter).length;
-  // A learner is a permanent non-voting role, not a stage of joining: it
-  // changes none of the arithmetic below and nothing promotes it later.
-  // Saying so stops it reading as a voter that went missing.
   const catching=learners?` ${learners===1?"One node is":`${learners} nodes are`} `+
     `${learners===1?"a learner":"learners"}: ${learners===1?"it receives":"they receive"} `+
     `replication, ${learners===1?"holds":"hold"} no vote, and ${learners===1?"is":"are"} `+
-    `not counted toward quorum.`:"";
+    `not counted toward quorum. ${readyLearners} ${readyLearners===1?"is":"are"} currently ready for `+
+    `bounded reads and declared node-local media work.`:"";
   const joining=joiningVoters?` ${joiningVoters===1?"One voter is":`${joiningVoters} voters are`} `+
     `joining and catching up: ${joiningVoters===1?"it has":"they have"} no committed vote yet and `+
     `${joiningVoters===1?"is":"are"} not counted toward quorum until Raft promotes `+
@@ -10248,11 +10248,10 @@ function clusterStateView(cluster){
       "supported configuration rather than a half-finished cluster. Add a second and a third node only "+
       "if you want another machine carrying the same watch state."+catching+joining};
 }
-// The refusals DELETE /cluster/nodes/{id} can return, as sentences that say
-// what to do next. `node_owns_offline_work` is expected to be the common one
-// when an active transfer or concurrent package creation prevents the server
-// from resolving the work safely, so it gets a route forward rather than a
-// statement of fact and a dead end.
+// Membership lifecycle refusals as sentences that say what to do next.
+// `node_owns_offline_work` is expected to be the common removal refusal, while
+// the learner proof codes are the expected promotion refusals; both need a
+// route forward rather than a statement of fact and a dead end.
 function membershipRefusalText(code,message){
   const REFUSALS={
     removal_would_lose_quorum:
@@ -10280,16 +10279,19 @@ function membershipRefusalText(code,message){
     membership_unavailable:
       "This server is not running a replicated store, so it has no cluster membership to change.",
     membership_upgrade_required:
-      "Finish upgrading every active cluster node before changing membership, then retry. No new removal "+
-      "fence, offline-work settlement, leadership handoff, or Raft membership proposal was created by this request.",
+      "Finish upgrading every active cluster node before changing membership, then retry. The reference-counted removal and learner-lifecycle fences are enabled only after every running binary proves it understands them.",
     membership_removal_pending:
       "This node is still protected by a pending removal fence because another, ambiguous, or older-version "+
       "attempt may still commit. Finish upgrading every cluster node and retry this same removal; do not return "+
       "the fenced node to service while its outcome is unresolved.",
+    learner_not_ready:
+      "This learner has not yet published a fresh zero-lag apply proof. Leave it running until its Read worker badge says ready, then retry promotion.",
+    voter_storage_preflight_failed:
+      "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
-  return message?`The server refused this removal: ${message}`
-                :"The server refused this removal and gave no reason.";
+  return message?`The server refused this cluster operation: ${message}`
+                :"The server refused this cluster operation and gave no reason.";
 }
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
@@ -10300,7 +10302,7 @@ function clusterNodeRow(n,localNodeId){
     ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
     : admittedVoter
       ? `<span class="pill" title="Admitted as a voter and currently joining or catching up. It is not counted toward quorum until Raft commits its vote.">joining voter</span>`
-      : `<span class="pill" title="A permanent non-voting role. A learner receives replication, does not vote, and is not counted toward quorum.">learner</span>`;
+      : `<span class="pill" title="A non-voting capacity role. A learner receives replication and may serve gated work; explicit promotion adds its vote only after catch-up and storage preflight.">learner</span>`;
   const heartbeat=n.reachable
     ? `<span style="color:var(--good)">fresh</span>`
     : `<span style="color:var(--bad)">stale</span>`;
@@ -10308,13 +10310,21 @@ function clusterNodeRow(n,localNodeId){
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
   const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
+  const worker=!voter&&n.role==="learner"
+    ? n.bounded_read_ready
+      ? `<span class="pill" style="color:var(--good);border-color:var(--good)">Read worker ready</span>`
+      : `<span class="pill" style="color:var(--warn);border-color:var(--warn)">Catching up</span>`
+    : "";
   const hostname=n.hostname||n.node_id;
   const advertised=n.advertised_host
     ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
+  const promote=!voter&&n.role==="learner"
+    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
+    : "";
   const action=n.node_id===localNodeId
     ? `<span class="muted">Use graceful leave below</span>`
-    : `<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}</div>
+    : `${promote}<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
+  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
     <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
     <td data-label="Role">${role}</td>
@@ -10336,6 +10346,12 @@ function clusterPanel(d){
   // One lag answer, not a second competing one: this is the same projection and
   // the same renderer as Settings → System.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
+  const capacity=clustered&&cluster.capacity;
+  const capacityText=capacity
+    ? `${capacity.ready_read_workers} ready non-voting read worker${capacity.ready_read_workers===1?"":"s"}; `+
+      `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}; `+
+      `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
+    : "Capacity details unavailable.";
   const roster=nodes.length
     ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
        <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
@@ -10347,6 +10363,7 @@ function clusterPanel(d){
       Leader, commit, and apply-lag readings below describe Raft replication health.</div>
     <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
       — the same reading as the Server card on the System tab.</div>
+    <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div>
     ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
     ${clustered?joinPanel()+leavePanel(cluster.local_node_id):""}</div>
@@ -10365,7 +10382,7 @@ function retryCluster(){
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
-  return `<div class="clrefusal"><b>${esc(CLUSTER_REFUSAL.node_id)} was not removed</b>${
+  return `<div class="clrefusal"><b>Cluster operation for ${esc(CLUSTER_REFUSAL.node_id)} was refused</b>${
     esc(membershipRefusalText(CLUSTER_REFUSAL.code,CLUSTER_REFUSAL.message))}</div>`;
 }
 // Minting is separated from showing because the token exists exactly once: the
@@ -10379,6 +10396,10 @@ function joinPanel(){
           <option value="600" selected>10 minutes</option>
           <option value="1800">30 minutes</option>
           <option value="3600">1 hour</option></select></span>
+      <span class="schedpair">Role
+        <select id="clrole" style="max-width:150px;font-size:12px;padding:3px 6px">
+          <option value="voter" selected>Voting member</option>
+          <option value="learner">Read worker</option></select></span>
       <button onclick="mintJoinToken(this)">Create a join token</button></div>
     <div class="hint">A join token is single-use and short-lived, and it is shown once. Create it when the
       other machine is ready to start, not before.</div>`;
@@ -10402,13 +10423,14 @@ function leavePanel(localNodeId){
 // than presenting it as an identifier to leave on a screen.
 function joinTokenHtml(issued){
   const mins=Math.max(0,Math.round((issued.expires_at-Date.now())/60000));
+  const role=issued.role==="learner"?"a non-voting read worker":"a voting member";
   return `<h2 class="section">Add a node</h2>
     <div class="jointoken" id="cltoken">${esc(issued.token)}</div>
     <div class="hint"><b>Shown once.</b> plurx keeps only this token's digest, so closing this is the end of
       it — create another if you lose it. Until it is redeemed or expires it carries the complete authority
       to join a node to this cluster: treat it like a password, and do not paste it into a chat, an issue, or
       a shell transcript. It expires in about ${mins} minute${mins===1?"":"s"}
-      and admits exactly one node as Raft id ${esc(String(issued.raft_id))}.</div>
+      and admits exactly one node as ${role}, Raft id ${esc(String(issued.raft_id))}.</div>
     <div class="hint">On the new machine — a fresh data directory with no existing plurx database — save this
       into an owner-only file, point <code>cluster.join_token_file</code> at it, give that node its own
       reachable <code>cluster.advertise_host</code>, and start plurxd. It joins on its own and deletes the
@@ -10421,11 +10443,12 @@ async function mintJoinToken(btn){
   const generation=PAGE_RENDER_GENERATION;
   const sel=document.getElementById("clttl");
   const expires_in_seconds=sel?Number(sel.value):600;
+  const role=document.getElementById("clrole")?.value||"voter";
   const was=btn.textContent; btn.disabled=true; btn.textContent="Creating…";
   try{
-    const token=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
+    const token=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds,role}});
     if(!settingsCurrent(generation,"cluster")) return;
-    CLUSTER_TOKEN=token;
+    CLUSTER_TOKEN={...token,role};
     CLUSTER_REFUSAL=null;
     renderSettings();
   }catch(e){
@@ -10477,6 +10500,22 @@ async function removeNode(nodeId){
       }).catch(()=>{});
     }
     return;
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+async function promoteNode(nodeId){
+  if(!confirm(`Promote ${nodeId} to a voting member?\n\nThis increases quorum size only after the node proves zero apply lag and voter-grade durable storage headroom.`)) return;
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  try{
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/promote`,{method:"POST",body:{}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    toast("Learner promoted to voter");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:nodeId,code:e.code,message:e.message};
   }
   if(settingsCurrent(generation,"cluster")) renderSettings();
 }

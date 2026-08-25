@@ -316,7 +316,7 @@ impl MediaPool {
     async fn refresh_root_readability(&self, store: &dyn plurx_core::store::Store) {
         let peers = match tokio::time::timeout(
             ROOT_PROBE_COLLECTION_DEADLINE,
-            self.membership.activity_peers(),
+            self.membership.media_peers(),
         )
         .await
         {
@@ -580,7 +580,7 @@ impl MediaPool {
     async fn poll_once(&self) -> Result<(), MembershipError> {
         let peers = self
             .membership
-            .activity_peers()
+            .media_peers()
             .await?
             .into_iter()
             .filter(|peer| peer.reachable && peer.http_base.is_some())
@@ -748,7 +748,7 @@ impl MediaPool {
             Ok((offer, snapshot)) => (vec![offer], Some(snapshot)),
             Err(_) => (Vec::new(), None),
         };
-        let peers = tokio::time::timeout_at(deadline, self.membership.activity_peers())
+        let peers = tokio::time::timeout_at(deadline, self.membership.media_peers())
             .await
             .ok()
             .and_then(Result::ok)

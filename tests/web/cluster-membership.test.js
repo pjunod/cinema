@@ -54,6 +54,7 @@ const BORROWED = [
   "leavePanel",
   "joinTokenHtml",
   "clusterPanel",
+  "promoteNode",
 ];
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
@@ -132,11 +133,22 @@ function node(id, raftId, role, extra = {}) {
 }
 
 function status(availability, nodes) {
+  const voting_nodes = nodes.filter((entry) => entry.is_voter).length;
+  const voting_quorum = Math.floor(voting_nodes / 2) + 1;
   return {
     local_node_id: nodes[0] && nodes[0].node_id,
     availability,
     nodes,
     replication: REPLICATION,
+    capacity: {
+      voting_nodes,
+      voting_quorum,
+      voting_failure_tolerance: Math.max(0, voting_nodes - voting_quorum),
+      non_voting_replicas: nodes.filter((entry) => !entry.is_voter).length,
+      ready_read_workers: nodes.filter(
+        (entry) => !entry.is_voter && entry.bounded_read_ready,
+      ).length,
+    },
   };
 }
 
@@ -282,21 +294,18 @@ test("a replicated one-node install says one node is a complete configuration", 
   assert.match(view.body, /complete, supported configuration/i);
 });
 
-test("a learner is named as a permanent non-voting role", () => {
+test("a learner is named as a non-voting capacity role", () => {
   const ui = sandbox();
   const view = ui.clusterStateView(
     status("single_node", [
       node("node-a", 1, "voter"),
-      node("node-b", 2, "learner"),
+      node("node-b", 2, "learner", { bounded_read_ready: true }),
     ]),
   );
   assert.match(view.body, /is a learner/i);
   assert.match(view.body, /holds no vote/i);
   assert.match(view.body, /not counted toward quorum/i);
-  // It is not a join state: nothing in this panel may promise a promotion
-  // the server does not implement.
-  assert.doesNotMatch(view.body, /catching up/i);
-  assert.doesNotMatch(view.body, /becomes? a voter/i);
+  assert.match(view.body, /one is currently ready for bounded reads/i);
 });
 
 // The banner sentence has two branches and only the singular one was read, so
@@ -307,15 +316,14 @@ test("two learners are named the same way the one-learner sentence is", () => {
   const view = ui.clusterStateView(
     status("single_node", [
       node("node-a", 1, "voter"),
-      node("node-b", 2, "learner"),
+      node("node-b", 2, "learner", { bounded_read_ready: true }),
       node("node-c", 3, "learner"),
     ]),
   );
   assert.match(view.body, /2 nodes are learners/i);
   assert.match(view.body, /hold no vote/i);
   assert.match(view.body, /not counted toward quorum/i);
-  assert.doesNotMatch(view.body, /catching up/i);
-  assert.doesNotMatch(view.body, /become voters/i);
+  assert.match(view.body, /1 is currently ready for bounded reads/i);
 });
 
 // The roster pill repeats the promise in a `title` attribute, and that is the
@@ -323,12 +331,18 @@ test("two learners are named the same way the one-learner sentence is", () => {
 // so it could be reverted to "Admitted and catching up" by itself.
 test("the learner role pill says what the banner says", () => {
   const ui = sandbox();
-  const row = ui.clusterNodeRow(node("node-b", 2, "learner"), "node-a");
-  assert.match(row, /permanent non-voting role/i);
-  assert.match(row, /does not vote/i);
-  assert.match(row, /not counted toward quorum/i);
-  assert.doesNotMatch(row, /catching up/i);
-  assert.doesNotMatch(row, /becomes? a voter/i);
+  const row = ui.clusterNodeRow(
+    node("node-b", 2, "learner", {
+      bounded_read_ready: true,
+      voter_storage_ready: true,
+    }),
+    "node-a",
+  );
+  assert.match(row, /non-voting capacity role/i);
+  assert.match(row, /explicit promotion adds its vote/i);
+  assert.match(row, /Read worker ready/i);
+  assert.match(row, /Promote to voter/i);
+  assert.doesNotMatch(row, /Promote to voter" disabled/);
 
   // And none of that leaks onto a voter's pill.
   const voter = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
@@ -336,7 +350,36 @@ test("the learner role pill says what the banner says", () => {
   assert.doesNotMatch(voter, /non-voting/i);
 });
 
-test("a voter catching up is not rendered as a permanent learner", () => {
+test("promotion stays disabled until both learner proofs are ready", () => {
+  const ui = sandbox();
+  for (const extra of [
+    { bounded_read_ready: false, voter_storage_ready: true },
+    { bounded_read_ready: true, voter_storage_ready: false },
+  ]) {
+    const row = ui.clusterNodeRow(node("node-b", 2, "learner", extra), "node-a");
+    assert.match(row, /Promote to voter/);
+    assert.match(row, /<button class="ghost sm" disabled/);
+  }
+});
+
+test("capacity text separates read workers, copies, and voting tolerance", () => {
+  const ui = sandbox();
+  const html = ui.clusterPanel({
+    cluster: status("high_availability", [
+      node("node-a", 1, "voter"),
+      node("node-b", 2, "voter"),
+      node("node-c", 3, "voter"),
+      node("node-d", 4, "learner", { bounded_read_ready: true }),
+    ]),
+    sys: { replication: REPLICATION },
+  });
+  assert.match(html, /1 ready non-voting read worker/);
+  assert.match(html, /1 non-voting replicated copy/);
+  assert.match(html, /3 voters, quorum 2, tolerates 1 voter failure/);
+  assert.match(html, /do not increase voting redundancy/i);
+});
+
+test("a voter catching up is not rendered as a learner capacity role", () => {
   const ui = sandbox();
   const joining = node("node-d", 4, "voter", { is_voter: false });
   const view = ui.clusterStateView(
@@ -353,7 +396,7 @@ test("a voter catching up is not rendered as a permanent learner", () => {
 
   const row = ui.clusterNodeRow(joining, "node-a");
   assert.match(row, /joining voter/i);
-  assert.doesNotMatch(row, /permanent non-voting role/i);
+  assert.doesNotMatch(row, /non-voting capacity role/i);
 });
 
 // ---- every refusal is a sentence with a next step -------------------------
@@ -368,6 +411,8 @@ const REFUSAL_CODES = [
   "leave_node_mismatch",
   "membership_upgrade_required",
   "membership_removal_pending",
+  "learner_not_ready",
+  "voter_storage_preflight_failed",
 ];
 
 test("each removal refusal renders as an actionable sentence, not a code", () => {
@@ -421,7 +466,7 @@ test("an unknown refusal still says something true", () => {
   );
   assert.match(
     ui.membershipRefusalText(null, ""),
-    /refused this removal and gave no reason/,
+    /refused this cluster operation and gave no reason/,
   );
 });
 
@@ -430,7 +475,7 @@ test("a refusal is rendered into the panel against the node it names", () => {
     refusal: { node_id: "node-b", code: "node_owns_offline_work", message: "" },
   });
   const html = ui.clusterRefusalHtml();
-  assert.match(html, /node-b was not removed/);
+  assert.match(html, /Cluster operation for node-b was refused/);
   assert.match(html, /offline download/i);
 });
 
@@ -637,6 +682,7 @@ test("the token is shown once, with what it is and how long it lasts", () => {
       token: "plxjoin:v1:aaaa:bbbb",
       expires_at: Date.now() + 600_000,
       raft_id: 4,
+      role: "learner",
     },
   });
   const html = ui.joinPanel();
@@ -644,6 +690,7 @@ test("the token is shown once, with what it is and how long it lasts", () => {
   assert.match(html, /Shown once/);
   assert.match(html, /10 minutes/);
   assert.match(html, /Raft id 4/);
+  assert.match(html, /non-voting read worker/i);
   // It must say what the holder of the token can do, not just that it is secret.
   assert.match(html, /complete authority\s+to join a node/i);
   assert.match(html, /Done — clear it/);
@@ -654,6 +701,20 @@ test("clearing the token removes it from the rendered panel", () => {
   const html = ui.joinPanel();
   assert.equal(html.includes("plxjoin:"), false);
   assert.match(html, /Create a join token/);
+  assert.match(html, /Voting member/);
+  assert.match(html, /Read worker/);
+});
+
+test("learner issuance and promotion are wired to their admin APIs", () => {
+  const mint = shippedSource("mintJoinToken");
+  assert.match(mint, /clrole/);
+  assert.match(mint, /body:\{expires_in_seconds,role\}/);
+  assert.match(mint, /CLUSTER_TOKEN=\{\.\.\.token,role\}/);
+
+  const promote = shippedSource("promoteNode");
+  assert.match(promote, /\/cluster\/nodes\/\$\{encodeURIComponent\(nodeId\)\}\/promote/);
+  assert.match(promote, /method:"POST"/);
+  assert.match(promote, /Learner promoted to voter/);
 });
 
 test("routing away from Settings drops the in-memory join token", () => {
