@@ -212,8 +212,7 @@ mod tests {
     use super::*;
 
     fn state() -> AppState {
-        let root =
-            std::env::temp_dir().join(format!("plurx-cluster-route-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_temp_path(format!("plurx-cluster-route-{}", uuid::Uuid::new_v4()));
         AppState::new(
             "test".to_owned(),
             Arc::new(SqliteStore::open_in_memory().expect("session store")),

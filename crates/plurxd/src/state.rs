@@ -3925,8 +3925,8 @@ mod tests {
     #[tokio::test]
     async fn three_cluster_ticks_run_one_provider_pass() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("cluster tick store"));
-        let artwork = tempfile::tempdir().expect("artwork");
-        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
         seeded_episode_backlog(&store, 1).await;
         let hits = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -4040,8 +4040,8 @@ mod tests {
             .put_setting(keys::CACHE_MAX_GB, "50")
             .await
             .expect("enable cache");
-        let artwork = tempfile::tempdir().expect("artwork");
-        let cache = tempfile::tempdir().expect("cache");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let cache = crate::test_tempdir().expect("cache");
         let cache_root = cache.path().join("transcode");
         let recipe = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
         let orphan = cache_root
@@ -4282,7 +4282,7 @@ mod tests {
     #[tokio::test]
     async fn job_lifecycle_helpers_publish_progress_and_clear_every_guard() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(Arc::clone(&store), artwork.path());
 
         assert!(
@@ -4347,7 +4347,7 @@ mod tests {
     #[tokio::test]
     async fn job_settings_are_bounded_and_stamps_round_trip() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(Arc::clone(&store), artwork.path());
 
         assert_eq!(jobs.job_interval("missing").await, 0);
@@ -4385,7 +4385,7 @@ mod tests {
     #[tokio::test]
     async fn targeted_request_failures_queue_every_waiter_and_stay_bounded() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(Arc::clone(&store), artwork.path());
 
         let missing = scan_request_fixture("missing", 404);
@@ -4472,8 +4472,8 @@ mod tests {
     #[tokio::test]
     async fn same_path_waiters_all_finish_and_apply_their_own_ids() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
         let folder = media.path().join("Queued");
         std::fs::create_dir_all(&folder).expect("queued folder");
         std::fs::write(folder.join("clip.mp4"), b"not really video").expect("queued clip");
@@ -4570,7 +4570,7 @@ mod tests {
     #[tokio::test]
     async fn targeted_waiter_queue_is_bounded_and_overflow_is_terminal() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store, artwork.path());
         let library_id = 406;
         jobs.statuses.lock().await.insert(
@@ -4614,7 +4614,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_of_a_missing_library_finishes_with_an_error() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store, artwork.path());
         assert!(jobs.trigger_refresh_as(999, ScanTrigger::Scheduled).await);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4643,8 +4643,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn startup_scan_is_opt_in_and_runs_each_library_after_settling() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
         let library = store
             .create_library(&NewLibrary {
                 name: "Movies".into(),
@@ -4710,9 +4710,9 @@ mod tests {
     #[tokio::test]
     async fn schedule_loop_dispatches_a_due_library_scan() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
-        let transcode = tempfile::tempdir().expect("transcode");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let transcode = crate::test_tempdir().expect("transcode");
         let library = store
             .create_library(&NewLibrary {
                 name: "Movies".into(),
@@ -4776,9 +4776,9 @@ mod tests {
     #[tokio::test]
     async fn due_jobs_dispatches_a_scheduled_metadata_refresh() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
-        let transcode = tempfile::tempdir().expect("transcode");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let transcode = crate::test_tempdir().expect("transcode");
         let library = store
             .create_library(&NewLibrary {
                 name: "Movies".into(),
@@ -4843,7 +4843,7 @@ mod tests {
     #[tokio::test]
     async fn refreshing_missing_item_artwork_is_an_empty_success() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store, artwork.path());
 
         let outcome = jobs
@@ -4866,8 +4866,8 @@ mod tests {
     #[tokio::test]
     async fn a_targeted_scan_enriches_what_it_placed() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
         std::fs::create_dir_all(media.path().join("Holiday")).expect("mkdir");
         std::fs::write(media.path().join("Holiday/clip.mp4"), b"not really video").expect("clip");
         std::fs::write(media.path().join("Holiday/clip-thumb.jpg"), b"jpeg-ish").expect("thumb");
@@ -4928,8 +4928,8 @@ mod tests {
     #[tokio::test]
     async fn a_targeted_scan_enriches_new_children_of_an_existing_show() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
         let show = media.path().join("Severance (2022)");
         let season_one = show.join("Season 01");
         std::fs::create_dir_all(&season_one).expect("mkdir s1");
@@ -5047,7 +5047,7 @@ mod tests {
     #[tokio::test]
     async fn enrich_targets_walks_up_to_the_show() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let lib = store
             .create_library(&NewLibrary {
                 name: "Shows".into(),
@@ -5109,7 +5109,7 @@ mod tests {
     #[tokio::test]
     async fn the_artwork_sweep_is_a_no_op_on_a_healthy_library() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let jobs = manager(store.clone(), artwork.path());
         assert_eq!(jobs.sweep_artwork().await.expect("sweep"), 0);
     }
@@ -5121,7 +5121,7 @@ mod tests {
     async fn the_artwork_sweep_claims_exactly_one_bounded_batch() {
         const EXTRA: usize = 7;
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let episodes = seeded_episode_backlog(&store, ARTWORK_RETRY_BATCH as usize + EXTRA).await;
         let season_hits = Arc::new(AtomicUsize::new(0));
         let base = serve(empty_season_tmdb(Arc::clone(&season_hits))).await;
@@ -5165,7 +5165,7 @@ mod tests {
     async fn artwork_retry_fairness_drains_fresh_rows_before_reclaiming_any() {
         const EXTRA: usize = 7;
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let episodes = seeded_episode_backlog(&store, ARTWORK_RETRY_BATCH as usize + EXTRA).await;
         let season_hits = Arc::new(AtomicUsize::new(0));
         let base = serve(empty_season_tmdb(Arc::clone(&season_hits))).await;
@@ -5198,7 +5198,7 @@ mod tests {
     #[tokio::test]
     async fn artwork_retry_does_not_back_off_work_that_never_reached_a_provider_result() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let episode = seeded_episode_backlog(&store, 1).await[0];
         store
             .put_setting(keys::TMDB_API_KEY, "")
@@ -5253,7 +5253,7 @@ mod tests {
     #[tokio::test]
     async fn artwork_retry_pass_is_single_flight() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         seeded_episode_backlog(&store, 1).await;
         let hits = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -5288,8 +5288,8 @@ mod tests {
     #[tokio::test]
     async fn due_jobs_continue_while_artwork_retry_is_in_flight() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
-        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
         seeded_episode_backlog(&store, 1).await;
         store
             .put_setting(keys::JOB_TRANSCODE_CLEANUP_MINS, "15")
@@ -5380,8 +5380,8 @@ mod tests {
                 .await
                 .expect("seed telemetry");
         }
-        let artwork = tempfile::tempdir().expect("artwork");
-        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
         let jobs = manager(store.clone(), artwork.path());
         let transcode = Arc::new(TranscodeManager::new(
             store.clone(),
@@ -5418,7 +5418,7 @@ mod tests {
     #[tokio::test]
     async fn the_artwork_sweep_repairs_and_converges_blank_tv_children() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let (library_id, show, season) = seeded_enriched_show(&store).await;
         let episode = store
             .insert_item(&NewItem {
@@ -5504,7 +5504,7 @@ mod tests {
     #[tokio::test]
     async fn the_artwork_sweep_repairs_a_blank_season_without_touching_healthy_rows() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let (library_id, show, season) = seeded_enriched_show(&store).await;
         let episode = store
             .insert_item(&NewItem {
@@ -5564,7 +5564,7 @@ mod tests {
     #[tokio::test]
     async fn the_artwork_sweep_stamps_a_season_when_tmdb_has_no_poster() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let (_, show, season) = seeded_enriched_show(&store).await;
         let show_hits = Arc::new(AtomicUsize::new(0));
         let season_hits = Arc::new(AtomicUsize::new(0));

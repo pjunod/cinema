@@ -762,7 +762,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = crate::test_tempdir().expect("artwork");
         let client = reqwest::Client::builder().build().expect("client");
         let first = cache_artwork_url(&client, artwork.path(), &url)
             .await

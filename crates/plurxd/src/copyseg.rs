@@ -576,7 +576,7 @@ mod tests {
     }
 
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe(kind);
         let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits).await;
         (dir, outcome)
@@ -791,7 +791,7 @@ mod tests {
     /// to trip over, and no ENDLIST claiming a film that ends early.
     #[tokio::test]
     async fn a_killed_session_leaves_no_tmp_files_and_no_endlist() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         // Two thirds of the stream, which lands inside a fragment.
         let cut = feed.len() * 2 / 3;
@@ -818,7 +818,7 @@ mod tests {
     /// stands on (a client that can't see the live edge can't start at it).
     #[tokio::test]
     async fn the_publish_gate_holds_the_playlist_while_segments_land() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         // Mid-fragment, so nothing mistakes this for end of stream — EOF is
         // the one thing allowed to open the gate early.
@@ -848,7 +848,7 @@ mod tests {
     /// fixture can actually fill.
     #[tokio::test]
     async fn the_gate_opens_mid_stream_and_the_first_playlist_lists_the_cushion() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
@@ -905,7 +905,7 @@ mod tests {
     /// what lets the caller fall back to ffmpeg's own muxer.
     #[tokio::test]
     async fn an_unparseable_moov_falls_back_to_the_legacy_path() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let mut feed = pipe("open-gop");
         // Corrupt the moov's first child box size. The box walk then runs past
         // its parent, which is the malformed case, not the truncated one.
@@ -960,7 +960,7 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let outcome = run(&out.stdout[..], dir.path().to_path_buf(), "test", brisk()).await;
         match outcome {
             Outcome::Unsupported(reason) => {
@@ -974,7 +974,7 @@ mod tests {
     /// Nothing at all down the pipe — ffmpeg refused the source outright.
     #[tokio::test]
     async fn an_empty_pipe_asks_for_the_fallback() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk()).await;
         assert!(matches!(outcome, Outcome::Unsupported(_)), "{outcome:?}");
     }
@@ -986,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn a_trickling_pipe_produces_the_same_session() {
         let (whole, whole_outcome) = session("clean-cra", brisk()).await;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let trickle = tokio::io::BufReader::with_capacity(1, &feed[..]);
         let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk()).await;
@@ -1047,7 +1047,7 @@ mod tests {
             .expect("spawning ffmpeg");
         let stdout = child.stdout.take().expect("stdout pipe");
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let limits = Limits {
             floor_seconds: 3,
             first_floor_seconds: 1,

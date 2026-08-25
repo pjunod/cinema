@@ -75,6 +75,7 @@ struct CacheOrphanWalker {
     root: Option<PathBuf>,
     prefixes: Option<tokio::fs::ReadDir>,
     final_entries: Option<(PathBuf, tokio::fs::ReadDir)>,
+    final_resume: Option<PathBuf>,
     staging_entries: Option<tokio::fs::ReadDir>,
 }
 
@@ -1389,12 +1390,22 @@ async fn sweep_orphan_dirs(
     // Persist the open directory cursors across passes. A hostile cache tree
     // therefore cannot force every sweep to restart at its first 10,000
     // entries, while the independent staging cursor prevents one huge fanout
-    // prefix from starving crash-leftover cleanup.
+    // prefix from starving crash-leftover cleanup. A prefix whose entries are
+    // deleted below is reopened once: Darwin's directory cursor can otherwise
+    // skip siblings when APFS compacts the directory around the cursor.
     let final_scan_limit = ORPHAN_SCAN_LIMIT * 4 / 5;
     let final_delete_limit = ORPHAN_DELETE_LIMIT * 3 / 4;
     let mut scanned = 0usize;
+    let mut final_cursor_is_resume = false;
     while scanned < final_scan_limit && final_candidates.len() < final_delete_limit {
         if walker.final_entries.is_none() {
+            if let Some(parent) = walker.final_resume.take() {
+                if let Ok(entries) = tokio::fs::read_dir(&parent).await {
+                    walker.final_entries = Some((parent, entries));
+                    final_cursor_is_resume = true;
+                    continue;
+                }
+            }
             if walker.prefixes.is_none() {
                 walker.prefixes = tokio::fs::read_dir(root).await.ok();
             }
@@ -1425,6 +1436,7 @@ async fn sweep_orphan_dirs(
             let parent = prefix.path();
             if let Ok(entries) = tokio::fs::read_dir(&parent).await {
                 walker.final_entries = Some((parent, entries));
+                final_cursor_is_resume = false;
             }
             continue;
         }
@@ -1530,6 +1542,27 @@ async fn sweep_orphan_dirs(
             max_depth: 3,
             _eviction: None,
         });
+    }
+
+    // Never mutate a directory beneath a live readdir cursor. APFS may compact
+    // the directory and advance the cursor past entries that have not yet been
+    // returned. Resume an ordinary prefix once; after that bounded retry, move
+    // on through the saved prefix cursor so a replenished prefix cannot starve
+    // the rest of the cache tree.
+    if let Some((parent, _)) = walker.final_entries.as_ref() {
+        if final_candidates
+            .iter()
+            .any(|candidate| candidate.parent == *parent)
+        {
+            let parent = parent.clone();
+            walker.final_entries = None;
+            if !final_cursor_is_resume {
+                walker.final_resume = Some(parent);
+            }
+        }
+    }
+    if !staging_candidates.is_empty() {
+        walker.staging_entries = None;
     }
     drop(walker);
 
@@ -1851,7 +1884,7 @@ mod tests {
     }
 
     fn root() -> tempfile::TempDir {
-        tempfile::tempdir().expect("root")
+        crate::test_tempdir().expect("root")
     }
 
     async fn preparing_package(store: &Arc<dyn Store>, file: i64, recipe: &str) -> (String, i64) {
@@ -1977,7 +2010,7 @@ mod tests {
     async fn eviction_rejects_an_intermediate_symlink_without_touching_its_target() {
         let (store, file) = store().await;
         let root = root();
-        let outside = tempfile::tempdir().expect("outside");
+        let outside = crate::test_tempdir().expect("outside");
         let victim = outside.path().join("victim");
         tokio::fs::create_dir_all(&victim).await.expect("victim");
         tokio::fs::write(victim.join("index.m3u8"), b"outside sentinel")
@@ -3083,7 +3116,7 @@ mod tests {
     /// directory becomes an orphan and the offline worker loses its queue.
     #[tokio::test]
     async fn node_identity_initialization_preserves_populated_v14_ownership_and_bytes() {
-        let data = tempfile::tempdir().expect("data dir");
+        let data = crate::test_tempdir().expect("data dir");
         let mut config = Config::default();
         config.storage.data_dir = data.path().to_owned();
         let cache_root = data.path().join("cache/transcode");
@@ -3307,7 +3340,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_distinct_node_id_cannot_strand_existing_local_ownership() {
-        let data = tempfile::tempdir().expect("data dir");
+        let data = crate::test_tempdir().expect("data dir");
         let mut config = Config::default();
         config.storage.data_dir = data.path().to_owned();
         let store = SqliteStore::open(&data.path().join("plurx.db")).expect("store");

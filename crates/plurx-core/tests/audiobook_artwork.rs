@@ -7,6 +7,12 @@ use plurx_core::metadata::book::{
 use plurx_core::scan::probe::probe;
 use plurx_core::store::{LibraryStore, MediaStore, SqliteStore};
 
+fn canonical_tempdir() -> tempfile::TempDir {
+    let root =
+        std::fs::canonicalize(std::env::temp_dir()).expect("canonical system temporary directory");
+    tempfile::tempdir_in(root).expect("temporary directory")
+}
+
 fn ffmpeg() -> String {
     std::env::var("PLURX_FFMPEG")
         .ok()
@@ -40,8 +46,8 @@ fn run(command: &mut Command) {
 #[tokio::test]
 async fn audiobook_refresh_adopts_its_embedded_cover() {
     require_ffmpeg();
-    let media = tempfile::tempdir().expect("media");
-    let artwork = tempfile::tempdir().expect("artwork");
+    let media = canonical_tempdir();
+    let artwork = canonical_tempdir();
     let cover = media.path().join("cover.jpg");
     let audiobook = media.path().join("One Second After.mp3");
     run(Command::new(ffmpeg())

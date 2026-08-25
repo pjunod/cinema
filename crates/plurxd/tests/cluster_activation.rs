@@ -9,6 +9,11 @@ use plurx_core::store::{SqliteStore, UserStore};
 
 static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn canonical_tempdir() -> std::io::Result<tempfile::TempDir> {
+    let root = std::fs::canonicalize(std::env::temp_dir())?;
+    tempfile::tempdir_in(root)
+}
+
 fn process_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     PROCESS_TEST_LOCK.blocking_lock()
 }
@@ -155,7 +160,7 @@ async fn login_status(port: u16, username: &str, password: &str) -> reqwest::Sta
 #[test]
 fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
     let _process_test = process_test_guard();
-    let root = tempfile::tempdir().expect("activation process fixture");
+    let root = canonical_tempdir().expect("activation process fixture");
     let data = root.path().join("data");
     std::fs::create_dir_all(data.join("sessions/live-session")).expect("session fixture");
     std::fs::write(
@@ -216,7 +221,7 @@ fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
 #[cfg(unix)]
 #[test]
 fn sigterm_is_registered_before_the_listener_can_become_reachable() {
-    let root = tempfile::tempdir().expect("shutdown registration fixture");
+    let root = canonical_tempdir().expect("shutdown registration fixture");
     let run = run_to_completion_with_failpoint(root.path(), "after-listener-bind");
 
     assert!(
@@ -248,7 +253,7 @@ fn sigterm_is_registered_before_the_listener_can_become_reachable() {
 #[cfg(unix)]
 #[test]
 fn a_signal_during_startup_stops_the_daemon_before_it_boots() {
-    let root = tempfile::tempdir().expect("startup shutdown fixture");
+    let root = canonical_tempdir().expect("startup shutdown fixture");
     let run = run_to_completion_with_failpoint(root.path(), "after-store-activation");
 
     assert!(
@@ -321,7 +326,7 @@ fn run_to_completion_with_failpoint(root: &std::path::Path, failpoint: &str) -> 
 #[test]
 fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
     let _process_test = process_test_guard();
-    let root = tempfile::tempdir().expect("listener host fixture");
+    let root = canonical_tempdir().expect("listener host fixture");
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).expect("data directory");
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
@@ -377,7 +382,7 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
 #[test]
 fn maintenance_commands_reach_tls_on_an_activated_node() {
     let _process_test = process_test_guard();
-    let root = tempfile::tempdir().expect("maintenance TLS fixture");
+    let root = canonical_tempdir().expect("maintenance TLS fixture");
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).expect("data directory");
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
@@ -450,7 +455,7 @@ fn maintenance_commands_reach_tls_on_an_activated_node() {
 #[test]
 fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
     let _process_test = process_test_guard();
-    let root = tempfile::tempdir().expect("daemon activation fixture");
+    let root = canonical_tempdir().expect("daemon activation fixture");
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).expect("data directory");
     drop(SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source"));
@@ -561,7 +566,7 @@ async fn activated_one_voter_rebuilds_current_state_after_sigkill() {
 
 #[cfg(unix)]
 async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
-    let root = tempfile::tempdir().expect("SIGKILL recovery fixture");
+    let root = canonical_tempdir().expect("SIGKILL recovery fixture");
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).expect("data directory");
     let source = SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source");

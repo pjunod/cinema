@@ -577,7 +577,7 @@ mod tests {
     }
 
     async fn dir() -> (tempfile::TempDir, RenditionDir) {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = crate::test_tempdir().expect("tempdir");
         let rendition = RenditionDir::new(temp.path().join("rendition"));
         rendition.create().await.expect("create");
         (temp, rendition)

@@ -194,7 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn availability_caches_presence_but_never_absence() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let present = dir.path().join("here.mkv");
         tokio::fs::write(&present, b"x").await.expect("write");
         let missing = dir.path().join("gone.mkv");

@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn a_probe_of_a_directory_with_only_small_files_says_so() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         std::fs::write(dir.path().join("small.mkv"), b"not a movie").expect("write");
         let s = sample_device(&[dir.path().to_path_buf()], 0.0);
         assert!(s.read_bps.is_none());
@@ -775,7 +775,7 @@ mod tests {
     #[test]
     #[ignore = "writes ~600MB"]
     fn a_real_file_yields_a_real_throughput_and_seek_number() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("fixture.mkv");
         {
             use std::io::Write;
@@ -1054,7 +1054,7 @@ mod tests {
 
     #[test]
     fn a_file_smaller_than_one_sample_is_refused_rather_than_read() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("short.mkv");
         let size = sparse_file(&path, SAMPLE_BYTES / 2);
         let why = throughput_at(&path, size, 0).expect_err("must refuse");
@@ -1066,7 +1066,7 @@ mod tests {
     /// of that number rather than a separate opinion about it.
     #[test]
     fn a_completed_sample_reports_the_bytes_it_actually_read() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("big.mkv");
         let size = sparse_file(&path, SAMPLE_BYTES * 3);
 
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn a_seek_probe_needs_a_file_with_something_in_it() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("seek.mkv");
         let size = sparse_file(&path, 16 * 1024 * 1024);
         let ms = seek_latency(&path, size).expect("a seek number");
@@ -1101,7 +1101,7 @@ mod tests {
     /// on evidence that could not have held one — so it wraps, and says it did.
     #[test]
     fn a_trace_longer_than_the_file_wraps_and_admits_it() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("small.mkv");
         let size = sparse_file(&path, 8 * 1024 * 1024);
 
@@ -1120,7 +1120,7 @@ mod tests {
     /// not a fabricated one.
     #[test]
     fn an_unreadable_file_yields_an_empty_trace() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let t = sustained_read(&dir.path().join("nope.mkv"), 1 << 30, 0.5);
         assert!(t.windows_bps.is_empty());
         assert_eq!(t.seconds, 0.0);
@@ -1135,7 +1135,7 @@ mod tests {
     /// is that the code says so rather than reporting it as storage.
     #[test]
     fn a_sampled_mount_reports_what_it_read_and_flags_what_it_cannot_trust() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().join("Movies").join("Dune");
         std::fs::create_dir_all(&path).expect("mkdir");
         let file = path.join("Dune.mkv");
@@ -1177,7 +1177,7 @@ mod tests {
     /// library at every boot.
     #[test]
     fn the_search_for_a_file_stops_at_a_bounded_depth() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let mut deep = dir.path().to_path_buf();
         for i in 0..(FIND_DEPTH + 2) {
             deep = deep.join(format!("level{i}"));
@@ -1204,7 +1204,7 @@ mod tests {
     /// holding a worker while it does.
     #[tokio::test]
     async fn the_async_probe_returns_a_report_for_every_root() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let r = probe(
             vec![
                 dir.path().to_path_buf(),
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn roots_on_one_device_are_sampled_once() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let a = dir.path().join("a");
         let b = dir.path().join("b");
         std::fs::create_dir_all(&a).expect("mkdir");
