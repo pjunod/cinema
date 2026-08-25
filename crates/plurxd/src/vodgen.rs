@@ -182,11 +182,18 @@ where
         }
     }
 
-    // A clean end is one where everything sent was consumed: ffmpeg wrote its
-    // `mfra` trailer, or the pipe closed on a fragment boundary. A truncated
-    // fragment left in hand means the producer was killed mid-write, and the
-    // tail entry's media never fully arrived.
-    let complete = reader.saw_trailer() || reader.buffered() == 0;
+    // A generation's end is trustworthy only when ffmpeg said so: the `mfra`
+    // trailer. `copyseg` also accepts "buffer drained on a fragment
+    // boundary", and for a live session that is harmless — its playlist only
+    // ever names what it actually published. Here the plan already named
+    // every entry, and ffmpeg flushes the pipe per fragment, so a SIGKILL
+    // routinely leaves the pipe drained exactly on a boundary in the middle
+    // of an entry: publishing the pending rump would materialize a fraction
+    // of an entry's media under its real index — a permanent cache hit,
+    // which admission can then make durable — while dropping it merely
+    // leaves a segment unmaterialized for a later generation to redo. So:
+    // trailer or nothing.
+    let complete = reader.saw_trailer();
     state.finish(complete).await
 }
 
@@ -409,7 +416,7 @@ impl<S: Sink> GenerationRun<'_, S> {
     }
 
     /// End of pipe: land whatever is still undecided, then publish the tail
-    /// if — and only if — the stream ended on a whole fragment.
+    /// if — and only if — ffmpeg's trailer says the film really ended.
     async fn finish(&mut self, complete: bool) -> Outcome {
         if self.served.is_none() && self.segmenter.is_none() {
             return Outcome::Failed(Failure::Stream(
@@ -429,21 +436,44 @@ impl<S: Sink> GenerationRun<'_, S> {
             unreachable!("engage constructs the segmenter or fails typed");
         };
         if !complete {
-            // Killed mid-fragment. The pending media is real but its entry
+            // Killed without a trailer — whether mid-fragment or exactly on
+            // a fragment boundary. The pending media is real but its entry
             // is not whole, and a plan entry is served complete or not at
             // all — the wait pool blocks on it and a later generation
             // produces it.
             tracing::debug!(
                 session = %crate::transcode::session_log_id(self.session_log),
-                "pipe ended mid-fragment; the tail entries stay unmaterialized"
+                "pipe ended without its trailer; the tail entries stay \
+                 unmaterialized"
             );
             return Outcome::Ran {
                 produced_through: self.produced_through,
             };
         }
+        // One index past the plan is a shape `finish` can legitimately emit:
+        // the source's audio outruns the last planned entry by a tail the
+        // plan skipped (plan_copy plans nothing under its 50 ms threshold,
+        // and its probe can call the tracks equal), while the segmenter
+        // splits at the exact video boundary and hands the trailing audio
+        // back as its own chunk. The playlist never names that index, so
+        // nothing can ever fetch it — dropping it with a warning is the
+        // honest end of a complete film, where handing it to the sink would
+        // be refused as out-of-plan and poison the whole rendition at the
+        // end of every complete watch. Any other out-of-plan index stays the
+        // hard sink failure it is.
+        let planned = self.generation.plan.len() as u64;
         match segmenter.finish() {
             Ok(published) => {
                 for segment in published {
+                    if segment.index == planned {
+                        tracing::warn!(
+                            session = %crate::transcode::session_log_id(self.session_log),
+                            bytes = segment.segment.bytes.len(),
+                            "dropping an unplanned sub-threshold audio rump \
+                             one past the plan's last entry"
+                        );
+                        continue;
+                    }
                     if let Err(outcome) = self.deliver(segment).await {
                         return outcome;
                     }
@@ -710,6 +740,36 @@ mod tests {
         panic!("no video traf in the segment");
     }
 
+    /// The byte offset of the end of the pipe's `fragments`-th fragment —
+    /// a cut there is exactly what a SIGKILL between two flushes leaves:
+    /// a drained pipe, on a boundary, with no trailer. Verbatim contiguity
+    /// (init, then moof+mdat pairs, nothing between) is asserted as we walk,
+    /// so the cut cannot silently land inside some box this walk skipped.
+    fn fragment_boundary_cut(feed: &[u8], fragments: usize) -> usize {
+        let mut reader = FragmentReader::new();
+        reader.push(feed);
+        let mut cut = 0usize;
+        let mut seen = 0usize;
+        while let Some(unit) = reader.next_unit().expect("parsing the pipe") {
+            match unit {
+                Unit::Init(init) => {
+                    assert_eq!(&feed[..init.bytes.len()], &init.bytes[..]);
+                    cut += init.bytes.len();
+                }
+                Unit::Fragment(fragment) => {
+                    assert_eq!(&feed[cut..cut + fragment.len()], &fragment.bytes[..]);
+                    cut += fragment.len();
+                    seen += 1;
+                    if seen == fragments {
+                        return cut;
+                    }
+                }
+                Unit::Trailer => {}
+            }
+        }
+        panic!("the pipe carried only {seen} fragments");
+    }
+
     /// The film's video payload of one plan entry, in bytes — summed
     /// `video_bytes` of the index rows the entry covers. This is the quantity
     /// that must come out identical from every generation, because video
@@ -936,6 +996,109 @@ mod tests {
             assert_eq!(*entry as usize, offset);
         }
         assert_eq!(produced_through, Some(writes.len() as u32 - 1));
+    }
+
+    /// The kill that copyseg's rule would mistake for a clean end: ffmpeg
+    /// flushes the pipe per fragment, so a SIGKILL routinely leaves the pipe
+    /// drained exactly on a fragment boundary, mid-entry, with no trailer.
+    /// The pending rump of the half-read entry must NOT reach the sink —
+    /// published under its real index it would be a permanent cache hit
+    /// carrying a fraction of its media — and the generation still Ran,
+    /// ending at the last complete entry.
+    #[tokio::test]
+    async fn a_kill_on_a_fragment_boundary_publishes_no_partial_entry() {
+        let film = film().await;
+        // Four fragments in: entry 0 (fragment 0) and entry 1 (fragments
+        // 1-2) are complete, and fragment 3 — half of entry 2 — is pending.
+        let cut = fragment_boundary_cut(&film.feed, 4);
+        assert!(cut < film.feed.len());
+        let sink = MemSink::default();
+        let outcome = run(&film.feed[..cut], generation(&film, 0), &sink, "test").await;
+        let Outcome::Ran { produced_through } = outcome else {
+            panic!("a killed pipe still Ran: {outcome:?}");
+        };
+        let indexes: Vec<u32> = sink.taken().iter().map(|(entry, _)| *entry).collect();
+        assert_eq!(
+            indexes,
+            vec![0, 1],
+            "only the entries whose media fully arrived may materialize; a \
+             drained pipe with no trailer is a killed pipe, not a finished \
+             film"
+        );
+        assert_eq!(produced_through, Some(1));
+    }
+
+    /// The production pipe with its audio outrunning the plan: the fixture's
+    /// 12 s of film against 12.3 s of tone, under a plan whose probe said the
+    /// tracks are equal — the shape of a tail the plan skipped. The plan
+    /// names no tail entry, while `Segmenter::finish` splits at the exact
+    /// video boundary and hands the trailing audio back as its own chunk —
+    /// one index past the plan. (The tone runs 0.3 s over rather than the
+    /// threshold's 50 ms because `-avoid_negative_ts make_zero` stretches
+    /// the video timeline by the audio priming delay, and a sliver under one
+    /// AAC frame past the stretched video end never leaves the last chunk.)
+    fn audiotail_pipe() -> Vec<u8> {
+        let source = testfixtures::source("clean-cra");
+        let mut command = std::process::Command::new(testfixtures::ffmpeg());
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&source)
+            .args(["-f", "lavfi", "-t", "12.3"])
+            .args(["-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-map", "0:v:0", "-map", "1:a:0", "-sn"])
+            .args(["-c:v", "copy", "-tag:v", "hvc1"])
+            .args(["-bsf:v", "filter_units=remove_types=32-34"])
+            .args(["-c:a", "aac", "-b:a", "256k"])
+            .args(["-avoid_negative_ts", "make_zero"])
+            .args([
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            ])
+            .args(["-use_editlist", "0", "-f", "mp4", "pipe:1"]);
+        testfixtures::run(&mut command)
+    }
+
+    /// The end-of-film twin of the kill test: a source whose audio outruns
+    /// the plan's last entry makes `finish` emit one chunk at an index the
+    /// playlist never names. Nothing can ever fetch it, so it is dropped
+    /// with a warning — not handed to a sink that would refuse it as
+    /// out-of-plan and poison the rendition at the end of every complete
+    /// watch of an affected title.
+    #[tokio::test]
+    async fn an_unplanned_rump_one_past_the_plan_is_dropped_not_a_failure() {
+        let film = film().await;
+        let feed = audiotail_pipe();
+        // The sliver-bearing pipe is its own first generation: same video
+        // branch (so the film's index and plan still describe it), its own
+        // muxer init to establish against.
+        let mut init = muxer_init(&feed);
+        sanitize_stale_dolby_brand(&mut init);
+        let identity = InitIdentity::establish(&init, film.index.promotion.clone())
+            .expect("establishing identity");
+        let generation = Generation {
+            plan: film.plan.clone(),
+            index: film.index.clone(),
+            identity,
+            start_entry: 0,
+            policy: film.policy,
+        };
+        let planned = film.plan.len() as u32;
+        let sink = MemSink::default();
+        let outcome = run(&feed[..], generation, &sink, "test").await;
+        let Outcome::Ran { produced_through } = outcome else {
+            panic!("an unplanned rump must not fail the generation: {outcome:?}");
+        };
+        let writes = sink.taken();
+        assert_eq!(
+            writes.len(),
+            planned as usize,
+            "every planned entry and nothing else"
+        );
+        assert!(
+            writes.iter().all(|(entry, _)| *entry < planned),
+            "the sink must never see an index the plan does not name"
+        );
+        assert_eq!(produced_through, Some(planned - 1));
     }
 
     /// A sink whose directory went away is a session ending, not a fault:
