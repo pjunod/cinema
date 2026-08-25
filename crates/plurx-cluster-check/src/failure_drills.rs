@@ -19,6 +19,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -86,7 +87,9 @@ pub struct FailureDrillObservation {
     pub failed_node: u64,
     pub replacement_leader: u64,
     pub write_operations: u64,
+    pub request_attempts: u64,
     pub request_errors: u64,
+    pub raw_write_latency_millis: Vec<u64>,
     pub recovery_millis: u64,
     pub writes_preserved: bool,
 }
@@ -103,6 +106,9 @@ pub struct ProxyDrillObservation {
     pub unsafe_mutation_retries: u64,
     pub connect_timeout_millis: u64,
     pub drain_timeout_millis: u64,
+    pub slow_response_millis: u64,
+    pub graceful_drain_completed: bool,
+    pub graceful_drain_millis: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +172,16 @@ pub(crate) fn write_semantic_artifact(
 }
 
 pub fn validate_failure_drill_artifact(artifact: &ClusterFailureDrillArtifact) -> Result<()> {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../benchmarks/cluster-failure-drills.schema.json"
+    ))
+    .context("parse checked-in failure-drill schema")?;
+    let validator =
+        jsonschema::draft202012::new(&schema).context("compile failure-drill schema")?;
+    let value = serde_json::to_value(artifact)?;
+    if !validator.is_valid(&value) {
+        bail!("failure-drill artifact does not satisfy its closed schema");
+    }
     if artifact.schema_version != FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION
         || artifact.evidence_scope != EVIDENCE_SCOPE
     {
@@ -221,6 +237,9 @@ pub fn validate_failure_drill_artifact(artifact: &ClusterFailureDrillArtifact) -
         || proxy.unsafe_mutation_retries != 0
         || proxy.connect_timeout_millis != artifact.accepted_budgets.proxy_connect_timeout_millis
         || proxy.drain_timeout_millis != artifact.accepted_budgets.proxy_drain_timeout_millis
+        || proxy.slow_response_millis <= PROXY_CONNECT_TIMEOUT_MILLIS
+        || !proxy.graceful_drain_completed
+        || proxy.graceful_drain_millis > proxy.drain_timeout_millis
         || artifact.accepted_budgets.unsafe_mutation_retries != 0
     {
         bail!("proxy drill did not preserve the readiness, affinity, and retry contract");
@@ -231,9 +250,12 @@ pub fn validate_failure_drill_artifact(artifact: &ClusterFailureDrillArtifact) -
 fn validate_loss(observation: &FailureDrillObservation, expected: &str) -> Result<()> {
     if observation.target != expected
         || observation.write_operations != FAILURE_DRILL_WRITE_OPERATIONS
+        || observation.request_attempts != FAILURE_DRILL_WRITE_OPERATIONS
         || observation.request_errors != 0
+        || observation.raw_write_latency_millis.len() != FAILURE_DRILL_WRITE_OPERATIONS as usize
         || !observation.writes_preserved
         || (expected == "follower" && observation.failed_node == observation.initial_leader)
+        || (expected == "follower" && observation.replacement_leader != observation.initial_leader)
         || (expected == "leader" && observation.failed_node != observation.initial_leader)
     {
         bail!("{expected}-loss observation did not preserve the fixed write contract");
@@ -248,6 +270,7 @@ struct BackendState {
     ready: Arc<AtomicBool>,
     fail_mutations: Arc<AtomicBool>,
     mutations: Arc<AtomicU64>,
+    slow_started: Arc<Notify>,
 }
 
 struct TestServer {
@@ -257,9 +280,22 @@ struct TestServer {
 }
 
 impl TestServer {
-    async fn stop(self) {
+    async fn stop(self, maximum_drain: Duration) -> Result<(bool, u64)> {
+        let started = std::time::Instant::now();
         self.shutdown.cancel();
-        let _ = self.task.await;
+        let mut task = self.task;
+        let completed = match tokio::time::timeout(maximum_drain, &mut task).await {
+            Ok(result) => {
+                result.context("join local proxy fixture server")?;
+                true
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                false
+            }
+        };
+        Ok((completed, u64::try_from(started.elapsed().as_millis())?))
     }
 }
 
@@ -268,6 +304,7 @@ async fn start_backend(state: BackendState) -> Result<TestServer> {
         .route("/readyz", get(backend_ready))
         .route("/hls/session/master.m3u8", get(backend_playlist))
         .route("/hls/session/segment-1.ts", get(backend_segment))
+        .route("/hls/session/slow-segment.ts", get(backend_slow_segment))
         .route("/api/mutate", post(backend_mutation))
         .with_state(state);
     start_server(app).await
@@ -287,6 +324,12 @@ async fn backend_playlist(State(state): State<BackendState>) -> Response<Body> {
 
 async fn backend_segment(State(state): State<BackendState>) -> Response<Body> {
     backend_response(&state, "video/mp2t", "synthetic-segment")
+}
+
+async fn backend_slow_segment(State(state): State<BackendState>) -> Response<Body> {
+    state.slow_started.notify_one();
+    tokio::time::sleep(Duration::from_millis(PROXY_CONNECT_TIMEOUT_MILLIS + 250)).await;
+    backend_response(&state, "video/mp2t", "synthetic-slow-segment")
 }
 
 async fn backend_mutation(State(state): State<BackendState>) -> Response<Body> {
@@ -328,7 +371,6 @@ struct ProxyState {
 async fn start_proxy(backends: Vec<String>) -> Result<TestServer> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(PROXY_CONNECT_TIMEOUT_MILLIS))
-        .timeout(Duration::from_millis(PROXY_CONNECT_TIMEOUT_MILLIS))
         .build()
         .context("build proxy fixture client")?;
     let app = Router::new()
@@ -481,12 +523,14 @@ pub(crate) async fn run_proxy_fixture() -> Result<ProxyDrillObservation> {
     let backend_a_fail_mutations = Arc::new(AtomicBool::new(false));
     let backend_a_mutations = Arc::new(AtomicU64::new(0));
     let backend_b_mutations = Arc::new(AtomicU64::new(0));
+    let backend_a_slow_started = Arc::new(Notify::new());
     let backend_a = start_backend(BackendState {
         name: "a",
         playlist: "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:4.0,\nsegment-1.ts\n",
         ready: Arc::clone(&backend_a_ready),
         fail_mutations: Arc::clone(&backend_a_fail_mutations),
         mutations: Arc::clone(&backend_a_mutations),
+        slow_started: Arc::clone(&backend_a_slow_started),
     })
     .await?;
     let backend_b = start_backend(BackendState {
@@ -495,6 +539,7 @@ pub(crate) async fn run_proxy_fixture() -> Result<ProxyDrillObservation> {
         ready: Arc::new(AtomicBool::new(true)),
         fail_mutations: Arc::new(AtomicBool::new(false)),
         mutations: Arc::clone(&backend_b_mutations),
+        slow_started: Arc::new(Notify::new()),
     })
     .await?;
     let proxy = start_proxy(vec![backend_a.base_url.clone(), backend_b.base_url.clone()]).await?;
@@ -537,7 +582,60 @@ pub(crate) async fn run_proxy_fixture() -> Result<ProxyDrillObservation> {
         .and_then(|v| v.to_str().ok())
         == Some("a");
 
-    backend_a_ready.store(false, Ordering::SeqCst);
+    // A failing unsafe request is sent once even though B is healthy. Its
+    // status is returned as-is; the proxy never infers that the mutation was
+    // uncommitted and never replays it.
+    backend_a_fail_mutations.store(true, Ordering::SeqCst);
+    let mutation = client
+        .post(format!("{}/api/mutate", proxy.base_url))
+        .body("one-shot")
+        .send()
+        .await
+        .context("request failing unsafe mutation")?;
+    if mutation.status() != StatusCode::SERVICE_UNAVAILABLE {
+        bail!("proxy did not preserve the unsafe mutation failure status");
+    }
+    let unsafe_mutation_attempts =
+        backend_a_mutations.load(Ordering::SeqCst) + backend_b_mutations.load(Ordering::SeqCst);
+    let unsafe_mutation_retries = backend_b_mutations.load(Ordering::SeqCst);
+
+    // A response may take longer than the connect budget once the connection
+    // exists. Start one, begin a real graceful backend shutdown while it is in
+    // flight, and require it to finish inside the 75-second drain ceiling.
+    // The stopped listener then makes the sticky takeover exercise an actual
+    // connection failure instead of only a synthetic unready response.
+    let slow_client = client.clone();
+    let slow_url = format!("{}/hls/session/slow-segment.ts", proxy.base_url);
+    let slow_cookie = cookie.clone();
+    let slow_request = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let response = slow_client
+            .get(slow_url)
+            .header(COOKIE, slow_cookie)
+            .send()
+            .await
+            .context("request slow sticky segment")?;
+        Ok::<_, anyhow::Error>((response, u64::try_from(started.elapsed().as_millis())?))
+    });
+    tokio::time::timeout(Duration::from_secs(3), backend_a_slow_started.notified())
+        .await
+        .context("slow backend response never started")?;
+    let (graceful_drain_completed, graceful_drain_millis) = backend_a
+        .stop(Duration::from_millis(PROXY_DRAIN_TIMEOUT_MILLIS))
+        .await?;
+    let (slow_response, slow_response_millis) =
+        slow_request.await.context("join slow proxy request")??;
+    if slow_response.status() != StatusCode::OK
+        || slow_response
+            .headers()
+            .get("x-backend")
+            .and_then(|value| value.to_str().ok())
+            != Some("a")
+        || slow_response_millis <= PROXY_CONNECT_TIMEOUT_MILLIS
+    {
+        bail!("a response longer than the connect budget did not drain from backend A");
+    }
+
     let takeover = client
         .get(format!("{}/hls/session/master.m3u8", proxy.base_url))
         .header(COOKIE, cookie)
@@ -559,26 +657,15 @@ pub(crate) async fn run_proxy_fixture() -> Result<ProxyDrillObservation> {
         && takeover_backend.as_deref() == Some("b")
         && discontinuity_tags_after_failover == 1;
 
-    // Restore A's readiness, but make its mutation fail. A proxy that blindly
-    // replays POST would reach B; the fixture pins a single backend attempt.
-    backend_a_ready.store(true, Ordering::SeqCst);
-    backend_a_fail_mutations.store(true, Ordering::SeqCst);
-    let mutation = client
-        .post(format!("{}/api/mutate", proxy.base_url))
-        .body("one-shot")
-        .send()
-        .await
-        .context("request failing unsafe mutation")?;
-    if mutation.status() != StatusCode::SERVICE_UNAVAILABLE {
-        bail!("proxy did not preserve the unsafe mutation failure status");
+    let (proxy_stopped, _) = proxy
+        .stop(Duration::from_millis(PROXY_DRAIN_TIMEOUT_MILLIS))
+        .await?;
+    let (backend_b_stopped, _) = backend_b
+        .stop(Duration::from_millis(PROXY_DRAIN_TIMEOUT_MILLIS))
+        .await?;
+    if !proxy_stopped || !backend_b_stopped {
+        bail!("idle proxy fixture servers exceeded the drain bound");
     }
-    let unsafe_mutation_attempts =
-        backend_a_mutations.load(Ordering::SeqCst) + backend_b_mutations.load(Ordering::SeqCst);
-    let unsafe_mutation_retries = backend_b_mutations.load(Ordering::SeqCst);
-
-    proxy.stop().await;
-    backend_a.stop().await;
-    backend_b.stop().await;
 
     let observation = ProxyDrillObservation {
         readiness_path: "/readyz".to_owned(),
@@ -590,12 +677,17 @@ pub(crate) async fn run_proxy_fixture() -> Result<ProxyDrillObservation> {
         unsafe_mutation_retries,
         connect_timeout_millis: PROXY_CONNECT_TIMEOUT_MILLIS,
         drain_timeout_millis: PROXY_DRAIN_TIMEOUT_MILLIS,
+        slow_response_millis,
+        graceful_drain_completed,
+        graceful_drain_millis,
     };
     if !observation.hls_affinity
         || !observation.segment_affinity
         || !observation.hls_session_survived_backend_loss
         || observation.unsafe_mutation_attempts != 1
         || observation.unsafe_mutation_retries != 0
+        || !observation.graceful_drain_completed
+        || observation.graceful_drain_millis > PROXY_DRAIN_TIMEOUT_MILLIS
     {
         bail!("proxy fixture violated its application contract: {observation:?}");
     }
@@ -639,7 +731,9 @@ mod tests {
                 failed_node: 2,
                 replacement_leader: 1,
                 write_operations: 64,
+                request_attempts: 64,
                 request_errors: 0,
+                raw_write_latency_millis: vec![1; 64],
                 recovery_millis: 100,
                 writes_preserved: true,
             },
@@ -649,7 +743,9 @@ mod tests {
                 failed_node: 1,
                 replacement_leader: 2,
                 write_operations: 64,
+                request_attempts: 64,
                 request_errors: 0,
+                raw_write_latency_millis: vec![1; 64],
                 recovery_millis: 1_000,
                 writes_preserved: true,
             },
@@ -663,6 +759,9 @@ mod tests {
                 unsafe_mutation_retries: 0,
                 connect_timeout_millis: 2_000,
                 drain_timeout_millis: 75_000,
+                slow_response_millis: 2_250,
+                graceful_drain_completed: true,
+                graceful_drain_millis: 2_250,
             },
             accepted_budgets: AcceptedBudgets {
                 leader_election_recovery_millis: 10_000,
@@ -685,6 +784,23 @@ mod tests {
         let mut stale = fixture();
         stale.three_voter_plus_learner.lagged_learner_left_rotation = false;
         assert!(validate_failure_drill_artifact(&stale).is_err());
+        let mut enlarged_budget = fixture();
+        enlarged_budget
+            .accepted_budgets
+            .leader_election_recovery_millis = 60_000;
+        assert!(validate_failure_drill_artifact(&enlarged_budget).is_err());
+        let mut wrong_workload = fixture();
+        wrong_workload.workload.id = "invented".to_owned();
+        assert!(validate_failure_drill_artifact(&wrong_workload).is_err());
+        let mut negative_time = fixture();
+        negative_time.started_at_unix_ms = -1;
+        assert!(validate_failure_drill_artifact(&negative_time).is_err());
+        let mut zero_node = fixture();
+        zero_node.follower_loss.failed_node = 0;
+        assert!(validate_failure_drill_artifact(&zero_node).is_err());
+        let mut changed_follower_leader = fixture();
+        changed_follower_leader.follower_loss.replacement_leader = 3;
+        assert!(validate_failure_drill_artifact(&changed_follower_leader).is_err());
     }
 
     #[test]

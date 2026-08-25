@@ -37,8 +37,10 @@ interface, and secret below for your network before enabling one.
 
 Copy `haproxy.cfg.example` into an existing HAProxy deployment. It illustrates
 `/readyz`, ejects a voter only after repeated failures, and gives browsers a
-sticky cookie for HLS/cache locality. HAProxy does not replay failed writes;
-clients decide whether a request is safe to retry.
+sticky cookie for HLS/cache locality. Separate method-selected backends permit
+bounded `GET`/`HEAD` redispatch while setting mutation retries to zero; HAProxy
+does not replay failed writes, and clients decide whether a mutation is safe to
+retry.
 
 ## keepalived
 

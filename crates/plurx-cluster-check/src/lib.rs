@@ -6156,24 +6156,54 @@ async fn run_failure_case(
             .context("choose follower")?,
     };
     let failure_name = format!("{target:?}").to_ascii_lowercase();
-    for ordinal in 0..32 {
-        cluster
-            .request(
-                leader,
-                Request::TopologyWrite {
-                    ordinal,
-                    value: format!("failure-drill-{failure_name}-before-{ordinal:02}"),
-                },
-            )
-            .await?
-            .require_ok()?;
-    }
-    let loss_started = Instant::now();
-    cluster.kill(target_id).await?;
-
     let survivor = (1..=3)
         .find(|node_id| *node_id != target_id)
         .context("choose survivor")?;
+    let mut loss_started = None;
+    let mut recovery_millis = None;
+    let mut request_errors = 0_u64;
+    let mut raw_write_latency_millis = Vec::with_capacity(usize::try_from(
+        failure_drills::FAILURE_DRILL_WRITE_OPERATIONS,
+    )?);
+
+    // Keep one fixed-cadence workload running across the process loss. There
+    // is deliberately no readiness wait between kill and write 33: the first
+    // surviving request absorbs the election, and its acknowledged completion
+    // is the recovery point retained in the artifact.
+    for ordinal in 0..failure_drills::FAILURE_DRILL_WRITE_OPERATIONS {
+        if ordinal == failure_drills::FAILURE_DRILL_WRITE_OPERATIONS / 2 {
+            loss_started = Some(Instant::now());
+            cluster.kill(target_id).await?;
+        }
+        let request_target = if loss_started.is_some() {
+            survivor
+        } else {
+            leader
+        };
+        let value = format!("failure-drill-{failure_name}-{ordinal:02}");
+        let attempt_started = Instant::now();
+        let outcome = cluster
+            .request(request_target, Request::TopologyWrite { ordinal, value })
+            .await
+            .and_then(Response::require_ok);
+        raw_write_latency_millis.push(u64::try_from(attempt_started.elapsed().as_millis())?);
+        if let Err(error) = outcome {
+            request_errors = request_errors.saturating_add(1);
+            eprintln!("cluster-check: {failure_name} workload write {ordinal} failed: {error:#}");
+        } else if recovery_millis.is_none() {
+            if let Some(started) = loss_started {
+                recovery_millis = Some(u64::try_from(started.elapsed().as_millis())?);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    if request_errors != 0 {
+        bail!(
+            "{failure_name} loss produced {request_errors} failed requests in the fixed 64-write workload"
+        );
+    }
+    let recovery_millis = recovery_millis.context("post-loss workload never recovered")?;
+
     cluster.wait_for_ready(survivor).await?;
     cluster
         .request(survivor, Request::VerifyProof)
@@ -6189,19 +6219,6 @@ async fn run_failure_case(
         )
         .await?
         .require_ok()?;
-    let recovery_millis = u64::try_from(loss_started.elapsed().as_millis())?;
-    for ordinal in 32..64 {
-        cluster
-            .request(
-                survivor,
-                Request::TopologyWrite {
-                    ordinal,
-                    value: format!("failure-drill-{failure_name}-after-{ordinal:02}"),
-                },
-            )
-            .await?
-            .require_ok()?;
-    }
     let current_leader = cluster.leader().await?;
     let first_degraded = cluster
         .wait_for_replication_health(current_leader, ReplicationHealth::Degraded)
@@ -6280,6 +6297,14 @@ async fn run_failure_case(
         response => bail!("unexpected post-loss dump response: {response:?}"),
     };
     require_dump_setting(&post_loss_dump, &post_loss_key, "acknowledged")?;
+    for ordinal in 0..failure_drills::FAILURE_DRILL_WRITE_OPERATIONS {
+        require_dump_setting(
+            &post_loss_dump,
+            &format!("cluster.topology.write.{ordinal:04}"),
+            &format!("failure-drill-{failure_name}-{ordinal:02}"),
+        )?;
+    }
+    let writes_preserved = true;
     if cluster.wait_for_equal_catalog_views().await?.search.len() != 3 {
         bail!("post-loss catalogue/search proof lost rows");
     }
@@ -6391,15 +6416,18 @@ async fn run_failure_case(
     }
     cluster.assert_running().await?;
 
+    let request_attempts = u64::try_from(raw_write_latency_millis.len())?;
     let observation = failure_drills::FailureDrillObservation {
         target: failure_name,
         initial_leader: leader,
         failed_node: target_id,
         replacement_leader: current_leader,
         write_operations: failure_drills::FAILURE_DRILL_WRITE_OPERATIONS,
-        request_errors: 0,
+        request_attempts,
+        request_errors,
+        raw_write_latency_millis,
         recovery_millis,
-        writes_preserved: true,
+        writes_preserved,
     };
     cluster.kill_all().await;
     Ok(observation)

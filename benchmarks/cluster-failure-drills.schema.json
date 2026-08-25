@@ -83,7 +83,9 @@
         "failed_node",
         "replacement_leader",
         "write_operations",
+        "request_attempts",
         "request_errors",
+        "raw_write_latency_millis",
         "recovery_millis",
         "writes_preserved"
       ],
@@ -93,7 +95,14 @@
         "failed_node": { "type": "integer", "minimum": 1 },
         "replacement_leader": { "type": "integer", "minimum": 1 },
         "write_operations": { "const": 64 },
+        "request_attempts": { "const": 64 },
         "request_errors": { "const": 0 },
+        "raw_write_latency_millis": {
+          "type": "array",
+          "minItems": 64,
+          "maxItems": 64,
+          "items": { "type": "integer", "minimum": 0 }
+        },
         "recovery_millis": { "type": "integer", "minimum": 0 },
         "writes_preserved": { "const": true }
       }
@@ -110,7 +119,10 @@
         "unsafe_mutation_attempts",
         "unsafe_mutation_retries",
         "connect_timeout_millis",
-        "drain_timeout_millis"
+        "drain_timeout_millis",
+        "slow_response_millis",
+        "graceful_drain_completed",
+        "graceful_drain_millis"
       ],
       "properties": {
         "readiness_path": { "const": "/readyz" },
@@ -121,7 +133,10 @@
         "unsafe_mutation_attempts": { "const": 1 },
         "unsafe_mutation_retries": { "const": 0 },
         "connect_timeout_millis": { "const": 2000 },
-        "drain_timeout_millis": { "const": 75000 }
+        "drain_timeout_millis": { "const": 75000 },
+        "slow_response_millis": { "type": "integer", "minimum": 2001 },
+        "graceful_drain_completed": { "const": true },
+        "graceful_drain_millis": { "type": "integer", "minimum": 0, "maximum": 75000 }
       }
     },
     "budgets": {

@@ -1349,12 +1349,14 @@ jq '{follower_loss,leader_loss,three_voter_plus_learner,hls_backend_loss,accepte
   target/validation/cluster-failure-drills.json
 ```
 
-The retained semantic artifact proves zero-error split-loss writes, leader
-recovery inside the accepted 10-second election transition budget, lagged
-learner rotation, HLS backend takeover with one discontinuity, and zero proxy
-replays of an unsafe mutation. It is not a hardware latency benchmark. Preserve
-the CI artifact for the build being deployed; do not infer a tighter absolute
-SLO from local stopwatch output.
+The retained semantic artifact records every attempt, error, and latency from a
+fixed-cadence 64-write workload that continues through node loss. It proves
+leader recovery inside the accepted 10-second election transition budget,
+lagged learner rotation, a response longer than the connect budget draining
+inside the 75-second ceiling, HLS takeover from a stopped backend with one
+discontinuity, and zero proxy replays of an unsafe mutation. It is not a
+hardware latency benchmark. Preserve the CI artifact for the build being
+deployed; do not infer a tighter absolute SLO from local stopwatch output.
 
 ### Cluster ingress, drain, and recovery
 

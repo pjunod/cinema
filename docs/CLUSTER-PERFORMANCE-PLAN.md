@@ -949,10 +949,10 @@ documented discontinuity behavior.
 | Product-neutral routing contract | met — `/readyz`, HLS/segment affinity, 2 s connect, 75 s drain, and safe-method-only retry behavior are specified independently of example proxy syntax |
 | Executable local proxy fixture | met — two real local HTTP backends and a proxy prove sticky HLS/segments, backend ejection, one discontinuity, and no replay of a failing `POST` |
 | Three voters and three voters plus learner | met — the same separate-process harness records the three-voter quorum and admitted non-voting replica |
-| Follower loss preserves writes | met — 64 quorum-acknowledged writes split around process loss complete with zero request errors and replicated-state parity |
-| Leader loss meets the accepted election budget | met — readiness plus the first post-loss acknowledged write is measured and rejected above 10 seconds |
+| Follower loss preserves writes | met — one fixed-cadence 64-write workload continues through process loss, records every attempt/error/latency, and verifies every acknowledged key on equal surviving replicas |
+| Leader loss meets the accepted election budget | met — the first post-loss write continues without a readiness pause, its acknowledgement defines recovery, and the artifact is rejected above 10 seconds |
 | Lagged learner leaves rotation | met — the real learner apply path pauses, commits fall beyond it, `ready_read_workers` reaches zero, and catch-up restores eligibility |
-| HLS survives backend loss | met — the sticky session moves to the ready survivor and its replacement playlist carries exactly one discontinuity |
+| HLS survives backend loss | met — a response longer than the connect budget drains during bounded shutdown, the sticky session then moves from the stopped backend to the ready survivor, and its replacement playlist carries exactly one discontinuity |
 | Retained evidence | met — CI uploads `cluster-failure-drills.json`, validated by a closed Draft 2020-12 schema; it makes no named-hardware performance claim |
 
 ## 7. Pull-request sequence — small diffs, explicit dependencies

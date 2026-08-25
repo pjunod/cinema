@@ -11,9 +11,11 @@ defaults
 
 frontend plurx_http
     bind :32400
-    default_backend plurx_ready_voters
+    acl retry_safe method GET HEAD
+    use_backend plurx_ready_voters_safe if retry_safe
+    default_backend plurx_ready_voters_unsafe
 
-backend plurx_ready_voters
+backend plurx_ready_voters_safe
     balance leastconn
     option httpchk GET /readyz
     http-check expect status 200
@@ -21,11 +23,25 @@ backend plurx_ready_voters
     # plaintext LAN deployment, and know that you are then handing every
     # browser a plaintext cookie naming which node serves it.
     cookie PLURX_NODE insert indirect nocache httponly secure attr SameSite=Lax
-    # Two seconds, not ten: this is how long new sessions keep being handed to
-    # a dead voter. `slowstart` still ramps a recovered one back gently.
-    default-server inter 2s fall 3 rise 2 slowstart 10s
+    default-server inter 10s fall 3 rise 2 slowstart 10s
     # A viewer's stickiness must not outlive the node it points at.
+    retries 2
+    retry-on conn-failure empty-response response-timeout 502 503 504
     option redispatch
+    server plurx-a 192.0.2.11:32400 check cookie a
+    server plurx-b 192.0.2.12:32400 check cookie b
+    server plurx-c 192.0.2.13:32400 check cookie c
+
+# Authority mutations are never replayed. This backend intentionally repeats
+# the server list: method-based backend selection is what makes the retry rule
+# mechanically visible instead of depending on an operator remembering it.
+backend plurx_ready_voters_unsafe
+    balance leastconn
+    option httpchk GET /readyz
+    http-check expect status 200
+    cookie PLURX_NODE insert indirect nocache httponly secure attr SameSite=Lax
+    default-server inter 10s fall 3 rise 2 slowstart 10s
+    retries 0
     server plurx-a 192.0.2.11:32400 check cookie a
     server plurx-b 192.0.2.12:32400 check cookie b
     server plurx-c 192.0.2.13:32400 check cookie c
