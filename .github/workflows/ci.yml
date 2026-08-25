@@ -362,13 +362,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify the pinned Apple toolchain
         run: |
-          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "26.6"
-          test "$(xcodebuild -version | sed -n '2s/^Build version //p')" = "17F113"
+          xcode_version="$(xcodebuild -version)"
+          grep -Fxq "Xcode 26.6" <<< "$xcode_version"
+          grep -Fxq "Build version 17F113" <<< "$xcode_version"
           test "$(xcrun --sdk iphoneos --show-sdk-version)" = "26.5"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "26.5"
           test "$(xcodegen --version)" = "Version: 2.46.0"
-          xcrun simctl list runtimes | grep -Fq "iOS 26.5"
-          xcrun simctl list runtimes | grep -Fq "tvOS 26.5"
+          simulator_runtimes="$(xcrun simctl list runtimes)"
+          grep -Fq "iOS 26.5" <<< "$simulator_runtimes"
+          grep -Fq "tvOS 26.5" <<< "$simulator_runtimes"
       # Warm Swift incrementals: the Makefile builds into
       # clients/apple/build/DerivedData precisely so this cache can restore it.
       # restore-keys accepts the newest prior entry when sources moved — an
