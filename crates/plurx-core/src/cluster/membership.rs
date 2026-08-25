@@ -6826,10 +6826,9 @@ fn quorum_confirms_promotion(promoted: u64, observations: &[(u64, Option<BTreeSe
         .any(|(voters, count)| count > voters.len() / 2)
 }
 
-fn quorum_confirms_member_removal(
-    removed: u64,
-    observations: &[(u64, Option<(BTreeSet<u64>, BTreeSet<u64>)>)],
-) -> bool {
+type MemberSetObservation = (u64, Option<(BTreeSet<u64>, BTreeSet<u64>)>);
+
+fn quorum_confirms_member_removal(removed: u64, observations: &[MemberSetObservation]) -> bool {
     let mut confirmations = BTreeMap::<(BTreeSet<u64>, BTreeSet<u64>), usize>::new();
     for (observer, observed) in observations {
         let Some((voters, members)) = observed else {
