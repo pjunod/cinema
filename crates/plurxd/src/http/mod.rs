@@ -8974,7 +8974,7 @@ mod tests {
     /// that missing context as permission to turn a known HDR source into
     /// H.264 SDR. The refusal happens before playback accounting or ffmpeg.
     #[tokio::test]
-    async fn hls_create_refuses_hdr_downgrades_and_defers_the_existing_sdr_transcode() {
+    async fn hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
