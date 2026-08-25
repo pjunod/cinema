@@ -814,7 +814,7 @@ mod tests {
     }
 
     async fn seeded_fixture() -> Fixture {
-        let root = tempfile::tempdir().expect("root");
+        let root = crate::test_tempdir().expect("root");
         let source = root.path().join("movie.mkv");
         std::fs::write(&source, b"offline lifecycle fixture").expect("source");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));

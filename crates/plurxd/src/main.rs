@@ -63,6 +63,23 @@ use tracing_subscriber::EnvFilter;
 use crate::job_lease::acquire_cluster_job;
 use crate::state::{AppState, SystemInfo};
 
+/// Test fixtures that exercise capability-style path walks must start below a
+/// canonical root. Darwin exposes its per-user temporary directory through
+/// `/var`, a system symlink to `/private/var`, which the production no-follow
+/// walker intentionally refuses.
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
+    let root = std::fs::canonicalize(std::env::temp_dir())?;
+    tempfile::tempdir_in(root)
+}
+
+#[cfg(test)]
+pub(crate) fn test_temp_path(name: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonical system temporary directory")
+        .join(name)
+}
+
 #[derive(Parser)]
 // `--version` carries the build stamp too: "0.1.0 (v0.1.0-14-gc0ffee)". The
 // bare number is what a release *is*; the git description is what someone
@@ -2364,7 +2381,7 @@ mod startup_tests {
     /// empties on restart is a warm-up cost with none of the benefit.
     #[test]
     fn boot_clears_the_session_scratch_and_nothing_else() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path();
 
         let first = create_dirs(data).expect("first boot");
@@ -2399,7 +2416,7 @@ mod startup_tests {
 
     #[test]
     fn split_storage_roots_preserve_cache_and_clear_only_scratch() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let storage = StorageConfig {
             data_dir: tmp.path().join("durable"),
             cache_dir: tmp.path().join("persistent"),
@@ -2452,7 +2469,7 @@ mod startup_tests {
 
     #[test]
     fn scratch_must_not_contain_authoritative_or_persistent_roots() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = Config::default();
         config.storage.data_dir = tmp.path().join("scratch").join("durable");
         config.storage.cache_dir = tmp.path().join("scratch").join("persistent");
@@ -2469,7 +2486,7 @@ mod startup_tests {
 
     #[test]
     fn shared_cache_root_is_never_scratch_or_a_local_cache_alias() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let scratch = tmp.path().join("scratch");
         let shared = scratch.join("shared-cache");
         std::fs::create_dir_all(shared.join("objects")).expect("shared cache root");
@@ -2522,7 +2539,7 @@ mod startup_tests {
 
     #[test]
     fn missing_shared_cache_mount_preserves_node_local_fallback() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let missing_shared = tmp.path().join("offline-shared-mount");
         let mut config = Config::default();
         config.storage.data_dir = tmp.path().join("durable");
@@ -2542,7 +2559,7 @@ mod startup_tests {
 
     #[test]
     fn populated_unowned_explicit_scratch_is_refused_and_untouched() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let scratch = tmp.path().join("broad-existing-directory");
         std::fs::create_dir_all(&scratch).expect("scratch root");
         let unrelated = scratch.join("unrelated-host-data");
@@ -2568,7 +2585,7 @@ mod startup_tests {
 
     #[test]
     fn prelock_storage_validation_never_clears_owned_live_scratch() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let storage = StorageConfig {
             data_dir: tmp.path().join("durable"),
             cache_dir: tmp.path().join("persistent"),
@@ -2594,7 +2611,7 @@ mod startup_tests {
 
     #[test]
     fn scratch_must_not_be_nested_inside_a_managed_cache() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = Config::default();
         config.storage.data_dir = tmp.path().join("durable");
         config.storage.cache_dir = tmp.path().join("persistent");
@@ -2612,7 +2629,7 @@ mod startup_tests {
 
     #[test]
     fn authoritative_data_must_not_be_a_managed_cache_child() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = Config::default();
         config.storage.cache_dir = tmp.path().join("persistent");
         config.storage.data_dir = config.storage.cache_dir.join("transcode");
@@ -2630,7 +2647,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn metadata_refresh_resolves_the_daemon_storage_topology() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let cache = tmp.path().join("persistent");
         let artwork_target = tmp.path().join("artwork-on-another-disk");
         std::fs::create_dir_all(&cache).expect("cache root");
@@ -2660,7 +2677,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn a_legacy_transcode_cache_symlink_does_not_relocate_its_siblings() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path().join("durable");
         let cache_root = data.join("cache");
         let transcode_target = tmp.path().join("transcodes-on-another-disk");
@@ -2690,7 +2707,7 @@ mod startup_tests {
 
     #[test]
     fn credential_key_inside_scratch_is_refused_without_deleting_it() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let scratch = tmp.path().join("scratch");
         std::fs::create_dir_all(&scratch).expect("scratch root");
         let key = scratch.join("credentials.key");
@@ -2719,7 +2736,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn filesystem_identity_alias_is_refused_even_without_ancestry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let target = tmp.path().join("one-mounted-directory");
         let scratch_name = tmp.path().join("scratch-name");
         let cache_name = tmp.path().join("cache-name");
@@ -2740,7 +2757,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn persistent_symlink_alias_to_scratch_is_refused_without_cleanup() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let cache = tmp.path().join("persistent");
         let scratch = tmp.path().join("scratch");
         std::fs::create_dir_all(&cache).expect("cache root");
@@ -2773,7 +2790,7 @@ mod startup_tests {
     #[test]
     fn vod_cache_children_cannot_alias_scratch_without_being_validated() {
         for child in ["runtime", "renditions"] {
-            let tmp = tempfile::tempdir().expect("tempdir");
+            let tmp = crate::test_tempdir().expect("tempdir");
             let cache = tmp.path().join("persistent");
             let scratch = tmp.path().join("scratch");
             std::fs::create_dir_all(&cache).expect("cache root");
@@ -2810,7 +2827,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn legacy_scratch_symlink_is_refused_without_touching_its_target() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path().join("durable");
         let external = tmp.path().join("external-host-tree");
         std::fs::create_dir_all(&data).expect("data root");
@@ -2849,7 +2866,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn incomplete_scratch_cleanup_fails_startup_and_preserves_the_error_target() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let storage = StorageConfig {
             data_dir: tmp.path().join("durable"),
             cache_dir: tmp.path().join("persistent"),
@@ -2888,7 +2905,7 @@ mod startup_tests {
     #[cfg(unix)]
     #[test]
     fn incomplete_legacy_scratch_cleanup_fails_startup_and_preserves_its_target() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path().join("durable");
         let first = create_dirs(&data).expect("first boot");
         let stale = first.transcode.join("stale-session.m4s");
@@ -2914,7 +2931,7 @@ mod startup_tests {
 
     #[test]
     fn cache_or_scratch_device_failure_leaves_authoritative_bytes_untouched() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path().join("durable");
         std::fs::create_dir_all(&data).expect("durable root");
         let marker = data.join("authority.marker");
@@ -2973,7 +2990,7 @@ mod startup_tests {
             }
         }
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let full = tmp.path().join("full-device");
         std::fs::create_dir(&full).expect("mount point");
         let status = std::process::Command::new("mount")
@@ -3063,7 +3080,7 @@ mod startup_tests {
     /// so silence there is bytes the operator cannot find and cannot reclaim.
     #[test]
     fn setting_cache_dir_warns_about_the_legacy_cache_it_strands() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let data = tmp.path().join("durable");
         let legacy = create_dirs(&data).expect("legacy boot");
         std::fs::write(legacy.artwork.join("poster.jpg"), b"kept").expect("legacy artwork");
@@ -3116,7 +3133,7 @@ mod startup_tests {
     /// empty legacy cache has nothing to report.
     #[test]
     fn an_empty_legacy_cache_produces_no_warning() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let storage = StorageConfig {
             data_dir: tmp.path().join("durable"),
             cache_dir: tmp.path().join("persistent"),
@@ -3138,7 +3155,7 @@ mod startup_tests {
 
     #[test]
     fn a_data_dir_that_cannot_be_created_is_reported_with_its_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let blocked = tmp.path().join("data");
         std::fs::write(&blocked, b"a file, not a directory").expect("write");
         let error = format!("{:#}", create_dirs(&blocked).expect_err("must fail"));
@@ -3172,7 +3189,7 @@ mod startup_tests {
     /// is one answer rather than two that can disagree.
     #[tokio::test]
     async fn the_stored_encoder_preference_defaults_to_auto_and_is_read_back() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
 
         assert_eq!(resolve_hwaccel_pref(&store).await.expect("pref"), "auto");
@@ -3364,7 +3381,7 @@ mod startup_tests {
     /// back into a `?` or an `expect` is exactly what this catches.
     #[tokio::test]
     async fn a_discovery_daemon_that_cannot_be_withdrawn_still_drains_cleanly() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let progress = Arc::clone(&state.progress);
         let app = http::router(state);
@@ -3418,7 +3435,7 @@ mod startup_tests {
     async fn playback_progress_pending_at_shutdown_is_committed_not_lost() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let store = Arc::clone(&state.store);
         let progress = Arc::clone(&state.progress);
@@ -3577,7 +3594,7 @@ mod startup_tests {
             (port, request_rx, handle)
         }
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
 
         let (port, request, server) = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
@@ -3622,7 +3639,7 @@ mod startup_tests {
             }
         });
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         config.server.bind = format!("127.0.0.1:{port}").parse().expect("addr");
         dispatch(Command::Healthcheck, config)
@@ -3636,7 +3653,7 @@ mod startup_tests {
     /// was issued against.
     #[tokio::test]
     async fn resetting_a_password_revokes_the_sessions_it_replaces() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
         let hash = plurx_core::auth::hash_password("original-password").expect("hash");
         let user = store
@@ -3676,7 +3693,7 @@ mod startup_tests {
 
     #[tokio::test]
     async fn a_password_reset_refuses_a_short_password_and_an_unknown_user() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         let store = store_in(tmp.path());
         let hash = plurx_core::auth::hash_password("original-password").expect("hash");
@@ -3720,7 +3737,7 @@ mod startup_tests {
     /// incoming or active target and leave the legacy database untouched.
     #[tokio::test]
     async fn maintenance_commands_refuse_an_unmigrated_data_directory() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         let store = store_in(tmp.path());
         let hash = plurx_core::auth::hash_password("original-password").expect("hash");
@@ -3781,7 +3798,7 @@ mod startup_tests {
     /// TMDB key it was never going to use.
     #[tokio::test]
     async fn a_refresh_skips_the_libraries_that_have_no_provider() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
         add_library(&store, "Books", LibraryKind::Books, false).await;
         add_library(&store, "Home", LibraryKind::Home, false).await;
@@ -3801,7 +3818,7 @@ mod startup_tests {
     /// alternative is a run that silently refreshes nothing and exits 0.
     #[tokio::test]
     async fn a_refresh_of_an_unknown_library_fails_rather_than_doing_nothing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
         add_library(&store, "Movies", LibraryKind::Movies, false).await;
         let artwork = tmp.path().join("artwork");
@@ -3825,7 +3842,7 @@ mod startup_tests {
     /// rather than reporting a successful refresh that fetched nothing.
     #[tokio::test]
     async fn a_provider_refresh_without_a_key_says_so() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
         add_library(&store, "Movies", LibraryKind::Movies, false).await;
         let artwork = tmp.path().join("artwork");
@@ -3850,7 +3867,7 @@ mod startup_tests {
     /// library routes to AniList rather than TMDB.
     #[tokio::test]
     async fn an_empty_provider_library_refreshes_to_an_empty_report() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let store = store_in(tmp.path());
         store
             .put_setting(keys::TMDB_API_KEY, "not-a-real-key")
@@ -3907,7 +3924,7 @@ mod startup_tests {
 
     #[test]
     fn the_assembled_state_carries_the_configured_identity_and_directories() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let root = std::fs::canonicalize(tmp.path()).expect("canonical state root");
         assert_eq!(state.server_name, "plurx");
@@ -3928,7 +3945,7 @@ mod startup_tests {
     /// coalesced playback progress is flushed on the way out rather than lost.
     #[tokio::test]
     async fn the_server_answers_until_it_is_asked_to_stop_and_then_drains() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         state
             .transcode
@@ -4002,7 +4019,7 @@ mod startup_tests {
                 .unwrap_or_default()
         }
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let progress = Arc::clone(&state.progress);
         let app = axum::Router::new().route("/peer", axum::routing::get(peer));
@@ -4087,7 +4104,7 @@ mod startup_tests {
     /// the local bytes.
     #[test]
     fn startup_names_the_server_and_the_node_separately() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         log_startup(
             &config_in(tmp.path()),
             &plurx_core::cluster::ClusterIdentity {
@@ -4137,7 +4154,7 @@ mod startup_tests {
     /// client on the LAN that can never connect.
     #[tokio::test]
     async fn a_loopback_server_starts_no_discovery_at_all() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         assert!(
             start_discovery(&config, "instance-1", None, advertiser_that_fails).is_none(),
@@ -4150,7 +4167,7 @@ mod startup_tests {
     /// failing the boot.
     #[test]
     fn an_advertiser_that_cannot_start_does_not_stop_the_server() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         config.server.bind = "0.0.0.0:32400".parse().expect("addr");
         assert!(
@@ -4165,7 +4182,7 @@ mod startup_tests {
     /// server that answers, and a shutdown drains it back out again.
     #[tokio::test]
     async fn a_measured_node_boots_serves_and_drains() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         let handle = plurx_core::cluster::open_store(&config)
             .await
@@ -4215,7 +4232,7 @@ mod startup_tests {
     /// names has to be the one the probe actually chose.
     #[test]
     fn the_system_record_reports_the_encoder_the_probe_selected() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let caps = plurx_core::transcode::EncoderCaps::default();
         let selected = caps.choose("").label().to_owned();
         let system = system_info(
@@ -4435,7 +4452,7 @@ mod startup_tests {
     /// One test rather than several because `PLURX_GDM_PORT` is process-wide.
     #[tokio::test]
     async fn a_lan_server_answers_plex_searches_on_the_configured_port() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         config.server.name = "Loft".to_owned();
         config.server.bind = "0.0.0.0:32400".parse().expect("addr");
@@ -4497,7 +4514,7 @@ mod startup_tests {
     /// cannot cross a bridge. One test, because the variable is process-wide.
     #[test]
     fn compose_can_turn_the_in_process_advertiser_off() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         config.server.bind = "0.0.0.0:32400".parse().expect("addr");
 
@@ -4688,7 +4705,7 @@ mod startup_tests {
             .expect("holding a port");
         let taken = held.local_addr().expect("addr").port();
 
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         let logs = Arc::new(logbuf::LogBuffer::new(64));
         let _capture = capturing(&logs);
@@ -4723,7 +4740,7 @@ mod startup_tests {
     /// the two identities easy to confuse, so both have to be in it.
     #[test]
     fn the_startup_line_names_both_identities_and_the_data_dir() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         let identity = plurx_core::cluster::ClusterIdentity {
             cluster_id: "cluster-abc".to_owned(),
@@ -4877,7 +4894,7 @@ mod startup_tests {
     /// achieving nothing and then SIGKILL, which surfaces as exit 137.
     #[tokio::test]
     async fn a_connection_that_never_finishes_does_not_hold_the_drain_open() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let progress = Arc::clone(&state.progress);
         // A route that never responds, standing in for a paced remux.
@@ -4983,7 +5000,7 @@ mod startup_tests {
     /// publishing a Bonjour record pointing at nothing.
     #[tokio::test]
     async fn the_advertise_subcommand_refuses_an_unreachable_url() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_tempdir().expect("tempdir");
         let error = format!(
             "{:#}",
             dispatch(

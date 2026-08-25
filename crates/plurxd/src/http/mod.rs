@@ -702,7 +702,7 @@ mod tests {
     /// pass already running.
     pub(super) fn test_app_with_state() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
-        let base = std::env::temp_dir().join(format!("plurx-test-{}", uuid::Uuid::new_v4()));
+        let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
             "test".into(),
             Arc::new(store),
@@ -1114,7 +1114,7 @@ mod tests {
         let app = test_app();
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let (status, _) = call(
             &app,
             post(
@@ -1126,7 +1126,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let elsewhere = tempfile::tempdir().expect("tmp2");
+        let elsewhere = crate::test_tempdir().expect("tmp2");
         let (status, body) = call(
             &app,
             post(
@@ -1210,7 +1210,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let movie = dir.path().join("Heat (1995)");
         std::fs::create_dir_all(&movie).expect("mkdir");
         std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
@@ -1246,7 +1246,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let movie = dir.path().join("Heat (1995)");
         std::fs::create_dir_all(&movie).expect("mkdir");
         std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
@@ -1324,7 +1324,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let book = dir.path().join("Ursula K. Le Guin/The Dispossessed");
         std::fs::create_dir_all(&book).expect("mkdir");
         std::fs::write(book.join("The Dispossessed.epub"), b"epub fixture").expect("write");
@@ -1378,7 +1378,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
 
-        let books = tempfile::tempdir().expect("books");
+        let books = crate::test_tempdir().expect("books");
         let book_path = books.path().join("Book");
         std::fs::create_dir_all(&book_path).expect("book dir");
         std::fs::write(book_path.join("Book.epub"), b"epub fixture").expect("book file");
@@ -1417,7 +1417,7 @@ mod tests {
         let (status, body) = call(&app, post("/api/v1/scan", Some(&key), wrong_medium)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-        let movies = tempfile::tempdir().expect("movies");
+        let movies = crate::test_tempdir().expect("movies");
         std::fs::write(movies.path().join("Movie.mkv"), b"movie").expect("movie");
         call(
             &app,
@@ -2080,7 +2080,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let movie = dir.path().join("Heat (1995)");
         std::fs::create_dir_all(&movie).expect("mkdir");
         std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
@@ -2163,7 +2163,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let movie = dir.path().join("Heat (1995)");
         std::fs::create_dir_all(&movie).expect("mkdir");
         std::fs::write(movie.join("Heat (1995).mkv"), b"x").expect("write");
@@ -2212,7 +2212,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         let season = dir.path().join("Severance (2022)/Season 01");
         std::fs::create_dir_all(&season).expect("mkdir");
         std::fs::write(season.join("Severance.S01E01.mkv"), b"x").expect("write");
@@ -2268,7 +2268,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = crate::test_tempdir().expect("tmp");
         for name in ["Heat (1995)", "Alien (1979)"] {
             let d = dir.path().join(name);
             std::fs::create_dir_all(&d).expect("mkdir");
@@ -3246,7 +3246,7 @@ mod tests {
         // With a library, the probe runs and the mount appears — here with no
         // file big enough to sample, which is the honest answer for the path
         // and still tells the operator the path resolved.
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let (status, _) = call(
             &app,
             post(
@@ -4019,7 +4019,7 @@ mod tests {
     // straight through the store and then drive the real handlers end to end.
     fn test_state() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
-        let base = std::env::temp_dir().join(format!("plurx-it-{}", uuid::Uuid::new_v4()));
+        let base = crate::test_temp_path(format!("plurx-it-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
             "test".into(),
             Arc::new(store),
@@ -4034,7 +4034,7 @@ mod tests {
 
     fn test_state_with_pgs_overlay() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
-        let base = std::env::temp_dir().join(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
+        let base = crate::test_temp_path(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
         let mut state = AppState::new(
             "test".into(),
             Arc::new(store),
@@ -4408,7 +4408,7 @@ mod tests {
     async fn publication_api_is_authenticated_scoped_and_script_network_closed() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
 
-        let directory = tempfile::tempdir().expect("publication directory");
+        let directory = crate::test_tempdir().expect("publication directory");
         let path = directory.path().join("proof.epub");
         write_epub_fixture(&path);
         let metadata = std::fs::metadata(&path).expect("EPUB metadata");
@@ -4586,7 +4586,7 @@ mod tests {
 
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
-        let source_dir = tempfile::tempdir().expect("source");
+        let source_dir = crate::test_tempdir().expect("source");
         let source = source_dir.path().join("movie.mkv");
         std::fs::write(&source, b"offline fixture").expect("source bytes");
         let library = state
@@ -4978,7 +4978,7 @@ mod tests {
         let (app, state) = test_state_with_pgs_overlay();
         let admin = setup_admin(&app).await;
         let source_dir =
-            std::env::temp_dir().join(format!("plurx-pgs-source-{}", uuid::Uuid::new_v4()));
+            crate::test_temp_path(format!("plurx-pgs-source-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&source_dir).expect("source dir");
         let source = source_dir.join("movie.mkv");
         std::fs::write(&source, b"fixture").expect("source");
@@ -5163,7 +5163,7 @@ mod tests {
             AudioStream, ItemKind, LibraryKind, MetadataPatch, NewItem, NewLibrary, ProbeResult,
         };
 
-        let dir = std::env::temp_dir().join(format!("plurx-audiobook-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-audiobook-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("audiobook dir");
         let library = state
             .store
@@ -5273,7 +5273,7 @@ mod tests {
             .await
             .expect("movie");
         // A real (tiny) file on disk so decision/direct/detail treat it as present.
-        let dir = std::env::temp_dir().join(format!("plurx-media-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-media-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mediadir");
         let mpath = dir.join("Heat.mp4");
         std::fs::write(&mpath, b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes").expect("write");
@@ -5372,7 +5372,7 @@ mod tests {
     async fn seed_home(state: &AppState) -> HomeSeed {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
 
-        let dir = std::env::temp_dir().join(format!("plurx-home-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-home-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("2019")).expect("mediadir");
         let lib = state
             .store
@@ -5828,7 +5828,7 @@ mod tests {
         // A 69 Mb/s HEVC MKV with TrueHD: the video decodes, the container and
         // the audio do not, so it remuxes — and it is far too fast for the
         // browser's 2.2 s progressive buffer.
-        let dir = std::env::temp_dir().join(format!("plurx-big-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-big-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mediadir");
         let path = dir.join("Big.mkv");
         std::fs::write(&path, b"\x1a\x45\xdf\xa3 tiny placeholder").expect("write");
@@ -5883,8 +5883,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        let dir =
-            std::env::temp_dir().join(format!("plurx-selected-audio-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-selected-audio-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("media dir");
         let path = dir.join("Two Audio Tracks.mp4");
         std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
@@ -6007,7 +6006,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        let dir = std::env::temp_dir().join(format!("plurx-plan-audio-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-plan-audio-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("media dir");
         let path = dir.join("Dual Language.mp4");
         std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
@@ -6143,7 +6142,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_temp_path(format!(
             "plurx-audio-only-policy-subtitle-{}",
             uuid::Uuid::new_v4()
         ));
@@ -6253,7 +6252,7 @@ mod tests {
         // envelopes for the same copied bytes — the progressive URL, and the
         // copy-session POST for players that need HLS transport — and settles
         // the audio question so no client re-derives it.
-        let dir = std::env::temp_dir().join(format!("plurx-plan-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mediadir");
         let path = dir.join("Plan.mkv");
         std::fs::write(&path, b"\x1a\x45\xdf\xa3 tiny placeholder").expect("write");
@@ -6350,7 +6349,7 @@ mod tests {
         let s = seed_content(&state).await;
 
         // A 900p source: not itself a rung, which is the interesting case.
-        let dir = std::env::temp_dir().join(format!("plurx-ladder-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-ladder-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("Odd.mkv");
         std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("write");
@@ -6791,7 +6790,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
         let path =
-            std::env::temp_dir().join(format!("plurx-season-facts-{}.mkv", uuid::Uuid::new_v4()));
+            crate::test_temp_path(format!("plurx-season-facts-{}.mkv", uuid::Uuid::new_v4()));
         state
             .store
             .upsert_file(
@@ -6835,7 +6834,7 @@ mod tests {
             })
             .await
             .expect("second episode");
-        let second_path = std::env::temp_dir().join(format!(
+        let second_path = crate::test_temp_path(format!(
             "plurx-season-facts-second-{}.mp4",
             uuid::Uuid::new_v4()
         ));
@@ -6924,8 +6923,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        let dir =
-            std::env::temp_dir().join(format!("plurx-uppercase-lang-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-uppercase-lang-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("media dir");
         let path = dir.join("Shouty Tags.mp4");
         std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("media file");
@@ -7084,8 +7082,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        let dir =
-            std::env::temp_dir().join(format!("plurx-detail-tracks-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-detail-tracks-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("media dir");
 
         let french_path = dir.join("French Subtitles.mp4");
@@ -8067,6 +8064,17 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        let media = state
+            .store
+            .get_file(s.file)
+            .await
+            .expect("file read")
+            .expect("file");
+        // Progressive remux is intentionally allowed to run at several times
+        // realtime. Keep enough source behind it that the response-owned
+        // activity guard cannot reach EOF while two HLS sessions start under
+        // the fully parallel test binary.
+        write_real_av_fixture(&media.path, 120);
         // Two software sessions coexist below; on a 2-core runner the
         // machine-derived pool would refuse the second and fail this test for
         // a reason that has nothing to do with what it is testing.
@@ -8332,6 +8340,44 @@ mod tests {
         (status, bytes.to_vec())
     }
 
+    fn write_real_av_fixture(path: &std::path::Path, seconds: u32) {
+        let duration = seconds.to_string();
+        let video = format!("color=c=black:s=64x64:r=10:d={seconds}");
+        let made = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &video,
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-t",
+                &duration,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "20",
+                "-c:a",
+                "aac",
+            ])
+            .arg(path)
+            .output()
+            .expect("spawn ffmpeg");
+        assert!(
+            made.status.success(),
+            "A/V fixture encode failed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
     /// The §3.3 contract: the first request extracts and files the VTT under
     /// the source's fingerprint; the second is served from that file without
     /// ffmpeg reading the source again — proven by editing the cached entry
@@ -8345,7 +8391,7 @@ mod tests {
         let admin = setup_admin(&app).await;
 
         // A real MKV with a real SRT track, so extraction actually runs.
-        let dir = std::env::temp_dir().join(format!("plurx-subs-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-subs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let srt = dir.join("s.srt");
         std::fs::write(&srt, "1\n00:00:00,000 --> 00:00:01,000\nhello plurx\n\n").expect("srt");
@@ -8579,39 +8625,7 @@ mod tests {
             .await
             .expect("file read")
             .expect("file");
-        let made = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=c=black:s=64x64:r=10:d=16",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=channel_layout=stereo:sample_rate=48000",
-                "-t",
-                "16",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-g",
-                "20",
-                "-c:a",
-                "aac",
-            ])
-            .arg(&media.path)
-            .output()
-            .expect("spawn ffmpeg");
-        assert!(
-            made.status.success(),
-            "HLS fixture encode failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        write_real_av_fixture(&media.path, 16);
 
         // Unknown session → 404 for both playlist and segment.
         assert_eq!(
@@ -8867,7 +8881,7 @@ mod tests {
             .await
             .expect("movie");
 
-        let dir = std::env::temp_dir().join(format!("plurx-mixedsubs-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-mixedsubs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("mixed.mp4");
         let made = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
@@ -9149,7 +9163,7 @@ mod tests {
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
 
-        let dir = std::env::temp_dir().join(format!("plurx-subs-dto-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_path(format!("plurx-subs-dto-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("WEB-DL.mp4");
         std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("write");

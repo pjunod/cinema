@@ -1527,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_corruption_restore_leaves_a_sweep_eligible_quarantine() {
-        let directory = tempfile::tempdir().expect("artwork");
+        let directory = crate::test_tempdir().expect("artwork");
         let digest = hex::encode(Sha256::digest(b"authenticated artwork"));
         let filename = format!("84-poster-{digest}.webp");
         let path = directory.path().join(&filename);
@@ -1575,8 +1575,8 @@ mod tests {
         let old = "84-poster-aaaaaaaaaaaaaaaa.jpg";
         let new = "84-poster-bbbbbbbbbbbbbbbb.jpg";
         let voters = [
-            tempfile::tempdir().expect("voter one"),
-            tempfile::tempdir().expect("voter two"),
+            crate::test_tempdir().expect("voter one"),
+            crate::test_tempdir().expect("voter two"),
         ];
         for voter in &voters {
             tokio::fs::write(voter.path().join(old), b"old edition")
@@ -1604,7 +1604,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_sweep_honors_publication_reservations_and_removes_old_generations() {
         let store = SqliteStore::open_in_memory().expect("store");
-        let directory = tempfile::tempdir().expect("artwork");
+        let directory = crate::test_tempdir().expect("artwork");
         let orphan = directory
             .path()
             .join(format!("84-poster-{}.jpg", "a".repeat(64)));
@@ -1635,7 +1635,7 @@ mod tests {
     #[tokio::test]
     async fn orphan_candidate_rechecks_age_after_a_competing_publication() {
         let store = SqliteStore::open_in_memory().expect("store");
-        let directory = tempfile::tempdir().expect("artwork");
+        let directory = crate::test_tempdir().expect("artwork");
         let filename = format!("84-poster-{}.jpg", "b".repeat(64));
         let path = directory.path().join(&filename);
         let grace = Duration::from_secs(1);
@@ -1661,7 +1661,7 @@ mod tests {
     #[tokio::test]
     async fn simultaneous_same_filename_misses_fetch_and_install_once() {
         let coordinator = ArtworkCoordinator::new();
-        let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
+        let directory = Arc::new(crate::test_tempdir().expect("artwork directory"));
         let hits = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
         for _ in 0..MATERIALIZE_CONCURRENCY {
@@ -1700,7 +1700,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_filename_fetches_obey_the_global_buffer_bound() {
         let coordinator = ArtworkCoordinator::new();
-        let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
+        let directory = Arc::new(crate::test_tempdir().expect("artwork directory"));
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
@@ -1742,7 +1742,7 @@ mod tests {
     #[tokio::test]
     async fn local_artwork_hits_share_the_global_buffer_bound() {
         let coordinator = ArtworkCoordinator::new();
-        let directory = Arc::new(tempfile::tempdir().expect("artwork directory"));
+        let directory = Arc::new(crate::test_tempdir().expect("artwork directory"));
         tokio::fs::write(directory.path().join("bounded-local.jpg"), b"local artwork")
             .await
             .expect("local artwork");
@@ -1796,7 +1796,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_response_capacity_defers_reconciliation_repairs() {
         let coordinator = ArtworkCoordinator::new();
-        let directory = tempfile::tempdir().expect("artwork directory");
+        let directory = crate::test_tempdir().expect("artwork directory");
         let mut held = Vec::new();
         for _ in 0..MATERIALIZE_CONCURRENCY {
             held.push(coordinator.permit().await.expect("hold response permit"));
@@ -1843,7 +1843,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn provider_repair_validation_rejects_symlinks_and_oversized_outputs() {
-        let directory = tempfile::tempdir().expect("artwork directory");
+        let directory = crate::test_tempdir().expect("artwork directory");
         let outside = tempfile::NamedTempFile::new().expect("outside artwork");
         std::fs::write(outside.path(), b"outside bytes").expect("outside bytes");
         std::os::unix::fs::symlink(outside.path(), directory.path().join("symlink.jpg"))
@@ -1959,7 +1959,7 @@ mod tests {
         .expect("peer bytes");
         assert_eq!(bytes, b"\xff\xd8\xff peer artwork");
 
-        let directory = tempfile::tempdir().expect("artwork directory");
+        let directory = crate::test_tempdir().expect("artwork directory");
         install_artwork(directory.path(), "poster one.jpg", &bytes)
             .await
             .expect("materialize");

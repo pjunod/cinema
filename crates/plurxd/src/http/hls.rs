@@ -3198,7 +3198,7 @@ mod tests {
     async fn segment_bytes_are_counted_as_the_body_drains_not_at_open() {
         use futures_util::StreamExt;
 
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "drain").await;
         let body = vec![7_u8; 12 * 1024];
         tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
@@ -3244,7 +3244,7 @@ mod tests {
 
     #[tokio::test]
     async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
         let body = vec![5_u8; 16 * 1024];
         tokio::fs::write(dir.path().join("seg00004.m4s"), &body)
@@ -3305,7 +3305,7 @@ mod tests {
             "valid partial and intentionally bodyless responses are not incomplete deliveries"
         );
 
-        let init_dir = tempfile::tempdir().expect("init directory");
+        let init_dir = crate::test_tempdir().expect("init directory");
         let init_fixture = HlsDeliveryFixture::publish(init_dir.path(), "init-range").await;
         tokio::fs::write(init_dir.path().join("init.mp4"), vec![9_u8; 4_096])
             .await
@@ -3338,7 +3338,7 @@ mod tests {
     async fn an_abandoned_segment_body_is_recorded_as_response_dropped() {
         use futures_util::StreamExt;
 
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "abandoned").await;
         let body = vec![3_u8; 64 * 1024];
         tokio::fs::write(dir.path().join("seg00002.m4s"), &body)
@@ -3392,7 +3392,7 @@ mod tests {
     async fn an_unreadable_segment_body_is_recorded_as_storage_read_error() {
         use futures_util::StreamExt;
 
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable").await;
         // A directory opens like a file and reports a length, then fails its
         // first read with EISDIR — a storage failure the handler meets only
@@ -3453,7 +3453,7 @@ mod tests {
     /// that ended early.
     #[tokio::test]
     async fn a_playlist_time_init_probe_is_not_client_delivery_and_never_a_short_response() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe").await;
         // Past the inspection bound, so the read stops short of the file's
         // advertised length by design.
@@ -3492,7 +3492,7 @@ mod tests {
     /// is the availability/delivery conflation this telemetry exists to end.
     #[tokio::test]
     async fn a_failed_init_probe_is_tagged_as_internal_rather_than_a_client_fetch() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe-error").await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
             .await
@@ -4186,7 +4186,7 @@ mod tests {
     /// -15517 while the same session's CODECS-free media playlist played.
     #[tokio::test]
     async fn a_preserved_dolby_vision_master_keeps_its_dolby_vision_identifier() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv").await;
         // The sample entry's `hvcC` describes the base layer only: Main 10,
         // High tier, level 150 — the record the HEVC reader would have used.
@@ -4219,7 +4219,7 @@ mod tests {
     /// preparation. The init knows the answer.
     #[tokio::test]
     async fn a_bare_dolby_vision_declaration_is_completed_from_the_init() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-bare").await;
         tokio::fs::write(dir.path().join("init.mp4"), dolby_vision_init(5, 6))
             .await
@@ -4241,7 +4241,7 @@ mod tests {
     /// advertised string alone rather than falling back to the HEVC reader.
     #[tokio::test]
     async fn a_dolby_vision_init_without_a_configuration_record_changes_nothing() {
-        let dir = tempfile::tempdir().expect("segment directory");
+        let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-nodvcc").await;
         let mut init = vec![0, 0, 0, 21];
         init.extend_from_slice(b"hvcC");

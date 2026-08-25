@@ -1279,9 +1279,15 @@ impl GenerationManifest {
 mod tests {
     use super::*;
 
+    fn generation_tempdir() -> tempfile::TempDir {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical system temporary directory");
+        tempfile::tempdir_in(root).expect("generation directory")
+    }
+
     #[tokio::test]
     async fn requested_object_verification_detects_corruption_without_a_manifest_walk() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         tokio::fs::write(
             directory.path().join("index.m3u8"),
             b"#EXTM3U\nseg00000.ts\n",
@@ -1323,7 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn budgeted_manifest_load_refuses_before_reading_past_its_allowance() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         tokio::fs::write(directory.path().join("index.m3u8"), b"#EXTM3U\n")
             .await
             .expect("playlist");
@@ -1351,7 +1357,7 @@ mod tests {
 
     #[tokio::test]
     async fn playlist_authenticates_the_response_buffer_not_a_reopened_path() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let path = directory.path().join("index.m3u8");
         tokio::fs::write(&path, b"#EXTM3U\n#EXT-X-ENDLIST\n")
             .await
@@ -1373,7 +1379,7 @@ mod tests {
 
     #[tokio::test]
     async fn segment_streams_the_same_handle_that_was_authenticated() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let path = directory.path().join("seg00000.ts");
         tokio::fs::write(&path, b"published segment")
             .await
@@ -1414,7 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn manifest_rejects_duplicate_and_traversal_object_names() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
             .await
             .expect("segment");
@@ -1436,7 +1442,7 @@ mod tests {
 
     #[tokio::test]
     async fn publication_rejects_an_object_larger_than_the_scrub_io_ceiling() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let path = directory.path().join("seg00000.ts");
         let file = std::fs::File::create(&path).expect("sparse segment");
         file.set_len(MAX_OBJECT_BYTES + 1)
@@ -1453,7 +1459,7 @@ mod tests {
     }
 
     async fn checkpoint_corruption_is_rehashed(mutate_bytes: bool) {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let names = (0..3)
             .map(|index| format!("seg{index:05}.ts"))
             .collect::<Vec<_>>();
@@ -1604,7 +1610,7 @@ mod tests {
     async fn checkpoint_appends_every_permitted_record_across_retries() {
         const BATCH_RECORDS: usize = 1_024;
 
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let capability = crate::fs_secure::SecureDirectory::open(directory.path())
             .await
             .expect("directory capability");
@@ -1662,7 +1668,7 @@ mod tests {
 
     #[tokio::test]
     async fn generation_id_rejects_json_expansion_outside_the_header_contract() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
             .await
             .expect("segment");
@@ -1681,7 +1687,7 @@ mod tests {
         const OBJECTS: usize = 128;
         const PROBES_PER_PASS: usize = 17;
 
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let capability = crate::fs_secure::SecureDirectory::open(directory.path())
             .await
             .expect("directory capability");
@@ -1744,7 +1750,7 @@ mod tests {
     #[tokio::test]
     async fn validated_checkpoint_cursor_survives_a_later_object_hash_yield() {
         const PREFIX: usize = 64;
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let capability = crate::fs_secure::SecureDirectory::open(directory.path())
             .await
             .expect("directory capability");
@@ -1814,7 +1820,7 @@ mod tests {
 
     #[tokio::test]
     async fn mutation_between_cached_validation_and_publication_forces_rehash() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let first_name = "seg00000.ts".to_owned();
         let second_name = "seg00001.ts".to_owned();
         tokio::fs::write(directory.path().join(&first_name), b"original prefix")
@@ -1878,7 +1884,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_checkpoint_cursor_is_bound_to_the_requested_object_prefix() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         for name in ["seg00000.ts", "seg00001.ts", "seg00002.ts"] {
             tokio::fs::write(directory.path().join(name), name.as_bytes())
                 .await
@@ -1931,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_growth_after_open_is_rejected_without_a_large_line_allocation() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let capability = crate::fs_secure::SecureDirectory::open(directory.path())
             .await
             .expect("directory capability");
@@ -1970,7 +1976,7 @@ mod tests {
 
     #[tokio::test]
     async fn blank_checkpoint_tail_is_rejected_in_constant_record_work() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let capability = crate::fs_secure::SecureDirectory::open(directory.path())
             .await
             .expect("directory capability");
@@ -2008,7 +2014,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_publication_checkpoints_sub_interval_progress_before_yielding() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let names = (0..3)
             .map(|index| format!("seg{index:05}.ts"))
             .collect::<Vec<_>>();
@@ -2058,7 +2064,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_length_object_yields_before_it_is_checkpointed() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let name = "seg00000.ts".to_owned();
         tokio::fs::write(directory.path().join(&name), b"")
             .await
@@ -2093,7 +2099,7 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_snapshot_bodies_reject_same_class_admission_promptly() {
-        let directory = tempfile::tempdir().expect("generation directory");
+        let directory = generation_tempdir();
         let bytes = vec![0x5a; (RESPONSE_SMALL_MAX_MIB as usize + 1) * 1024 * 1024];
         tokio::fs::write(directory.path().join("seg00000.ts"), &bytes)
             .await

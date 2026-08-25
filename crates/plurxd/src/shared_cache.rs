@@ -1514,8 +1514,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_way_canary_requires_the_same_writable_root_and_identity() {
-        let shared = tempfile::tempdir().expect("shared root");
-        let different = tempfile::tempdir().expect("different root");
+        let shared = crate::test_tempdir().expect("shared root");
+        let different = crate::test_tempdir().expect("different root");
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
         let origin = coordinator(shared.path(), "media-a", "origin", Arc::clone(&store));
@@ -1564,7 +1564,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_failure_revokes_shared_classification_until_readmission() {
-        let shared = tempfile::tempdir().expect("shared root");
+        let shared = crate::test_tempdir().expect("shared root");
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
         let shared_cache = coordinator(shared.path(), "media-a", "reader", Arc::clone(&store));
@@ -1603,7 +1603,7 @@ mod tests {
 
     #[tokio::test]
     async fn gc_refuses_a_replaced_root_before_any_retirement_work() {
-        let parent = tempfile::tempdir().expect("shared parent");
+        let parent = crate::test_tempdir().expect("shared parent");
         let shared_root = parent.path().join("shared");
         tokio::fs::create_dir(&shared_root)
             .await
@@ -1635,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_canary_proof_cannot_reenable_a_failed_mount() {
-        let shared = tempfile::tempdir().expect("shared root");
+        let shared = crate::test_tempdir().expect("shared root");
         let store: Arc<dyn Store> =
             Arc::new(SqliteStore::open_in_memory().expect("shared cache store"));
         let shared_cache = coordinator(shared.path(), "media-a", "reader", Arc::clone(&store));
@@ -1654,8 +1654,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_publication_callers_do_not_release_copy_capacity() {
-        let shared = tempfile::tempdir().expect("shared root");
-        let sources = tempfile::tempdir().expect("source roots");
+        let shared = crate::test_tempdir().expect("shared root");
+        let sources = crate::test_tempdir().expect("source roots");
         let source_a = sources.path().join("a");
         let source_b = sources.path().join("b");
         let manifest_a = source_generation(&source_a, "generation-a").await;
@@ -1714,8 +1714,8 @@ mod tests {
 
     #[tokio::test]
     async fn mount_loss_during_publication_cannot_install_or_complete_generation() {
-        let shared = tempfile::tempdir().expect("shared root");
-        let sources = tempfile::tempdir().expect("source roots");
+        let shared = crate::test_tempdir().expect("shared root");
+        let sources = crate::test_tempdir().expect("source roots");
         let source = sources.path().join("generation");
         let manifest = source_generation(&source, "generation-revoked").await;
         let store: Arc<dyn Store> =
@@ -1771,8 +1771,8 @@ mod tests {
 
     #[tokio::test]
     async fn mount_loss_after_commit_begins_preserves_global_generation() {
-        let shared = tempfile::tempdir().expect("shared root");
-        let sources = tempfile::tempdir().expect("source roots");
+        let shared = crate::test_tempdir().expect("shared root");
+        let sources = crate::test_tempdir().expect("source roots");
         let source = sources.path().join("generation");
         let manifest = source_generation(&source, "generation-committing").await;
         let store: Arc<dyn Store> =
