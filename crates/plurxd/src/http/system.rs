@@ -1151,6 +1151,10 @@ pub struct SettingsDto {
     pub vod_working_set_bytes: String,
     /// Server ceiling on one blocking VOD segment fetch, seconds.
     pub vod_block_budget_secs: String,
+    /// Producer watchdog from first blocked demand to bytes or typed failure.
+    pub vod_materialize_budget_secs: String,
+    /// Node-local fragment-index pass interval. 0 is off.
+    pub vod_index_mins: i64,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1352,6 +1356,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() == Some("1"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
+        vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
+        vod_index_mins: mins(setting(keys::VOD_INDEX_MINS)),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1394,11 +1400,13 @@ pub struct UpdateSettings {
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
-    /// VOD presentation opt-in and its two serving knobs; absent leaves each
-    /// as-is. `vod_working_set_bytes` refuses 0 — see the handler.
+    /// VOD presentation opt-in, serving budgets, and index cadence; absent
+    /// leaves each as-is. `vod_working_set_bytes` refuses 0 — see the handler.
     pub vod_presentation: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
+    pub vod_materialize_budget_secs: Option<String>,
+    pub vod_index_mins: Option<i64>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1633,6 +1641,34 @@ pub async fn update_settings(
             .put_setting(keys::VOD_BLOCK_BUDGET_SECS, "")
             .await?;
     }
+    if let Some(raw) = req
+        .vod_materialize_budget_secs
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        let parsed: f64 = raw.trim().parse().map_err(|_| {
+            ApiError::BadRequest("vod_materialize_budget_secs must be a number".into())
+        })?;
+        if !(10.0..=300.0).contains(&parsed) {
+            return Err(ApiError::BadRequest(
+                "vod_materialize_budget_secs must be between 10 and 300".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, &parsed.to_string())
+            .await?;
+    }
+    if req
+        .vod_materialize_budget_secs
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        state
+            .store
+            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, "")
+            .await?;
+    }
     if let Some(on) = req.cluster_media_pool_enabled {
         state
             .store
@@ -1768,6 +1804,7 @@ pub async fn update_settings(
             "cache_produce_mins",
             req.cache_produce_mins,
         ),
+        (keys::VOD_INDEX_MINS, "vod_index_mins", req.vod_index_mins),
     ] {
         if let Some(value) = value {
             if value < 0 || (value > 0 && value < 15) {

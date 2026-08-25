@@ -1733,6 +1733,15 @@ test("two runs that differ only in run-local values normalize identically", () =
 
 // ------------------------------------------------------------------- CLI
 
+test("API parsing preserves opaque 64-bit ids for later routes", () => {
+  const parsed = lab.parseApiJson(
+    '{"id":8622887431169855001,"file_id":7,"nested":{"item_id":-9007199254740993}}',
+  );
+  assert.equal(parsed.id, "8622887431169855001");
+  assert.equal(parsed.file_id, 7, "safe ids keep the API's ordinary numeric shape");
+  assert.equal(parsed.nested.item_id, "-9007199254740993");
+});
+
 test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites["stall-recovery"];
@@ -1754,6 +1763,20 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
     "the general fixtures command does not pay for the 120-second opt-in source");
   const shapedCorpus = lab.fixturesForBuild(manifest, new Set(["shaping-mpeg4-mp3-720"]));
   assert.deepEqual(shapedCorpus.map((fixture) => fixture.id), ["shaping-mpeg4-mp3-720"]);
+});
+
+test("the VOD suite makes native seeking and resume invariants executable", () => {
+  const manifest = lab.loadManifest();
+  const suite = manifest.suites.vod;
+  assert.ok(suite, "the named VOD suite exists");
+  assert.equal(suite.requires_vod, true);
+  const cases = lab.expandCases(manifest, "vod");
+  assert.equal(cases.length, 3);
+  assert.ok(cases.every((testCase) => testCase.require_vod === true));
+  const storm = cases.find((testCase) => testCase.operation === "seek-storm");
+  assert.equal(storm.seeks, 20);
+  assert.equal(storm.maximum_session_creates, 1, "only the initial create is allowed");
+  assert.ok(cases.some((testCase) => testCase.operation === "suspend-resume"));
 });
 
 test("the run command retains JSON and JUnit when a bad profile exits nonzero", async () => {

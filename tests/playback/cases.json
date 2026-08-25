@@ -119,6 +119,37 @@
           }
         }
       ]
+    },
+    "vod": {
+      "requires_vod": true,
+      "cases": [
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "steady",
+          "require_vod": true,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
+        },
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "seek-storm",
+          "require_vod": true,
+          "seeks": 20,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
+        },
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "suspend-resume",
+          "require_vod": true,
+          "suspend_seconds": 8,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
+        }
+      ]
     }
   }
 }

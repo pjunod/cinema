@@ -10,6 +10,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **The web player adopts the film-addressed VOD presentation (milestone
+  M4).** Every web HLS session now declares `presentation:"vod"` and an
+  8-second server block budget from one client contract whose explicit
+  10-second hls.js first-byte timeout leaves the measured two-second response
+  margin. Fragment retries span the server's 30-second producer deadline, so a
+  slow materialization ends as the server's typed failure rather than a raw
+  browser timeout. VOD sessions seek on their immutable film timeline without
+  opening a replacement session or running the live-playlist keeper, survive a
+  paused browser, expose materialization/working-set health through the normal
+  HLS status URL, and can carry native WebVTT renditions through the existing
+  multivariant HLS path. Settings → Playback now owns the server opt-in, index
+  interval, working-set budget, and producer deadline; the opt-in remains off
+  by default, and files without a current index, subtitle burns, and transcode
+  rungs still fall back to the live presentation. The named `playback-lab`
+  `vod` suite makes steady playback, a 20-seek same-session storm, zero keeper
+  fires, zero replacement creates, and suspend/resume executable contracts.
+
 - **The VOD presentation serves (milestone M3).** A session created with
   `presentation:"vod"` while the new `playback.vod_presentation` setting is on
   is a film, not a broadcast: its playlist is rendered once from the stored

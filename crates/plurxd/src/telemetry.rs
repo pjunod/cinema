@@ -12,7 +12,7 @@ const STALL_KINDS: [&str; 4] = ["supply", "decode", "network", "other"];
 const STALL_RECOVERY_OUTCOMES: [&str; 4] = ["attempt", "recovered", "failed", "other"];
 const HOLD_REASONS: [&str; 4] = ["time", "bytes", "global", "unknown"];
 const CACHE_RESULTS: [&str; 3] = ["hit", "miss", "prefix_later"];
-const ENCODERS: [&str; 7] = [
+const ENCODERS: [&str; 8] = [
     "qsv",
     "nvenc",
     "vaapi",
@@ -20,6 +20,7 @@ const ENCODERS: [&str; 7] = [
     "software",
     "copy",
     "cached",
+    "vod",
 ];
 
 struct PlaybackMetrics {

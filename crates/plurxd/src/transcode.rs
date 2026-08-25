@@ -2832,6 +2832,16 @@ pub struct SessionInfo {
     pub suspend_count: u64,
 }
 
+/// The two honest shapes returned by `/hls/{session}/status`. Kept untagged so
+/// existing live clients see byte-for-byte the object they already consume;
+/// the VOD arm adds only the fields that presentation can actually measure.
+#[derive(Clone, serde::Serialize)]
+#[serde(untagged)]
+pub enum HlsSessionInfo {
+    Live(SessionInfo),
+    Vod(crate::vodserve::VodSessionInfo),
+}
+
 /// Monotone failover coordinates sampled for the owner's two-second liveness
 /// batch. This intentionally excludes activity-page locks and byte accounting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -8202,6 +8212,8 @@ impl TranscodeManager {
         /// back typed before a stock player gives up on its own.
         const DEFAULT_BLOCK_BUDGET_SECS: f64 = 8.0;
         const MAX_BLOCK_BUDGET_SECS: f64 = 30.0;
+        const DEFAULT_MATERIALIZE_BUDGET_SECS: f64 = 30.0;
+        const MAX_MATERIALIZE_BUDGET_SECS: f64 = 300.0;
         let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
             Some(raw) => match raw.trim().parse::<u64>() {
                 // The settings surface refuses a zero on the way in; one that
@@ -8227,6 +8239,17 @@ impl TranscodeManager {
             .filter(|s| s.is_finite() && *s > 0.0)
             .map(|s| s.min(server_cap))
             .unwrap_or(server_cap);
+        let materialize_secs =
+            match read(plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS).await? {
+                Some(raw) => raw
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && *s >= 10.0)
+                    .map(|s| s.min(MAX_MATERIALIZE_BUDGET_SECS))
+                    .unwrap_or(DEFAULT_MATERIALIZE_BUDGET_SECS),
+                None => DEFAULT_MATERIALIZE_BUDGET_SECS,
+            };
         // Admitted renditions are the copy cache, so they answer to the same
         // budget the pre-transcode cache does. `0`/absent keeps admission
         // closed: renditions serve and evict under the working set, and
@@ -8243,6 +8266,7 @@ impl TranscodeManager {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
+            materialize_budget: Duration::from_secs_f64(materialize_secs),
         }))
     }
 
@@ -10473,6 +10497,9 @@ impl TranscodeManager {
     /// Apple High-tier rewrite — must ask, because a fenced successor names
     /// its init after its ownership epoch. `None` for an unknown session.
     pub(crate) async fn session_init_object(&self, session_id: &str) -> Option<String> {
+        if self.vod.session_file_id(session_id).await.is_some() {
+            return Some("init.mp4".to_owned());
+        }
         let sessions = self.sessions.lock().await;
         let session = sessions.get(session_id)?;
         Some(init_object_name(
@@ -10663,6 +10690,18 @@ impl TranscodeManager {
             )
             .await,
         )
+    }
+
+    /// Status for either HLS presentation. A VOD lookup goes first because a
+    /// session id belongs to exactly one registry and its diagnostics have no
+    /// honest live-transcode equivalent.
+    pub async fn hls_session_status(&self, session_id: &str) -> Option<HlsSessionInfo> {
+        if let Some(status) = self.vod.status(session_id).await {
+            return Some(HlsSessionInfo::Vod(status));
+        }
+        self.session_status(session_id)
+            .await
+            .map(HlsSessionInfo::Live)
     }
 
     async fn emit_session_event(
@@ -11051,6 +11090,26 @@ impl TranscodeManager {
 
     /// Resolve the source and resume base attached to a live HLS capability.
     pub async fn hls_context(&self, session_id: &str) -> Option<HlsContext> {
+        if let Some(facts) = self.vod.hls_facts(session_id).await {
+            let probe_json = self.store.get_file_probe_json(facts.file.id).await.ok()?;
+            let (codecs, supplemental_codecs) = copied_hls_codecs(
+                &facts.file,
+                facts.audio_index,
+                CopySessionOptions {
+                    transcode_audio: facts.aac,
+                    preserve_dolby_vision: facts.preserve_dolby_vision,
+                },
+                probe_json.as_deref(),
+            );
+            return Some(HlsContext {
+                file_id: facts.file.id,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs,
+                supplemental_codecs,
+                frame_rate: None,
+            });
+        }
         let session = self.touch(session_id, "hls-context").await?;
         Some(HlsContext {
             file_id: session.file_id,
@@ -11349,6 +11408,9 @@ impl TranscodeManager {
     /// their files are gone, so callers never reconstruct time from a segment
     /// number or the shortened playlist.
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
+        if let Some(window) = self.vod.segment_window(session_id, segment_index).await {
+            return Some(window);
+        }
         let session = self.touch(session_id, "segment-window").await?;
         self.flow_control(&session, session_id).await;
         let (start_ms, end_ms) = session.segments.lock().await.window_ms_of(segment_index)?;
