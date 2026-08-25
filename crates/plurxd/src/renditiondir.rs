@@ -141,6 +141,17 @@ impl InitIdentity {
     }
 }
 
+/// The index a rendition-owned segment name carries, `None` for any other
+/// file. The inverse of [`plurx_core::fmp4::segment_name`], strict on
+/// purpose: reconcile owns the rendition's own names, not the directory.
+fn parse_segment_name(name: &str) -> Option<u64> {
+    let digits = name.strip_prefix("seg")?.strip_suffix(".m4s")?;
+    if digits.len() < 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 fn digest(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes))
 }
@@ -319,12 +330,28 @@ impl RenditionDir {
             init_present: self.has_init().await,
             ..Reconciled::default()
         };
+        // One directory listing instead of a `metadata()` per planned index
+        // (ruling §4.3, carried to M3): a two-hour film plans thousands of
+        // segments, and a restart that paid a blocking-pool round trip for
+        // every one of them — nearly all absent on a working-set rendition —
+        // was the cost this defers. Sizes come off each entry that actually
+        // exists; an absent index costs a map miss.
+        let mut on_disk_len: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let planned = manifest.len() as u64;
+        let mut entries = tokio::fs::read_dir(&self.dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let Some(index) = parse_segment_name(&name.to_string_lossy()) else {
+                continue;
+            };
+            if index >= planned {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata().await {
+                on_disk_len.insert(index as u32, meta.len());
+            }
+        }
         for index in 0..manifest.len() as u32 {
-            // Zero length is not a segment. `publish_file` renames a complete
-            // file into place, so a zero-length one is the residue of
-            // something else — a truncated restore, a filesystem that
-            // journalled the rename and not the data — and adopting it
-            // publishes an unplayable segment as a cache hit.
             let claimed_bytes = manifest.state(index).and_then(|state| match state {
                 SegState::Materialized { bytes, .. } => Some(bytes),
                 SegState::Planned => None,
@@ -339,15 +366,15 @@ impl RenditionDir {
             // publishes an unplayable segment as a cache hit.
             //
             // The check costs nothing: the recorded length is already in hand.
-            let on_disk = tokio::fs::metadata(self.segment_path(index))
-                .await
-                .ok()
-                .filter(|meta| meta.len() > 0)
-                .filter(|meta| claimed_bytes.is_none_or(|bytes| meta.len() == bytes));
+            let on_disk = on_disk_len
+                .get(&index)
+                .copied()
+                .filter(|len| *len > 0)
+                .filter(|len| claimed_bytes.is_none_or(|bytes| *len == bytes));
             let claimed = claimed_bytes.is_some();
             match (on_disk, claimed) {
-                (Some(meta), false) => {
-                    manifest.materialize(index, meta.len(), at_ms);
+                (Some(len), false) => {
+                    manifest.materialize(index, len, at_ms);
                     report.adopted.push(index);
                 }
                 (None, true) => {
