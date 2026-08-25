@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["114ab8dc"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "playback-shaping"]
+reason = "The retained shipped-web regression requires a forced transcode restart to carry the exact predecessor session and typed stall reason while leaving viewer-directed seeks ordinary. That binding drives the server's already-tested Auto rung normalization instead of reopening the same unsustainable stream, and the shaping contracts retain the one-restart recovery budget and cliff verdict."

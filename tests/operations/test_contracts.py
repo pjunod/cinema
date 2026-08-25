@@ -180,17 +180,25 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_provisions_concrete_apple_devices_before_testing(self):
         workflow = read(".github/workflows/ci.yml")
         makefile = read("Makefile")
-        self.assertIn("sudo xcodebuild -runFirstLaunch", workflow)
-        self.assertEqual(workflow.count("xcrun simctl create"), 2)
-        self.assertIn("SimDeviceType.iPhone-16-Pro", workflow)
-        self.assertIn("xcrun simctl list devices available -j", workflow)
-        self.assertIn('runtime.endswith("iOS-18-5")', workflow)
-        self.assertIn('device["name"].startswith("iPad")', workflow)
-        self.assertIn('device["udid"]', workflow)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer", workflow)
+        self.assertIn('grep -Fxq "Xcode 26.6"', workflow)
+        self.assertIn('grep -Fxq "Build version 17F113"', workflow)
+        self.assertIn('= "Version: 2.46.0"', workflow)
+        self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
+        self.assertIn('tvOS 26.5 (26.5 - 23L470)', workflow)
+        self.assertNotIn("sudo xcode", workflow)
+        self.assertEqual(workflow.count("xcrun simctl create"), 3)
+        self.assertIn("SimDeviceType.iPhone-17-Pro", workflow)
+        self.assertIn("SimDeviceType.iPad-Pro-13-inch-M4-8GB", workflow)
+        self.assertEqual(workflow.count("SimRuntime.iOS-26-5"), 2)
         self.assertIn("SimDeviceType.Apple-TV-4K-3rd-generation-4K", workflow)
+        self.assertIn("SimRuntime.tvOS-26-5", workflow)
         self.assertIn('APPLE_IOS_SIM=platform=iOS Simulator,id=$ios_id', workflow)
         self.assertIn('APPLE_IPAD_SIM=platform=iOS Simulator,id=$ipad_id', workflow)
         self.assertIn('APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id', workflow)
+        self.assertIn("name: Delete the run's simulators", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn('xcrun simctl delete "$udid"', workflow)
         self.assertIn('$${APPLE_IPAD_SIM:-}', makefile)
         self.assertLess(workflow.index("xcrun simctl create"), workflow.index("run: make apple-test"))
 
@@ -396,6 +404,24 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("cache-from: type=gha", docker)
         self.assertIn("cache-to: type=gha,mode=min", docker)
 
+    def test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries(self):
+        workflow = read(".github/workflows/ci.yml")
+
+        # Every artifact emitted by the high-frequency CI workflow expires
+        # quickly; durable release evidence belongs to publish-release.yml.
+        self.assertEqual(
+            workflow.count("uses: actions/upload-artifact@v4"),
+            workflow.count("retention-days: 1"),
+        )
+
+        # PR and merge-queue builds prove both release targets compile, but no
+        # downstream job consumes those binaries. Only push/tag runs retain
+        # them, avoiding two large duplicate artifacts on every validation.
+        build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
+        self.assertIn("name: Retain release binary for push and tag runs", build)
+        self.assertIn("if: github.event_name == 'push'", build)
+        self.assertIn("name: plurxd-${{ matrix.target }}", build)
+
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
         publisher = read(".github/workflows/publish-release.yml")
@@ -434,9 +460,13 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
         high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
+        ffmpeg6 = "    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]"
+        high_cpu_ffmpeg6 = (
+            "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]"
+        )
         android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
         hosted_linux = "    runs-on: ubuntu-latest"
-        apple = "    runs-on: macos-15"
+        apple = "    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]"
 
         for path in (
             ".github/workflows/ci.yml",
@@ -453,7 +483,18 @@ class OperationsContractCase(unittest.TestCase):
                 expected = general
                 if path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name == "docker":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
+                    "vod_web",
+                    "coverage",
+                }:
+                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "web_layout":
+                    expected = ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_auth",
+                    "docker",
+                }:
                     expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
