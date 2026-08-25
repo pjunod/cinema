@@ -24,7 +24,11 @@ case "$mode" in
     usage
     ;;
   status)
-    if value="$(gh variable get CI_RUNNER_MODE --repo "$repo" 2>/dev/null)"; then
+    value="$(
+      gh variable list --repo "$repo" --json name,value \
+        --jq '.[] | select(.name == "CI_RUNNER_MODE") | .value'
+    )"
+    if [[ -n "$value" ]]; then
       printf '%s\n' "$value"
     else
       printf '%s\n' "self-hosted (default; CI_RUNNER_MODE is unset)"
