@@ -1,0 +1,37 @@
+version = 1
+
+[[coverage]]
+commits = ["f8a99194", "5e7c3ca9"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "database-upgrades", "cluster-auth"]
+reason = "P6 promotion waits for the target to observe its committed vote, atomically rewrites membership.json as downgrade-readable voter/version 1, fsyncs it, rewrites activation.json, and publishes a fresh heartbeat proof before the replicated learner role or intent can clear. The migration test exercises the successful rewrite, the crash interval between files, idempotent recovery, and the transcribed previous-release parser; the separate-process cluster check restarts the promoted voter before protocol rollback."
+
+[[coverage]]
+commits = ["f8a99194", "5e7c3ca9"]
+points = ["cluster.membership"]
+checks = ["rust-gate", "cluster-auth", "security-boundaries"]
+reason = "The production heartbeat publishes target-local apply, periodic durable-storage, route-role, and restart-role proofs. Promotion reconciles an indeterminate attempt first and requires a new quorum barrier plus new target heartbeat before every resubmission. Learner removal fences routing, ends seeded active media ownership with the session schema's valid terminal state, removes only the non-voter, and leaves quorum and tombstones intact. Capacity counts only durably admitted learners, never a transient voter join."
+
+[[coverage]]
+commits = ["f8a99194", "5e7c3ca9"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The real-process lifecycle scenario proves a learner cannot acquire singleton authority, its active replicated media ownership is terminally fenced during removal, a live promotion grants authority, and a process restart retains that authority. Promotion and removal intents remain durable across ambiguous transport outcomes."
+
+[[coverage]]
+commits = ["f8a99194", "5e7c3ca9"]
+points = ["cluster.media-observation"]
+checks = ["rust-gate", "cluster-auth", "security-boundaries"]
+reason = "Ready learner media placement is driven by a fresh target-local zero-lag proof, the learner HTTP matrix names exact method-and-route shapes, and removal applies its local route fence before the coordinator accepts the target's barrier heartbeat. Replicated audio-offset and offline-package create/delete/lease/complete routes are explicit negative tests."
+
+[[coverage]]
+commits = ["f8a99194", "5e7c3ca9"]
+points = ["server.api"]
+checks = ["rust-gate"]
+reason = "The global capacity middleware reads one atomic serving-role projection and performs no SQL or Raft-metrics clone per request. The route-matrix tests pin bounded reads, exact node-local session methods, and representative replicated authority mutations that must return learner_route_ineligible."
+
+[[coverage]]
+commits = ["f8a99194"]
+points = ["web.experience"]
+checks = ["rust-gate", "web-membership"]
+reason = "The cluster panel reports voter redundancy separately from admitted learner/read capacity, exposes both promotion proofs, disables promotion until both are true, and wires explicit voter-versus-learner token issuance. The governed web membership test executes the shipped embedded UI."
