@@ -1,6 +1,7 @@
 # VOD M3 — serving from the plan, and the first code on the live path
 
-**Status:** ready to build once `agent/vod-m2d` is reviewed and merged ·
+**Status:** BUILT 2026-08-25 on `agent/vod-m3` (copy-path serving; §10 below
+records what was deliberately deferred and why) ·
 **Executes:** M3 of [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §8,
 with the rulings in [VOD-M2-QUESTIONS.md](VOD-M2-QUESTIONS.md) ·
 **Written:** 2026-08-24 · **Branch:** `agent/vod-m3`
@@ -187,3 +188,35 @@ Plan §8's M3 acceptance, unchanged, plus:
 - `make lint && make fmt-check && make history-check && make validation-lint`
   and `cargo test --workspace`, the last of which has now twice caught what a
   targeted run did not. Run it before calling anything ready.
+
+## 10. What was built, and what was deliberately not (2026-08-25)
+
+Everything in §§2–7 is implemented and on the request path except the
+following, each deferred on a recorded reason rather than dropped:
+
+- **Transcode-rung serving.** Gated on the D6/P2 device measurement, which is
+  still owed by an operator run (§8 said not to touch it; nothing did). A
+  `presentation:"vod"` transcode request keeps the live presentation with a
+  log line.
+- **Native-subtitle VOD sessions.** The multivariant playlist reads the init
+  through `exact_hls_context` and mirrors the video timeline per rendition;
+  wiring that against a plan playlist is M4 work beside the web flag. Falls
+  back, logged.
+- **`/status` for VOD sessions** answers 404. `SessionInfo` is live-session
+  shaped (encoder speed, ahead window); the client that learns to send the
+  flag in M4 is the right moment to decide what a VOD status even says.
+- **`playback.vod_materialize_budget` (ruling A3's 30 s producer bound).**
+  The block deadline is enforced per request; the producer-side watchdog is
+  not yet. A wedged generation today answers `segment_pending` at each
+  deadline rather than being killed at 30 s.
+- **Durable 410s.** Tombstones are process-local. A terminal session's
+  durable route is released, so after a daemon restart it answers 404, not
+  410 — and still never resurrects, because resurrection requires an active
+  route. The client-visible invariant (a terminal session never comes back)
+  holds; only the status code after a restart differs from B6's letter.
+- **Wait caps as settings.** Global 64 / per-session 4 are consts.
+
+The §3 attachment, §4 init identity, §5 durability + adoption (including the
+one-`read_dir` reconcile), §6 zero refusal, and §7's create/segment/lifecycle
+contract are all in, with the four wait-pool cases and the process-state
+attachment test among the module suites.

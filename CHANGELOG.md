@@ -8,6 +8,36 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **The VOD presentation serves (milestone M3).** A session created with
+  `presentation:"vod"` while the new `playback.vod_presentation` setting is on
+  is a film, not a broadcast: its playlist is rendered once from the stored
+  segment plan — `PLAYLIST-TYPE:VOD`, every segment named, `ENDLIST` from the
+  first byte — and never changes for the session's life. Segments materialize
+  just-in-time behind blocking GETs with the plan's three-outcome contract: a
+  materialized segment serves immutably (strong ETag, `immutable`
+  cache-control, byte ranges), a planned one blocks up to a hard deadline
+  (client-declared `block_budget_secs`, clamped by
+  `playback.vod_block_budget_secs`) and then answers a typed `segment_pending`
+  503, and an unknown name is the only 404 left. Production is driven by the
+  M2 scheduler/executor pair against real producer children — suspend on the
+  ahead window, reposition on a far seek, reclaim when idle — cutting on the
+  plan's own boundaries and enforcing the rendition's init identity before a
+  byte is written. Renditions live beside the persistent caches under a
+  node-wide working-set budget (`playback.vod_working_set_bytes`, never zero),
+  evict coldest-first without ever taking a reader's window, admit into the
+  copy cache when they complete (`reserve → fsync → complete`, budgeted by
+  `cache.max_gb`), and adopt their own directories back after a restart — a
+  reaped session resurrects from its durable route while that route is live,
+  and every terminal cause (DELETE, supersession, admin stop, revocation,
+  file replacement) answers a typed 410 and never resurrects. Everything is
+  double-opt-in: a transcode rung (gated on the open D6 device measurement), a
+  subtitle burn, a missing fragment index, varying in-band parameter sets, or
+  the setting being off all keep today's live presentation byte for byte, with
+  one log line naming why. Off by default; no shipped client sends the flag
+  yet (web lands in M4).
+
 ### Changed
 
 - **Playback info is a top-right ledger on every client.** The panel anchored
