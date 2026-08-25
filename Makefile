@@ -79,6 +79,11 @@ bind-mount-check: ## Privileged Linux: run the opt-in mount-namespace scratch te
 	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core \
 	  fs_secure::tests:: -- --nocapture
 
+.PHONY: storage-pressure-check
+storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device preserves authority
+	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
+	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
+
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
 	@scripts/history-audit --report target/validation/history.json

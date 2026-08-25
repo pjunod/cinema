@@ -2735,6 +2735,44 @@ mod startup_tests {
 
     #[cfg(unix)]
     #[test]
+    fn selected_credential_key_inode_is_protected_during_startup_scratch_cleanup() {
+        let tmp = crate::test_tempdir().expect("tempdir");
+        let data = tmp.path().join("durable");
+        let cache = tmp.path().join("persistent");
+        let scratch = tmp.path().join("scratch");
+        let storage = StorageConfig {
+            data_dir: data.clone(),
+            cache_dir: cache,
+            transcode_dir: scratch,
+            ..Default::default()
+        };
+        let initial = create_dirs_for_storage(&storage).expect("claim explicit scratch");
+        let key = data.join("credentials.key");
+        std::fs::write(&key, b"authoritative-key-material").expect("credential key");
+        let alias = initial.transcode.join("credential-key-alias");
+        std::fs::hard_link(&key, &alias).expect("same-inode scratch alias");
+
+        let mut config = Config::default();
+        config.storage = storage;
+        config.cluster.credential_key_file = key.clone();
+        let error = format!(
+            "{:#}",
+            create_dirs_for_config(&config)
+                .expect_err("the selected key identity must reach scratch cleanup")
+        );
+        assert!(error.contains("protected storage identity"), "{error}");
+        assert_eq!(
+            std::fs::read(&key).expect("credential key survives"),
+            b"authoritative-key-material"
+        );
+        assert_eq!(
+            std::fs::read(&alias).expect("scratch alias survives"),
+            b"authoritative-key-material"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn filesystem_identity_alias_is_refused_even_without_ancestry() {
         let tmp = crate::test_tempdir().expect("tempdir");
         let target = tmp.path().join("one-mounted-directory");
@@ -2976,13 +3014,14 @@ mod startup_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_full_cache_or_scratch_device_never_relocates_authoritative_bytes() {
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!(
-                "skipping a_full_cache_or_scratch_device_never_relocates_authoritative_bytes: \
-                 mounting the ENOSPC tmpfs needs root"
-            );
+        if std::env::var_os("PLURX_RUN_STORAGE_PRESSURE_TEST").is_none() {
             return;
         }
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "the opt-in ENOSPC storage-pressure test must run as root"
+        );
         struct Mounted(PathBuf);
         impl Drop for Mounted {
             fn drop(&mut self) {
@@ -2998,13 +3037,10 @@ mod startup_tests {
             .arg(&full)
             .status()
             .expect("run mount");
-        if !status.success() {
-            eprintln!(
-                "skipping a_full_cache_or_scratch_device_never_relocates_authoritative_bytes: \
-                 tmpfs mount unavailable in this environment ({status})"
-            );
-            return;
-        }
+        assert!(
+            status.success(),
+            "opt-in ENOSPC tmpfs setup failed: {status}"
+        );
         let _mounted = Mounted(full.clone());
         // Exhaust the filesystem so every later create returns ENOSPC,
         // whatever this kernel charges a directory.

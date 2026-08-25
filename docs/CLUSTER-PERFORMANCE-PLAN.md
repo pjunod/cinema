@@ -2,8 +2,8 @@
 
 **Status:** P0–P7 implementation and deterministic acceptance delivered; M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
-revised after adversarial review (§6.6), with four of its storage guards still
-design intent rather than pinned behavior; P6 delivered across two stacked
+revised after adversarial review (§6.6), with its deterministic and privileged
+storage guards now pinned; P6 delivered across two stacked
 changes — admission/protocol safety first, then useful traffic, readiness,
 promotion, removal, capacity reporting, and full real-process lifecycle
 acceptance (§6.7); P7's vendor-neutral proxy/failure evidence is delivered;
@@ -624,11 +624,11 @@ restart tests preserve cache/offline content and discard only declared scratch;
 disk-pressure tests on the cache/scratch device do not corrupt or relocate the
 durable target. The chosen read-pool value has a retained benchmark artifact.
 
-Two of those acceptance clauses are not met as written. The disk-pressure clause
-is satisfied by an ENOTDIR proxy rather than by a device that actually fills, and
-a real out-of-space exercise looks privilege-gated wherever it lands; the
-read-pool artifact is deferred with P0c/P2f. Both are stated as such below and
-in [OPERATIONS.md](OPERATIONS.md) rather than quietly counted as delivered.
+The read-pool artifact remains deferred with P0c/P2f. The disk-pressure clause
+now has a separate root-only Linux gate that fills a bounded tmpfs to real
+`ENOSPC`; it remains outside ordinary CI because mounting that filesystem needs
+privilege. Both boundaries are stated below and in
+[OPERATIONS.md](OPERATIONS.md) rather than conflated with deterministic CI.
 
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
@@ -668,21 +668,17 @@ and offline content are never restart cleanup targets. An available shared-cache
 mount is a separately protected persistent root; a missing mount keeps the
 existing node-local fallback and is not created by this preflight.
 
-The delivered coverage is narrower than that contract. Mutation runs found the
-cross-device bound, the depth and entry-count bounds, and the credential-key
-inode protection implemented but unreached by any test, and the only real
-mount-namespace exercises are opt-in and privileged. The follow-up work added
-tests for root repair, the foreign-uid root refusal, permissive-mode and
-foreign-uid children, a faulting readdir, the interrupted pending claim, the
-truncated published marker, the foreign-durable-root marker message, and the
-depth ceiling in the owned-root direction. Three gaps remain, and operator-facing
-text must not restate them as proven: the entry-count ceiling, the cross-device
-bound, and the wiring that makes the credential key one of the protected
-identities cleanup receives — the preflight that honours a protected identity is
-tested, the choice of that identity is not. The mount-point error and the
-bind-source-ancestry refusal now have real exercises, but only under
-`make bind-mount-check` (`PLURX_RUN_BIND_MOUNT_TEST=1`), which needs
-CAP_SYS_ADMIN and is deliberately outside `check` and CI.
+The cleanup coverage now reaches every storage guard mutation identified by the
+P5 review. A reduced-limit unit fixture drives the production entry-count path
+and proves preflight leaves the whole owned tree untouched. A startup-level
+hard-link fixture proves the selected credential-key inode is the protected
+identity passed into scratch cleanup. `make bind-mount-check` reaches the real
+mount-point, bind-source-ancestry, and cross-device refusals, while
+`make storage-pressure-check` fills a bounded tmpfs and proves cache and scratch
+`ENOSPC` cannot relocate or create authority. The last two targets require root
+and CAP_SYS_ADMIN on Linux and remain deliberately outside `check` and ordinary
+CI; their retained run record is physical evidence, not a claim about an
+unprivileged runner.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the
