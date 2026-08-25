@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["27df3d83"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract requires the replicated-storage job to resolve absolute Rust 1.97.1 cargo and rustc paths before its long proof, so a persistent runner cannot lose a transient rustup shim or fall back to an older system toolchain between Make recipes."

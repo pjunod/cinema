@@ -397,7 +397,12 @@ class OperationsContractCase(unittest.TestCase):
             "\n  web_layout:", 1
         )[0]
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
-        self.assertIn("CARGO: rustup run 1.97.1 cargo", cluster)
+        self.assertIn(
+            "Resolve pinned Rust executables for the long contract run", cluster
+        )
+        self.assertIn("rustup which --toolchain 1.97.1 cargo", cluster)
+        self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
+        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
         self.assertIn("run: make cluster-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
