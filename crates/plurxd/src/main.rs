@@ -902,6 +902,7 @@ fn spawn_background_loops(
     tokio::spawn(std::sync::Arc::clone(&state.transcode).scratch_space_loop());
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
     tokio::spawn(std::sync::Arc::clone(&state.offline).run());
 
     // What the libraries' storage reads at. Deliberately after the listener

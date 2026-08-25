@@ -32,9 +32,6 @@
 //! at-or-before the boundary by design, so the discard only ever runs
 //! forward.
 
-// TODO(m3-wire): removed when the rendition producer spawns generations.
-#![allow(dead_code)]
-
 use plurx_core::fmp4::{CutPolicy, Fragment, FragmentReader, Init, Published, Segmenter, Unit};
 use plurx_core::segplan::{
     discards_to, match_landing, FragmentIndex, PlanEntryKind, SegmentPlan, LANDING_WINDOW,

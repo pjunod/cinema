@@ -26,8 +26,6 @@
 //! serves. The playlist bytes derived from it are immutable for the life of
 //! the rendition; a resurrected rendition serves the identical bytes.
 
-#![allow(dead_code)] // TODO(m3-wire): removed when the manager attaches
-
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -90,7 +88,6 @@ const IDENTITY_NAME: &str = "identity.json";
 /// Settings snapshot the manager reads per-create.
 #[derive(Debug, Clone)]
 pub struct VodSettings {
-    pub enabled: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Never zero by
     /// the time it reaches here (settings validation refuses a parsed zero).
     pub working_set_bytes: u64,
@@ -108,6 +105,14 @@ pub enum Terminal {
     AdminStop,
     Revoked,
     Replaced,
+}
+
+/// The create answer plus the request facts an idempotent replay echoes.
+#[derive(Debug)]
+pub struct RecoveredVod {
+    pub start: VodStart,
+    pub target_height: i64,
+    pub kind: SessionKind,
 }
 
 /// What [`VodServe::try_create`] answers when the VOD presentation can serve
@@ -260,6 +265,13 @@ impl Rendition {
 struct Session {
     rendition: Arc<Rendition>,
     playback_id: String,
+    /// Echoed on an idempotent create replay (`request_id` recovery).
+    target_height: i64,
+    /// Echoed on an idempotent create replay.
+    kind: SessionKind,
+    /// The same user scope the legacy supersession sweep filters by, so one
+    /// viewer's `playback_id` can never end another viewer's session.
+    supersession_user: String,
     block_budget: Duration,
     last_touch: StdMutex<Instant>,
     tombstone: Option<Terminal>,
@@ -314,6 +326,7 @@ impl VodServe {
         req: &SessionRequest,
         file: &MediaFile,
         settings: &VodSettings,
+        supersession_user: &str,
         session_id: String,
     ) -> Result<Option<VodStart>, String> {
         let SessionKind::Copy {
@@ -394,6 +407,9 @@ impl VodServe {
             Session {
                 rendition: Arc::clone(&rendition),
                 playback_id: req.playback_id.clone(),
+                target_height: file.height.unwrap_or(0),
+                kind: req.kind,
+                supersession_user: supersession_user.to_owned(),
                 block_budget: settings.block_budget,
                 last_touch: StdMutex::new(Instant::now()),
                 tombstone: None,
@@ -475,16 +491,20 @@ impl VodServe {
         true
     }
 
-    /// Supersession sweep: end every session with this `playback_id` except
-    /// `keep` (cause [`Terminal::Superseded`]). Called by the manager on
-    /// create.
-    pub async fn supersede(&self, playback_id: &str, keep: &str) -> usize {
+    /// Supersession sweep: end every session with this viewer's
+    /// `playback_id` except `keep` (cause [`Terminal::Superseded`]). Called
+    /// by the manager on create — for a VOD create AND a legacy one, because
+    /// a viewer switching presentations is still one player replacing its own
+    /// stream. Scoped by the same user string the legacy sweep uses, so a
+    /// colliding `playback_id` from another account ends nothing.
+    pub async fn supersede(&self, supersession_user: &str, playback_id: &str, keep: &str) -> usize {
         let victims: Vec<String> = {
             let sessions = self.shared.sessions.lock().await;
             sessions
                 .iter()
                 .filter(|(id, session)| {
                     session.playback_id == playback_id
+                        && session.supersession_user == supersession_user
                         && id.as_str() != keep
                         && session.tombstone.is_none()
                 })
@@ -503,6 +523,42 @@ impl VodServe {
     /// Whether this session id is (or ever was) a VOD session here.
     pub async fn owns(&self, session_id: &str) -> bool {
         self.shared.sessions.lock().await.contains_key(session_id)
+    }
+
+    /// Every registered session id, tombstoned included — "still addressed
+    /// here" is the fact the caller needs, not "still playing".
+    pub async fn session_ids(&self) -> Vec<String> {
+        self.shared.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// The file a live VOD session is serving, for callers that need source
+    /// facts at response time (the Apple init-record rewrite).
+    pub async fn session_file_id(&self, session_id: &str) -> Option<i64> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if session.tombstone.is_some() {
+            return None;
+        }
+        Some(session.rendition.recipe.file.id)
+    }
+
+    /// Rebuild the create answer for an idempotent replay (`request_id`
+    /// recovery). `None` for a session that is not ours or has ended — the
+    /// caller then answers the way it always has.
+    pub async fn recovered_start(&self, session_id: &str) -> Option<RecoveredVod> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if session.tombstone.is_some() {
+            return None;
+        }
+        Some(RecoveredVod {
+            start: VodStart {
+                session_id: session_id.to_owned(),
+                duration_ms: plan_duration_ms(&session.rendition.plan),
+            },
+            target_height: session.target_height,
+            kind: session.kind,
+        })
     }
 
     /// Periodic maintenance, called from a spawned interval task the manager
@@ -1748,12 +1804,13 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         }
     }
 
     fn settings() -> VodSettings {
         VodSettings {
-            enabled: true,
             working_set_bytes: 8 << 30,
             completed_cache_bytes: 50 << 30,
             block_budget: Duration::from_secs(30),
@@ -1804,6 +1861,7 @@ mod tests {
                 &request(playback_id, 0.0),
                 file,
                 settings,
+                "[\"user_id\",1]",
                 session_id.to_string(),
             )
             .await
@@ -2029,7 +2087,10 @@ mod tests {
         // Supersession: two sessions of one playback, the newer one kept.
         create(&serve, &file, "sess-b", "play-b", &settings()).await;
         create(&serve, &file, "sess-c", "play-b", &settings()).await;
-        assert_eq!(serve.supersede("play-b", "sess-c").await, 1);
+        assert_eq!(
+            serve.supersede("[\"user_id\",1]", "play-b", "sess-c").await,
+            1
+        );
         match serve.playlist("sess-b").await.expect("still ours") {
             Err(VodError::Gone(Terminal::Superseded)) => {}
             other => panic!("expected Gone(Superseded), got {other:?}"),
@@ -2168,7 +2229,13 @@ mod tests {
         let serve = VodServe::new(base.path().to_path_buf(), store);
 
         let answer = serve
-            .try_create(&request("play-a", 0.0), &file, &settings(), "sess-a".into())
+            .try_create(
+                &request("play-a", 0.0),
+                &file,
+                &settings(),
+                "[\"user_id\",1]",
+                "sess-a".into(),
+            )
             .await
             .expect("try_create");
         assert!(
@@ -2187,7 +2254,13 @@ mod tests {
         let mut transcode = request("play-a", 0.0);
         transcode.kind = SessionKind::Transcode { height: 720 };
         assert!(serve
-            .try_create(&transcode, &file, &settings(), "sess-t".into())
+            .try_create(
+                &transcode,
+                &file,
+                &settings(),
+                "[\"user_id\",1]",
+                "sess-t".into()
+            )
             .await
             .expect("try_create")
             .is_none());
@@ -2196,7 +2269,13 @@ mod tests {
         let mut burn = request("play-a", 0.0);
         burn.subtitle_burn = Some(0);
         assert!(serve
-            .try_create(&burn, &file, &settings(), "sess-s".into())
+            .try_create(
+                &burn,
+                &file,
+                &settings(),
+                "[\"user_id\",1]",
+                "sess-s".into()
+            )
             .await
             .expect("try_create")
             .is_none());
@@ -2205,7 +2284,13 @@ mod tests {
         let empty_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let bare = VodServe::new(base.path().join("bare"), empty_store);
         assert!(bare
-            .try_create(&request("play-a", 0.0), &file, &settings(), "sess-n".into())
+            .try_create(
+                &request("play-a", 0.0),
+                &file,
+                &settings(),
+                "[\"user_id\",1]",
+                "sess-n".into()
+            )
             .await
             .expect("try_create")
             .is_none());

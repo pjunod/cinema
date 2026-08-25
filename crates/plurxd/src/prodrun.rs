@@ -42,8 +42,6 @@
 //! respawn half of [`Step::Restart`] come back as [`Performed::NeedsSpawn`],
 //! and [`ProducerSlot::attach`] records the spawn once it has happened.
 
-#![allow(dead_code)] // TODO(m3-wire): removed when the rendition producer attaches
-
 use std::io;
 
 use tokio::process::Child;

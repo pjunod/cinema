@@ -26,11 +26,6 @@
 //! remux is about 62 GB against a 50 GB default cache, so this is the common
 //! case for exactly the titles the plan cares most about, not an edge.
 
-// M2 builds this bookkeeping before M3 wires it to the delivery and transcode
-// paths, so nothing outside the tests calls it yet. The allow is scoped to
-// this module and comes out when those callers arrive.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use plurx_core::segplan::{PlanEntryKind, SegmentPlan};
@@ -136,6 +131,7 @@ impl Manifest {
         }
     }
 
+    #[allow(dead_code)] // test-facing until a later milestone consumes it
     pub fn plan(&self) -> &SegmentPlan {
         &self.plan
     }
@@ -273,6 +269,7 @@ impl Manifest {
         Ok(self.planned_bytes())
     }
 
+    #[allow(dead_code)] // test-facing until a later milestone consumes it
     pub fn is_reserved(&self) -> bool {
         self.reserved
     }
@@ -359,6 +356,7 @@ impl Manifest {
     /// Audio-tail entries carry no video and are produced by the same pass
     /// that finishes the last video segment, so a scheduler must not chase
     /// them as if they were independently seekable.
+    #[allow(dead_code)] // test-facing until a later milestone consumes it
     pub fn is_audio_tail(&self, index: u32) -> bool {
         self.plan
             .entry(index)

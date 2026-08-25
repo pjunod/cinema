@@ -1574,6 +1574,8 @@ mod tests {
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
+                presentation: Default::default(),
+                block_budget_secs: None,
             },
         }
     }

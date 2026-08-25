@@ -39,7 +39,6 @@
 
 // M3 builds the pool before the segment GET handler attaches to it, so
 // nothing outside the tests calls it yet.
-#![allow(dead_code)] // TODO(m3-wire): removed when the segment GET attaches
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -294,10 +293,12 @@ impl WaitPool {
     }
 
     /// Number of registered waiters (for telemetry and tests).
+    #[allow(dead_code)] // telemetry/test-facing
     pub fn len(&self) -> usize {
         self.lock().total
     }
 
+    #[allow(dead_code)] // telemetry/test-facing
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

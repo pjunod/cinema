@@ -1137,6 +1137,15 @@ pub struct SettingsDto {
     /// Opt-in physical-device experiment: serve new live sessions as typeless
     /// sliding playlists from their first response. Off by default.
     pub hls_typeless_sliding: bool,
+    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
+    /// default; a client must also send `presentation:"vod"` per session.
+    pub vod_presentation: bool,
+    /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
+    /// built-in default. Never zero — "no working set" is not a configuration
+    /// this accepts (M3 handoff §6).
+    pub vod_working_set_bytes: String,
+    /// Server ceiling on one blocking VOD segment fetch, seconds.
+    pub vod_block_budget_secs: String,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1335,6 +1344,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_scratch_max_bytes,
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
+        vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() == Some("1"),
+        vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
+        vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1377,6 +1389,11 @@ pub struct UpdateSettings {
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
+    /// VOD presentation opt-in and its two serving knobs; absent leaves each
+    /// as-is. `vod_working_set_bytes` refuses 0 — see the handler.
+    pub vod_presentation: Option<bool>,
+    pub vod_working_set_bytes: Option<String>,
+    pub vod_block_budget_secs: Option<String>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1531,6 +1548,54 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HLS_TYPELESS_SLIDING, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.vod_presentation {
+        state
+            .store
+            .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(raw) = &req.vod_working_set_bytes {
+        let parsed: u64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest("vod_working_set_bytes must be a number".into()))?;
+        // A parsed zero is refused rather than stored: 0 means "not
+        // configured" to the serving layer, and an operator who typed it
+        // meant "no working set" — an answer this presentation cannot run
+        // with. Offer the honest alternatives instead of silently keeping a
+        // default (M3 handoff §6).
+        if parsed == 0 {
+            return Err(ApiError::BadRequest(
+                "vod_working_set_bytes cannot be 0: to stop VOD production turn \
+                 vod_presentation off; the smallest accepted working set is 268435456 (256 MiB)"
+                    .into(),
+            ));
+        }
+        if parsed < 256 * 1024 * 1024 {
+            return Err(ApiError::BadRequest(
+                "vod_working_set_bytes must be at least 268435456 (256 MiB)".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_WORKING_SET_BYTES, &parsed.to_string())
+            .await?;
+    }
+    if let Some(raw) = &req.vod_block_budget_secs {
+        let parsed: f64 = raw
+            .trim()
+            .parse()
+            .map_err(|_| ApiError::BadRequest("vod_block_budget_secs must be a number".into()))?;
+        if !(1.0..=30.0).contains(&parsed) {
+            return Err(ApiError::BadRequest(
+                "vod_block_budget_secs must be between 1 and 30".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_BLOCK_BUDGET_SECS, &parsed.to_string())
             .await?;
     }
     if let Some(on) = req.cluster_media_pool_enabled {

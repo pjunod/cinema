@@ -310,6 +310,18 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
+    /// default: even a client that sends `presentation:"vod"` keeps today's
+    /// live presentation until an operator turns this on.
+    pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
+    /// Node-wide byte budget for un-admitted VOD rendition working sets.
+    /// Absent takes the built-in default. A parsed zero is refused at the
+    /// settings surface: "no working set" and "not configured" are opposite
+    /// answers and only the caller knows which one was meant (M3 handoff §6).
+    pub const VOD_WORKING_SET_BYTES: &str = "playback.vod_working_set_bytes";
+    /// Server ceiling, in seconds, for one blocking VOD segment fetch. The
+    /// per-request `block_budget_secs` is clamped to this.
+    pub const VOD_BLOCK_BUDGET_SECS: &str = "playback.vod_block_budget_secs";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not

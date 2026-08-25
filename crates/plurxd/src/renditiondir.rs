@@ -28,10 +28,6 @@
 //! GC then carry on unchanged, which is the same trick that let the copy
 //! segmenter replace ffmpeg's muxer without the rest of the daemon noticing.
 
-// M3 attaches this to the delivery path; nothing outside the tests calls it
-// yet. The allow comes out with those callers.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -416,6 +412,9 @@ pub struct Freed {
 }
 
 impl Freed {
+    /// Exercised by this module's tests; serving reads `bytes` and `error`
+    /// directly.
+    #[allow(dead_code)]
     pub fn is_complete(&self) -> bool {
         self.error.is_none()
     }
@@ -494,6 +493,7 @@ impl Default for Reconciled {
 
 impl Reconciled {
     /// Nothing to repair *and* the rendition is playable.
+    #[allow(dead_code)] // test-facing; adoption reads the fields directly
     pub fn is_clean(&self) -> bool {
         self.adopted.is_empty() && self.forgotten.is_empty() && self.init_present
     }

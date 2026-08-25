@@ -31,11 +31,6 @@
 //! watch the producer walk backwards to refill an evicted index 5 it might
 //! rewind into some day, and time out while it did.
 
-// M2 builds the store and the scheduler before M3 wires either to the
-// transcode manager, so nothing outside the tests calls these yet. The allow
-// is scoped to this module and comes out when the manager starts asking.
-#![allow(dead_code)]
-
 use crate::titlestore::Manifest;
 
 /// How far ahead of the furthest demand a producer may run before it is

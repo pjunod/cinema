@@ -40,10 +40,6 @@
 //! `transcode.rs` lists "SIGSTOP sent to the wrong pid" among the things that
 //! look like a hung encoder, which is the expensive way to find this out.
 
-// M3 attaches this to the transcode path; nothing outside the tests calls it
-// yet. The allow comes out with those callers.
-#![allow(dead_code)]
-
 use crate::prodsched::{Action, Hold};
 
 /// What the executor believes about the producer process right now.

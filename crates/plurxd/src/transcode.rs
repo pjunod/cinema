@@ -2942,6 +2942,32 @@ pub struct SessionRequest {
     /// because the passthrough filter on a non-DV input emits a broken
     /// picture at exit 0 rather than failing (measured).
     pub hdr10: bool,
+    /// Which presentation the client asked for. Defaults to the live
+    /// presentation, so every shipped client and every stored recipe
+    /// deserializes to exactly the behaviour it always had; `"vod"` is the
+    /// per-request half of the plan §2.7 opt-in (the other half is the
+    /// `playback.vod_presentation` setting). A VOD request the server cannot
+    /// honour — no fragment index, varying parameter sets, a transcode rung,
+    /// a subtitle burn — falls back to the live presentation with one log
+    /// line saying why, never to an error: the opt-in is a request, not a
+    /// promise.
+    #[serde(default)]
+    pub presentation: Presentation,
+    /// Client's ceiling for one blocking segment GET, in seconds. Clamped to
+    /// the server's own cap; `None` takes the server default. VOD only.
+    #[serde(default)]
+    pub block_budget_secs: Option<f64>,
+}
+
+/// The two presentations a session can be created under (plan §2.7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Presentation {
+    /// Today's behaviour: an EVENT playlist that grows, prunes and rewrites.
+    #[default]
+    Live,
+    /// The film-addressed immutable playlist served from a segment plan.
+    Vod,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3015,6 +3041,15 @@ impl SessionRequest {
         // did — a replay in flight across a deploy still recovers its session.
         let kind = if self.hdr10 {
             format!("{kind}+hdr10")
+        } else {
+            kind
+        };
+        // Same append-only discipline: a VOD-presented session answers a
+        // different playlist shape, so it cannot recover a live session's id
+        // (or vice versa), while every legacy request keeps the exact
+        // fingerprint it always had.
+        let kind = if self.presentation == Presentation::Vod {
+            format!("{kind}+vod")
         } else {
             kind
         };
@@ -4468,6 +4503,11 @@ impl RateControlSnapshot {
 pub struct TranscodeManager {
     store: Arc<dyn Store>,
     work_dir: PathBuf,
+    /// The VOD presentation's serving runtime (plan §2). Sessions created
+    /// under `presentation:"vod"` live here rather than in `sessions`; every
+    /// serving entry point dispatches to it first and falls through when the
+    /// id is not one of its own.
+    vod: Arc<crate::vodserve::VodServe>,
     /// Writable XDG cache inherited by ffmpeg and libraries such as fontconfig.
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
@@ -4662,6 +4702,7 @@ impl TranscodeManager {
             );
         }
         TranscodeManager {
+            vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
             runtime_cache,
@@ -4745,6 +4786,13 @@ impl TranscodeManager {
         let cache_parent = cache_dir.parent().unwrap_or(cache_dir.as_path());
         self.runtime_cache = cache_parent.join("runtime");
         self.subtitle_cache = cache_parent.join("subs");
+        // Renditions are durable state — admitted ones are the copy cache the
+        // plan promises — so they live beside the persistent caches rather
+        // than in scratch. Replaced before serving starts, like the caches.
+        self.vod = crate::vodserve::VodServe::new(
+            cache_parent.join("renditions"),
+            Arc::clone(&self.store),
+        );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
                 path = %self.runtime_cache.display(),
@@ -7980,54 +8028,291 @@ impl TranscodeManager {
             None => (None, req),
         };
 
-        let info = match req.kind {
-            SessionKind::Transcode { height } => {
-                self.start_with_audio_offset(
-                    req.file_id,
-                    height,
-                    req.start_seconds,
-                    req.audio_index,
-                    req.subtitle_burn,
-                    req.audio_offset_ms,
-                    user_name,
-                    supersession_user,
-                    replacement_deadline,
-                    takeover,
-                    &req.playback_id,
-                    req.automatic,
-                    req.hdr10,
-                )
-                .await?
-            }
-            SessionKind::Copy {
-                aac,
-                preserve_dolby_vision,
-            } => {
-                self.start_copy_with_audio_offset(
-                    req.file_id,
-                    req.start_seconds,
-                    req.audio_index,
-                    req.audio_offset_ms,
-                    CopySessionOptions {
-                        transcode_audio: aac,
-                        preserve_dolby_vision,
-                    },
-                    user_name,
-                    supersession_user,
-                    replacement_deadline,
-                    takeover,
-                    &req.playback_id,
-                    req.automatic,
-                )
-                .await?
+        let info = if let Some(info) = self
+            .try_vod_session(
+                req,
+                supersession_user,
+                replacement_deadline,
+                takeover.is_some(),
+            )
+            .await?
+        {
+            info
+        } else {
+            match req.kind {
+                SessionKind::Transcode { height } => {
+                    self.start_with_audio_offset(
+                        req.file_id,
+                        height,
+                        req.start_seconds,
+                        req.audio_index,
+                        req.subtitle_burn,
+                        req.audio_offset_ms,
+                        user_name,
+                        supersession_user,
+                        replacement_deadline,
+                        takeover,
+                        &req.playback_id,
+                        req.automatic,
+                        req.hdr10,
+                    )
+                    .await?
+                }
+                SessionKind::Copy {
+                    aac,
+                    preserve_dolby_vision,
+                } => {
+                    self.start_copy_with_audio_offset(
+                        req.file_id,
+                        req.start_seconds,
+                        req.audio_index,
+                        req.audio_offset_ms,
+                        CopySessionOptions {
+                            transcode_audio: aac,
+                            preserve_dolby_vision,
+                        },
+                        user_name,
+                        supersession_user,
+                        replacement_deadline,
+                        takeover,
+                        &req.playback_id,
+                        req.automatic,
+                    )
+                    .await?
+                }
             }
         };
         if let Some(claim) = claim {
-            let live: std::collections::HashSet<String> =
+            let mut live: std::collections::HashSet<String> =
                 self.sessions.lock().await.keys().cloned().collect();
+            // VOD sessions are live too: without them here, the next create's
+            // completion would purge their Ready records, breaking both
+            // idempotent replay and the cluster stop path's match check.
+            live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
         Ok(info)
+    }
+
+    /// The VOD arm of session creation (plan §2.7, milestone M3).
+    ///
+    /// `None` means "not this presentation" — the caller proceeds down the
+    /// live-presentation arms exactly as if the opt-in had never been sent,
+    /// which is the fallback contract: a VOD request the server cannot honour
+    /// degrades to today's behaviour, never to an error. One log line inside
+    /// names each fallback reason.
+    async fn try_vod_session(
+        &self,
+        req: &SessionRequest,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        is_takeover: bool,
+    ) -> Result<Option<StartInfo>, String> {
+        if req.presentation != Presentation::Vod {
+            return Ok(None);
+        }
+        if is_takeover {
+            // A takeover continues a live incarnation's exact serving shape;
+            // a presentation switch is a new create's business.
+            tracing::info!("vod presentation refused for a takeover start");
+            return Ok(None);
+        }
+        let Some(settings) = self.vod_settings(req).await? else {
+            tracing::info!(
+                file = req.file_id,
+                "vod presentation requested but playback.vod_presentation is off"
+            );
+            return Ok(None);
+        };
+        let file = self
+            .store
+            .get_file(req.file_id)
+            .await
+            .map_err(|error| format!("reading the source file: {error}"))?
+            .ok_or_else(|| "the file no longer exists".to_owned())?;
+        // One player replacing its own stream sweeps both registries: the
+        // live sessions it may be leaving, and any VOD session it holds
+        // (`reap_superseded_until` sweeps both).
+        self.reap_superseded_before(replacement_deadline, supersession_user, &req.playback_id)
+            .await?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        match self
+            .vod
+            .try_create(req, &file, &settings, supersession_user, session_id)
+            .await?
+        {
+            Some(start) => Ok(Some(StartInfo {
+                playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
+                session_id: start.session_id,
+                duration_ms: Some(start.duration_ms),
+                // Like a cached generation: the timeline is the whole film
+                // from zero, and the client seeks — that is the point.
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                target_height: file.height.unwrap_or(0),
+                kind: req.kind,
+                encoder: "vod",
+                // A copy session encodes nothing; same answer the live copy
+                // arm gives.
+                grade: OutputGrade::Sdr,
+                vod: true,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Read the VOD serving settings, `None` when the presentation is off.
+    async fn vod_settings(
+        &self,
+        req: &SessionRequest,
+    ) -> Result<Option<crate::vodserve::VodSettings>, String> {
+        let read = |key: &'static str| {
+            let store = Arc::clone(&self.store);
+            async move {
+                store
+                    .get_setting(key)
+                    .await
+                    .map_err(|error| format!("reading {key}: {error}"))
+            }
+        };
+        if read(plurx_core::store::keys::VOD_PRESENTATION)
+            .await?
+            .as_deref()
+            != Some("1")
+        {
+            return Ok(None);
+        }
+        /// Un-admitted working sets across the node when the operator has not
+        /// said otherwise: enough for a handful of concurrent films' ahead
+        /// windows without threatening a small disk.
+        const DEFAULT_WORKING_SET_BYTES: u64 = 8 << 30;
+        /// The server's ceiling on one blocking segment fetch. hls.js's own
+        /// manifest-load budget is 10 s (M0-P3), so the default answer comes
+        /// back typed before a stock player gives up on its own.
+        const DEFAULT_BLOCK_BUDGET_SECS: f64 = 8.0;
+        const MAX_BLOCK_BUDGET_SECS: f64 = 30.0;
+        let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
+            Some(raw) => match raw.trim().parse::<u64>() {
+                // The settings surface refuses a zero on the way in; one that
+                // arrived by another route is still not a budget this can run
+                // with, and "not configured" is the honest reading.
+                Ok(0) | Err(_) => DEFAULT_WORKING_SET_BYTES,
+                Ok(bytes) => bytes,
+            },
+            None => DEFAULT_WORKING_SET_BYTES,
+        };
+        let server_cap = match read(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|s| s.is_finite() && *s > 0.0)
+                .map(|s| s.min(MAX_BLOCK_BUDGET_SECS))
+                .unwrap_or(DEFAULT_BLOCK_BUDGET_SECS),
+            None => DEFAULT_BLOCK_BUDGET_SECS,
+        };
+        let block_secs = req
+            .block_budget_secs
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| s.min(server_cap))
+            .unwrap_or(server_cap);
+        // Admitted renditions are the copy cache, so they answer to the same
+        // budget the pre-transcode cache does. `0`/absent keeps admission
+        // closed: renditions serve and evict under the working set, and
+        // nothing is promised durability.
+        let completed_cache_bytes = match read(plurx_core::store::keys::CACHE_MAX_GB).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                .saturating_mul(1 << 30),
+            None => 0,
+        };
+        Ok(Some(crate::vodserve::VodSettings {
+            working_set_bytes,
+            completed_cache_bytes,
+            block_budget: Duration::from_secs_f64(block_secs),
+        }))
+    }
+
+    /// The VOD dispatch half of [`Self::playlist`]: `None` when the id is not
+    /// a VOD session's.
+    pub async fn vod_playlist(
+        &self,
+        session_id: &str,
+    ) -> Option<Result<Vec<u8>, crate::vodserve::VodError>> {
+        self.vod.playlist(session_id).await
+    }
+
+    /// The VOD dispatch half of [`Self::segment`]: `None` when the id is not
+    /// a VOD session's.
+    pub async fn vod_segment(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Option<Result<Option<crate::vodserve::SegmentReady>, crate::vodserve::VodError>> {
+        self.vod.segment(session_id, name).await
+    }
+
+    /// The file a live VOD session serves, for response-time source facts.
+    pub async fn vod_session_file_id(&self, session_id: &str) -> Option<i64> {
+        self.vod.session_file_id(session_id).await
+    }
+
+    /// Rebuild a reaped VOD session from its durable route's recipe (plan
+    /// §2.5: sessions are handles, and a handle whose durable route is still
+    /// active resurrects instead of failing the viewer). The caller has
+    /// already verified the route: this node owns it, it is active, and its
+    /// lease has not expired. `false` when the recipe is not a VOD one or the
+    /// rendition cannot be re-attached — the caller then answers as it always
+    /// has.
+    pub async fn vod_resurrect(&self, recipe_json: &str, session_id: &str, user_id: i64) -> bool {
+        let Ok(remote) =
+            serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
+        else {
+            return false;
+        };
+        let req = remote.request;
+        if req.presentation != Presentation::Vod {
+            return false;
+        }
+        let Ok(Some(settings)) = self.vod_settings(&req).await else {
+            return false;
+        };
+        let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
+            return false;
+        };
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        match self
+            .vod
+            .try_create(
+                &req,
+                &file,
+                &settings,
+                &supersession_user,
+                session_id.to_owned(),
+            )
+            .await
+        {
+            Ok(Some(_)) => {
+                tracing::info!(
+                    session = %session_log_id(session_id),
+                    "resurrected a vod session from its durable route"
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
+    pub async fn vod_maintain_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.vod.maintain().await;
+        }
     }
 
     /// Resolve a `request_id` to either a reservation this call owns or the
@@ -8202,6 +8487,22 @@ impl TranscodeManager {
 
     /// Describe a session that already exists, for an idempotent re-create.
     async fn recover(&self, session_id: &str) -> Option<StartInfo> {
+        if let Some(recovered) = self.vod.recovered_start(session_id).await {
+            // An idempotent replay of a VOD create: repeat the persisted
+            // answer, field for field, from the session record.
+            return Some(StartInfo {
+                playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
+                session_id: recovered.start.session_id,
+                duration_ms: Some(recovered.start.duration_ms),
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                target_height: recovered.target_height,
+                kind: recovered.kind,
+                encoder: "vod",
+                grade: OutputGrade::Sdr,
+                vod: true,
+            });
+        }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         if session.failed.load(Relaxed) {
             return None;
@@ -8858,6 +9159,9 @@ impl TranscodeManager {
         supersession_user: &str,
         playback_id: &str,
     ) -> Result<(), String> {
+        // A player replacing its stream supersedes whichever presentation it
+        // was on — a legacy create must end this viewer's VOD session too.
+        self.vod.supersede(supersession_user, playback_id, "").await;
         let doomed: Vec<(String, Arc<Session>)> = {
             let sessions = match deadline {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
@@ -10445,6 +10749,26 @@ impl TranscodeManager {
     /// routine, and an admin killing one from the activity page is somebody
     /// intervening.
     pub async fn stop_session(&self, session_id: &str, reason: &'static str) -> bool {
+        // A VOD session ends with a tombstone rather than a retirement: its
+        // rendition may outlive it (admitted cache, other readers), but this
+        // id answers 410 ever after. The cause keys off the same reason
+        // strings the live path already uses.
+        {
+            let cause = if reason.contains("superseded") {
+                crate::vodserve::Terminal::Superseded
+            } else if reason.contains("revoked") || reason.contains("credential") {
+                crate::vodserve::Terminal::Revoked
+            } else if reason.contains("replaced") || reason.contains("rescan") {
+                crate::vodserve::Terminal::Replaced
+            } else if reason.contains("admin") || reason.contains("operator") {
+                crate::vodserve::Terminal::AdminStop
+            } else {
+                crate::vodserve::Terminal::Deleted
+            };
+            if self.vod.end(session_id, cause).await {
+                return true;
+            }
+        }
         let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
             return false;
         };
@@ -10594,6 +10918,10 @@ impl TranscodeManager {
                         .as_ref()
                         .is_some_and(|takeover| takeover.incarnation_id == request_id)
                 });
+        // A VOD session is stoppable by its durable route without a match in
+        // the live maps: its ids are unguessable and never recycled, and the
+        // route store is the caller's authority.
+        let matches = matches || self.vod.owns(session_id).await;
         matches && self.stop_session(session_id, reason).await
     }
 
@@ -12823,6 +13151,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         let hdr10 = SessionRequest {
             hdr10: true,
@@ -15147,6 +15477,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         }
     }
 
@@ -19210,6 +19542,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
 
         // The idempotency identity is `intent_fingerprint`, so that is what
@@ -19314,6 +19648,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
 
         let (a, b) = tokio::join!(
@@ -19361,6 +19697,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
@@ -19409,6 +19747,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         let previous = mgr
             .create_session(&original, "paul")
