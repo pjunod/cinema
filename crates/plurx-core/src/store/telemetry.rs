@@ -1,8 +1,12 @@
-//! Node-local playback telemetry storage shared by both durable backends.
+//! The node-local sidecar shared by both durable backends.
 //!
-//! Single-node SQLite carries this schema as migration v17. A hiqlite voter
-//! owns the same table in a separate SQLite sidecar because submitting an
-//! operational event through hiqlite's write API would replicate it via Raft.
+//! Playback telemetry, network priors, and fragment indexes all describe what
+//! happened on ONE machine, so single-node SQLite carries them as ordinary
+//! migrations while a hiqlite voter keeps them in a separate SQLite file:
+//! submitting any of them through hiqlite's write API would replicate a local
+//! observation via Raft and let one node's answer govern another node's bytes.
+//! The module is still named for telemetry because that was the first of the
+//! three; the discipline is what it shares, not the subject.
 
 #[cfg(any(test, feature = "hiqlite-store"))]
 use std::path::Path;
@@ -12,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 
 use crate::domain::{
-    NetworkPrior, NetworkPriorObservation, PlaybackEvent, PlaybackEventQuery,
+    CredentialGeneration, NetworkPrior, NetworkPriorObservation, PlaybackEvent, PlaybackEventQuery,
     NETWORK_PRIOR_STARVED_TTL_MS,
 };
 use crate::error::StoreError;
@@ -47,7 +51,9 @@ CREATE TABLE playback_events (
 CREATE INDEX playback_events_by_event ON playback_events(event, at_unix_ms);
 CREATE INDEX playback_events_by_file ON playback_events(file_id, at_unix_ms);";
 
-pub(crate) const NETWORK_PRIORS_SCHEMA: &str = "
+/// Old integer-key network priors schema (sidecar v2).
+/// Replaced by [`NETWORK_PRIORS_SCHEMA`] in sidecar v3.
+pub(crate) const NETWORK_PRIORS_V2_SCHEMA: &str = "
 CREATE TABLE network_priors (
     user_id             INTEGER NOT NULL,
     client_class        TEXT NOT NULL,
@@ -62,8 +68,26 @@ CREATE TABLE network_priors (
 CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
+/// New credential-generation-key network priors schema (sidecar v3+).
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 2;
+pub(crate) const NETWORK_PRIORS_SCHEMA: &str = "
+CREATE TABLE network_priors (
+    user_id               INTEGER NOT NULL,
+    credential_generation TEXT NOT NULL,
+    client_class          TEXT NOT NULL,
+    network_fingerprint   TEXT NOT NULL,
+    sustained_kbps        INTEGER,
+    worst_rung_height     INTEGER,
+    starved_at_ms         INTEGER,
+    sample_count          INTEGER NOT NULL DEFAULT 0,
+    updated_at_ms         INTEGER NOT NULL,
+    PRIMARY KEY (credential_generation, client_class, network_fingerprint)
+) STRICT;
+CREATE INDEX network_priors_by_updated
+    ON network_priors(updated_at_ms, user_id, client_class);";
+
+#[cfg(any(test, feature = "hiqlite-store"))]
+const SIDECAR_SCHEMA_VERSION: i64 = 6;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -178,7 +202,7 @@ fn prior_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NetworkPrior> {
         .and_then(|value| u32::try_from(value).ok());
     let sample_count = u32::try_from(row.get::<_, i64>(6)?).unwrap_or(u32::MAX);
     Ok(NetworkPrior {
-        user_id: row.get(0)?,
+        credential_generation: CredentialGeneration::from(row.get::<_, String>(0)?),
         client_class: row.get(1)?,
         network_fingerprint: row.get(2)?,
         sustained_kbps,
@@ -193,7 +217,7 @@ pub(crate) fn observe_prior(
     conn: &Connection,
     observation: &NetworkPriorObservation,
 ) -> Result<NetworkPrior, StoreError> {
-    if observation.user_id <= 0
+    if observation.credential_generation.as_str().trim().is_empty()
         || observation.client_class.trim().is_empty()
         || observation.network_fingerprint.trim().is_empty()
         || (observation.throughput_kbps.is_none() && observation.starved_rung_height.is_none())
@@ -214,15 +238,15 @@ pub(crate) fn observe_prior(
     // stays deterministic under test.
     transaction.execute(
         "INSERT INTO network_priors (
-             user_id, client_class, network_fingerprint, sustained_kbps,
+             user_id, credential_generation, client_class, network_fingerprint, sustained_kbps,
              worst_rung_height, starved_at_ms, sample_count, updated_at_ms
          ) VALUES (
-             ?1, ?2, ?3, ?4, ?5,
-             CASE WHEN ?5 IS NULL THEN NULL ELSE ?6 END,
-             CASE WHEN ?4 IS NULL THEN 0 ELSE 1 END,
-             ?6
+             ?1, ?2, ?3, ?4, ?5, ?6,
+             CASE WHEN ?6 IS NULL THEN NULL ELSE ?7 END,
+             CASE WHEN ?5 IS NULL THEN 0 ELSE 1 END,
+             ?7
          )
-         ON CONFLICT(user_id, client_class, network_fingerprint) DO UPDATE SET
+         ON CONFLICT(credential_generation, client_class, network_fingerprint) DO UPDATE SET
              sustained_kbps = CASE
                  WHEN excluded.sustained_kbps IS NULL THEN network_priors.sustained_kbps
                  WHEN network_priors.sustained_kbps IS NULL THEN excluded.sustained_kbps
@@ -230,7 +254,7 @@ pub(crate) fn observe_prior(
              END,
              worst_rung_height = CASE
                  WHEN network_priors.starved_at_ms IS NULL
-                      OR excluded.updated_at_ms - network_priors.starved_at_ms > ?7
+                      OR excluded.updated_at_ms - network_priors.starved_at_ms > ?8
                      THEN excluded.worst_rung_height
                  WHEN excluded.worst_rung_height IS NULL THEN network_priors.worst_rung_height
                  ELSE min(network_priors.worst_rung_height, excluded.worst_rung_height)
@@ -238,7 +262,7 @@ pub(crate) fn observe_prior(
              starved_at_ms = CASE
                  WHEN excluded.starved_at_ms IS NOT NULL THEN excluded.starved_at_ms
                  WHEN network_priors.starved_at_ms IS NULL
-                      OR excluded.updated_at_ms - network_priors.starved_at_ms > ?7
+                      OR excluded.updated_at_ms - network_priors.starved_at_ms > ?8
                      THEN NULL
                  ELSE network_priors.starved_at_ms
              END,
@@ -251,6 +275,7 @@ pub(crate) fn observe_prior(
          WHERE excluded.updated_at_ms >= network_priors.updated_at_ms",
         params![
             observation.user_id,
+            observation.credential_generation.as_str(),
             observation.client_class,
             observation.network_fingerprint,
             observation.throughput_kbps.map(i64::from),
@@ -261,11 +286,10 @@ pub(crate) fn observe_prior(
     )?;
     transaction.execute(
         "DELETE FROM network_priors
-         WHERE user_id = ?1 AND client_class = ?2
-           AND network_fingerprint IN (
-             SELECT network_fingerprint FROM network_priors
+         WHERE (credential_generation, client_class, network_fingerprint) IN (
+             SELECT credential_generation, client_class, network_fingerprint FROM network_priors
              WHERE user_id = ?1 AND client_class = ?2
-             ORDER BY updated_at_ms DESC, network_fingerprint DESC
+             ORDER BY updated_at_ms DESC, credential_generation DESC, network_fingerprint DESC
              LIMIT -1 OFFSET ?3
            )",
         params![
@@ -275,12 +299,12 @@ pub(crate) fn observe_prior(
         ],
     )?;
     let prior = transaction.query_row(
-        "SELECT user_id, client_class, network_fingerprint, sustained_kbps,
+        "SELECT credential_generation, client_class, network_fingerprint, sustained_kbps,
                 worst_rung_height, starved_at_ms, sample_count, updated_at_ms
          FROM network_priors
-         WHERE user_id = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
+         WHERE credential_generation = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
         params![
-            observation.user_id,
+            observation.credential_generation.as_str(),
             observation.client_class,
             observation.network_fingerprint,
         ],
@@ -292,18 +316,18 @@ pub(crate) fn observe_prior(
 
 pub(crate) fn get_prior(
     conn: &Connection,
-    user_id: i64,
+    credential_generation: &str,
     client_class: &str,
     network_fingerprint: &str,
 ) -> Result<Option<NetworkPrior>, StoreError> {
     use rusqlite::OptionalExtension;
 
     conn.query_row(
-        "SELECT user_id, client_class, network_fingerprint, sustained_kbps,
+        "SELECT credential_generation, client_class, network_fingerprint, sustained_kbps,
                 worst_rung_height, starved_at_ms, sample_count, updated_at_ms
          FROM network_priors
-         WHERE user_id = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
-        params![user_id, client_class, network_fingerprint],
+         WHERE credential_generation = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
+        params![credential_generation, client_class, network_fingerprint],
         prior_from_row,
     )
     .optional()
@@ -320,11 +344,11 @@ pub(crate) fn prune_priors(
     }
     let changed = conn.execute(
         "DELETE FROM network_priors
-         WHERE (user_id, client_class, network_fingerprint) IN (
-             SELECT user_id, client_class, network_fingerprint
+         WHERE (credential_generation, client_class, network_fingerprint) IN (
+             SELECT credential_generation, client_class, network_fingerprint
              FROM network_priors
              WHERE updated_at_ms < ?1
-             ORDER BY updated_at_ms, user_id, client_class, network_fingerprint
+             ORDER BY updated_at_ms, credential_generation, client_class, network_fingerprint
              LIMIT ?2
          )",
         params![before_ms, limit.min(MAX_PRUNE_ROWS)],
@@ -337,6 +361,17 @@ pub(crate) fn prune_priors(
 /// The sidecar migration uses this to stay re-runnable against a database an
 /// earlier build left half-upgraded.
 #[cfg(any(test, feature = "hiqlite-store"))]
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
     let found: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -382,12 +417,61 @@ impl NodeLocalTelemetry {
         // of failing every restart forever.
         if current < SIDECAR_SCHEMA_VERSION {
             let mut migration = String::from("BEGIN;\n");
+            // Only a sidecar below v3 needs the prior table rebuilt. Written as
+            // an explicit ceiling rather than as "whatever is not current",
+            // because the v4 bump proved the other shape wrong: it let a v3
+            // sidecar into this branch, where `current >= 2` is true, and every
+            // voter's thirty days of network priors were dropped on the first
+            // start of the new build.
+            let mut needs_prior_upgrade =
+                current < 3 && (current >= 2 || table_exists(&conn, "network_priors")?);
             if !table_exists(&conn, "playback_events")? {
                 migration.push_str(PLAYBACK_EVENTS_SCHEMA);
                 migration.push('\n');
             }
-            if !table_exists(&conn, "network_priors")? {
+            if current < 2 && !table_exists(&conn, "network_priors")? {
+                // v0/v1: create the legacy integer-key prior table. The
+                // upgrade step below handles the v2→v3 transition.
+                migration.push_str(NETWORK_PRIORS_V2_SCHEMA);
+                migration.push('\n');
+                needs_prior_upgrade = true;
+            }
+            if needs_prior_upgrade {
+                // v2→v3: drop the old integer-key prior table and recreate
+                // with the credential-generation text key. Old numeric-key
+                // rows cannot be translated because the user_id alone is not
+                // enough material to recover the credential generation.
+                migration.push_str("DROP TABLE IF EXISTS network_priors;\n");
                 migration.push_str(NETWORK_PRIORS_SCHEMA);
+                migration.push('\n');
+            }
+            // v4: fragment indexes. Node-local for the same reason as the
+            // rows above, and additive, so a v3 sidecar upgrades in place.
+            let creating_indexes = !table_exists(&conn, "fragment_indexes")?;
+            if creating_indexes {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA);
+                migration.push('\n');
+            }
+            // v5: rendition plans. Additive in the same way, so a v4 sidecar
+            // upgrades in place and a v3 one picks up both tables at once.
+            if !table_exists(&conn, "rendition_plans")? {
+                migration.push_str(crate::store::renditionplan::RENDITION_PLANS_SCHEMA);
+                migration.push('\n');
+            }
+            // v6: the promotion columns.
+            //
+            // `creating_indexes` is the whole subtlety. Every guard here is
+            // evaluated against the connection *before* the batch runs, so a
+            // sidecar that is creating `fragment_indexes` in this same batch
+            // still reports the table absent — and a guard that asked
+            // `table_exists && !column_exists` skipped the ALTER for exactly
+            // the case that needs it most, leaving a brand-new sidecar at the
+            // v4 shape with a v6 stamp. The create constant is deliberately
+            // frozen at its v27 shape so both backends reach one table by one
+            // route, which means a fresh sidecar needs this ALTER just as much
+            // as an upgraded one.
+            if creating_indexes || !column_exists(&conn, "fragment_indexes", "promotion")? {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS);
                 migration.push('\n');
             }
             migration.push_str(&format!(
@@ -447,12 +531,19 @@ impl NodeLocalTelemetry {
 
     pub(crate) async fn prior(
         &self,
-        user_id: i64,
+        credential_generation: String,
         client_class: String,
         network_fingerprint: String,
     ) -> Result<Option<NetworkPrior>, StoreError> {
-        self.with_conn(move |conn| get_prior(conn, user_id, &client_class, &network_fingerprint))
-            .await
+        self.with_conn(move |conn| {
+            get_prior(
+                conn,
+                &credential_generation,
+                &client_class,
+                &network_fingerprint,
+            )
+        })
+        .await
     }
 
     pub(crate) async fn prune_priors(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError> {
@@ -465,9 +556,85 @@ impl NodeLocalTelemetry {
         self.with_conn(|conn| {
             conn.execute("DELETE FROM playback_events", [])?;
             conn.execute("DELETE FROM network_priors", [])?;
+            conn.execute("DELETE FROM fragment_indexes", [])?;
+            // Every table this sidecar holds, or the promise that each
+            // contract scenario starts empty is only true of the tables
+            // somebody remembered. A case that stored a plan under a key a
+            // later case reuses would pass on SQLite and fail on hiqlite --
+            // backend divergence manufactured by the harness meant to catch
+            // it.
+            conn.execute("DELETE FROM rendition_plans", [])?;
             Ok(())
         })
         .await
+    }
+
+    pub(crate) async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: crate::segplan::FragmentIndex,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::put(conn, file_id, &index, now_ms))
+            .await
+    }
+
+    pub(crate) async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::get(conn, file_id, &identity))
+            .await
+    }
+
+    pub(crate) async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::vod_row_file_ids(conn, limit))
+            .await
+    }
+
+    pub(crate) async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::forget(conn, file_id))
+            .await
+    }
+
+    /// Store a rendition's plan unless one is already stored under that key.
+    /// Answers whether this call is the one that stored it — see
+    /// [`crate::store::renditionplan::put_if_absent`] for why this is not an
+    /// upsert.
+    pub(crate) async fn put_rendition_plan(
+        &self,
+        rendition_key: String,
+        file_id: i64,
+        plan: crate::segplan::SegmentPlan,
+        source: crate::segplan::SourceIdentity,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::renditionplan::put_if_absent(
+                conn,
+                &rendition_key,
+                file_id,
+                &plan,
+                &source,
+                now_ms,
+            )
+        })
+        .await
+    }
+
+    pub(crate) async fn rendition_plan(
+        &self,
+        rendition_key: String,
+        source: crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError> {
+        self.with_conn(move |conn| crate::store::renditionplan::get(conn, &rendition_key, &source))
+            .await
+    }
+
+    pub(crate) async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
+        self.with_conn(move |conn| crate::store::renditionplan::forget_file(conn, file_id))
+            .await
     }
 }
 
@@ -487,15 +654,16 @@ mod tests {
         network: &str,
         throughput_kbps: Option<u32>,
         starved_rung_height: Option<i64>,
-        observed_at_ms: i64,
+        at_ms: i64,
     ) -> NetworkPriorObservation {
         NetworkPriorObservation {
-            user_id: 7,
+            user_id: 42,
+            credential_generation: CredentialGeneration::from("test-gen".to_owned()),
             client_class: "safari".to_owned(),
             network_fingerprint: network.to_owned(),
             throughput_kbps,
             starved_rung_height,
-            observed_at_ms,
+            observed_at_ms: at_ms,
         }
     }
 
@@ -684,7 +852,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM network_priors", [], |row| row.get(0))
             .expect("count priors");
         assert_eq!(count, MAX_PRIORS_PER_USER_CLIENT);
-        assert!(get_prior(&conn, 7, "safari", "192.0.0.0/24")
+        assert!(get_prior(&conn, "test-gen", "safari", "192.0.0.0/24")
             .expect("oldest lookup")
             .is_none());
 
@@ -693,6 +861,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM network_priors", [], |row| row.get(0))
             .expect("remaining priors");
         assert_eq!(remaining, MAX_PRIORS_PER_USER_CLIENT - 3);
+    }
+
+    #[test]
+    fn prior_bound_spans_credential_generations_without_warming_the_replacement() {
+        let conn = prior_connection();
+        for generation in ["old-gen", "middle-gen"] {
+            for network in 0..40 {
+                let mut sample = observation(
+                    &format!("192.0.{network}.0/24"),
+                    Some(1_000),
+                    None,
+                    network + if generation == "old-gen" { 1 } else { 101 },
+                );
+                sample.credential_generation = CredentialGeneration::from(generation.to_owned());
+                observe_prior(&conn, &sample).expect("rotated-generation observation");
+            }
+        }
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM network_priors WHERE user_id = 42 AND client_class = 'safari'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count priors across generations");
+        assert_eq!(count, MAX_PRIORS_PER_USER_CLIENT);
+        assert!(get_prior(&conn, "new-gen", "safari", "192.0.39.0/24")
+            .expect("new generation lookup")
+            .is_none());
     }
 
     #[tokio::test]
@@ -727,6 +924,49 @@ mod tests {
             .is_empty());
     }
 
+    #[tokio::test]
+    async fn a_brand_new_sidecar_gets_every_column_the_reader_asks_for() {
+        // The guard's whole subtlety, pinned. Every migration guard is
+        // evaluated against the connection *before* the batch runs, so a
+        // sidecar creating `fragment_indexes` in that same batch still reports
+        // the table absent -- and a guard that asked `table_exists &&
+        // !column_exists` skipped the ALTER for exactly the case that needs it
+        // most, leaving a brand-new sidecar at the old shape carrying a
+        // current stamp. Nothing noticed until the first read of a v6 column
+        // on a fresh cluster node.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        let fresh = NodeLocalTelemetry::open(&path).expect("a brand-new sidecar");
+
+        // A round trip through the columns the create constant does not carry.
+        // `put` writes them and `get` selects them by name, so either half
+        // missing is a hard error rather than a wrong answer.
+        let index = crate::segplan::FragmentIndex::new(
+            16_000,
+            vec![crate::segplan::IndexRow {
+                dts: 0,
+                duration: 28_016,
+                bytes: 104_452,
+                video_bytes: 103_836,
+                class: crate::fmp4::CutClass::CleanIdr,
+            }],
+            "abc123",
+            crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+        );
+        fresh
+            .put_fragment_index(42, index, 1_700_000_000_000)
+            .await
+            .expect("a fresh sidecar must accept an index");
+        assert!(fresh
+            .fragment_index(
+                42,
+                crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+            )
+            .await
+            .expect("a fresh sidecar must be able to read one back")
+            .is_some());
+    }
+
     #[test]
     fn sidecar_refuses_a_future_schema_version() {
         let directory = tempfile::tempdir().expect("sidecar directory");
@@ -738,7 +978,141 @@ mod tests {
         let error = NodeLocalTelemetry::open(&path)
             .err()
             .expect("future sidecar schema must be refused");
-        assert!(error.to_string().contains("only knows v2"), "{error}");
+        assert!(error.to_string().contains("only knows v6"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sidecar_v3_keeps_its_network_priors_across_the_v4_upgrade() {
+        // Every other upgrade test starts at v1, which is why the v4 bump could
+        // drop a v3 sidecar's priors without one of them noticing.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v3 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            observe_prior(
+                &conn,
+                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            )
+            .expect("record a prior the way a running voter would");
+            conn.pragma_update(None, "user_version", 3)
+                .expect("stamp v3");
+        }
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v4");
+        let prior = upgraded
+            .prior(
+                "test-gen".to_owned(),
+                "safari".to_owned(),
+                "home".to_owned(),
+            )
+            .await
+            .expect("read the prior back");
+        assert!(
+            prior.is_some(),
+            "a v3 sidecar's network priors must survive the v4 upgrade: they are \
+             thirty days of per-voter history and nothing rebuilds them"
+        );
+
+        let conn = Connection::open(&path).expect("inspect");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SIDECAR_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "fragment_indexes").expect("table check"));
+        assert!(table_exists(&conn, "rendition_plans").expect("table check"));
+    }
+
+    #[tokio::test]
+    async fn sidecar_v4_keeps_everything_it_has_across_the_later_upgrades() {
+        // The v4 bump is what dropped a v3 sidecar's priors, and it did so
+        // because every upgrade test then started at v1. This one starts at
+        // v4, so the next bump cannot repeat it — and it checks the fragment
+        // index too, which v4 was the first sidecar to hold.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v4 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA)
+                .expect("indexes");
+            observe_prior(
+                &conn,
+                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            )
+            .expect("record a prior the way a running voter would");
+            // Written with the v4 column list rather than through today's
+            // `put`, because that is what a v4 binary could actually have
+            // written -- and the point of the test is that those rows survive.
+            conn.execute(
+                "INSERT INTO fragment_indexes (
+                     file_id, source_size, source_mtime, argv_fingerprint,
+                     segplan_version, timescale, init_sha256, fragments,
+                     rows_packed, built_at_ms
+                 ) VALUES (42, 4096, 1700000000000, 'fingerprint', 2, 16000,
+                           'abc123', 1, X'00', 1700000000000)",
+                [],
+            )
+            .expect("record an index the way a v4 voter would");
+            conn.pragma_update(None, "user_version", 4)
+                .expect("stamp v4");
+        }
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v5");
+        assert!(
+            upgraded
+                .prior(
+                    "test-gen".to_owned(),
+                    "safari".to_owned(),
+                    "home".to_owned(),
+                )
+                .await
+                .expect("read the prior back")
+                .is_some(),
+            "a v4 sidecar's network priors must survive the v5 upgrade"
+        );
+        // The index TABLE must survive -- dropping it is the v4-bump
+        // regression this test exists for. The index ROW is a different
+        // question: it was written at `segplan_version` 2, and v3 added the
+        // promotion inputs a served init is built from. A v2 row cannot answer
+        // what those are, so it is refused and rebuilt rather than read, and
+        // that refusal is the point rather than a loss.
+        let rows: i64 = upgraded
+            .with_conn(|conn| {
+                Ok(
+                    conn.query_row("SELECT COUNT(*) FROM fragment_indexes", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .await
+            .expect("count the surviving rows");
+        assert_eq!(
+            rows, 1,
+            "the upgrade must not drop the fragment index table -- that is the \
+             v4 regression this test exists for"
+        );
+        assert!(
+            upgraded
+                .fragment_index(
+                    42,
+                    crate::segplan::SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint"),
+                )
+                .await
+                .expect("read the index back")
+                .is_none(),
+            "and a pre-v3 index is refused rather than read, because it cannot \
+             say what promotion must copy into every generation's init"
+        );
+
+        let conn = Connection::open(&path).expect("inspect");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SIDECAR_SCHEMA_VERSION);
+        assert!(table_exists(&conn, "rendition_plans").expect("table check"));
     }
 
     #[tokio::test]
@@ -776,7 +1150,11 @@ mod tests {
         assert_eq!(prior.sustained_kbps, Some(5_000));
         assert_eq!(
             sidecar
-                .prior(7, "safari".to_owned(), "192.0.2.0/24".to_owned())
+                .prior(
+                    "test-gen".to_owned(),
+                    "safari".to_owned(),
+                    "192.0.2.0/24".to_owned()
+                )
                 .await
                 .expect("read migrated prior"),
             Some(prior)
@@ -807,13 +1185,13 @@ mod tests {
             [],
         )
         .expect("seed event");
-        // The interrupted upgrade: the new table is committed, the version is
-        // not.
-        conn.execute_batch(NETWORK_PRIORS_SCHEMA)
+        // The interrupted upgrade: the old integer-key table is committed,
+        // the version is not.
+        conn.execute_batch(NETWORK_PRIORS_V2_SCHEMA)
             .expect("committed v2 table");
-        observe_prior(
-            &conn,
-            &observation("192.0.2.0/24", Some(4_000), Some(720), 15),
+        conn.execute(
+            "INSERT INTO network_priors              (user_id, client_class, network_fingerprint, sustained_kbps,               worst_rung_height, starved_at_ms, sample_count, updated_at_ms)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+            rusqlite::params![15, "safari", "192.0.2.0/24", 4_000i64, 720i64, 15i64, 15i64],
         )
         .expect("seed prior");
         conn.pragma_update(None, "user_version", 1)
@@ -832,13 +1210,20 @@ mod tests {
                 .len(),
             1
         );
-        let prior = sidecar
-            .prior(7, "safari".to_owned(), "192.0.2.0/24".to_owned())
-            .await
-            .expect("read preserved prior")
-            .expect("the committed prior survives the repair");
-        assert_eq!(prior.sustained_kbps, Some(4_000));
-        assert_eq!(prior.worst_rung_height, Some(720));
+        // The old integer-key prior is dropped because the user_id alone is
+        // not enough material to recover the credential generation.
+        assert!(
+            sidecar
+                .prior(
+                    "test-gen".to_owned(),
+                    "safari".to_owned(),
+                    "192.0.2.0/24".to_owned()
+                )
+                .await
+                .expect("read old prior")
+                .is_none(),
+            "old integer-key prior rows must be dropped, not translated"
+        );
 
         // The repair finished the upgrade rather than leaving it to be retried
         // on every restart.

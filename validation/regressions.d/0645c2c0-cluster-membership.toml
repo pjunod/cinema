@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0645c2c0"]
+points = ["cluster.membership", "server.api"]
+checks = ["rust-gate"]
+reason = "The retained `cluster_membership_controls_are_admin_only_and_sqlite_is_explicit` route check drives a remote-placement enable attempt through the production settings handler while rollout readiness is false, then requires the refusal's legacy `{error}` response to name the every-committed-voter invariant. Restoring the typed `{code}` assertion fails against the handler's established error envelope instead of verifying the refusal contract clients actually receive."

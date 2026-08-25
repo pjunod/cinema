@@ -290,6 +290,11 @@ pub struct BookMetadataPatch {
     pub edition_id: Option<String>,
     pub poster_path: Option<String>,
     pub source: BookMetadataSource,
+    /// Exact immutable Curator origin row that must still exist when a
+    /// conditional item update commits. Orphan pruning may remove the row
+    /// between origin publication and this CAS; requiring it here turns that
+    /// interleaving into a retry instead of a cover with no repair authority.
+    pub required_origin: Option<(String, String)>,
 }
 
 /// The outcome of one artwork download.
@@ -608,7 +613,371 @@ pub struct CachedTranscode {
     pub bytes: i64,
     /// A partial entry is a producer that died. Nothing may serve one.
     pub complete: bool,
+    /// Fenced digest of the generation manifest. `None` is the explicit
+    /// legacy path for cache entries produced before manifests existed.
+    pub manifest_digest: Option<String>,
+    /// Durable next object for the bounded background integrity scrub. Bound
+    /// to this location generation and reset whenever publication replaces it.
+    pub scrub_object_index: i64,
     pub last_used_at: i64,
+}
+
+/// One node's current proof that it can use a cache storage identity.
+///
+/// Paths deliberately do not cross this boundary. A shared path is node-local
+/// configuration; replicated state records only the stable storage identity
+/// and the result of a recent two-way mount proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheStorageMember {
+    pub storage_id: String,
+    pub node_id: String,
+    /// `local` or `shared`.
+    pub storage_class: String,
+    pub verified_at_ms: i64,
+    /// `verified`, `suspect`, or `unverified`.
+    pub verification_state: String,
+}
+
+/// One immutable, storage-keyed cache generation.
+///
+/// `generation_id` is part of every reader pin and deletion decision. A stale
+/// observation can therefore never pin or retire a replacement generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SharedCacheGeneration {
+    pub recipe_hash: String,
+    pub file_id: i64,
+    pub storage_id: String,
+    pub generation_id: String,
+    pub relative_dir: String,
+    pub bytes: i64,
+    pub manifest_digest: Option<String>,
+    pub last_used_at: i64,
+    /// True after a fenced GC winner retired the readable pointer but before
+    /// the derived filesystem paths and tombstone were durably finalized.
+    pub cleanup_pending: bool,
+}
+
+/// Durable consumers that can keep one shared-cache generation alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheConsumerKind {
+    MediaSession,
+    OfflinePackage,
+    OfflineDownload,
+}
+
+impl CacheConsumerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MediaSession => "media_session",
+            Self::OfflinePackage => "offline_package",
+            Self::OfflineDownload => "offline_download",
+        }
+    }
+}
+
+/// One exact distributed reader pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheConsumerPin {
+    pub storage_id: String,
+    pub recipe_hash: String,
+    pub generation_id: String,
+    pub consumer_kind: CacheConsumerKind,
+    pub consumer_id: String,
+    pub consumer_epoch: i64,
+    pub expires_at_ms: i64,
+}
+
+/// Bounded ownership facts for filesystem cleanup. `complete` is false when
+/// the backend found more rows than the safety ceiling; callers must then
+/// fail closed rather than treating an omitted owner as an orphan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheOwnershipInventory {
+    pub rows: Vec<CachedTranscode>,
+    pub complete: bool,
+}
+
+/// One exact generation cursor advance after a bounded integrity-scrub page.
+/// Backends apply a page of these in one transaction so routine maintenance
+/// costs one consensus write rather than one write per cache location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheManifestCheck {
+    pub recipe_hash: String,
+    pub node_id: String,
+    pub storage_class: String,
+    pub relative_dir: String,
+    pub manifest_digest: String,
+    pub next_object_index: i64,
+    /// Descriptor-bound presence observation. A location that performed deep
+    /// verification is placed one second later than presence-only peers so
+    /// oldest-first pages durably rotate the deep-I/O starting point.
+    pub observed_at: i64,
+}
+
+/// One immutable candidate inserted by the cluster-wide speculative scheduler.
+///
+/// The source snapshot is part of the row rather than looked up when a worker
+/// finishes. A rescan may keep the same file id while replacing the bytes; the
+/// completion CAS checks size and mtime so work from the old incarnation can
+/// never become a cache hit for the new one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewPretranscodeJob {
+    pub id: String,
+    pub dedupe_key: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub target_height: i64,
+    pub policy_generation: String,
+    pub requirements_json: String,
+    /// `in_progress` | `next_up` | `recent`.
+    pub reason: String,
+    /// Larger values win. Stable creation/id ordering breaks ties.
+    pub priority: i64,
+    pub not_before_ms: i64,
+    pub created_at_ms: i64,
+}
+
+/// A claimed distributed speculative-transcode job.
+///
+/// `fence` advances on every takeover. Renewals keep the same fence and move
+/// only the expiry; every settlement checks id + owner + fence + live expiry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PretranscodeJob {
+    pub id: String,
+    pub dedupe_key: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub target_height: i64,
+    pub policy_generation: String,
+    pub requirements_json: String,
+    pub reason: String,
+    pub priority: i64,
+    pub state: String,
+    pub owner_node_id: String,
+    pub fence: i64,
+    pub lease_expires_ms: i64,
+    pub attempts: i64,
+    pub not_before_ms: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Durable owner route for one capability-authenticated HLS session.
+///
+/// The public `session_id` is random and never reused. `incarnation_id` is the
+/// coordination identity minted before placement; playback ids group a
+/// viewer's successive sessions but are never used as fences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MediaSessionRoute {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
+    pub state: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_origin_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Result of atomically claiming a user-scoped session-creation request id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaSessionRequestClaim {
+    Acquired {
+        incarnation_id: String,
+    },
+    InFlight {
+        incarnation_id: String,
+        owner_node_id: Option<String>,
+        claim_expires_at_ms: i64,
+    },
+    Resolved(Box<MediaSessionRoute>),
+    Conflict,
+    Overloaded,
+}
+
+/// Inputs committed when a selected worker has created the local session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivation {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub user_id: i64,
+    pub playback_id: String,
+    /// When a stall reopen names a durable predecessor, activation is a CAS:
+    /// the playback pointer must still name this exact incarnation. Ordinary
+    /// starts leave this unset and replace whichever route is current.
+    pub expected_predecessor_incarnation_id: Option<String>,
+    /// Distinguishes an unfenced ordinary start from a legacy reopen that
+    /// observed no durable predecessor. When true with no expected id, the
+    /// atomic activation requires the playback pointer to remain absent.
+    pub fence_predecessor: bool,
+    pub request_id: Option<String>,
+    pub request_fingerprint: String,
+    pub owner_node_id: String,
+    pub recipe_json: String,
+    pub response_json: String,
+    /// Exact source position represented by session-relative zero.
+    pub media_origin_ms: i64,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionActivationOutcome {
+    pub route: MediaSessionRoute,
+    pub predecessor: Option<MediaSessionRoute>,
+}
+
+/// One exact owner/epoch tuple in the two-second session liveness batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionRenewal {
+    pub incarnation_id: String,
+    pub owner_epoch: i64,
+    /// End of the newest complete object advertised by this owner.
+    pub produced_playable_through_ms: i64,
+    /// End of the furthest object the client has *asked for*.
+    ///
+    /// Not "delivered": it advances the moment a request arrives, so an owner
+    /// that dies mid-response has already published a frontier past what the
+    /// viewer holds. A successor must therefore overlap at least one whole
+    /// segment behind this, never a fixed margin.
+    pub fetched_through_ms: i64,
+    /// Next immutable HLS object number available to a successor.
+    pub media_sequence: i64,
+}
+
+/// Compare-and-swap input for transferring one expired media incarnation.
+///
+/// The existing public session id and recipe survive the handoff. Only the
+/// owner capability and its monotone epoch change; the Store increments the
+/// discontinuity sequence in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionTakeover {
+    pub incarnation_id: String,
+    pub expected_owner_node_id: String,
+    pub expected_owner_epoch: i64,
+    pub next_owner_node_id: String,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+}
+
+/// Lean owner inventory used by the liveness loop and removal barrier.
+/// Persisted recipes and responses are deliberately excluded from this hot
+/// path so renewal cost is independent of user-shaped JSON sizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedMediaSessionLease {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub owner_epoch: i64,
+    pub lease_expires_at_ms: i64,
+}
+
+/// Versioned, bounded filter attached to a queue row.
+///
+/// This describes an output contract, not the candidate generator's own
+/// hardware. Any listed encoder family may claim because the recipe hash still
+/// records which family actually produced the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PretranscodeRequirements {
+    pub version: u16,
+    pub decoder: String,
+    pub acceptable_encoder_families: Vec<String>,
+    pub output_contract: String,
+    pub tone_map: bool,
+    pub output_grade: String,
+    pub scratch_bytes: i64,
+}
+
+/// What one worker can prove about the local producer it is about to run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PretranscodeWorkerCapabilities {
+    pub version: u16,
+    pub decoders: Vec<String>,
+    pub encoder_families: Vec<String>,
+    /// Highest output geometry this node's proved encoder path may claim.
+    pub max_target_height: i64,
+    pub output_contracts: Vec<String>,
+    pub tone_map: bool,
+    pub output_grades: Vec<String>,
+    pub scratch_bytes: i64,
+}
+
+impl PretranscodeRequirements {
+    pub const VERSION: u16 = 1;
+    const MAX_VALUES: usize = 16;
+    const MAX_VALUE_BYTES: usize = 64;
+
+    /// Reject rows that could turn a claim scan into unbounded JSON work.
+    pub fn validate(&self) -> bool {
+        self.version == Self::VERSION
+            && self.scratch_bytes > 0
+            && !self.decoder.is_empty()
+            && self.decoder.len() <= Self::MAX_VALUE_BYTES
+            && !self.acceptable_encoder_families.is_empty()
+            && self.acceptable_encoder_families.len() <= Self::MAX_VALUES
+            && self
+                .acceptable_encoder_families
+                .iter()
+                .all(|value| !value.is_empty() && value.len() <= Self::MAX_VALUE_BYTES)
+            && !self.output_contract.is_empty()
+            && self.output_contract.len() <= Self::MAX_VALUE_BYTES
+            && !self.output_grade.is_empty()
+            && self.output_grade.len() <= Self::MAX_VALUE_BYTES
+    }
+
+    pub fn compatible_with(&self, worker: &PretranscodeWorkerCapabilities) -> bool {
+        self.validate()
+            && worker.validate()
+            && worker.scratch_bytes >= self.scratch_bytes
+            && (worker.decoders.iter().any(|value| value == "*")
+                || worker.decoders.iter().any(|value| value == &self.decoder))
+            && self.acceptable_encoder_families.iter().any(|required| {
+                worker
+                    .encoder_families
+                    .iter()
+                    .any(|value| value == required)
+            })
+            && worker
+                .output_contracts
+                .iter()
+                .any(|value| value == &self.output_contract)
+            && (!self.tone_map || worker.tone_map)
+            && worker
+                .output_grades
+                .iter()
+                .any(|value| value == &self.output_grade)
+    }
+}
+
+impl PretranscodeWorkerCapabilities {
+    /// Keep claim evaluation bounded even if a future caller builds
+    /// capabilities from an external snapshot rather than local boot facts.
+    pub fn validate(&self) -> bool {
+        let valid_values = |values: &[String]| {
+            !values.is_empty()
+                && values.len() <= PretranscodeRequirements::MAX_VALUES
+                && values.iter().all(|value| {
+                    !value.is_empty() && value.len() <= PretranscodeRequirements::MAX_VALUE_BYTES
+                })
+        };
+        self.version == PretranscodeRequirements::VERSION
+            && self.scratch_bytes > 0
+            && self.max_target_height > 0
+            && valid_values(&self.decoders)
+            && valid_values(&self.encoder_families)
+            && valid_values(&self.output_contracts)
+            && valid_values(&self.output_grades)
+    }
 }
 
 /// A durable request for an app-managed offline HLS package.
@@ -666,6 +1035,9 @@ pub struct OfflinePackage {
 pub struct OfflineActivityPackage {
     pub package: OfflinePackage,
     pub lease_active: bool,
+    pub item_id: Option<i64>,
+    pub title: String,
+    pub user_name: String,
 }
 
 /// Fixed-cardinality offline gauges for one server node.
@@ -842,8 +1214,21 @@ impl ItemSort {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ItemPage {
+    pub items: Vec<Item>,
+    pub total: i64,
+}
+
+/// One library's Home preview from the catalog-wide bounded preview query.
+///
+/// Libraries with no top-level items are absent from the Store result; the
+/// HTTP layer joins these pages to the authoritative library roster and emits
+/// an empty page for them. Keeping only the id here avoids leaking HTTP DTOs
+/// into the durable storage boundary.
+#[derive(Debug, Clone, Serialize)]
+pub struct HomePreviewPage {
+    pub library_id: i64,
     pub items: Vec<Item>,
     pub total: i64,
 }
@@ -861,7 +1246,7 @@ pub struct ItemPage {
 /// Counts, deliberately, not a list. Nobody needs to know which files; they
 /// need to know whether the 4K HDR they own is mostly the kind the fast path
 /// can reach.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MediaShape {
     /// Files with a successful probe. Everything below is a subset — an
     /// unprobed file has no codec, no height and no HDR flavour, and counting
@@ -933,10 +1318,13 @@ pub struct PlaybackEventQuery {
 ///
 /// The fingerprint is deliberately opaque outside the storage boundary. It is
 /// derived from a coarse client class and an IPv4 /24, never a full address,
-/// and must not be returned by an API or written to application logs.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// and must not be returned by an API or written to application logs. The
+/// credential generation is also opaque — it is the stable node-local prior
+/// identity derived from the user's credential material and must never be
+/// exposed through APIs, logs, or telemetry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NetworkPrior {
-    pub user_id: i64,
+    pub credential_generation: CredentialGeneration,
     pub client_class: String,
     pub network_fingerprint: String,
     /// Conservative sustained throughput estimate, in decimal kilobits/s.
@@ -979,15 +1367,115 @@ impl NetworkPrior {
     }
 }
 
+/// An opaque node-local credential-generation key for network priors.
+///
+/// Lowercase hex-encoded SHA-256, domain-separated and length-delimited with
+/// domain `plurx/network-prior-user/v1`. Derived from the authenticated user's
+/// id, created_at, and complete Argon2 PHC password_hash. Never exposed
+/// through APIs, logs, metrics, telemetry payloads, or client-visible
+/// diagnostics.
+///
+/// A delete/recreate, password reset, or password rehash produces a different
+/// generation, so a prior bound to the old generation is unreachable through
+/// the new one. An admin-role change preserves the generation because the
+/// inputs do not change.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct CredentialGeneration(String);
+
+impl CredentialGeneration {
+    /// Domain-separated, length-delimited encoding domain.
+    const DOMAIN: &'static [u8] = b"plurx/network-prior-user/v1";
+
+    /// Derive a credential-generation key from the three stable inputs.
+    ///
+    /// Uses domain-separated, length-delimited encoding so that field
+    /// boundaries are unambiguous even when one field's content could be
+    /// confused with another's.
+    pub fn derive(user_id: i64, created_at: i64, password_hash: &str) -> Self {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(Self::DOMAIN);
+        let id_bytes = user_id.to_be_bytes();
+        hasher.update((id_bytes.len() as u64).to_be_bytes());
+        hasher.update(id_bytes);
+        let created_bytes = created_at.to_be_bytes();
+        hasher.update((created_bytes.len() as u64).to_be_bytes());
+        hasher.update(created_bytes);
+        let pw_bytes = password_hash.as_bytes();
+        hasher.update((pw_bytes.len() as u64).to_be_bytes());
+        hasher.update(pw_bytes);
+        Self(hex::encode(hasher.finalize()))
+    }
+
+    /// Borrow the inner hex string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the inner hex string.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for CredentialGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialGeneration(<redacted>)")
+    }
+}
+
+impl std::fmt::Display for CredentialGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<credential-generation>")
+    }
+}
+
+impl From<String> for CredentialGeneration {
+    fn from(inner: String) -> Self {
+        Self(inner)
+    }
+}
+
+impl AsRef<str> for CredentialGeneration {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for CredentialGeneration {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
 /// One telemetry-derived update to a [`NetworkPrior`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NetworkPriorObservation {
+    /// Non-lookup ownership metadata used only to enforce the bounded number
+    /// of retained priors across credential rotations.
     pub user_id: i64,
+    pub credential_generation: CredentialGeneration,
     pub client_class: String,
     pub network_fingerprint: String,
     pub throughput_kbps: Option<u32>,
     pub starved_rung_height: Option<i64>,
     pub observed_at_ms: i64,
+}
+
+/// The set of fields that must be supplied to build a
+/// [`NetworkPriorObservation`].
+///
+/// At the HTTP boundary the authenticated user's credential generation is
+/// captured once, during authentication, and threaded to the telemetry path
+/// alongside the user_id used for other purposes. This struct bundles the
+/// three prior-specific inputs so callers do not fetch the password hash
+/// inside spawned work.
+#[derive(Debug, Clone)]
+pub struct PriorCredential {
+    pub credential_generation: CredentialGeneration,
 }
 
 /// A user's linked Trakt account (tokens + sync bookkeeping).

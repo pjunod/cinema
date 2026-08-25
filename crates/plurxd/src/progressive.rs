@@ -52,6 +52,9 @@ pub struct Stream {
     /// couple of seconds.
     pub user_name: String,
     pub file_id: i64,
+    /// Carried from the already-loaded file at stream start so a frequent
+    /// activity poll never needs a file lookup merely to discover its parent.
+    pub item_id: i64,
     /// The pace this remux was started at, in multiples of realtime (`0` =
     /// unpaced). Without it a reader cannot tell a server sitting at its speed
     /// limit from one that is barely coping: both report the same number.
@@ -130,12 +133,14 @@ impl Streams {
         user_id: i64,
         user_name: &str,
         file_id: i64,
+        item_id: i64,
         readrate: f64,
     ) -> (Arc<Stream>, StreamGuard) {
         let stream = Arc::new(Stream {
             user_id,
             user_name: user_name.to_owned(),
             file_id,
+            item_id,
             readrate,
             progress: Arc::new(Progress::new()),
             delivery: Meter::new(),
@@ -201,13 +206,26 @@ impl Streams {
     ///
     /// Ordered newest first so a page that re-polls does not reshuffle.
     pub fn list(&self) -> Vec<StreamListing> {
+        self.list_bounded(usize::MAX)
+    }
+
+    /// A diagnostics-safe prefix that does not clone or inspect an unbounded
+    /// registry before the caller applies its response cap.
+    pub fn list_bounded(&self, limit: usize) -> Vec<StreamListing> {
         let live = self.live.lock().expect("streams mutex");
-        let mut out: Vec<StreamListing> = live
-            .iter()
+        let selected = crate::delivery::newest_ids_bounded(
+            live.iter()
+                .map(|(id, stream)| (id.as_str(), stream.started_unix)),
+            limit,
+        );
+        let mut out: Vec<StreamListing> = selected
+            .into_iter()
+            .filter_map(|id| live.get(&id).map(|stream| (id, stream)))
             .map(|(id, s)| StreamListing {
                 id: id.clone(),
                 user_name: s.user_name.clone(),
                 file_id: s.file_id,
+                item_id: s.item_id,
                 started_unix: s.started_unix,
                 delivered_bytes: s.delivery.total_bytes(),
                 delivered_bps: s.delivery.recent_bps().map(|b| b * 8),
@@ -228,6 +246,7 @@ pub struct StreamListing {
     pub id: String,
     pub user_name: String,
     pub file_id: i64,
+    pub item_id: i64,
     pub started_unix: i64,
     pub delivered_bytes: i64,
     pub delivered_bps: Option<i64>,
@@ -236,6 +255,7 @@ pub struct StreamListing {
 
 /// Deregisters its stream when dropped. Held by the response body, so it
 /// outlives the request handler and dies with the connection.
+#[derive(Clone)]
 pub struct StreamGuard {
     streams: Arc<Streams>,
     id: String,
@@ -255,7 +275,7 @@ mod tests {
     #[test]
     fn a_stream_is_visible_to_its_owner_and_gone_when_dropped() {
         let streams = Streams::new();
-        let (stream, guard) = streams.register("pb-1", 7, "paul", 42, 4.0);
+        let (stream, guard) = streams.register("pb-1", 7, "paul", 42, 5, 4.0);
         stream.delivery.note(2_000_000);
 
         let info = streams.status("pb-1", 7).expect("owner sees it");
@@ -280,9 +300,9 @@ mod tests {
         // playback id. Two entries would mean the overlay could read the dead
         // one's frozen numbers.
         let streams = Streams::new();
-        let (first, g1) = streams.register("pb-1", 7, "paul", 42, 4.0);
+        let (first, g1) = streams.register("pb-1", 7, "paul", 42, 5, 4.0);
         first.delivery.note(999);
-        let (_second, _g2) = streams.register("pb-1", 7, "paul", 42, 4.0);
+        let (_second, _g2) = streams.register("pb-1", 7, "paul", 42, 5, 4.0);
         assert_eq!(streams.list().len(), 1);
         assert_eq!(
             streams.status("pb-1", 7).expect("live").delivered_bytes,
@@ -304,11 +324,34 @@ mod tests {
         let streams = Streams::new();
         let mut guards = Vec::new();
         for n in 0..(MAX_PER_USER + 4) {
-            let (_s, g) = streams.register(&format!("pb-{n}"), 7, "paul", 42, 4.0);
+            let (_s, g) = streams.register(&format!("pb-{n}"), 7, "paul", 42, 5, 4.0);
             guards.push(g);
         }
         assert_eq!(streams.list().len(), MAX_PER_USER);
         assert!(streams.status("pb-0", 7).is_none(), "oldest evicted first");
         assert!(streams.status("pb-11", 7).is_some(), "newest kept");
+    }
+
+    #[test]
+    fn bounded_listing_keeps_the_actual_newest_entries_past_the_wire_limit() {
+        let streams = Streams::new();
+        let mut guards = Vec::new();
+        for n in 0..600_i64 {
+            let id = format!("pb-{n:04}");
+            let (stream, guard) = streams.register(&id, n, "viewer", n, n, 4.0);
+            drop(stream);
+            let mut live = streams.live.lock().expect("streams mutex");
+            Arc::get_mut(live.get_mut(&id).expect("registered stream"))
+                .expect("registry owns the only stream Arc")
+                .started_unix = n;
+            drop(live);
+            guards.push(guard);
+        }
+
+        let listed = streams.list_bounded(512);
+        assert_eq!(listed.len(), 512);
+        assert_eq!(listed.first().expect("newest").file_id, 599);
+        assert_eq!(listed.last().expect("oldest retained").file_id, 88);
+        assert!(listed.iter().all(|stream| stream.file_id >= 88));
     }
 }

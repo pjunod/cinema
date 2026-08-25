@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["0c6eb621"]
+points = ["cluster.auth", "metadata.enrichment"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained default-feature SQLite artwork publication contract now imports LibraryStore and MediaStore without the hiqlite feature gate, so its fixture compiles in the functionality-points profile as well as the replicated-storage profile."

@@ -142,9 +142,25 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testEarlyEndGetsOneReopenButCannotLoopAtTheSamePosition"
 
 [[fixes]]
+id = "apple.build-claim-narrative-relocation"
+commits = ["05f930be"]
+# The regression this pins is a layout one: per-build narrative back at a shared
+# insertion point in the Apple README's status blockquote is what made every two
+# concurrent Apple changes conflict. The pointer below is what replaced it, and
+# the test is red the moment a `Build <n> …` sentence returns to that blockquote.
+source = "clients/apple/README.md"
+source_anchor = "Per-build release notes live in"
+test = "tests/operations/test_apple_build_claims.py"
+test_anchor = "test_the_shared_status_blockquotes_carry_no_per_build_narrative"
+
+[[fixes]]
 id = "apple.build-49-documentation-alignment"
 commits = ["c52c38b7"]
-source = "clients/apple/README.md"
+# Issue #509 moved every per-build sentence out of the Apple README's status
+# blockquote into docs/apple-builds/, because that shared insertion point is
+# what made two concurrent Apple branches conflict. The build 49 prose this
+# commit aligned is preserved verbatim in the archive; only its home moved.
+source = "docs/apple-builds/history-through-build-78.md"
 source_anchor = "build `49`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
@@ -228,6 +244,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
 source_anchor = "private fun decoderDolbyVisionProbe()"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "capabilityDiagnosticsExplainWhyDolbyVisionWasNotClaimed"
+
+[[fixes]]
+id = "android.playback-ledger-note-placement"
+commits = ["9cc4d912"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "private fun splitLedgerValue(value: String, facts: Int = 3)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackInfoOverlayTest.kt"
+test_anchor = "fun lightThemeStillShowsStructuredPlaybackDetails()"
 
 [[fixes]]
 id = "apple.stall-clock-regime-flap"
@@ -399,8 +423,96 @@ test_anchor = "test_client_anchor_survives_a_non_corrective_squash_title"
 
 [[fixes]]
 id = "apple.offline-launch-navigation"
-commits = ["bcc39c31"]
+commits = ["87927379"]
 source = "clients/apple/Sources/HomeView.swift"
 source_anchor = "static let offlineLaunchTab: HomeTab = .downloads"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testIOSExposesDownloadsAndUsesConservativeDefaults"
+
+[[fixes]]
+id = "android.per-codec-video-height-caps"
+commits = ["58fc89ea"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal data class VideoDecoderLimit("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "videoCapsKeepTheBestHeightForEachCodec"
+
+[[fixes]]
+id = "android.software-video-decoder-ceiling"
+commits = ["5af63e13"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "val hardwareAccelerated: Boolean = true"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "softwareDecoderClaimsStopAtHdUnlessHardwareProvesMore"
+
+[[fixes]]
+id = "android.transcode-output-remains-server-owned"
+commits = ["37008d1d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun subtitleSessionBody("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "aPlanSessionCarriesNoSubtitleFieldsAtAll"
+
+[[fixes]]
+id = "android.sdr-subtitle-burn-acknowledgement"
+commits = ["71edaf7c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "subtitle_burn_sdr = true.takeIf {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "autoBurnSendsQualityAutoTrue"
+
+[[fixes]]
+id = "android.pre-media3-failure-telemetry"
+commits = ["1eda4e22"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun redactedFailureDetail("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "preMediaFailureNamesItsStageWithoutLeakingExceptionText"
+
+[[fixes]]
+id = "android.saved-session-unreachable-resume"
+commits = ["1014af35"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "A persisted bearer is enough to restore the app shell."
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/SavedSessionResumeTest.kt"
+test_anchor = "savedSessionPaintsHomeBeforeAnUnreachableServerFinishesValidation"
+
+[[fixes]]
+id = "apple.tv-playback-info-presentation"
+commits = ["05d276f5"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "enum TVPlaybackInfoPresentation"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale"
+
+[[fixes]]
+id = "clients.native-reader-lossless-route-ids"
+commits = ["5d4c0d5a"]
+source = "clients/apple/Sources/ReaderView.swift"
+source_anchor = "IDs are quoted deliberately"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "clients.media-failover-origin-validation"
+commits = ["f5fb37af"]
+source = "clients/apple/Sources/Session.swift"
+source_anchor = "static func canonicalOrigin("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate"
+
+[[fixes]]
+id = "apple.media-failover-transport-only"
+commits = ["1415ce13", "b8f11bc6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isTransportPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyATransportFailureMovesToAnotherNode"
+
+[[fixes]]
+id = "apple.media-failover-recovery-disjoint"
+commits = ["19e2d818"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isCompatibilityPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNoFailureIsBothAMediaVerdictAndANodeFault"

@@ -49,6 +49,11 @@ The human-visible server name follows the **`Store` boundary** too.
 `server.name` in TOML seeds a new store once; the durable replicated setting is
 authoritative thereafter. Existing installs therefore retain their configured
 name on upgrade, while a joining node cannot silently rename the logical server.
+Cluster discovery keeps that logical identity while making each voter
+addressable: Bonjour publishes the replicated id and name plus a local node id;
+Plex GDM uses the node id as `Resource-Identifier` to avoid client-side
+deduplication and carries the replicated id separately as `Logical-Identifier`.
+Legacy single-node discovery remains byte-for-byte unchanged.
 
 The load-bearing boundary is the **`Store` trait**: every read and write goes
 through it, so single-node SQLite and the replicated cluster store are the same
@@ -302,6 +307,18 @@ doesn't triple-hit the providers.
 local login; optional OIDC (Google/Apple) code flow mapping to local accounts
 (REQ-USER-2). Argon2id at rest, SHA-256 token lookup.
 
+Cluster activity uses one separate, non-public application RPC:
+`/_internal/v1/activity-snapshot`. Membership retains explicitly advertised
+plurxd endpoints internally and signs each request with short-lived cluster
+authority from a durable per-node Ed25519 key, bound to the live sender and
+intended target; user/admin/Plex bearers, shared cluster secrets, and HLS
+capability ids are never forwarded. The response is a byte-exact bounded,
+minimal node-local delivery snapshot. Fan-out is concurrent under one
+two-second deadline, caps the roster, rejects redirects and wrong-node responses, and
+distinguishes unhealthy, unreachable, invalid, and timed-out peers for the
+public aggregator. A SQLite or never-joined node has no peers and performs no
+fan-out.
+
 **Plex-compat façade** (Tier 1, REQ-PLEX-1) — a stateless translation layer over
 the *same* services, plus a GDM responder (UDP 239.0.0.250:32414, LAN-only).
 Implements the endpoint set the Kodi-family clients actually use: `/identity`,
@@ -361,9 +378,13 @@ against the API it talks to.
 6. **Chapters, not fingerprinting, for skip intro/credits.** Real chapter titles
    (MakeMKV, anime OP/ED, hand-authored) are honest and cheap — one ffprobe at
    playback start. We do *not* guess an intro from a model, because a "Skip Intro"
-   button that jumps into the middle of a scene is worse than no button. A
-   duration-based end-credits estimate is the one exception, and the API marks it
-   `chapter:false` so the UI can hedge.
+   button that jumps into the middle of a scene is worse than no button. A title
+   alone is not enough either: the match must sit where the title claims (an
+   intro in the first half, credits in the last 30%), or the broad substrings
+   turn a scene called "Closing Time" into a mid-episode Skip Credits button.
+   When no title names the credits we infer the window — from the final chapter
+   boundary when it lands in a plausible tail, from the runtime when it does not
+   — and the API marks either inference `chapter:false` so the UI can hedge.
 7. **The NFO is a seed, not a store.** A Kodi `<basename>.nfo` in a home
    library is read once, at first ingest, to build the item — and after that
    the DB owns the metadata: plurx never re-reads the sidecar and never writes

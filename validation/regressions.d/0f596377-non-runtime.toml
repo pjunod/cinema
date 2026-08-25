@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["0f596377"]
+points = []
+checks = []
+reason = "This commit only registers current regression evidence for the preceding activity-authority runtime correction and does not change runtime behavior."
+ignore = true

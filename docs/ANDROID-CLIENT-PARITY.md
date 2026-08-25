@@ -22,6 +22,11 @@ for that viewer and keeps server administration out of the comparison.
 > hygiene pass, and an R8-minified release build. The dynamic-range badge also
 > reports what is being *delivered and rendered*, not only what the file
 > carries ([MEDIA-BADGES-PLAN.md](MEDIA-BADGES-PLAN.md) §6).
+> Android build 42 preserves full signed 64-bit reader item/file routes across
+> the native-to-JavaScript handoff. Build 41 compacts the shared Mini, Standard,
+> and Debug playback-info modes, bounds Debug to the available screen, and uses
+> severity colors for starvation, stalls, idle delivery, slow encoding, and
+> unhealthy player state.
 >
 > Two acceptance checks remain device-only and unproven in CI: `ShelfFocusTest`
 > (needs a TV emulator or device) and the badge's on-screen behaviour on an HDR
@@ -78,8 +83,8 @@ for that viewer and keeps server administration out of the comparison.
 | Intro/credits markers | Manual skip or automatic skip; estimated credits markers are visibly labelled while chapter-derived markers keep their exact label |
 | Autoplay next episode | Ordered season/show traversal |
 | A/V sync correction | Persistent per-file correction |
-| Playback decision/stats | In-player information panel, including a "Dynamic range" row |
-| Durable playback telemetry | TTFF, passive buffering-stall, and playback-error beacons with attempt/session context |
+| Playback decision/stats | Shared compact Mini, Standard, and Debug modes. Mini keeps playback visible, Standard groups source/playing/server facts, and responsive Debug groups every build, transport, player, network, and live HLS-session field without exceeding the available screen. Severity colors identify starvation, stalls, idle delivery, slow encoding, and unhealthy player state. |
+| Durable playback telemetry | TTFF, passive buffering-stall, Media3 playback-error beacons with attempt/session context, and redacted pre-Media3 plan-load or session-create failures that name the failed stage and exception type; HTTP session failures also retain their status code |
 | Source-vs-delivered media badges | Dynamic-range chip dims and names what is on screen (`DV → HDR10`) |
 | Classic, Terminal, noirr | Matching palettes, shapes, and typography |
 | System, light, dark appearance | Independent appearance preference |
@@ -108,6 +113,10 @@ implemented and pinned by `PlaybackPolicyTest`:
   back to a codec table only for a server that predates the field, and never on
   `text`. A 2160p WEB-DL MP4 with 23 `mov_text` tracks is what the distinction
   costs when it is missing: every track offered, every explicit pick a 400.
+- The HDR burn guard follows `delivered_dynamic_range`. When an HDR source is
+  already tone-mapped to SDR by the base plan, the burn body includes
+  `subtitle_burn_sdr: true`; the server accepts the forced subtitle without
+  treating it as permission to downgrade a genuinely HDR delivery.
 - On direct play those same tracks are free — the player reads the container's
   own track, and `/files/{id}/subs/{index}.vtt` would extract either format if
   asked, since that endpoint turns away only bitmaps

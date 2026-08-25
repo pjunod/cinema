@@ -60,6 +60,25 @@ and is checked identically; it exists only because browsers won't attach
 headers to `<img>`/`<video>` requests. Treat a URL with `?token=` as a
 credential — it grants exactly what the bearer does.
 
+## Network priors — credential generations, never reusable user ids
+
+Node-local network priors are keyed by a lowercase SHA-256 credential-generation
+digest, not by the reusable numeric user id. The digest uses the
+`plurx/network-prior-user/v1` domain and length-delimited `user.id`,
+`user.created_at`, and complete Argon2 PHC `password_hash` inputs. Authentication
+captures it once and carries it internally through lookup and observation, so an
+in-flight event cannot switch identities after a reset or delete/recreate.
+
+Password reset, password rehash, and delete/recreate start cold; an admin-role
+change preserves the generation. The digest is excluded from APIs, logs,
+metrics, telemetry payloads, and client diagnostics. A non-lookup numeric user
+id is retained beside each node-local row only to enforce the 64-network bound
+across credential generations; lookups remain scoped exclusively by the digest.
+SQLite v22 and the next
+node-local Hiqlite sidecar migration drop old numeric-key rows because they
+cannot be translated safely. This correction adds no replicated migration:
+replicated schema remains v6 and protocol remains v4.
+
 ## Offline media leases — one package, one narrow capability
 
 The signed-in JSON API owns package creation, status, lease issue, and
@@ -272,7 +291,7 @@ else, and it cannot widen itself.
 | At rest | SHA-256 of the secret, same discipline as login tokens (`api_keys.key_hash`); the plaintext is shown **once**, in the create response, and is unrecoverable afterwards |
 | Scopes | `scan:trigger` · `status:read`. A key holds exactly the scopes it was created with. Unknown scopes are rejected at creation rather than stored, so a typo cannot produce a key that looks right and authorizes nothing |
 | Revocation | `disabled` (or delete) takes away every scope at once, checked in one place — a revocation that depends on each call site remembering to check is not a revocation |
-| Audit | `last_used_at` is bumped on every successful check; a key nobody can tell is unused is a key nobody revokes |
+| Audit | Successful checks refresh `last_used_at` when it is more than 60 seconds old; the activity signal remains useful without a Raft write per request |
 | Management | admin only — `POST/GET/DELETE /api/v1/keys`. A key cannot mint another key, or the narrow credential would be one request away from a wide one |
 
 **Two credential kinds, two doors**, and the wall runs in both directions. A
@@ -389,6 +408,27 @@ Peer addresses are internal membership data and are omitted from the public
 node-status payload. The automatic certificates encrypt traffic but are
 self-signed and accepted without certificate verification; the shared secrets,
 not a certificate authority, authenticate membership requests.
+
+The read-only activity snapshot is the narrow application-level peer call. An
+explicit per-node `artwork_url` origin is retained behind membership (never
+projected in public status), and requests to
+`/_internal/v1/activity-snapshot` carry a 30-second Ed25519 proof from the
+calling node's owner-only private key. Only the public key is replicated. The
+proof names the current sender and intended target; the receiver verifies that
+key and also requires both ends to remain committed, non-removed voters. A
+removed machine therefore cannot use retained cluster-wide secrets to
+impersonate a survivor. Calls refuse redirects and validate the returned node
+identity. They never forward a login, admin, Plex, scoped API-key bearer, or
+HLS session capability. Missing, stale, cross-target, removed-sender, or
+invalid proofs receive 401. The producer enforces the same exact 256 KiB JSON
+budget as the consumer and returns only node identity and bounded
+active-delivery fields: no media paths, peer addresses, credentials, library
+rows, or settings.
+
+Artwork recovery predates that activity route and retains its v4 shared-HMAC
+wire during rolling upgrades. The activity key is not substituted into the
+artwork protocol without a future negotiated protocol transition; new and old
+v4 voters therefore continue to exchange artwork while a cluster rolls.
 
 The consequence is explicit: **anything past a network you fully trust belongs
 behind a TLS-terminating reverse proxy** (Caddy, nginx, Traefik). Over plain

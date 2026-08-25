@@ -80,12 +80,53 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	  single_voter_cost_stays_inside_the_m0_budget -- --ignored --exact --nocapture
 
 .PHONY: cluster-check
-cluster-check: ## Run compacted growth plus M1b-M2 durable-state, import, and failure contracts
-	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failure contracts
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  snapshot_metrics --lib -- --test-threads=1
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  client::helpers::tests::configured_leader_probes_do_not_wait_for_the_first_peer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::stream::tests::proxy_failover_cycles_only_through_configured_endpoints \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,listen_notify,macros,sqlite \
+	  client::mgmt::tests::remote_shutdown_joins_streams_with_every_endpoint_unavailable \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  http_client::tests::management_client_does_not_forward_api_secret_across_redirects \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  metadata::tests::interrupted_metadata_replacement_keeps_the_previous_record_readable \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  writer::tests::single_file_snapshot_tail_restores_its_missing_purge_boundary \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
+	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features cluster-read-cost-validation \
 	  --test store_contract -- --test-threads=1
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  topology::tests::topology_artifact -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  named_runner::tests --lib -- --nocapture
 	$(CARGO) run --locked -p plurx-cluster-check -- check
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  topology target/validation/cluster-topology-semantic.json 3,4
+
+.PHONY: cluster-campaign-validate
+cluster-campaign-validate: ## Validate P0c campaign (set CAMPAIGN=.../campaign.json)
+	test -n "$(CAMPAIGN)"
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  topology-campaign-validate "$(CAMPAIGN)"
 
 .PHONY: cluster-growth
 cluster-growth: ## Measure and gate post-coalescer one-voter compacted growth
@@ -233,6 +274,7 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
 	@node tests/web/reader.test.js
+	@node tests/web/page-read-budget.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
@@ -244,6 +286,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 # crates/plurxd/build.rs — see docs/RELEASING.md.
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
 BUILD_REF := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
+HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
 .PHONY: version
 version: ## Print the version and git build stamp a build would report
@@ -291,7 +334,7 @@ container-smoke: docker ## Build, start, probe, restart, and re-probe the contai
 # one sprang on the first real deploy.
 .PHONY: docker-up
 docker-up: ## Build + (re)start the Compose stack, stamping this commit into the image
-	cd deploy && PLURX_BUILD_REF="$(BUILD_REF)" docker compose up -d --build
+	cd deploy && PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 .PHONY: release-check
@@ -312,6 +355,10 @@ hooks: ## Install the functionality-point pre-commit validator
 	@echo "Bypass one run with 'git commit --no-verify'."
 
 ## ---- apple clients -----------------------------------------------------
+
+.PHONY: apple-build-bump
+apple-build-bump: ## Claim the next Apple build number across every generated surface
+	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
 
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
@@ -380,6 +427,8 @@ android-instrumentation-build: android-image ## Build app + test APKs for an emu
 android-instrumentation-run: ## Install and run instrumented tests (set PLURX_ANDROID_SERIAL)
 	@test -n "$${PLURX_ANDROID_SERIAL:-}" || { echo "set PLURX_ANDROID_SERIAL to a disposable emulator/device serial"; exit 1; }
 	adb -s "$${PLURX_ANDROID_SERIAL}" wait-for-device
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app.test >/dev/null 2>&1 || true
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app >/dev/null 2>&1 || true
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/debug/app-debug.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" shell am instrument -w \

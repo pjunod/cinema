@@ -15,6 +15,10 @@ struct ServerInfo: Codable {
     var instanceId: String?
 }
 
+struct ClusterIngress: Codable {
+    var nodeUrls: [String]?
+}
+
 struct User: Codable {
     let id: Int
     let username: String
@@ -328,6 +332,12 @@ struct MediaFile: Codable, Identifiable {
     var partOffsetMs: Int? = nil
     var chapters: [BookChapter]? = nil
     var available: Bool? = true
+    /// The server's format/action registry for this exact file. Optional for
+    /// compatibility with servers that predate the registry.
+    var reader: ReaderCapability? = nil
+    /// Exact edition identity required by a native document reader when it
+    /// saves a locator. Older servers omit it and never advertise PDF Read.
+    var readerRevision: ReadingRevision? = nil
 
     var isEpub: Bool {
         container?.lowercased() == "epub"
@@ -335,9 +345,39 @@ struct MediaFile: Codable, Identifiable {
     }
 }
 
+enum ReaderAction: String, Codable, Equatable {
+    case read
+    case openIn = "open_in"
+    case unavailable
+}
+
+struct ReaderSurfaceCapability: Codable, Equatable {
+    let online: ReaderAction
+    let offline: ReaderAction
+}
+
+struct ReaderCapability: Codable, Equatable {
+    let format: String
+    let web: ReaderSurfaceCapability
+    let apple: ReaderSurfaceCapability
+    let android: ReaderSurfaceCapability
+    let television: ReaderSurfaceCapability
+}
+
 enum BookReaderPolicy {
     static func canRead(_ file: MediaFile, onTelevision: Bool) -> Bool {
-        !onTelevision && file.available != false && file.isEpub
+        guard !onTelevision, file.available != false else { return false }
+        if let reader = file.reader {
+            guard reader.apple.online == .read else { return false }
+            return reader.format != "pdf" || file.readerRevision != nil
+        }
+        return file.isEpub
+    }
+
+    static func canDownload(_ file: MediaFile, onTelevision: Bool) -> Bool {
+        guard !onTelevision, file.available != false else { return false }
+        if let reader = file.reader { return reader.apple.offline == .read }
+        return file.isEpub
     }
 }
 
@@ -767,6 +807,10 @@ struct CreateSessionRequest: Codable {
     var audio: Int?
     /// A bitmap or styled-text subtitle the server must draw into the video.
     var subtitleBurn: Int?
+    /// True only when the selected plan already delivers SDR. This lets an
+    /// HDR source keep a forced bitmap subtitle on an existing tone-map
+    /// without authorizing an HDR delivery to be silently downgraded.
+    var subtitleBurnSDR: Bool?
     /// Ask for an HLS master containing native WebVTT subtitle renditions.
     var nativeSubtitles: Bool?
     /// The initial native media-selection option. It does not alter video.

@@ -1,0 +1,1499 @@
+#!/usr/bin/env python3
+"""M0-P0/P1 harness for the VOD presentation plan.
+
+Runs the four proofs docs/VOD-PRESENTATION-PLAN.md §8 M0-P0 demands, and times
+the index build P1 prices:
+
+  (a) determinism  — two runs of the production-shaped VIDEO-ONLY copy pipe
+      yield identical fragment (DTS, duration, bytes, verdict) streams and an
+      identical initialization segment.
+  (b) fidelity     — every boundary the plan emits from that index is a
+      fragment boundary in the FULL production pipe (with audio) at the same
+      film-time DTS, is clean when the cut that made it was clean, and is
+      reachable by `-noaccurate_seek -ss` + discard-until-boundary-DTS.
+  (c) byte bounds  — planned est_bytes plus an audio headroom bound really does
+      bound the materialized segment bytes, under COPY_SEGMENT_MAX_BYTES.
+  (d) init identity— init.mp4 is byte-identical across process generations for
+      the same source and args, including a generation started with `-ss`.
+
+Why this shape. The plan is normative, not predictive (ledger D10): the
+producer cuts AT planned boundaries and never re-decides them. So the thing
+that has to be proven is not "the plan reproduces today's cuts" but "a producer
+told to cut here can, deterministically, and the bytes stay inside the
+ceiling". Every clause above is measured on real ffmpeg output — asserting on
+an argument list proves nothing (VOD-PRESENTATION-IMPLEMENTATION-HANDOFF §2).
+
+Standard library only, like scripts/gop-census: this has to run on nynuc with
+nothing installed. Box parsing, sample resolution, and `classify` are imported
+from scripts/gop-census rather than reimplemented, so the two tools cannot
+drift onto different verdicts for the same fragment.
+"""
+
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_gop_census():
+    """Import scripts/gop-census (extensionless) as a module.
+
+    The parsing half of that script is the repository's second implementation
+    of the fMP4 reader — the first is crates/plurx-core/src/fmp4.rs — and a
+    third would be one too many. Importing keeps `classify` in one place.
+    """
+    path = os.path.join(HERE, "gop-census")
+    loader = importlib.machinery.SourceFileLoader("gopcensus", path)
+    spec = importlib.util.spec_from_loader("gopcensus", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+GC = _load_gop_census()
+
+# crates/plurx-core/src/transcode/mod.rs — the production cut policy.
+COPY_SEGMENT_SECONDS = 6
+COPY_FIRST_SEGMENT_SECONDS = 2
+COPY_SEGMENT_MAX_BYTES = 64 * 1024 * 1024
+COPY_SEGMENT_MAX_SECS = 15
+
+
+# ---------------------------------------------------------------------------
+# the production-shaped pipe
+# ---------------------------------------------------------------------------
+
+
+class Source:
+    """What copy_pipe_args needs to know about a file, read from ffprobe."""
+
+    def __init__(self, path, video_codec, hdr, audio_channels, audio_codec,
+                 audio_bit_rate, video_duration, audio_duration):
+        self.path = path
+        self.video_codec = video_codec
+        self.hdr = hdr
+        self.audio_channels = audio_channels
+        self.audio_codec = audio_codec
+        self.audio_bit_rate = audio_bit_rate
+        self.video_duration = video_duration
+        self.audio_duration = audio_duration
+
+
+def probe_source(ffprobe, path):
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format",
+         "-of", "json", path],
+        capture_output=True, text=True, check=False,
+    )
+    if out.returncode != 0:
+        sys.exit(f"{path}: ffprobe failed: {out.stderr.strip()}")
+    doc = json.loads(out.stdout or "{}")
+    video = audio = None
+    hdr = None
+    for stream in doc.get("streams", []):
+        if stream.get("codec_type") == "video" and video is None:
+            video = stream
+            for side in stream.get("side_data_list", []) or []:
+                if "DOVI" in json.dumps(side) or "Dolby" in json.dumps(side):
+                    hdr = "dolby_vision"
+        elif stream.get("codec_type") == "audio" and audio is None:
+            audio = stream
+    if video is None:
+        sys.exit(f"{path}: no video stream")
+
+    def dur(stream):
+        for key in ("duration",):
+            value = (stream or {}).get(key)
+            if value:
+                try:
+                    return float(value)
+                except ValueError:
+                    pass
+        tags = (stream or {}).get("tags") or {}
+        value = tags.get("DURATION") or tags.get("duration")
+        if value:
+            match = re.match(r"(\d+):(\d+):([\d.]+)", str(value))
+            if match:
+                h, m, s = match.groups()
+                return int(h) * 3600 + int(m) * 60 + float(s)
+        try:
+            return float(doc.get("format", {}).get("duration"))
+        except (TypeError, ValueError):
+            return 0.0
+
+    rate = 0
+    if audio:
+        try:
+            rate = int(audio.get("bit_rate") or 0)
+        except ValueError:
+            rate = 0
+    return Source(
+        path=path,
+        video_codec=video.get("codec_name"),
+        hdr=hdr,
+        audio_channels=(audio or {}).get("channels"),
+        audio_codec=(audio or {}).get("codec_name"),
+        audio_bit_rate=rate,
+        video_duration=dur(video),
+        audio_duration=dur(audio) if audio else 0.0,
+    )
+
+
+def has_dovi_bsf(ffmpeg):
+    out = subprocess.run([ffmpeg, "-hide_banner", "-bsfs"], capture_output=True,
+                         text=True, check=False).stdout
+    return any(line.strip() == "dovi_rpu" for line in out.splitlines())
+
+
+def hevc_copy_bsf(hdr, have_dovi, preserve_dolby_vision=False):
+    """transcode/mod.rs:271-287."""
+    if hdr == "dolby_vision" and preserve_dolby_vision:
+        return "filter_units=remove_types=32-34"
+    if hdr == "dolby_vision":
+        if have_dovi:
+            return "dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63"
+        return "filter_units=remove_types=32-34|62-63"
+    return "filter_units=remove_types=32-34"
+
+
+def tag_for_format(source, preserve_dolby_vision):
+    """transcode/mod.rs:302-319 — `dvh1` only on the DV-preserving branch."""
+    if source.hdr == "dolby_vision" and preserve_dolby_vision:
+        return "dvh1"
+    return "hvc1"
+
+
+def pipe_args(ffmpeg, source, *, start=0.0, video_only=False,
+              audio_mode="aac", have_dovi=False, copyts=False, pacing=False,
+              audio_index=0, preserve_dolby_vision=False):
+    """The arguments crates/plurx-core/src/transcode/mod.rs builds.
+
+    `copy_input_args` (:1187) + `copy_pipe_args_with_dolby_vision`'s tail
+    (:1403), with two documented deviations, each a probe variable:
+
+      video_only — the plan's index pipe (§2.2): the audio map and codec are
+        replaced by `-an`, so one index serves every audio selection.
+      copyts     — NOT production. Measured only, to answer whether a
+        repositioned producer can carry film time in its own DTS instead of
+        needing an external origin. See the reposition proof.
+    """
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if start > 0:
+        args += ["-noaccurate_seek", "-ss", f"{start:.3f}"]
+    if pacing:
+        # transcode.rs:195-196 — the production default. Input rate limiting
+        # cannot change the output bytes, but a run whose argv matches the
+        # daemon's logged one is one fewer thing to argue about.
+        args += ["-readrate_initial_burst", "90.0", "-readrate", "2.00"]
+    if copyts:
+        args += ["-copyts"]
+    args += ["-i", source.path, "-map_chapters", "-1", "-map", "0:v:0?"]
+    if video_only:
+        args += ["-an"]
+    else:
+        args += ["-map", f"0:a:{audio_index}?"]
+    args += ["-sn", "-c:v", "copy"]
+    if source.video_codec in ("hevc", "h265"):
+        args += ["-tag:v", tag_for_format(source, preserve_dolby_vision)]
+        if source.hdr == "dolby_vision" and preserve_dolby_vision:
+            args += ["-strict", "unofficial"]
+        args += ["-bsf:v", hevc_copy_bsf(source.hdr, have_dovi,
+                                         preserve_dolby_vision)]
+    if not video_only:
+        if audio_mode == "copy":
+            args += ["-c:a", "copy"]
+        else:
+            args += ["-c:a", "aac", "-b:a"]
+            if source.audio_channels == 6:
+                args += ["320k", "-channel_layout:a", "5.1"]
+            else:
+                args += ["256k"]
+    args += ["-avoid_negative_ts", "make_zero", "-movflags",
+             "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+             "-use_editlist", "0", "-f", "mp4", "pipe:1"]
+    return args
+
+
+# ---------------------------------------------------------------------------
+# reading the pipe: init bytes + one row per fragment
+# ---------------------------------------------------------------------------
+
+HANDLER_KIND = {"vide": "video", "soun": "audio"}
+
+
+def parse_tracks(buf, ps, pe):
+    """Every track in the pipe's moov, not only the video one.
+
+    gop-census's parse_moov returns the video track alone; the byte-headroom
+    proof needs the audio track's id and timescale as well.
+    """
+    tracks = {}
+    for ts, te in GC.find(buf, ps, pe, ("trak",)):
+        track_id = timescale = 0
+        handler = ""
+        codec = None
+        lsz = 0
+        for btype, bs, be in GC.boxes(buf, ts, te):
+            if btype == "tkhd":
+                off = 20 if buf[bs] == 1 else 12
+                (track_id,) = struct.unpack_from(">I", buf, bs + off)
+            elif btype == "mdia":
+                for m, ms, me in GC.boxes(buf, bs, be):
+                    if m == "mdhd":
+                        off = 20 if buf[ms] == 1 else 12
+                        (timescale,) = struct.unpack_from(">I", buf, ms + off)
+                    elif m == "hdlr":
+                        handler = buf[ms + 8:ms + 12].decode("latin1")
+                    elif m == "minf":
+                        for sts, ste in GC.find(buf, ms, me, ("stbl", "stsd")):
+                            for e, es, ee in GC.boxes(buf, sts + 8, ste):
+                                if e in GC.HEVC_ENTRIES:
+                                    codec = "hevc"
+                                elif e in GC.H264_ENTRIES:
+                                    codec = "h264"
+                                else:
+                                    continue
+                                for c, cs, ce in GC.boxes(buf, es + 78, ee):
+                                    if c == "hvcC" and ce - cs >= 22:
+                                        lsz = (buf[cs + 21] & 3) + 1
+                                    elif c == "avcC" and ce - cs >= 5:
+                                        lsz = (buf[cs + 4] & 3) + 1
+        if track_id:
+            tracks[track_id] = {
+                "kind": HANDLER_KIND.get(handler, "other"),
+                "timescale": timescale or 1,
+                "codec": codec,
+                "nal_length_size": lsz,
+            }
+    return tracks
+
+
+class Row:
+    """One fragment of the pipe, as the index records it."""
+
+    __slots__ = ("dts", "ticks", "wire", "video_bytes", "audio_bytes",
+                 "verdict", "audio_dts", "audio_ticks")
+
+    def __init__(self, dts, ticks, wire, video_bytes, audio_bytes, verdict,
+                 audio_dts, audio_ticks):
+        self.dts = dts
+        self.ticks = ticks
+        self.wire = wire
+        self.video_bytes = video_bytes
+        self.audio_bytes = audio_bytes
+        self.verdict = verdict
+        self.audio_dts = audio_dts
+        self.audio_ticks = audio_ticks
+
+    def key(self):
+        """The tuple the determinism clause compares."""
+        return (self.dts, self.ticks, self.wire, self.verdict)
+
+    def as_dict(self):
+        return {
+            "dts": self.dts, "ticks": self.ticks, "wire": self.wire,
+            "video_bytes": self.video_bytes, "audio_bytes": self.audio_bytes,
+            "verdict": self.verdict,
+        }
+
+
+class Stream:
+    def __init__(self):
+        self.init = b""
+        self.init_sha = ""
+        self.tracks = {}
+        self.video_id = 0
+        self.timescale = 1
+        self.rows = []
+        self.stderr = ""
+        self.seconds = 0.0
+        self.exit_code = None
+        self.truncated = False
+        self.truncation_reason = None
+        self.stopped_early = False
+
+    def video_track(self):
+        return self.tracks.get(self.video_id, {})
+
+    def ticks(self):
+        return sum(r.ticks for r in self.rows)
+
+    def complete(self, expected_seconds, tolerance=1.0):
+        """Did this pipe really read the whole file?
+
+        A pipe that dies a third of the way in emits a perfectly well-formed
+        prefix, and every clause in this harness would score that prefix as a
+        pass — the highest-value false PASS available, and exactly what an NFS
+        read of a 19 GB remux does when it goes wrong. So completion is a
+        precondition, checked three ways: the child exited 0, the box walk did
+        not end on a malformed box, and the fragments cover the probed
+        duration.
+        """
+        problems = []
+        if self.exit_code not in (0, None):
+            problems.append(f"ffmpeg exited {self.exit_code}")
+        if self.truncated:
+            problems.append(f"box walk ended early: {self.truncation_reason}")
+        if not self.stopped_early and expected_seconds:
+            covered = self.ticks() / max(self.timescale, 1)
+            if covered < expected_seconds - tolerance:
+                problems.append(
+                    f"fragments cover {covered:.2f}s of a {expected_seconds:.2f}s file")
+        return problems
+
+
+def read_pipe(cmd, *, max_fragments=0):
+    """Run one pipe and return its Stream.
+
+    Streaming box walk, modelled on gop-census's run_census loop; it keeps the
+    working buffer bounded so a 19 GB remux does not become a 19 GB bytearray.
+    stderr goes to a file rather than a pipe: ffmpeg writing more than the pipe
+    buffer while this loop is blocked reading stdout deadlocks both processes,
+    and `-loglevel error` is not a promise of silence on the interesting files.
+    """
+    started = time.monotonic()
+    errfile = tempfile.TemporaryFile()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfile)
+    out = Stream()
+    buf = bytearray()
+    pos = 0
+    init_end = None
+    init_parts = []
+
+    def want(n):
+        while len(buf) - pos < n:
+            chunk = proc.stdout.read(1 << 16)
+            if not chunk:
+                return False
+            buf.extend(chunk)
+        return True
+
+    def truncate(reason):
+        out.truncated = True
+        out.truncation_reason = reason
+
+    try:
+        while True:
+            if not want(8):
+                if init_end is None:
+                    truncate("stream ended before any fragment")
+                break
+            (size,) = struct.unpack_from(">I", buf, pos)
+            btype = bytes(buf[pos + 4:pos + 8]).decode("latin1")
+            hdr = 8
+            if size == 1:
+                if not want(16):
+                    truncate("truncated 64-bit box header")
+                    break
+                (size,) = struct.unpack_from(">Q", buf, pos + 8)
+                hdr = 16
+            if size < hdr:
+                truncate(f"malformed {btype} box, size {size}")
+                break
+            if not want(size):
+                truncate(f"truncated {btype} box")
+                break
+
+            if btype == "moof":
+                moof_start, moof_end = pos, pos + size
+                if not want(size + 8):
+                    truncate("truncated mdat header")
+                    break
+                (msize,) = struct.unpack_from(">I", buf, moof_end)
+                if msize == 1:
+                    if not want(size + 16):
+                        truncate("truncated 64-bit mdat header")
+                        break
+                    (msize,) = struct.unpack_from(">Q", buf, moof_end + 8)
+                if not want(size + msize):
+                    truncate("truncated mdat")
+                    break
+                video = out.video_track()
+                verdict, dts, ticks, vbytes = "unparseable", None, 0, 0
+                abytes, adts, aticks = 0, None, 0
+                for t, ts_, te_ in GC.boxes(buf, moof_start + hdr, moof_end):
+                    if t != "traf":
+                        continue
+                    tid, tfdt, runs = GC.parse_traf(buf, ts_, te_)
+                    nbytes = sum(s[1] for _o, ss in runs for s in ss)
+                    nticks = sum(s[0] for _o, ss in runs for s in ss)
+                    kind = out.tracks.get(tid, {}).get("kind")
+                    if tid == out.video_id:
+                        verdict = GC.classify(buf, moof_start, runs,
+                                              video.get("nal_length_size", 0),
+                                              video.get("codec"))
+                        dts, ticks, vbytes = tfdt, nticks, nbytes
+                    elif kind == "audio":
+                        abytes, adts, aticks = nbytes, tfdt, nticks
+                out.rows.append(Row(dts, ticks, size + msize, vbytes, abytes,
+                                    verdict, adts, aticks))
+                pos = moof_end + msize
+                if max_fragments and len(out.rows) >= max_fragments:
+                    out.stopped_early = True
+                    break
+            else:
+                if btype == "moov":
+                    out.tracks = parse_tracks(buf, pos + hdr, pos + size)
+                    for tid, info in out.tracks.items():
+                        if info["kind"] == "video":
+                            out.video_id = tid
+                            out.timescale = info["timescale"]
+                            break
+                    if not out.video_id:
+                        sys.exit("no video track in the pipe's moov")
+                    # The initialization segment is ftyp + moov, the same bytes
+                    # `FragmentReader` publishes as `Unit::Init`
+                    # (fmp4.rs:330-353) — not "everything before the first
+                    # moof", which would fold interleaved free/skip padding
+                    # into the hash and fail clause (d) on a byte the real
+                    # init.mp4 never contains.
+                    init_parts.append(bytes(buf[pos:pos + size]))
+                    init_end = pos + size
+                    out.init = b"".join(init_parts)
+                    out.init_sha = hashlib.sha256(out.init).hexdigest()
+                elif btype == "ftyp" and init_end is None:
+                    init_parts.append(bytes(buf[pos:pos + size]))
+                pos += size
+
+            if pos > (1 << 22) and init_end is not None:
+                del buf[:pos]
+                pos = 0
+    finally:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        if out.stopped_early:
+            proc.terminate()
+        out.exit_code = proc.wait()
+        if out.stopped_early:
+            # A pipe we killed reports a signal, which says nothing.
+            out.exit_code = None
+        try:
+            errfile.seek(0)
+            out.stderr = errfile.read().decode(errors="replace")
+        except OSError:
+            out.stderr = ""
+        errfile.close()
+    out.seconds = time.monotonic() - started
+    if out.truncated and out.stderr.strip():
+        sys.stderr.write(out.stderr)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# the plan: CutPolicy over the index
+# ---------------------------------------------------------------------------
+
+CLEAN = ("idr", "cra")
+
+
+class Policy:
+    """fmp4::CutPolicy, transcribed from fmp4.rs:1700-1788."""
+
+    def __init__(self, floor_seconds, first_floor_seconds, max_bytes,
+                 max_seconds, timescale):
+        ts = max(timescale, 1)
+        self.floor_ticks = floor_seconds * ts
+        self.first_floor_ticks = min(first_floor_seconds, floor_seconds) * ts
+        self.max_bytes = max_bytes
+        self.max_ticks = max_seconds * ts
+        self.timescale = ts
+
+    def cut_before(self, pending_ticks, pending_bytes, verdict, first_segment):
+        floor = self.first_floor_ticks if first_segment else self.floor_ticks
+        if pending_bytes == 0 or pending_ticks < floor:
+            return None
+        if verdict in CLEAN:
+            return "clean"
+        if pending_bytes >= self.max_bytes:
+            return "byte-ceiling"
+        if pending_ticks >= self.max_ticks:
+            return "time-ceiling"
+        return None
+
+
+class Entry:
+    __slots__ = ("index", "start_ticks", "duration_ticks", "est_bytes",
+                 "end_reason", "start_origin", "fragments", "kind")
+
+    def __init__(self, index, start_ticks, duration_ticks, est_bytes,
+                 end_reason, start_origin, fragments, kind="video"):
+        self.index = index
+        self.start_ticks = start_ticks
+        self.duration_ticks = duration_ticks
+        self.est_bytes = est_bytes
+        self.end_reason = end_reason
+        self.start_origin = start_origin
+        self.fragments = fragments
+        self.kind = kind
+
+    def as_dict(self, timescale):
+        return {
+            "index": self.index,
+            "kind": self.kind,
+            "start_ticks": self.start_ticks,
+            "start_seconds": round(self.start_ticks / timescale, 6),
+            "duration_ticks": self.duration_ticks,
+            "duration_seconds": round(self.duration_ticks / timescale, 6),
+            "est_bytes": self.est_bytes,
+            "end_reason": self.end_reason,
+            "start_origin": self.start_origin,
+            "fragments": self.fragments,
+        }
+
+
+def append_audio_tail(entries, source, policy, timescale):
+    """`Segmenter::finish`'s end-of-stream split, computed from the probe.
+
+    A title whose audio runs past its video — the c58a4307 case — puts the
+    whole tail in one fragment, because `frag_keyframe` has no video keyframe
+    left to cut on. Rust splits it at audio sample boundaries into chunks
+    bounded by the policy ceiling (fmp4.rs:2384 `end_of_stream_chunks`) and
+    takes the LONGEST track for the segment's EXTINF (`seconds_for`). A plan
+    built from a video-only index cannot see the tail at all, so §2.2 says to
+    compute it from the probe's per-track durations. Without this, the plan's
+    entry count and — worse — its `#EXT-X-TARGETDURATION` are understated, and
+    an understated TARGETDURATION is a spec violation players act on.
+    """
+    tail_seconds = (source.audio_duration or 0) - (source.video_duration or 0)
+    if tail_seconds <= 0.05 or not entries:
+        return []
+    ceiling = policy.max_ticks
+    remaining = int(round(tail_seconds * timescale))
+    start = entries[-1].start_ticks + entries[-1].duration_ticks
+    index = entries[-1].index + 1
+    tail = []
+    while remaining > 0:
+        chunk = min(remaining, ceiling)
+        tail.append(Entry(index, start, chunk, 0, "eof", "eof", 0,
+                          kind="audio-tail"))
+        start += chunk
+        remaining -= chunk
+        index += 1
+    entries.extend(tail)
+    return tail
+
+
+def build_plan(rows, policy):
+    """Segmenter::push's loop (fmp4.rs:2322-2341) over an index, not a pipe."""
+    entries = []
+    pending_ticks = pending_bytes = 0
+    pending_start = None
+    pending_frags = 0
+    index = 0
+    origin = "start-of-file"
+    for row in rows:
+        reason = policy.cut_before(pending_ticks, pending_bytes, row.verdict,
+                                   index == 0)
+        if reason:
+            entries.append(Entry(index, pending_start, pending_ticks,
+                                 pending_bytes, reason, origin, pending_frags))
+            origin = reason
+            index += 1
+            pending_ticks = pending_bytes = pending_frags = 0
+            pending_start = None
+        if pending_start is None:
+            pending_start = row.dts
+        pending_ticks += row.ticks
+        pending_bytes += row.wire
+        pending_frags += 1
+    if pending_bytes:
+        entries.append(Entry(index, pending_start, pending_ticks, pending_bytes,
+                             "eof", origin, pending_frags))
+    return entries
+
+
+def plan_invariants(entries, rows, policy):
+    """Properties the plan must have whatever the transcription above does.
+
+    Asserting the shape directly rather than trusting the transcription is the
+    point: a bug in `cut_before` would otherwise prove itself correct. The
+    checks are written against the INDEX, not against the transcription's own
+    bookkeeping, and they are scored — an unscored invariant is a comment.
+
+    Note what is deliberately NOT asserted: that a segment never exceeds
+    `max_ticks`. `cut_before` tests the ceilings only when the arriving
+    fragment is dirty, so pending legitimately crosses `max_ticks` on a dirty
+    fragment and is then closed as `clean` by the next one. A check for that
+    fires on correct plans.
+    """
+    problems = []
+    by_dts = {r.dts: i for i, r in enumerate(rows) if r.dts is not None}
+    for i, entry in enumerate(entries):
+        floor = policy.first_floor_ticks if i == 0 else policy.floor_ticks
+        last = i == len(entries) - 1
+        if entry.duration_ticks < floor and not last:
+            problems.append(
+                f"entry {entry.index} is {entry.duration_ticks} ticks, under the "
+                f"{'first-segment ' if i == 0 else ''}floor of {floor}")
+        # The floor gates the ceilings, so a cut may only be taken once the
+        # floor is passed — and a cut taken LATER than the first eligible
+        # clean fragment means the clean-before-ceiling ordering is broken.
+        first = by_dts.get(entry.start_ticks)
+        if first is not None and not last:
+            pending = 0
+            for row in rows[first:]:
+                if pending >= floor and row.verdict in CLEAN:
+                    if pending != entry.duration_ticks:
+                        problems.append(
+                            f"entry {entry.index} runs {entry.duration_ticks} "
+                            f"ticks but the first clean fragment past its floor "
+                            f"is at {pending}")
+                    break
+                if pending >= policy.max_ticks:
+                    break
+                pending += row.ticks
+        landing = by_dts.get(entry.start_ticks + entry.duration_ticks)
+        if landing is not None:
+            arriving_clean = rows[landing].verdict in CLEAN
+            if entry.end_reason == "clean" and not arriving_clean:
+                problems.append(
+                    f"entry {entry.index} claims a clean cut but the fragment "
+                    f"it ends in front of is {rows[landing].verdict}")
+            # The converse, which is what catches a clean/ceiling precedence
+            # inversion: `cut_before` reaches a ceiling branch only when the
+            # arriving fragment is NOT clean, so a ceiling cut in front of a
+            # clean fragment means the ordering was swapped.
+            if entry.end_reason.endswith("ceiling") and arriving_clean:
+                problems.append(
+                    f"entry {entry.index} cut at the {entry.end_reason} in "
+                    f"front of a clean fragment; the clean branch should have "
+                    f"won")
+        if i and entries[i - 1].start_ticks + entries[i - 1].duration_ticks != entry.start_ticks:
+            problems.append(
+                f"entry {entry.index} starts at {entry.start_ticks}, but entry "
+                f"{entries[i-1].index} ends at "
+                f"{entries[i-1].start_ticks + entries[i-1].duration_ticks}")
+    if entries and entries[0].start_ticks != 0:
+        problems.append(f"the plan starts at {entries[0].start_ticks}, not 0")
+    covered = sum(e.fragments for e in entries)
+    if covered != len(rows):
+        problems.append(
+            f"the plan covers {covered} of the index's {len(rows)} fragments")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# proofs
+# ---------------------------------------------------------------------------
+
+
+def keyframe_origin(ffprobe, path, start_seconds):
+    """transcode/mod.rs:1118-1163 — where `-ss` will really land."""
+    out = subprocess.run(
+        [ffprobe, "-hide_banner", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time,dts_time,flags", "-read_intervals",
+         f"{start_seconds:.3f}%+#4", "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    first = None
+    for line in out.splitlines():
+        fields = [f.strip() for f in line.strip().split(",")]
+        if len(fields) < 2:
+            continue
+        pts, dts = fields[0], fields[1]
+        flags = fields[2] if len(fields) > 2 else ""
+        try:
+            stamp = float(dts)
+        except ValueError:
+            try:
+                stamp = float(pts)
+            except ValueError:
+                continue
+        stamp = max(stamp, 0.0)
+        if "K" in flags:
+            return stamp
+        if first is None:
+            first = stamp
+    return first
+
+
+def nominal_audio_rate(source, audio_mode):
+    """What the production pipe asks for (transcode/mod.rs:1327-1341)."""
+    if audio_mode == "copy":
+        return source.audio_bit_rate or 448_000
+    return 320_000 if source.audio_channels == 6 else 256_000
+
+
+def audio_headroom_bytes(source, duration_ticks, timescale, audio_mode,
+                         fragments, margin):
+    """The bound §2.2 claims: bitrate x duration, plus per-fragment mux overhead.
+
+    The nominal rate is not by itself an upper bound — ffmpeg's AAC encoder
+    overshoots its `-b:a` target — so the bound carries a margin, and the
+    report also prints the worst overshoot ratio actually observed so M1 can
+    size the constant from evidence rather than from this default.
+    `MUX_OVERHEAD_PER_FRAGMENT` covers the extra `traf` an audio track adds to
+    every `moof`; `audio_overhead_observed` is its measured counterpart.
+    """
+    seconds = duration_ticks / timescale
+    rate = nominal_audio_rate(source, audio_mode)
+    return (int(rate / 8 * seconds * margin)
+            + MUX_OVERHEAD_PER_FRAGMENT * max(fragments, 1))
+
+
+MUX_OVERHEAD_PER_FRAGMENT = 512
+
+
+def prove(ffmpeg, ffprobe, path, opts):
+    source = probe_source(ffprobe, path)
+    have_dovi = has_dovi_bsf(ffmpeg)
+    result = {
+        "file": path,
+        "video_codec": source.video_codec,
+        "audio_codec": source.audio_codec,
+        "audio_channels": source.audio_channels,
+        "audio_mode": opts.audio_mode,
+        "duration_seconds": round(source.video_duration, 3),
+        "clauses": {},
+    }
+    say = result.setdefault("notes", [])
+
+    # ---- (a) determinism of the video-only index -------------------------
+    index_cmd = pipe_args(ffmpeg, source, video_only=True, have_dovi=have_dovi,
+                          pacing=opts.pacing)
+    first = read_pipe(index_cmd)
+    second = read_pipe(index_cmd)
+    if not first.rows:
+        return fail(result, "a", "the video-only index pipe produced no fragments",
+                    extra={"stderr": first.stderr.strip()[:800]})
+    incomplete = (first.complete(source.video_duration)
+                  + second.complete(source.video_duration))
+    same_rows = [r.key() for r in first.rows] == [r.key() for r in second.rows]
+    result["index"] = {
+        "command": " ".join(index_cmd),
+        "fragments": len(first.rows),
+        "timescale": first.timescale,
+        "seconds": round(first.seconds, 3),
+        "second_run_seconds": round(second.seconds, 3),
+        "bytes": sum(r.wire for r in first.rows),
+        "source_bytes": os.path.getsize(path),
+        "megabytes_per_second": round(
+            os.path.getsize(path) / 1e6 / max(first.seconds, 1e-6), 1),
+        "verdicts": verdict_counts(first.rows),
+        "init_sha256": first.init_sha,
+    }
+    result["clauses"]["a_determinism"] = {
+        # An incomplete read is not a determinism result. Two identically
+        # truncated runs agree perfectly and mean nothing.
+        "pass": bool(same_rows and first.init_sha == second.init_sha
+                     and not incomplete),
+        "rows_identical": same_rows,
+        "init_identical": first.init_sha == second.init_sha,
+        "both_runs_complete": not incomplete,
+        "incomplete_detail": incomplete,
+        "fragments": len(first.rows),
+        "first_divergence": None if same_rows else first_divergence(first.rows, second.rows),
+    }
+
+    # ---- the plan --------------------------------------------------------
+    policy = Policy(opts.floor, opts.first_floor, opts.ceiling_bytes,
+                    opts.max_seconds, first.timescale)
+    entries = build_plan(first.rows, policy)
+    tail = append_audio_tail(entries, source, policy, first.timescale)
+    problems = plan_invariants([e for e in entries if e.kind == "video"],
+                               first.rows, policy)
+    result["plan"] = {
+        "entries": len(entries),
+        "video_entries": sum(1 for e in entries if e.kind == "video"),
+        "audio_tail_entries": len(tail),
+        "audio_tail_seconds": round(
+            sum(e.duration_ticks for e in tail) / first.timescale, 3),
+        "policy": {
+            "floor_seconds": opts.floor,
+            "first_floor_seconds": opts.first_floor,
+            "max_bytes": opts.ceiling_bytes,
+            "max_seconds": opts.max_seconds,
+            "timescale": first.timescale,
+        },
+        "end_reasons": count_by(e.end_reason for e in entries),
+        "target_duration": max(
+            (int(-(-e.duration_ticks // first.timescale)) for e in entries),
+            default=0),
+    }
+    # Scored, not printed. An unscored invariant lets a destroyed CutPolicy
+    # transcription report four green clauses over a 52-entry nonsense plan.
+    result["clauses"]["plan_invariants"] = {
+        "pass": not problems,
+        "problems": len(problems),
+        "problems_detail": problems[:5],
+    }
+    if opts.dump_plan:
+        result["plan"]["entries_detail"] = [e.as_dict(first.timescale) for e in entries]
+
+    # ---- (b) the full pipe materializes those boundaries ------------------
+    full_cmd = pipe_args(ffmpeg, source, have_dovi=have_dovi,
+                         audio_mode=opts.audio_mode, pacing=opts.pacing,
+                         audio_index=opts.audio_index)
+    full = read_pipe(full_cmd)
+    full_incomplete = full.complete(source.video_duration)
+    result["full_pipe"] = {
+        "command": " ".join(full_cmd),
+        "fragments": len(full.rows),
+        "timescale": full.timescale,
+        "seconds": round(full.seconds, 3),
+        "init_sha256": full.init_sha,
+        "verdicts": verdict_counts(full.rows),
+        "complete": not full_incomplete,
+        "incomplete_detail": full_incomplete,
+    }
+    if full.timescale != first.timescale:
+        say.append(
+            f"video timescale differs between the index pipe ({first.timescale}) "
+            f"and the production pipe ({full.timescale}); a plan in index ticks "
+            "is not addressable in production ticks")
+
+    # Does the video-only index describe the production pipe's fragment
+    # stream? Plan §2.2 asserts one index serves every audio selection. That
+    # is two claims: the SEQUENCE is the same, and the TIMELINE is the same.
+    # They are scored separately because they turn out to differ.
+    compare = index_vs_production(first.rows, full.rows)
+    result["index_vs_production"] = compare
+    offset = compare["dts_offset_ticks"] if compare["offset_constant"] else None
+    if offset:
+        say.append(
+            f"the production pipe's video DTS grid sits {offset} ticks "
+            f"({offset / first.timescale * 1000:.1f} ms) ahead of the "
+            f"video-only index's; the index and the plan built from it do not "
+            f"share a zero with the stream that materializes them")
+
+    by_dts = {r.dts: r for r in full.rows if r.dts is not None}
+    boundaries = []
+    for i, entry in enumerate(entries):
+        if i == 0 or entry.kind != "video":
+            continue
+        frag = by_dts.get(entry.start_ticks)
+        # Fragment 0's tfdt is clamped to zero in both pipes, so the offset
+        # describes fragments >= 1 only; entry 0 never carries it.
+        shifted = (by_dts.get(entry.start_ticks + offset)
+                   if offset is not None else None)
+        boundaries.append({
+            "index": entry.index,
+            "start_ticks": entry.start_ticks,
+            "start_seconds": round(entry.start_ticks / first.timescale, 6),
+            "origin": entry.start_origin,
+            "materialized": frag is not None,
+            "materialized_with_offset": shifted is not None,
+            "verdict": None if shifted is None else shifted.verdict,
+            "clean": bool(shifted and shifted.verdict in CLEAN),
+        })
+    missing = [b for b in boundaries if not b["materialized"]]
+    missing_shifted = [b for b in boundaries if not b["materialized_with_offset"]]
+    clean_origin = [b for b in boundaries if b["origin"] == "clean"]
+    dirty_clean_origin = [b for b in clean_origin if not b["clean"]]
+    ceiling_origin = [b for b in boundaries if b["origin"] != "clean"]
+    # The constant-offset hypothesis can only be scored when the offset really
+    # is constant; degrading it to "no offset" would report an untested
+    # hypothesis as tested.
+    offset_testable = compare["offset_constant"] and compare["fragment_count_matches"]
+    result["clauses"]["b_boundaries"] = {
+        # `pass` scores the plan's literal claim: the plan's film-time DTS is
+        # a DTS the production pipe emits.
+        "pass": bool(not missing and not dirty_clean_origin
+                     and full.timescale == first.timescale
+                     and compare["fragment_count_matches"]
+                     and not full_incomplete),
+        "pass_with_constant_offset": (bool(not missing_shifted
+                                           and not dirty_clean_origin)
+                                      if offset_testable else None),
+        "offset_testable": offset_testable,
+        "fragment_count_matches": compare["fragment_count_matches"],
+        "boundaries": len(boundaries),
+        "unmaterialized": len(missing),
+        "unmaterialized_with_offset": len(missing_shifted) if offset_testable else None,
+        "unmaterialized_detail": missing[:3],
+        "clean_origin": len(clean_origin),
+        "clean_origin_not_clean": len(dirty_clean_origin),
+        "clean_origin_not_clean_detail": dirty_clean_origin[:3],
+        "ceiling_origin": len(ceiling_origin),
+        "ceiling_origin_clean": sum(1 for b in ceiling_origin if b["clean"]),
+        "ceiling_origin_detail": ceiling_origin[:3],
+    }
+
+    # ---- (b, second half) reposition convergence -------------------------
+    result["clauses"]["b_reposition"] = reposition_proof(
+        ffmpeg, ffprobe, source, entries, first, full, opts, have_dovi)
+
+    # ---- (c) byte bounds --------------------------------------------------
+    result["clauses"]["c_byte_bounds"] = byte_bounds_proof(
+        source, entries, first, full, compare, opts)
+
+    # ---- (d) init identity across generations ----------------------------
+    full_again = read_pipe(full_cmd, max_fragments=1)
+    result["clauses"]["d_init_identity"] = {
+        "pass": bool(first.init_sha == second.init_sha
+                     and full.init_sha == full_again.init_sha
+                     and result["clauses"]["b_reposition"].get("init_matches_origin", False)),
+        "index_pipe_stable": first.init_sha == second.init_sha,
+        "full_pipe_stable": full.init_sha == full_again.init_sha,
+        "seeked_generation_matches": result["clauses"]["b_reposition"].get(
+            "init_matches_origin"),
+        "seeked_generation_detail": result["clauses"]["b_reposition"].get(
+            "init_mismatch_detail"),
+        "init_sha256": full.init_sha,
+    }
+
+    # What P0 did NOT exercise. Every production branch this harness cannot
+    # build is named, so nobody reads a green run as coverage it is not.
+    result["coverage_gaps"] = coverage_gaps(source, opts)
+
+    result["pass"] = all(c.get("pass") for c in result["clauses"].values())
+    return result
+
+
+def coverage_gaps(source, opts):
+    gaps = []
+    if not opts.pacing:
+        gaps.append("producer pacing (-readrate/-readrate_initial_burst) not "
+                    "applied; input rate limiting cannot change output bytes, "
+                    "but the argv differs from transcode.rs's logged one")
+    if opts.audio_offset_ms:
+        gaps.append("audio_offset_ms is set but the -itsoffset SECOND INPUT "
+                    "(mod.rs:1220-1234) and the -af offset filter "
+                    "(mod.rs:1312-1318) are not modelled")
+    else:
+        gaps.append("A/V-corrected sources (audio_offset_ms != 0) are not "
+                    "covered: production builds a second -itsoffset input on "
+                    "the copy-audio branch, which is a different fragment "
+                    "stream")
+    if source.hdr == "dolby_vision":
+        gaps.append("preserve_dolby_vision is not modelled: -tag:v dvh1, "
+                    "-strict unofficial, and the Profile-5 branch that OMITS "
+                    "-bsf:v entirely change the copied NAL stream")
+    gaps.append(f"one audio selection only (a:{opts.audio_index}, "
+                f"{opts.audio_mode}); §2.2's 'valid for every audio selection' "
+                f"is proven for the sequence, not measured for every track")
+    return gaps
+
+
+def byte_bounds_proof(source, entries, index_stream, full, compare, opts):
+    """Do planned bytes plus an audio headroom bound the materialized bytes?
+
+    Members are resolved by fragment ORDINAL, not by a DTS window. The index
+    and the production pipe agree fragment-for-fragment (that is what
+    `fragment_count_matches` and the duration comparison say); their DTS values
+    do not, and a windowed lookup that applies the offset to entry 0 — which
+    never carries it — silently measures a two-fragment segment over one.
+
+    Two claims are scored separately. `bound_holds` is the plan-fidelity one
+    and is the clause's verdict. `ceiling_respected` is a property of the
+    SHIPPED `CutPolicy`: the floor gates both ceilings (fmp4.rs:1745-1776), so
+    a high-bitrate source produces segments over the byte ceiling today, with
+    or without this plan. Scoring that into `pass` would stop the rewrite for
+    something the rewrite did not cause.
+    """
+    timescale = index_stream.timescale
+    if not compare["fragment_count_matches"]:
+        return {"pass": False,
+                "reason": "the index and the production pipe emitted different "
+                          "fragment counts, so no ordinal mapping exists",
+                "index_fragments": compare["index_fragments"],
+                "production_fragments": compare["production_fragments"]}
+    if opts.audio_mode == "copy" and not source.audio_bit_rate:
+        return {"pass": False,
+                "reason": "--audio-mode copy needs a probed audio bitrate to "
+                          "bound the headroom, and ffprobe reported none"}
+
+    rows = full.rows
+    video_entries = [e for e in entries if e.kind == "video"]
+    tail_entries = [e for e in entries if e.kind == "audio-tail"]
+    rate = nominal_audio_rate(source, opts.audio_mode)
+    cursor = 0
+    checked = skipped = 0
+    over_ceiling, over_bound = [], []
+    deltas, overheads, overshoots, reals = [], [], [], []
+    tail_group = None
+
+    for position, entry in enumerate(video_entries):
+        members = rows[cursor:cursor + entry.fragments]
+        cursor += entry.fragments
+        if len(members) != entry.fragments:
+            skipped += 1
+            continue
+        checked += 1
+        real = sum(r.wire for r in members)
+        audio = sum(r.audio_bytes for r in members)
+        video = sum(r.video_bytes for r in members)
+        seconds = entry.duration_ticks / timescale
+        # The bound that is scored uses no margin: a pass criterion with a
+        # tunable dial in it is not a proof. The observed overshoot is
+        # reported instead, so M1 can size the constant from evidence.
+        bound = entry.est_bytes + audio_headroom_bytes(
+            source, entry.duration_ticks, timescale, opts.audio_mode,
+            len(members), 1.0)
+        deltas.append(real - entry.est_bytes)
+        overheads.append(real - video - audio)
+        reals.append(real)
+        if seconds > 0 and rate:
+            overshoots.append(audio / (rate / 8 * seconds))
+        row = {"index": entry.index, "est_bytes": entry.est_bytes,
+               "real_bytes": real, "bound": bound, "audio_bytes": audio,
+               "duration_seconds": round(seconds, 3)}
+        last_video = position == len(video_entries) - 1
+        if real > opts.ceiling_bytes:
+            over_ceiling.append(row)
+        if real > bound:
+            if last_video and tail_entries:
+                # Production has no video keyframe left to cut the tail on, so
+                # `frag_keyframe` puts the whole audio tail in this fragment
+                # while the plan splits it into its own entries. Score the
+                # group, not the entry — and say so.
+                pass
+            else:
+                over_bound.append(row)
+        if last_video and tail_entries:
+            tail_seconds = seconds + sum(
+                e.duration_ticks for e in tail_entries) / timescale
+            tail_bound = entry.est_bytes + audio_headroom_bytes(
+                source, int(tail_seconds * timescale), timescale,
+                opts.audio_mode, len(members) + len(tail_entries), 1.0)
+            tail_group = {
+                "entries": [entry.index] + [e.index for e in tail_entries],
+                "real_bytes": real, "bound": tail_bound,
+                "seconds": round(tail_seconds, 3),
+                "holds": real <= tail_bound,
+                "note": "the plan splits the audio tail into its own entries; "
+                        "the production pipe emits it inside the last video "
+                        "fragment, so the two are compared as one group",
+            }
+    leftover = len(rows) - cursor
+    return {
+        "pass": not over_bound and skipped == 0
+                and (tail_group is None or tail_group["holds"]),
+        "bound_holds": not over_bound,
+        "ceiling_respected": not over_ceiling,
+        "entries": len(entries),
+        "checked": checked,
+        "skipped": skipped,
+        "unattributed_production_fragments": leftover,
+        "over_ceiling": len(over_ceiling),
+        "over_ceiling_detail": over_ceiling[:3],
+        "over_bound": len(over_bound),
+        "over_bound_detail": over_bound[:3],
+        "audio_tail_group": tail_group,
+        "max_real_bytes": max(reals, default=0),
+        "max_real_minus_est": max(deltas, default=0),
+        "audio_overhead_observed": max(overheads, default=0),
+        "audio_overshoot_ratio": round(max(overshoots, default=0), 4),
+    }
+
+
+def reposition_proof(ffmpeg, ffprobe, source, entries, index_stream,
+                     full_stream, opts, have_dovi):
+    """Can a producer restarted at a plan boundary land ON that boundary?
+
+    Plan §2.2: "A producer repositioned to a plan boundary seeks with
+    `-noaccurate_seek -ss <boundary>` (lands at the RAP at-or-before) and the
+    segmenter discards fragments until the first whose DTS equals the boundary;
+    a mismatch (never-equal) is a typed producer failure."
+
+    That sentence is executable only if a repositioned generation's emitted DTS
+    is film time. Four candidate answers are measured here, none assumed:
+
+      raw     — the DTS the production pipe emits, unmodified.
+      copyts  — the same pipe with `-copyts` (and `-avoid_negative_ts
+                disabled`, since `make_zero` would override it), asking whether
+                ffmpeg can be told to keep source time.
+      origin  — raw DTS plus the origin `keyframe_probe_args` reports, which is
+                the correction production already applies to session timelines
+                (transcode/mod.rs:1118-1163).
+      bytes   — matching the seeked generation's first fragment against the
+                index by output byte count, which needs no timestamp at all.
+
+    Each is scored for exact equality and for equality within one frame, and
+    the fragment sequence from the landing point is compared against the same
+    stretch of the t=0 generation. The `-ss` string is the `{:.3}` production
+    formats, so a boundary whose real time is not a whole millisecond is
+    measured under the rounding the producer would really do.
+    """
+    timescale = index_stream.timescale
+    frame_ticks, frame_ticks_source = estimate_frame_ticks(
+        ffprobe, source.path, timescale)
+    index_rows = index_stream.rows
+    by_dts = {r.dts: i for i, r in enumerate(index_rows) if r.dts is not None}
+    sample = pick_boundaries(entries, opts.boundaries)
+    cases = []
+    init_ok = True
+    init_detail = None
+    copyts_film_time = None
+
+    for entry in sample:
+        boundary_seconds = entry.start_ticks / timescale
+        ss = float(f"{boundary_seconds:.3f}")
+        origin = keyframe_origin(ffprobe, source.path, ss)
+        origin_ticks = None if origin is None else int(round(origin * timescale))
+        seeked = read_pipe(
+            pipe_args(ffmpeg, source, start=boundary_seconds,
+                      have_dovi=have_dovi, audio_mode=opts.audio_mode,
+                      pacing=opts.pacing, audio_index=opts.audio_index),
+            max_fragments=opts.reposition_fragments)
+        dts = [r.dts for r in seeked.rows]
+
+        if copyts_film_time is None:
+            cmd = pipe_args(ffmpeg, source, start=boundary_seconds,
+                            have_dovi=have_dovi, audio_mode=opts.audio_mode,
+                            pacing=opts.pacing, audio_index=opts.audio_index,
+                            copyts=True)
+            j = cmd.index("-avoid_negative_ts")
+            cmd[j + 1] = "disabled"
+            stamped = read_pipe(cmd, max_fragments=8)
+            stamped_dts = [d for d in (r.dts for r in stamped.rows)
+                           if d is not None]
+            # Film time means the FIRST emitted fragment sits at the RAP the
+            # seek landed on — at or just before this boundary — not merely
+            # that some later fragment's rebased DTS coincides with it. On a
+            # regular GOP grid the seeked stream's own timeline is full of
+            # such coincidences.
+            gop = max((r.ticks for r in index_rows), default=0)
+            head = stamped_dts[0] if stamped_dts else None
+            carries = (head is not None
+                       and 0 <= entry.start_ticks - head <= gop
+                       and head != 0)
+            copyts_film_time = {
+                "first_dts": head,
+                "expected_film_ticks": entry.start_ticks,
+                "one_gop_ticks": gop,
+                "carries_film_time": carries,
+            }
+
+        target = by_dts.get(entry.start_ticks)
+
+        # origin-corrected: which fragment is nearest the film-time boundary
+        # once the keyframe probe's origin is added to the emitted DTS?
+        best = origin_discards = None
+        if origin_ticks is not None:
+            for i, d in enumerate(dts):
+                if d is None:
+                    continue
+                error = origin_ticks + d - entry.start_ticks
+                if best is None or abs(error) < abs(best):
+                    best, origin_discards = error, i
+
+        # byte identity: the index already knows every fragment's output byte
+        # count, and the seeked generation copies the same video samples, so
+        # the landing fragment can be identified without any timestamp at all.
+        first_video_bytes = seeked.rows[0].video_bytes if seeked.rows else None
+        landing = None
+        byte_discards = None
+        if first_video_bytes:
+            matches = [i for i, r in enumerate(index_rows)
+                       if r.video_bytes == first_video_bytes]
+            row = matches[0] if len(matches) == 1 else None
+            landing = {"candidates": len(matches), "unique": len(matches) == 1,
+                       "index_row": row,
+                       "landed_seconds": (None if row is None else
+                                          round(index_rows[row].dts / timescale, 4))}
+            if row is not None and target is not None:
+                byte_discards = target - row
+                landing["fragments_to_discard"] = byte_discards
+
+        # Does the repositioned generation reproduce the t=0 fragment sequence?
+        # Anchored on the byte landing, which is exact, rather than on the
+        # origin estimate, which is the thing under test. The landing fragment
+        # itself is skipped: the muxer clamps the first fragment's tfdt to zero
+        # and absorbs the seek residue into its sample durations, so only the
+        # fragments after it describe the grid the producer will really emit.
+        sequence_match = None
+        if byte_discards is not None and byte_discards >= 0 and target is not None:
+            want = [r.ticks for r in index_rows[target + 1:target + 5]]
+            got = [r.ticks for r in
+                   seeked.rows[byte_discards + 1:byte_discards + 5]]
+            sequence_match = want == got and bool(want)
+
+        case = {
+            "index": entry.index,
+            "boundary_ticks": entry.start_ticks,
+            "boundary_seconds": round(boundary_seconds, 6),
+            "ss_argument": f"{boundary_seconds:.3f}",
+            "ss_rounding_ticks": int(round((boundary_seconds - ss) * timescale)),
+            "keyframe_origin_seconds": origin,
+            "keyframe_origin_ticks": origin_ticks,
+            "raw_dts_hits_boundary": entry.start_ticks in dts,
+            "raw_first_dts": dts[0] if dts else None,
+            "origin_best_error_ticks": best,
+            "origin_exact": best == 0,
+            "origin_within_frame": best is not None and abs(best) <= frame_ticks,
+            "origin_discards_needed": origin_discards,
+            "byte_landing": landing,
+            "byte_discards_needed": byte_discards,
+            "origin_agrees_with_landing": (None if (origin_discards is None
+                                                    or byte_discards is None)
+                                           else origin_discards == byte_discards),
+            "sequence_matches_t0": sequence_match,
+            "init_matches_t0": seeked.init_sha == full_stream.init_sha,
+            "init_sha256": seeked.init_sha,
+        }
+        if not case["init_matches_t0"]:
+            init_ok = False
+            if init_detail is None:
+                init_detail = {"boundary_ticks": entry.start_ticks,
+                               "seeked": seeked.init_sha,
+                               "from_zero": full_stream.init_sha}
+        cases.append(case)
+
+    exact = sum(1 for c in cases if c["origin_exact"])
+    within = sum(1 for c in cases if c["origin_within_frame"])
+    raw = sum(1 for c in cases if c["raw_dts_hits_boundary"])
+    byte_unique = sum(1 for c in cases
+                      if (c["byte_landing"] or {}).get("unique"))
+    return {
+        # The plan's literal rule is raw-DTS equality. Nothing else is what
+        # §2.2 says, so nothing else may be scored as this clause passing.
+        "pass": (len(cases) >= max(opts.boundaries, 1)
+                 and raw == len(cases) and init_ok),
+        "sampled": len(cases),
+        "frame_ticks": frame_ticks,
+        "frame_ticks_source": frame_ticks_source,
+        "converges_on_raw_dts": raw,
+        "copyts_carries_film_time": (copyts_film_time or {}).get("carries_film_time"),
+        "copyts_detail": copyts_film_time,
+        "converges_with_keyframe_origin_exactly": exact,
+        "converges_with_keyframe_origin_within_one_frame": within,
+        "max_origin_error_ticks": max((abs(c["origin_best_error_ticks"] or 0)
+                                       for c in cases), default=None),
+        "max_discards_needed": max((c["byte_discards_needed"] or 0
+                                    for c in cases), default=None),
+        "byte_landing_unique": byte_unique,
+        "origin_agrees_with_byte_landing": sum(
+            1 for c in cases if c["origin_agrees_with_landing"]),
+        # Landing PAST the boundary is the outcome that makes any
+        # discard-forward rule unimplementable, so it gets its own counter
+        # instead of hiding behind another case's zero.
+        "landed_past_boundary": sum(1 for c in cases
+                                    if (c["byte_discards_needed"] or 0) < 0),
+        "landing_unresolved": sum(1 for c in cases
+                                  if c["byte_discards_needed"] is None),
+        "sequence_matches_t0": sum(1 for c in cases if c["sequence_matches_t0"]),
+        "landed_a_fragment_early": sum(1 for c in cases
+                                       if (c["byte_discards_needed"] or 0) > 0),
+        "init_matches_origin": init_ok,
+        "init_mismatch_detail": init_detail,
+        "cases": cases,
+    }
+
+
+def index_vs_production(index_rows, full_rows):
+    """How the video-only index compares with the production pipe it plans for.
+
+    The sequence claim (same fragments, same durations, same verdicts, same
+    video byte counts) and the timeline claim (same DTS) are different claims.
+    A constant DTS offset means the plan is still buildable — the segmenter
+    counts ticks from its own zero — while a varying one would mean the index
+    describes a stream the producer never emits.
+    """
+    deltas = []
+    for a, b in zip(index_rows, full_rows):
+        if a.dts is None or b.dts is None:
+            continue
+        deltas.append(b.dts - a.dts)
+    # The muxer clamps the first fragment's tfdt to zero, so fragment 0 never
+    # shows the offset; it is the steady-state delta that describes the grid.
+    steady = deltas[1:] if len(deltas) > 1 else deltas
+    constant = bool(steady) and len(set(steady)) == 1
+    return {
+        "index_fragments": len(index_rows),
+        "production_fragments": len(full_rows),
+        "fragment_count_matches": len(index_rows) == len(full_rows),
+        "dts_offset_ticks": steady[0] if constant else None,
+        # One sample is not a constant. A single-fragment stream would
+        # otherwise report a proven offset from n=1.
+        "offset_constant": constant and len(steady) >= 3,
+        "offset_samples": len(steady),
+        "offset_values_seen": sorted(set(steady))[:6],
+        "duration_sequence_matches": [r.ticks for r in index_rows] ==
+                                     [r.ticks for r in full_rows],
+        # Fragment 0 absorbs the offset, so it is the tail that says whether
+        # the two pipes agree about where every later fragment begins.
+        "duration_sequence_matches_after_first": [r.ticks for r in index_rows[1:]] ==
+                                                 [r.ticks for r in full_rows[1:]],
+        "verdict_sequence_matches": [r.verdict for r in index_rows] ==
+                                    [r.verdict for r in full_rows],
+        "video_bytes_sequence_matches": [r.video_bytes for r in index_rows] ==
+                                        [r.video_bytes for r in full_rows],
+    }
+
+
+def estimate_frame_ticks(ffprobe, path, timescale, rows=()):
+    """One frame in video-timescale ticks — the tolerance a rounding rule needs.
+
+    `avg_frame_rate` is `0/0` on plenty of Matroska sources. Falling silently
+    back to 24 fps would make the "within one frame" tolerance 2.5x too
+    generous on a 60 fps title, and that tolerance is a number M1 would size a
+    rounding rule from — so the fallback chain is explicit and its source is
+    recorded in the report.
+    """
+    for entry in ("avg_frame_rate", "r_frame_rate"):
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             f"stream={entry}", "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, check=False).stdout.strip()
+        try:
+            num, den = out.split("/")
+            fps = float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if fps > 0:
+            return int(round(timescale / fps)), entry
+    return None, "unknown"
+
+
+def pick_boundaries(entries, count):
+    """Spread the sample across the film, and always include a ceiling cut.
+
+    Audio-tail entries are excluded: a producer repositions to a video RAP,
+    and the tail has none.
+    """
+    candidates = [e for e in entries[1:] if e.kind == "video"]
+    if not candidates:
+        return []
+    chosen = []
+    ceiling = [e for e in candidates if e.start_origin != "clean"]
+    if ceiling:
+        chosen.append(ceiling[0])
+    step = max(len(candidates) // max(count - len(chosen), 1), 1)
+    for entry in candidates[::step]:
+        if len(chosen) >= count:
+            break
+        if entry not in chosen:
+            chosen.append(entry)
+    return sorted(chosen, key=lambda e: e.index)
+
+
+def verdict_counts(rows):
+    return count_by(r.verdict for r in rows)
+
+
+def count_by(values):
+    counts = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def first_divergence(a, b):
+    for i in range(max(len(a), len(b))):
+        left = a[i].key() if i < len(a) else None
+        right = b[i].key() if i < len(b) else None
+        if left != right:
+            return {"fragment": i, "first_run": left, "second_run": right}
+    return None
+
+
+def fail(result, clause, message, extra=None):
+    entry = {"pass": False, "reason": message}
+    if extra:
+        entry.update(extra)
+    result["clauses"][f"{clause}_aborted"] = entry
+    result["pass"] = False
+    return result
+
+
+# ---------------------------------------------------------------------------
+# reporting
+# ---------------------------------------------------------------------------
+
+
+def report(result):
+    name = os.path.basename(result["file"])
+    print(f"\n=== {name} — {result['video_codec']}/{result['audio_codec']} "
+          f"({result['audio_mode']} branch), {result['duration_seconds']}s")
+    index = result.get("index")
+    if index:
+        print(f"  index      {index['fragments']} fragments · {index['timescale']} ticks/s"
+              f" · {index['bytes']/1e6:.1f} MB · {index['seconds']:.2f}s"
+              f" · {index['verdicts']}")
+    compare = result.get("index_vs_production")
+    if compare:
+        print(f"  index~prod fragments {compare['index_fragments']}"
+              f"/{compare['production_fragments']}"
+              f" · durations {'=' if compare['duration_sequence_matches'] else 'DIFFER'}"
+              f" · verdicts {'=' if compare['verdict_sequence_matches'] else 'DIFFER'}"
+              f" · video bytes {'=' if compare['video_bytes_sequence_matches'] else 'DIFFER'}"
+              f" · DTS offset {compare['dts_offset_ticks']}"
+              f"{'' if compare['offset_constant'] else ' (NOT constant: ' + str(compare['offset_values_seen']) + ')'}")
+    plan = result.get("plan")
+    if plan:
+        tail = (f" (+{plan['audio_tail_entries']} audio-tail,"
+                f" {plan['audio_tail_seconds']}s)"
+                if plan.get("audio_tail_entries") else "")
+        print(f"  plan       {plan['entries']} entries{tail} · "
+              f"{plan['end_reasons']} · TARGETDURATION {plan['target_duration']}")
+    for note in result.get("notes", []):
+        print(f"  ! {note}")
+    for key, clause in result["clauses"].items():
+        mark = "PASS" if clause.get("pass") else "FAIL"
+        detail = {k: v for k, v in clause.items()
+                  if k not in ("pass", "cases") and not k.endswith("_detail")}
+        print(f"  [{mark}] {key}")
+        for k, v in detail.items():
+            print(f"           {k}: {v}")
+        for k, v in clause.items():
+            if k.endswith("_detail") and v:
+                print(f"           {k}: {json.dumps(v)[:400]}")
+    for gap in result.get("coverage_gaps", []):
+        print(f"  ~ not covered: {gap}")
+    print(f"  => {'PASS' if result.get('pass') else 'FAIL'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("files", nargs="+", help="media files to probe")
+    ap.add_argument("--floor", type=int, default=COPY_SEGMENT_SECONDS)
+    ap.add_argument("--first-floor", type=int, default=COPY_FIRST_SEGMENT_SECONDS)
+    ap.add_argument("--ceiling-bytes", type=int, default=COPY_SEGMENT_MAX_BYTES)
+    ap.add_argument("--max-seconds", type=int, default=COPY_SEGMENT_MAX_SECS)
+    ap.add_argument("--audio-mode", choices=("aac", "copy"), default="aac",
+                    help="which production audio branch to materialize")
+    ap.add_argument("--audio-index", type=int, default=0,
+                    help="which audio stream the production pipe maps")
+    ap.add_argument("--audio-offset-ms", type=int, default=0,
+                    help="declare the source's A/V correction; the -itsoffset "
+                         "second input it implies is NOT modelled, so this only "
+                         "makes the coverage gap explicit")
+    ap.add_argument("--pacing", action="store_true",
+                    help="apply production's -readrate pacing to every pipe")
+    ap.add_argument("--boundaries", type=int, default=6,
+                    help="how many plan boundaries to reposition-test")
+    ap.add_argument("--reposition-fragments", type=int, default=12,
+                    help="fragments to read from each repositioned generation")
+    ap.add_argument("--dump-plan", action="store_true",
+                    help="include every plan entry in the JSON")
+    ap.add_argument("--json", help="write the full result set here")
+    ap.add_argument("--ffmpeg", default=os.environ.get("PLURX_FFMPEG", "ffmpeg"))
+    ap.add_argument("--ffprobe", default=os.environ.get("PLURX_FFPROBE", "ffprobe"))
+    opts = ap.parse_args()
+
+    results = []
+    for path in opts.files:
+        if not os.path.exists(path):
+            sys.exit(f"{path}: no such file")
+        result = prove(opts.ffmpeg, opts.ffprobe, path, opts)
+        report(result)
+        results.append(result)
+
+    if opts.json:
+        os.makedirs(os.path.dirname(os.path.abspath(opts.json)), exist_ok=True)
+        with open(opts.json, "w", encoding="utf8") as handle:
+            json.dump({"schema_version": 1, "results": results}, handle, indent=2)
+            handle.write("\n")
+        print(f"\nJSON  {opts.json}")
+
+    failed = [r for r in results if not r.get("pass")]
+    print(f"\n{len(results) - len(failed)}/{len(results)} files pass every P0 clause")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

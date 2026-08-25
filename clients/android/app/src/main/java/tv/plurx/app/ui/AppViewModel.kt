@@ -183,12 +183,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             when {
                 saved.origin.isNotBlank() && saved.token != null -> {
                     bindOrigin(saved.origin, saved.token)
+                    // A persisted bearer is enough to restore the app shell.
+                    // Reachability is not: after Android reclaimed the process,
+                    // waiting here left a resumed app on the otherwise-empty
+                    // Loading surface for the whole validation window whenever
+                    // the server was asleep. Paint Home immediately and let its
+                    // existing error + refresh surface own transport failures.
+                    _phase.value = Phase.Ready
+                    loadHome()
                     // Four attempts against a 20 s connect timeout, twice over
-                    // if rediscovery finds a candidate, is a splash screen that
-                    // can hold for well over a minute on a TV whose network is
-                    // still coming up. Cap the whole recovery: past this point
-                    // Home is the better place to be told, because it has a
-                    // Retry button and this does not.
+                    // if rediscovery finds a candidate, can still hold recovery
+                    // for well over a minute on a TV whose network is coming up.
+                    // Bound the background check even though it no longer gates
+                    // first paint.
                     val validation = withTimeoutOrNull(LAUNCH_VALIDATION_TIMEOUT_MS) {
                         var result = validateSavedSession { api().me() }
                         if (result == SavedSessionValidation.ServerUnavailable) {
@@ -216,7 +223,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 validation.user.id,
                             )
                             username = validation.user.username
-                            if (saved.instanceId == null) backfillServerIdentity()
+                            backfillServerIdentity()
                             _phase.value = Phase.Ready
                             loadHome()
                             resumeOfflineProfile()
@@ -229,10 +236,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         SavedSessionValidation.ServerUnavailable -> {
                             // Google TV often launches before networking has fully resumed.
-                            // Keep the saved credentials and let Home surface a retryable
-                            // connection error instead of incorrectly demanding a login.
-                            _phase.value = Phase.Ready
-                            loadHome()
+                            // Keep the saved credentials and the Home request already in
+                            // flight instead of incorrectly demanding a login or replacing
+                            // its error with another long request.
                         }
                     }
                 }
@@ -302,6 +308,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 username = resp.user.username
                 settings.saveSession(origin, resp.token, resp.user.username, resp.user.id)
                 _phase.value = Phase.Ready
+                // Now, not at connect: the ingress list is signed-in only.
+                refreshClusterIngress()
                 loadHome()
                 resumeOfflineProfile()
                 syncOfflineProgress()
@@ -482,7 +490,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         title: String,
         posterPath: String?,
     ): String? {
-        if (!file.isEpub) return "Cinema can currently download EPUB books only"
+        if (!file.supportsOfflineBookReader) {
+            return "Cinema cannot download this ebook format for in-app reading"
+        }
         val instance = serverInstanceId
             ?: return "Reconnect to this Cinema server before downloading"
         val user = currentUserId
@@ -707,6 +717,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart =
         api().createHlsSession(fileId, body)
 
+    suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
+
     /**
      * Fire-and-forget session release, on [viewModelScope] for the same reason
      * as [postProgress]: teardown can't await, and the scope outlives the
@@ -799,6 +811,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         settings.saveServerIdentity(origin, info.instance_id)
+        refreshClusterIngress()
+    }
+
+    /**
+     * Ask the server which other ingresses may serve this household's media.
+     *
+     * Signed-in only, and deliberately not part of `/server`: that endpoint is
+     * how an unknown candidate is identified before anyone has decided to
+     * trust it, so it is probed without a credential and must not carry the
+     * cluster's addresses. A single-node server answers with an empty list and
+     * everything below simply never fires.
+     */
+    private suspend fun refreshClusterIngress() {
+        val ingress = catchingUnlessCancelled { api().clusterIngress() }.getOrNull() ?: return
+        Session.configureNodeOrigins(ingress.node_urls, origin)
     }
 }
 

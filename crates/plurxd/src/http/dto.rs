@@ -13,8 +13,25 @@ use plurx_core::tracks::{
 use serde::{Deserialize, Serialize};
 
 /// Build the API URL for a cached artwork filename.
-fn image_url(filename: &Option<String>) -> Option<String> {
-    filename.as_ref().map(|f| format!("/api/v1/images/{f}"))
+///
+/// Artwork filenames historically contain only the item id, so importing a
+/// catalog or refreshing a poster can put different bytes behind the same
+/// path. Native image loaders and browsers are then entitled to keep the old
+/// response for its full cache lifetime. The replicated item revision changes
+/// with every metadata/artwork patch and makes that mutable filename a new
+/// cache identity without exposing node-local filesystem state in the API.
+fn image_url(filename: &Option<String>, revision: i64) -> Option<String> {
+    filename
+        .as_ref()
+        .map(|f| format!("/api/v1/images/{f}?v={revision}"))
+}
+
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+fn js_id_text_is_redundant(value: &str) -> bool {
+    value
+        .parse::<i64>()
+        .is_ok_and(|id| (-JS_SAFE_INTEGER_MAX..=JS_SAFE_INTEGER_MAX).contains(&id))
 }
 
 #[derive(Serialize)]
@@ -45,6 +62,11 @@ pub struct RevisionDto {
 #[derive(Serialize)]
 pub struct ReadingDto {
     pub file_id: i64,
+    /// Lossless decimal spelling for JavaScript clients. Keep the numeric
+    /// field for wire compatibility with native clients, and omit this
+    /// additive spelling when that number is already exact in JavaScript.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
+    pub file_id_text: String,
     pub revision: RevisionDto,
     pub locator: serde_json::Value,
     pub progression: f64,
@@ -58,6 +80,7 @@ impl TryFrom<ReadingState> for ReadingDto {
     fn try_from(state: ReadingState) -> Result<Self, Self::Error> {
         Ok(Self {
             file_id: state.file_id,
+            file_id_text: state.file_id.to_string(),
             revision: RevisionDto {
                 size: state.file_size,
                 mtime: state.file_mtime,
@@ -73,6 +96,10 @@ impl TryFrom<ReadingState> for ReadingDto {
 #[derive(Serialize)]
 pub struct ItemDto {
     pub id: i64,
+    /// Lossless decimal spelling for route construction in JavaScript. Safe
+    /// integer ids preserve the established byte-for-byte response shape.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
+    pub id_text: String,
     pub library_id: i64,
     pub kind: ItemKind,
     pub parent_id: Option<i64>,
@@ -205,6 +232,7 @@ impl From<Item> for ItemDto {
     fn from(item: Item) -> Self {
         ItemDto {
             id: item.id,
+            id_text: item.id.to_string(),
             library_id: item.library_id,
             kind: item.kind,
             parent_id: item.parent_id,
@@ -226,8 +254,8 @@ impl From<Item> for ItemDto {
             book_metadata_source: item.book_metadata_source,
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
-            poster: image_url(&item.poster_path),
-            backdrop: image_url(&item.backdrop_path),
+            poster: image_url(&item.poster_path, item.updated_at),
+            backdrop: image_url(&item.backdrop_path, item.updated_at),
             resolution: None,
             media: None,
             child_count: None,
@@ -255,7 +283,7 @@ impl ItemDto {
     /// and is still used on the season page (which builds DTOs without this).
     pub fn with_season_poster(mut self, season_poster: Option<String>) -> Self {
         if season_poster.is_some() {
-            self.poster = image_url(&season_poster);
+            self.poster = image_url(&season_poster, self.updated_at);
         }
         self
     }
@@ -300,6 +328,10 @@ pub fn in_progress_dto(item: InProgressItem) -> ItemDto {
 #[derive(Serialize)]
 pub struct FileDto {
     pub id: i64,
+    /// Lossless decimal spelling for route construction in JavaScript. Safe
+    /// integer ids preserve the established byte-for-byte response shape.
+    #[serde(skip_serializing_if = "js_id_text_is_redundant")]
+    pub id_text: String,
     pub filename: String,
     pub size: i64,
     pub duration_ms: Option<i64>,
@@ -333,6 +365,15 @@ pub struct FileDto {
     /// wrong container mount) — the client shows this and refuses to "play"
     /// something that isn't there. Set by the handler, not from the row.
     pub available: bool,
+    /// Server-owned reader actions for this exact detected format.  Clients
+    /// consume the surface entry instead of inferring Read from an extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reader: Option<crate::reader_formats::ReaderCapability>,
+    /// Exact file identity a native document reader must echo when it saves a
+    /// locator.  It is present only for recognized ebook formats, alongside
+    /// `reader`, so clients never have to infer a revision from HTTP dates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reader_revision: Option<RevisionDto>,
     /// Did ffprobe ever succeed on this file? `false` means every media field
     /// above is empty because nothing was ever read — not because the file has
     /// no video. The item page says so and offers a re-analyze, since the usual
@@ -465,6 +506,11 @@ fn defaults_from_selection(
 impl FileDto {
     pub fn from_media_file(f: MediaFile, prefs: &LangPrefs) -> Self {
         let playback_defaults = playback_defaults(&f.audio_streams, &f.subtitle_streams, prefs);
+        let reader = crate::reader_formats::capability(&f.path, f.container.as_deref());
+        let reader_revision = reader.map(|_| RevisionDto {
+            size: f.size,
+            mtime: f.mtime,
+        });
         let filename = f
             .path
             .file_name()
@@ -472,6 +518,7 @@ impl FileDto {
             .unwrap_or_default();
         FileDto {
             id: f.id,
+            id_text: f.id.to_string(),
             filename,
             size: f.size,
             duration_ms: f.duration_ms,
@@ -490,6 +537,8 @@ impl FileDto {
             part_offset_ms: 0,
             chapters: Vec::new(),
             available: true,
+            reader,
+            reader_revision,
             probed: f.probed,
             missing_path: None,
         }
@@ -562,6 +611,24 @@ pub fn chapters_from_probe_json(raw: Option<&str>) -> Vec<ChapterDto> {
 #[cfg(test)]
 mod audiobook_tests {
     use super::*;
+
+    #[test]
+    fn artwork_urls_change_with_the_replicated_item_revision() {
+        let filename = Some("287-poster.jpg".to_owned());
+        let before = image_url(&filename, 1_785_733_260);
+        let after = image_url(&filename, 1_785_733_261);
+
+        assert_eq!(
+            before.as_deref(),
+            Some("/api/v1/images/287-poster.jpg?v=1785733260")
+        );
+        assert_eq!(
+            after.as_deref(),
+            Some("/api/v1/images/287-poster.jpg?v=1785733261")
+        );
+        assert_ne!(before, after, "changed artwork must get a fresh cache key");
+        assert_eq!(image_url(&None, 1_785_733_260), None);
+    }
 
     #[test]
     fn chapter_table_is_named_sorted_and_converted_to_milliseconds() {

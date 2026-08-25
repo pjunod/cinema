@@ -8,17 +8,24 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 hiqlite = { workspace = true }
+hiqlite-wal = { version = "=0.14.0" }
 hex = { workspace = true }
-plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+jsonschema = { workspace = true }
+libc = { workspace = true }
+plurx-core = { path = "../plurx-core", features = ["cluster-read-cost-validation", "cluster-validation"] }
 plurx-compat-plex = { path = "../plurx-compat-plex" }
+reqwest = { workspace = true }
 rusqlite = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "069fdd5d",
+]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "cluster.page-reads", "identity.access"]
+checks = ["rust-gate"]
+reason = "Fragment indexes are node-local on both backends and invalidate by mismatch: the store contract asserts the round trip and the two mismatch cases -- a changed source and a changed video pipeline -- on every backend, and the import guard asserts the table never enters replicated state."

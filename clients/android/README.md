@@ -19,8 +19,27 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.2.7**, build `35` — native viewer parity across phone, foldable,
-> and TV. Build 35 displays bounded book author metadata and exact work-linked
+> Status: **v0.2.7**, build `44` — native viewer parity across phone, foldable,
+> and TV. Build 44 retries a stalled stream through another cluster node's
+> ingress without moving the account origin or spending the codec-compatibility
+> ladder; only a transport failure moves, and an `https` session will not fall
+> back to an `http` sibling. Build 43 quotes native reader item/file identifiers
+> so JavaScript preserves the full signed 64-bit route across the WebView
+> handoff. Build 41
+> compacts the shared Mini, Standard, and Debug playback-info
+> modes, keeps Debug inside every supported screen, and colors fields that need
+> attention. Build 40 introduced the three shared modes and live server-session
+> diagnostics. Build 39
+> restores a saved session's Home shell before checking server
+> reachability, so an Android process recreation cannot strand resume on an
+> empty loading surface while its server is unavailable. Build 38 stops
+> software-only decoder claims above 1080p from selecting direct play while
+> preserving the server's 2160p SDR transcode output.
+> Build 37 reports codec-specific decoder-height ceilings, acknowledges
+> an already-SDR forced-subtitle plan explicitly, and persists redacted failures
+> that happen before Media3 starts. Build 36 consumes Cinema's server-owned ebook format/action registry
+> so detected-but-external formats cannot acquire a false **Read** or offline
+> action. Build 35 displays bounded book author metadata and exact work-linked
 > editions on browse and detail surfaces. Build 34 adds Cinema-managed offline EPUB reading on phones and
 > tablets: a profile/revision-scoped original and bounded publication are
 > published atomically in app-private storage, then served through a synthetic

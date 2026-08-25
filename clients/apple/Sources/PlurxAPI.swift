@@ -165,6 +165,12 @@ struct PlurxAPI {
         guard let url = makeURL("server") else { throw APIError.badURL }
         return try await run(URLRequest(url: url))
     }
+    /// The other ingresses this household's media may be retried through.
+    /// Signed-in only, and deliberately not part of `serverInfo()`: that call
+    /// probes candidates that have not been trusted yet, so it carries no
+    /// credential and must not receive the cluster's addresses either.
+    func clusterIngress() async throws -> ClusterIngress { try await get("cluster/ingress") }
+
     func login(_ body: LoginRequest) async throws -> LoginResponse { try await post("auth/login", body: body) }
     func me() async throws -> User { try await get("me") }
     func libraries() async throws -> [Library] { try await get("libraries") }
@@ -200,11 +206,14 @@ struct PlurxAPI {
         try await deleteNoContent("publication/\(sessionId)")
     }
 
-    func bookContentRequest(fileId: Int) throws -> URLRequest {
+    func bookContentRequest(
+        fileId: Int,
+        accept: String = "application/epub+zip"
+    ) throws -> URLRequest {
         guard let url = makeURL("files/\(fileId)/content") else { throw APIError.badURL }
         var request = URLRequest(url: url)
         Session.shared.authorize(&request)
-        request.setValue("application/epub+zip", forHTTPHeaderField: "Accept")
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         return request
     }
 

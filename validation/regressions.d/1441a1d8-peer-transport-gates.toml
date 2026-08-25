@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1441a1d8"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The retained history audit requires the peer-transport lint correction to name only registered functionality points and to carry durable evidence. Reverting this registration leaves that corrective history uncovered and stops the authoritative PR matrix at preflight."

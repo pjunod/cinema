@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1590f8cf"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Eleven tests pin one interleaving each. `a_segment_is_on_disk_before_the_manifest_claims_it` and `eviction_clears_the_record_before_it_unlinks` fix the two orderings that make a crash leave an unclaimed byte rather than a phantom row. `a_segment_written_but_never_recorded_is_adopted_rather_than_deleted` and `a_claim_on_bytes_that_are_gone_is_forgotten` require reconcile to repair both directions, and `an_admitted_rendition_that_lost_a_member_still_reports_it` requires it to do so even where `evict` refuses -- a rendition that reports every member present while one is missing is exactly the cache hit that 404s a viewer, so a reconcile that inherited eviction's refusal fails here. `an_admitted_rendition_keeps_its_bytes_when_eviction_is_refused` requires the refusal not to unlink, so a refusal cannot break the promise it is enforcing. `making_room_never_takes_a_reader_s_own_media` requires every segment inside an attached reader's window to survive a request to free the whole rendition. `an_index_the_plan_does_not_contain_is_refused_before_anything_is_written` requires the refusal to precede the write. `nothing_partial_is_ever_left_behind` lists the directory the serving layer lists and requires no `.tmp` to survive. `reconciling_a_directory_that_agrees_changes_nothing` and `a_file_that_is_not_a_planned_segment_is_left_alone` bound the repair so it cannot move a byte it was not asked about."

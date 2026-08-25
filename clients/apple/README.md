@@ -12,81 +12,21 @@ anything it can't (MKV, DTS/TrueHD, …) is delivered as the server's on-the-fly
 HDR display at runtime and sends that to `/decision`, so the server transcodes
 only what this hardware genuinely can't play.
 
-> Status: **v0.2.7**, build `73` in [`project.yml`](project.yml) — working
-> development client. Browse, resume, discover, and play on both iOS and
-> tvOS. Both targets compile against the iOS/tvOS 26.5 SDKs and share the
-> same regression suite. Build 73 keeps reconnect and Settings reachable when
-> an offline download opens first. Build 72 displays bounded book author metadata and
-> exact work-linked editions on browse and detail surfaces. Build 71 keeps pending offline reading state separate
-> for each exact item/file/revision edition. Build 70 adds profile-scoped, atomically published
-> offline EPUB reading and newest-locator replay on iPhone and iPad, with no
-> tvOS action. Build 69 adds in-app online EPUB reading on iPhone
-> and iPad with an isolated, same-origin WebView, memory-only authentication,
-> cross-device locator resume, and no tvOS reader action. Build 68 adds the
-> revision-bound ebook reading-state wire models and authenticated API routes.
-> Build 67 gives stall recovery somewhere to go: a
-> reopen on a growing HLS session now names its exact predecessor with
-> `reopen_reason: "stall"`, so the server answers one rung *down* rather than
-> rebuilding the rung that just starved, states `quality_auto` so a subtitle
-> burn's promise height is not read as a sticky manual pick, and stops at the
-> ladder floor — the bound the server deliberately leaves to the client.
-> Build 66 adds unattended physical-device bandwidth acceptance with exact
-> runway evidence. Build 65 keeps the delivery watchdog honest about a player that is
-> still making progress. Build 64 stops the delivery watchdog firing on a
-> healthy player: a full forward buffer looks exactly like a wedge from the
-> server's delivery meter, so the film clock and the buffered runway now have
-> to agree before it recovers. Build 63 makes stall recovery un-foolable: one
-> shared no-progress clock that regime flapping cannot reset, a longer
-> bounded leash (then a visible error) where recovery used to disarm
-> forever, a server-truth delivery watchdog fed by the 2-second status
-> poll, and a rolling budget that turns automatic reopen storms into the
-> failure screen. Build 62 shows the audio and subtitle tracks a file
-> actually has on the detail screen and lets a viewer choose both before
-> pressing Play. Build 61 corrects copy-HLS recovery to seek past the
-> preceding keyframe and adds correlated AVPlayer, access-log, buffer, and
-> server-supply evidence to every stall report. Build 60 requires a concrete
-> PGS overlay track before
-> treating a subtitle as an active overlay, so ordinary playback with no
-> selected subtitle keeps its AVKit PiP controller attached. A physical H.264/
-> AAC baseline on iPhone Air (iOS 26.6) and iPad Pro 13-inch (M4, iPadOS 26.6)
-> reached active PiP and returned or stopped cleanly; the separate in-app PGS
-> refusal still needs physical acceptance. Build 59 keeps the iOS Picture in
-> Picture control
-> reachable when AVKit cannot start yet or an in-app PGS overlay blocks system
-> output, bounds the not-ready explanation to five seconds, and rejects stale
-> availability from a detached PiP controller instead of sending a start
-> command through a nil optional. Build 58 labels a
-> recognized `pgs-v1` subtitle as an
-> Overlay instead of the legacy Burn-in fallback, so the physical HDR/Dolby
-> Vision run in
-> [APPLE-PGS-OVERLAY-ACCEPTANCE.md](../../docs/APPLE-PGS-OVERLAY-ACCEPTANCE.md)
-> can distinguish the path it exercised. Build 57 makes the tvOS progress bar
-> an ordinary focus stop until Select engages scrubbing, so left/right can cross
-> the transport row without seeking. Build 56 restores bidirectional tvOS focus between
-> show/season header actions and their non-empty child shelves. Build 53 splits
-> season episode cards into Play artwork and Details copy on iPhone/iPad; tvOS
-> keeps one lifted card whose Select action plays. Build 52 preserves completed
-> iPhone and iPad offline download
-> locations across the equivalent `/private/var` and `/var` container spellings
-> returned by the system. Build 51 divides a long final audio tail into bounded,
-> sample-preserving HLS segments. A repeated near-end boundary now completes at
-> the actual media position; a genuinely early repeat stops with telemetry and
-> **Try Again** / **Close** actions instead of reopening forever. build `49`
-> adds first-class audiobook details and
-> playback through the shared audio player and progress path; physical-device
-> acceptance remains pending. Build 46 adds a one-shot, session-joined TTFF
-> beacon
-> when the online player first advances, with separate cold-start and resume
-> reasons; passing physical-device evidence remains pending. Build 29 added
-> app-managed offline viewing on iPhone and iPad; the
-> action remains hidden on tvOS. The
-> default-off `pgs-v1` bitmap-overlay client draws PGS over the existing Dolby
-> Vision, HDR, or SDR video
-> without changing its bytes or reopening playback. It is ready for the paired
-> iPhones, iPads,
-> and Bedroom Apple TV, but has not been uploaded to TestFlight.
-> It is not yet at full web parity; the exact boundary is in
-> [Feature parity](#feature-parity).
+> Status: **v0.2.7**, build `82` in [`project.yml`](project.yml) — working
+> development client. Browse, resume, discover, and play on both iOS and tvOS.
+> Both targets compile against the iOS/tvOS 26.5 SDKs and share the same
+> regression suite.
+>
+> Per-build release notes live in
+> [`docs/apple-builds/`](../../docs/apple-builds/README.md). Builds through 78
+> are archived in
+> [`history-through-build-78.md`](../../docs/apple-builds/history-through-build-78.md).
+>
+> The default-off `pgs-v1` bitmap-overlay client draws PGS over the existing
+> Dolby Vision, HDR, or SDR video without changing its bytes or reopening
+> playback. It is ready for the paired iPhones, iPads, and Bedroom Apple TV,
+> but has not been uploaded to TestFlight. It is not yet at full web parity;
+> the exact boundary is in [Feature parity](#feature-parity).
 
 ## What works
 
@@ -125,6 +65,14 @@ only what this hardware genuinely can't play.
   Interrupted transfers become explicit **Download again** rows; removal
   touches only the app-private copy. tvOS exposes no reader or ebook-download
   action.
+- **Online PDF reading on iPhone and iPad.** Cinema downloads the authenticated
+  original into an app-private temporary directory, requires the exact
+  server-advertised revision, and renders it with PDFKit. Page navigation,
+  pinch zoom, selection, local search, explicit completion, and cross-device
+  page resume are built in. Cross-origin redirects, password-protected files,
+  accessibility-restricted files, editions above 1 GiB, and changed byte counts
+  fail closed; the temporary file is removed when the reader closes. Offline
+  PDF and tvOS remain external handoff surfaces.
 - **On-demand player** with explicit play/pause, ±10 seconds, full-film seek,
   Skip Intro/Credits, a real runtime in iOS Now Playing instead of `LIVE`,
   audio/subtitle/quality menus, and a playback-info panel fed by the server's

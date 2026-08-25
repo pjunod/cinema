@@ -97,6 +97,13 @@
 
   h2.section{font-size:16px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--text);margin:26px 4px 14px;padding-top:24px;border-top:1px solid var(--line)}
   h2.section:first-child{border-top:0;padding-top:4px}
+  /* Incremental Home regions are stable DOM mounts. A heading at the start of
+     Coming Soon is no longer main's first heading when a hub preceded it, so
+     restore the shipped separator; keep the old first-heading treatment when
+     the hub mount is genuinely empty. */
+  [data-home-slot="hero"]{display:contents}
+  [data-home-region="soon"]>h2.section:first-child{border-top:1px solid var(--line);padding-top:24px}
+  [data-home-region="hubs"]:empty+[data-home-region="soon"]>h2.section:first-child{border-top:0;padding-top:4px}
   .card h2.section{border-top:0;padding-top:0}   /* cards separate their own sections */
   .getapp{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin:16px 20px 2px;padding:13px 16px;background:rgba(229,72,77,.08);border:1px solid var(--accent);border-radius:12px}
   .getapp a.btn{display:inline-block;background:var(--accent);color:#fff;padding:8px 15px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap}
@@ -394,72 +401,200 @@
      never on screen together and had to be scrolled between and remembered.
      Capped against the viewport, so a narrow window still gets the old single
      column rather than a panel wider than the video. */
-  .statsov{position:absolute;top:64px;left:20px;width:min(880px,calc(100vw - 40px));max-height:calc(100dvh - 190px);
-    background:rgba(8,10,15,.84);border:1px solid rgba(255,255,255,.12);border-radius:10px;
-    font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e8ea;
+  /* One corner, in every size. The panel used to anchor left and mini alone
+     anchored right, so changing size threw the readout across the picture and
+     the eye had to go find it again. Right-anchored throughout: the same
+     corner every time, and the left two thirds of the frame — where faces and
+     subtitles live — are never covered. */
+  .statsov{position:absolute;top:64px;right:20px;left:auto;width:min(780px,calc(100vw - 40px));
+    /* 64 above + 114 below. The transport bar is ~50px tall; the rest is the
+       gap that keeps the panel's edge clear of it. This is a bound, not a
+       promise of fit — the body scrolls inside it rather than growing over
+       the controls. positionStats() re-measures both bars on coarse pointers
+       and overrides top/max-height inline, which beats anything here. */
+    max-height:calc(100dvh - 178px);
+    background:rgba(8,10,15,.88);border:1px solid rgba(255,255,255,.12);border-radius:9px;
+    font:10.5px/1.34 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e8e8ea;
     display:none;flex-direction:column;overflow:hidden;backdrop-filter:blur(5px);z-index:5}
   .statsov.on{display:flex}
   .statshd{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;
-    padding:7px 7px 7px 13px;border-bottom:1px solid rgba(255,255,255,.1);
-    font:600 10.5px/1 ui-sans-serif,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.55)}
-  .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:13px;line-height:1;cursor:pointer;padding:6px 8px;border-radius:6px}
+    padding:5px 5px 5px 9px;border-bottom:1px solid rgba(255,255,255,.1);
+    font:600 9px/1 ui-sans-serif,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.55)}
+  .statsmodes{display:flex;gap:3px;margin-left:auto}
+  .statsmodes button{border:0;border-radius:999px;background:rgba(255,255,255,.07);color:rgba(255,255,255,.58);
+    padding:4px 8px;font:650 9px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em;cursor:pointer;text-transform:none}
+  .statsmodes button.on{background:var(--accent);color:#fff}
+  .statsmodes button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:12px;line-height:1;cursor:pointer;padding:4px 6px;border-radius:5px}
   .statsx:hover{background:rgba(255,255,255,.1);color:#fff}
-  /* Multi-column rather than a grid: the sections have very different
-     heights (Network is three rows, Now decoding can be ten), and grid rows
-     align to the tallest item in each row, which would reintroduce as much
-     empty space as the columns saved. `columns` takes a WIDTH, not a count,
-     so the number of columns follows the panel and no media query has to
-     guess it. The panel still scrolls if a session somehow outgrows even
-     this — the max-height above is a bound, not a promise.
-
-     880/270/112 were measured, not picked: narrower columns fit three across
-     but wrapped the values so hard (46 wrapped lines against 32) that the
-     panel came out TALLER than at two columns, and squeezed the label column
-     until "Client estimate" broke over two lines. Fewer, wider columns is
-     the shorter answer here. */
-  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:10px 13px 11px;
-    columns:270px;column-gap:22px}
-  /* A section is the unit a column break may not fall inside — otherwise a
-     header lands at the foot of one column and its rows at the head of the
-     next, which reads as two unrelated sections. */
-  .stsec{break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid;margin-bottom:9px}
-  /* Playback spans the full width: Reason and Switched are sentences, and a
-     sentence in a 224px column is six short lines. Everything below it is
-     label-and-number, which is what columns are good at. */
-  .stsec.wide{column-span:all;margin-bottom:11px}
-  /* A short screen — a phone held sideways, which is how a phone watches
-     video — inverts the trade. There, vertical space is the scarce thing, and
-     a full-width Playback section spends the entire visible panel on two
-     sentences: measured, 4 of 28 rows reachable without scrolling. Letting it
-     flow with the rest and narrowing the columns puts 13 of 28 on the first
-     screen. It still scrolls (28 rows will not fit a 200px-tall panel however
-     they are arranged) — but what you see first is numbers beside their
-     labels rather than prose. */
-  @media(max-height:640px){
-    .stsec.wide{column-span:none;margin-bottom:9px}
-    .statsbody{columns:230px}
-    .stsec.wide > div{grid-template-columns:112px minmax(0,1fr)}
+  /* The three levels intentionally match the native clients. Mini leaves the
+     picture legible, Standard is the glanceable Source/Now decoding/Server
+     ledger, and Debug is the same ledger with everything in it. */
+  /* Mini shrink-wraps its one line. A fixed 650px box around five short
+     values was mostly empty air over the picture; max-content is exactly as
+     wide as the sentence it holds, and no wider. */
+  .statsov[data-mode=mini]{width:max-content;max-width:calc(100vw - 40px);max-height:none}
+  .statsov[data-mode=standard]{width:min(900px,calc(100vw - 40px))}
+  .statsov[data-mode=debug]{width:min(1040px,calc(100vw - 40px))}
+  /* One ledger, one column's worth of width. These widths are sized for two
+     ledgers side by side; a direct-play session has only the client's half,
+     and at 1040px that was a 503px column of text beside 500px of nothing.
+     Higher specificity than the coarse-pointer width below on purpose — a
+     tablet has the same empty half. */
+  .statsov.onecol[data-mode=standard]{width:min(520px,calc(100vw - 40px))}
+  .statsov.onecol[data-mode=debug]{width:min(600px,calc(100vw - 40px))}
+  /* One line, one baseline, hairlines between the facts. The four-cell grid
+     this replaces stacked a caption over every value and reserved a column
+     width for the widest of them, so mini was three rows tall and half empty.
+     Reading order is the order you ask the questions in: what is playing,
+     where am I, what am I getting, how much is in hand, how fast is it
+     arriving, and is the far end healthy. */
+  /* `wrap`, and it costs nothing on a wide screen: the panel is `max-content`
+     wide, so the line is exactly as wide as it wants to be and there is never
+     a break opportunity to take. It only engages once `max-width` clamps the
+     balloon — on a phone — and then a break is strictly better than the
+     alternative, which was flexbox handing every cell a fraction of its own
+     text: at 390px the method cell was allotted 24px and rendered "T…". */
+  .statsmini{display:flex;flex-wrap:wrap;row-gap:2px;align-items:baseline;min-width:0;white-space:nowrap}
+  .statsmini > div{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .statsmini .sdiv{flex:0 0 auto;align-self:center;width:1px;height:11px;margin:0 9px;background:rgba(255,255,255,.2)}
+  .statsmini .smethod{flex:0 1 auto;font:700 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#fff}
+  .statsmini .spos{flex:0 0 auto;color:rgba(255,255,255,.55)}
+  .statsmini .sval{flex:0 1 auto;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif}
+  /* The buffer and the delivery rate are five characters each and never need
+     to give any of them up. They were shrinking anyway: `.spos` and `.spill`
+     are `flex:0 0 auto`, so the three `.sval`s shared the entire overflow, and
+     at 640px wide "12.5 s" ellipsized to "12…" and "38 Mb/s" to "38 …" — the
+     two numbers a glance is FOR, sacrificed to make room for a longer
+     neighbour. Only the resolution/grade cell shrinks now; it is the one with
+     a redundant half. */
+  .statsmini .sval.sfix{flex:0 0 auto}
+  /* The one thing on this line that is a verdict rather than a measurement,
+     so it is shaped like one. Same state the Server section names in full. */
+  .statsmini .spill{flex:0 0 auto;align-self:center;display:inline-flex;align-items:center;gap:5px;
+    padding:2px 8px 2px 6px;border-radius:999px;background:rgba(255,255,255,.08);
+    font:650 9.5px/1.2 ui-sans-serif,system-ui,sans-serif;color:rgba(255,255,255,.8)}
+  .statsmini .sdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+  .statsov .stat-good{color:#6ddb98!important}
+  .statsov .stat-warn{color:#ffbd4a!important}
+  .statsov .stat-bad{color:#ff6268!important}
+  .statsov .stat-muted{color:rgba(255,255,255,.52)!important}
+  @media(max-width:560px){
+    .statsmini .sdiv{margin:0 6px}
   }
+  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:7px 9px 8px}
+  /* Two explicit tracks with a FIXED section→column assignment — Playback,
+     Source and Now decoding on the left; Network and Server on the right —
+     rather than the `columns:` reflow this replaces. Reflow chose sides on
+     the fly from the rendered height, and the panel re-renders once a second:
+     a section moved across the panel the moment a row appeared or a value got
+     a digit longer, under the eye of someone mid-sentence reading it. Which
+     side a thing is on is now a property of what it is.
+     The split is also the question people are actually asking: the left
+     column is this machine's account of the stream, the right column is the
+     far end's. Blame lives in the difference between the two, so they are
+     side by side rather than one after the other. */
+  /* `.statscols`, not `.cols`: this is one 12k-line global stylesheet shared by
+     the library, the admin pages and the player, and a name that generic was
+     one careless `class="cols"` in an unrelated view away from inheriting a
+     two-track grid it never asked for. Every selector here is stats-only, so
+     the name says so. */
+  .statscols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px;align-items:start}
+  .statscols > div{min-width:0}
+  /* A direct-play session has no server-side half at all — no health, no hls,
+     no cache — so Network and Server render nothing and the right track is
+     empty air for half the panel while the left one is squeezed. When
+     panelHtml sees one side come back empty it says so here, and the panel
+     narrows to the one ledger it actually has. */
+  .statscols.one{grid-template-columns:minmax(0,1fr)}
+  .stsec{margin-bottom:6px}
+  /* Sentences leave the grid. Reason, the auto-switch log, the codec lines
+     and the hitch verdict are prose, and prose in a half-panel column is six
+     short ragged lines that push every number below the fold. They collect
+     here instead: full width, at the foot of the panel, under a hairline, in
+     the order the sections that own them appear. The label keeps the same
+     gutter as every row above, and the sentence hangs off it — a wrapped
+     clause lines up under its own first word rather than under the label. */
+  .snotes{margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.13)}
+  /* Which section a sentence came from, when more than one contributed. Flat,
+     the strip read as one undifferentiated list and nothing said that Video
+     and Audio are facts about the FILE while Dynamic range and Hitches are
+     facts about this playback — the same distinction the two ledgers above
+     make by position, lost the moment a row left the grid.
+     Deliberately NOT styled like `.sechd`: muted grey, sentence case, no
+     accent and no extra tracking, because the word "Source" appearing twice
+     on one panel in two different weights reads as two different things. This
+     is a quiet backreference to a heading, not another heading. */
+  .snotegrp{color:rgba(255,255,255,.34);font-weight:600;font-size:9.5px;margin:5px 0 1px}
+  .snotes > .snotegrp:first-child{margin-top:0}
+  .snote{padding:1px 0 1px 112px;text-indent:-112px;overflow-wrap:anywhere;color:rgba(255,255,255,.72)}
+  .snote > b{display:inline-block;width:112px;box-sizing:border-box;padding-right:7px;text-indent:0;vertical-align:top}
   /* Two real columns rather than an inline-block label with a minimum width.
      That version had no gap of its own, so any label wider than the minimum
      touched its value ("Client estimate338 Mb/s"), and a value long enough to
      wrap — the Reason line, every time — came back to the left margin and read
      as a new field. A grid fixes both: the gap is the gutter, and wrapped text
      stays inside the value column. Each row is its own grid, so the width is
-     fixed rather than max-content; every label here fits 116px at this size.
-     Section headers opt out, being one item and not two. */
+     fixed rather than max-content: 112px, which every label here fits at this
+     size, and which the notes strip below reuses so a note's first word lands
+     on the same left edge as a value. Section headers opt out, being one item
+     and not two. */
   /* `anywhere`, because the values worth reading most are the ones with no
      break opportunity in them: a browser's own error text arrives as
      PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED, one unbreakable token
      wider than any column here, and it was being clipped at the panel edge —
      losing the end of the sentence that says what went wrong. */
-  .stsec > div{display:grid;grid-template-columns:112px minmax(0,1fr);gap:0 10px;align-items:baseline;
-    overflow-wrap:anywhere}
-  /* The full-width section can afford the wider label column it always had. */
-  .stsec.wide > div{grid-template-columns:116px minmax(0,1fr)}
-  .stsec > div.sechd{display:block}
+  .stsec .r{display:grid;grid-template-columns:112px minmax(0,1fr);gap:0 7px;align-items:baseline;
+    padding:1px 0;overflow-wrap:anywhere}
+  .stsec .r > span{min-width:0}
+  /* A section aligns as a unit, decided from its own rendered rows: if nearly
+     all of them are numbers, the whole section's values go flush right on a
+     tabular figure grid, so digits stack in their places and a rate that
+     doubled is visible as a wider number without reading it. A section with
+     words in it stays flush left, where words belong. Mixing the two inside
+     one section was the worst of both — a ragged right edge that still looked
+     like it was trying to be a table. */
+  .stsec.num .r > span{text-align:right;font-variant-numeric:tabular-nums}
+  /* …with a per-row escape hatch, because the section verdict is a majority
+     vote and the minority is always the prose. "Now decoding" scores 4 of 5
+     numeric and goes flush right, which then right-ragged the Decoder
+     sentence over three wrapped lines and the frame-rate clause over two —
+     wrapped prose set flush right is the least readable thing on the panel,
+     and tabular figures inside a sentence space its digits like a table.
+     A row whose value is a sentence rather than a quantity keeps normal
+     figures and its left edge; the section keeps its column of numbers. */
+  .stsec.num .r.txt > span{text-align:left;font-variant-numeric:normal}
+  .stsec .sechd{display:block}
+  /* ---- responsive, and deliberately AFTER every base rule above ----------
+     These override `.statscols` and `.stsec .r` at the SAME specificity, so
+     they only win by source order. Sitting above the base rules (where the
+     narrow-viewport block used to live) they were simply dead: a 390px phone
+     in portrait still got two tracks, a 39px value column and a 1629px-tall
+     panel. Keep new breakpoints below this line. */
+  /* A short screen — a phone held sideways, which is how a phone watches
+     video — has no width to spend on two ledgers AND no height to waste, so
+     the columns stack and the label gutter narrows to buy value width. */
+  @media(max-height:640px){
+    .statscols{grid-template-columns:minmax(0,1fr)}
+    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
+    /* The notes strip borrows the rows' gutter so a sentence's first word
+       lands on the same left edge as a value. It has to borrow the narrowed
+       one too, or the promise only holds on a desktop. */
+    .snote{padding-left:92px;text-indent:-92px}
+    .snote > b{width:92px}
+  }
+  /* Too narrow for two ledgers side by side; the assignment survives, the
+     columns just stack in the order they are written. Same narrowed gutter as
+     the short-screen case above — a portrait phone is the tighter of the two,
+     not the looser one. */
+  @media(max-width:560px){
+    .statscols{grid-template-columns:minmax(0,1fr)}
+    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
+    .snote{padding-left:92px;text-indent:-92px}
+    .snote > b{width:92px}
+  }
   .statsov b{color:rgba(255,255,255,.5);font-weight:600}
-  .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:1px;text-transform:uppercase;letter-spacing:.05em;font-size:10.5px}
+  .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
   .pmenu{position:absolute;top:60px;right:20px;min-width:190px;max-width:300px;background:rgba(14,16,22,.97);border:1px solid rgba(255,255,255,.14);
     border-radius:10px;padding:6px;display:none;z-index:6;box-shadow:0 10px 30px rgba(0,0,0,.5)}
   /* Opened from the transport rather than the top bar: sit above the button
@@ -483,7 +618,7 @@
        the width on a screen too narrow for 360px. Height is capped, not pinned
        to both edges — pinned made it as tall as the gap no matter how little it
        held; positionStats() caps it against the real bars instead. */
-    .statsov{top:calc(env(safe-area-inset-top,0px) + 96px);left:12px;right:auto;
+    .statsov{top:calc(env(safe-area-inset-top,0px) + 96px);right:12px;left:auto;
       width:min(880px,calc(100vw - 24px));
       max-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 190px)}
     .pmenu{top:calc(env(safe-area-inset-top,0px) + 92px);right:12px;max-width:min(300px,calc(100vw - 24px));
@@ -492,6 +627,10 @@
     /* the synopsis strip and the stats panel both want the lower half — the
        one you just asked for wins */
     .player.statson .pinfo{display:none}
+  }
+  @media(pointer:coarse){
+    /* Mini shrink-wraps here too; only its ceiling changes, to the touch inset. */
+    .statsov[data-mode=mini]{max-width:calc(100vw - 24px)}
   }
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
     padding:10px 16px;border-radius:10px;z-index:60;opacity:0;transition:opacity .2s;pointer-events:none}
@@ -503,6 +642,11 @@
      which left the sticky header narrower than the body. minmax(0,…) lets the
      track shrink so the table scrolls inside its card instead. */
   .adminwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;max-width:960px}
+  /* Keep action cells in the table formatting context. Applying `.row`
+     directly to a <td> changes it to display:flex, so its height and bottom
+     rule stop following a taller multi-line row. The flex row belongs inside
+     the cell: the table owns alignment, while the child owns button layout. */
+  .adminwrap td.rowactions{vertical-align:middle}
   /* No-key warning banner (e.g. TMDB not configured → no artwork). */
   .setwarn{background:color-mix(in srgb,#e8a33d 15%,var(--panel));border:1px solid color-mix(in srgb,#e8a33d 45%,var(--line));
     border-radius:10px;padding:11px 14px;margin:0 0 16px;font-size:13.5px;line-height:1.55}
@@ -525,7 +669,8 @@
     .adminwrap td{padding:3px 0;border:0}
     .adminwrap td[data-label]::before{content:attr(data-label);display:block;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:1px}
     .adminwrap td.libname{font-size:16px;font-weight:700;padding-bottom:3px}
-    .adminwrap td.rowactions{justify-content:flex-start;padding-top:9px}
+    .adminwrap td.rowactions{padding-top:9px}
+    .adminwrap td.rowactions>.row{justify-content:flex-start!important}
   }
   /* Settings tab bar — one group visible at a time (persisted per browser). */
   .settabs{display:flex;gap:2px;flex-wrap:wrap;margin:0 0 20px;border-bottom:1px solid var(--line)}
@@ -603,7 +748,18 @@
   .clstate.good{border-left-color:var(--good)}
   .clstate.warn{border-left-color:var(--warn,#fbbf24)}
   .clstate.calm{border-left-color:var(--line)}
-  .clnode{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
+  /* A UUID is stable but useless for recognizing a machine. Lead with the
+     short OS hostname, keep the advertised host and node id as copyable
+     details, and put leadership beside the host it belongs to instead of
+     making the operator infer it from a removal refusal. */
+  .clidentity{min-width:190px}
+  .clhostline{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .clhost{font-size:15px;font-weight:700;line-height:1.3;overflow-wrap:anywhere}
+  .claddr{margin-top:4px;color:var(--text);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    font-size:11.5px;font-weight:500;line-height:1.35;overflow-wrap:anywhere}
+  .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
+  .clleader{color:var(--accent);border-color:var(--accent)}
   /* A join token is a complete cluster credential shown exactly once. It gets
      its own loud box so nobody mistakes it for an id they can leave on screen,
      and `user-select:all` makes copying it one gesture on a machine with no
@@ -706,7 +862,7 @@
   .specs .trk{border:1px solid var(--line);border-radius:999px;padding:2px 9px;line-height:1.5}
   .specs .trk.on{border-color:var(--accent);color:var(--accent)}
   .specs .trk .tdef{font-weight:600}
-  /* Large subtitle inventories stay out of the way until they are wanted.
+  /* Large track inventories stay out of the way until they are wanted.
      Native details/summary keeps the disclosure keyboard-accessible without
      adding another page-level state machine. The server-selected track is the
      one line that remains visible while the disclosure is closed. */
@@ -1896,6 +2052,8 @@
   font-size:12px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
   color:var(--muted)}
 [data-layout=theater] h2.section:first-child{margin-top:6px}
+[data-layout=theater] [data-home-region="soon"]>h2.section:first-child{border-top:0;padding-top:0;margin-top:30px}
+[data-layout=theater] [data-home-region="hubs"]:empty+[data-home-region="soon"]>h2.section:first-child{margin-top:6px}
 
 /* Larger posters. Note the variable: the SHIPPED name is --poster (set on
    <html> by applyPosterSize() from the user's icon-size preference), not the
@@ -2479,7 +2637,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 </head>
 <body>
 <div id="app"></div>
-<div class="modal" id="modal"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="audiobtn" style="display:none" onclick="toggleMenu('audio')">🔊 Audio</button><button class="pbtn" id="subsbtn" style="display:none" onclick="toggleMenu('subs')">💬 Subtitles</button><button class="pbtn" id="qualbtn" title="Playback quality" onclick="toggleMenu('quality')">◆ Quality</button><button class="pbtn" id="syncbtn" title="Audio sync adjustment" onclick="toggleMenu('sync')">⇄ Sync</button><button class="pbtn" id="statsbtn" title="Playback info (i)" onclick="toggleStats()">ⓘ Stats</button><button class="pbtn" id="skipbtn" title="Auto-skip intro & credits" onclick="togglePlayerAutoskip()">⏭ Auto-skip</button><button class="pbtn" id="autonextbtn" title="Auto-play the next episode when one finishes" onclick="togglePlayerAutonext()">▶ Autoplay</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptransport" id="ptransport"><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon nudge" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon nudge" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span><button class="picon paud" id="pbaudio" aria-label="Audio track" title="Audio track (a)" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">ⓘ</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov"><div class="statshd"><span>Playback info</span><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu"></div></div></div>
+<div class="modal" id="modal"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="audiobtn" style="display:none" onclick="toggleMenu('audio')">🔊 Audio</button><button class="pbtn" id="subsbtn" style="display:none" onclick="toggleMenu('subs')">💬 Subtitles</button><button class="pbtn" id="qualbtn" title="Playback quality" onclick="toggleMenu('quality')">◆ Quality</button><button class="pbtn" id="syncbtn" title="Audio sync adjustment" onclick="toggleMenu('sync')">⇄ Sync</button><button class="pbtn" id="statsbtn" title="Playback info (i)" onclick="toggleStats()">ⓘ Stats</button><button class="pbtn" id="skipbtn" title="Auto-skip intro & credits" onclick="togglePlayerAutoskip()">⏭ Auto-skip</button><button class="pbtn" id="autonextbtn" title="Auto-play the next episode when one finishes" onclick="togglePlayerAutonext()">▶ Autoplay</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptransport" id="ptransport"><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon nudge" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon nudge" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span><button class="picon paud" id="pbaudio" aria-label="Audio track" title="Audio track (a)" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">ⓘ</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span>Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu"></div></div></div>
 <div class="toast" id="toast"></div>
 
 <script src="/assets/playback-policy.js"></script>
@@ -2497,6 +2655,7 @@ const API = "/api/v1";
 // the native WebView prepares the handoff.
 const NATIVE_READER_BOOT = new URLSearchParams(location.search).get("native-reader")==="1";
 let TOKEN = NATIVE_READER_BOOT ? null : (localStorage.getItem("plurx_token") || null);
+let AUTH_GENERATION=0;
 let ME = null;
 
 function nativeReaderPost(event,message=""){
@@ -2513,11 +2672,11 @@ function nativeReaderPost(event,message=""){
 }
 
 async function startNativeReader(token,itemId,fileId){
-  const item=Number(itemId), file=Number(fileId);
-  if(!NATIVE_READER_BOOT||typeof token!=="string"||!token||!Number.isInteger(item)||item<1||!Number.isInteger(file)||file<1){
+  const item=String(itemId), file=String(fileId);
+  if(!NATIVE_READER_BOOT||typeof token!=="string"||!token||!(/^[1-9]\d*$/).test(item)||!(/^[1-9]\d*$/).test(file)){
     nativeReaderPost("error","Cinema could not validate this reader handoff."); return false;
   }
-  TOKEN=token; ME=null;
+  TOKEN=token; AUTH_GENERATION++; ME=null;
   history.replaceState(null,"",`${location.pathname}?native-reader=1#/read/${item}/${file}`);
   await boot();
   return true;
@@ -2526,11 +2685,23 @@ window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
 async function api(path, {method="GET", body=null, raw=false}={}){
+  const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
   const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null});
-  if(res.status===401){ logout(); throw new Error("unauthorized"); }
+  if(authGeneration!==AUTH_GENERATION){
+    const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
+    throw error;
+  }
+  if(res.status===401){
+    // Parallel requests from an expired credential may finish after the user
+    // has already signed in again. Only the credential generation that sent
+    // this request may clear the current session.
+    if(authGeneration===AUTH_GENERATION) logout();
+    const error=new Error("unauthorized"); error.status=401;
+    throw error;
+  }
   // `{error}` is the legacy body; `{code, message}` is the typed one routes
   // migrate to as their client contracts need a machine-readable cause. Read
   // both, or a typed refusal — "this server's ffmpeg has no subtitles filter"
@@ -2966,7 +3137,15 @@ function artHtml(it, cls){
 // ---- auth flows -----------------------------------------------------------
 function logout(){
   if(READER) destroyReader(false);
-  TOKEN=null; ME=null;
+  PAGE_RENDER_GENERATION++;
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  ACTIVITY_SNAPSHOT=null; ACTIVITY_DETAIL_BUSY=0;
+  SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_TICKING=null; SETTINGS_DATA={};
+  SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+  LOGS_RUN=null; CLUSTER_LOGS_RUN=null;
+  CLUSTER_LOADED=false; CLUSTER_LEAVING=false; forgetJoinToken();
+  const protectedMain=document.getElementById("main"); if(protectedMain) protectedMain.innerHTML="";
+  TOKEN=null; AUTH_GENERATION++; ME=null;
   if(!NATIVE_READER_BOOT) localStorage.removeItem("plurx_token");
   clearInterval(ACT_TIMER); ACT_TIMER=null; document.documentElement.classList.remove("working");
   if(NATIVE_READER_BOOT){ nativeReaderPost("session-ended"); return; }
@@ -3028,7 +3207,7 @@ function renderSetup(){
       if(p.value.length<8) throw new Error("Password must be at least 8 characters.");
       if(p.value!==p2.value){ p2.value=""; p2.focus(); throw new Error("Those two passwords don't match. Try again."); }
       const r=await api("/setup",{method:"POST",body:{username:u.value.trim(),password:p.value}});
-      TOKEN=r.token; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
+      TOKEN=r.token; AUTH_GENERATION++; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
     });
 }
 function renderLogin(){
@@ -3042,7 +3221,7 @@ function renderLogin(){
      </details>`,
     "Sign in", async()=>{
       const r=await api("/auth/login",{method:"POST",body:{username:u.value.trim(),password:p.value,device:"Web"}});
-      TOKEN=r.token; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
+      TOKEN=r.token; AUTH_GENERATION++; localStorage.setItem("plurx_token",TOKEN); ME=r.user; location.hash="#/"; render();
     });
 }
 
@@ -3220,24 +3399,37 @@ window.addEventListener("keydown",e=>{
 // ---- global activity indicator --------------------------------------------
 // Always-visible pill: whatever the server is doing right now (scans,
 // metadata, streams — later: moves, backups). Empty response = hidden.
-let ACT_TIMER=null;
-async function pollActivity(){
-  if(!TOKEN||!ME) return;
+let ACT_TIMER=null, ACT_POLLING=false;
+function paintActivity(acts){
   const el=document.getElementById("activity");
   if(!el) return;
+  // the cursor is the status light: blinking = working, solid = idle (noirr)
+  document.documentElement.classList.toggle("working", acts.length>0);
+  if(!acts.length){ el.style.display="none"; el.innerHTML=""; return; }
+  const a=acts[0];
+  const bits=[esc(a.label)];
+  if(a.detail) bits.push(esc(a.detail));
+  if(a.percent!=null) bits.push(a.percent+"%");
+  const extra=acts.length>1?` &nbsp;+${acts.length-1}`:"";
+  el.innerHTML=`<span class="spin"></span><span>${bits.join(" · ")}${extra}</span>`;
+  el.style.display="flex";
+}
+async function pollActivity(){
+  // The Activity page has a richer poll of its own. Do not make both pollers
+  // pay separate auth and leader-read costs for the same screen, and never
+  // stack requests when a slow cluster round outlives the timer interval.
+  if(!TOKEN||!ME||location.hash==="#/activity"||document.visibilityState==="hidden"||ACT_POLLING) return;
+  const el=document.getElementById("activity");
+  if(!el) return;
+  const generation=PAGE_RENDER_GENERATION;
+  const route=location.hash;
+  ACT_POLLING=true;
   try{
     const acts=await api("/activity");
-    // the cursor is the status light: blinking = working, solid = idle (noirr)
-    document.documentElement.classList.toggle("working", acts.length>0);
-    if(!acts.length){ el.style.display="none"; el.innerHTML=""; return; }
-    const a=acts[0];
-    const bits=[esc(a.label)];
-    if(a.detail) bits.push(esc(a.detail));
-    if(a.percent!=null) bits.push(a.percent+"%");
-    const extra=acts.length>1?` &nbsp;+${acts.length-1}`:"";
-    el.innerHTML=`<span class="spin"></span><span>${bits.join(" · ")}${extra}</span>`;
-    el.style.display="flex";
+    if(generation!==PAGE_RENDER_GENERATION||route!==location.hash||location.hash==="#/activity") return;
+    paintActivity(acts);
   }catch(e){}
+  finally{ ACT_POLLING=false; }
 }
 
 // ---- cards ----------------------------------------------------------------
@@ -3317,17 +3509,19 @@ function card(it, watchCtx){
   // chain this replaces was both fragile and wrong: a folder card has no watch
   // state either, so it got flagged as unwatched.
   const cls = `poster k-${esc(it.kind||"item")}${(!watched&&!prog)?" unw":""}`;
-  return `<div class="${cls}" onclick="location.hash='#/item/${it.id}'">
+  const itemId=exactWireId(it);
+  return `<div class="${cls}" onclick="location.hash='#/item/${itemId}'">
     <div class="artbox">${img}${dur}${watched}</div><div class="meta"><div class="t">${esc(main)}</div><div class="s"><span class="stxt">${sub}</span>${resb}</div>${watchLine(it,watchCtx)}</div>${prog}</div>`;
 }
 // Folder and photo cards. A folder opens its page; a photo opens the lightbox
 // in place, because paging through a shoebox of stills via a detail page each
 // time is nobody's idea of looking at photos.
 function homeCard(it){
+  const itemId=exactWireId(it);
   if(it.kind==='folder'){
     const n=it.child_count;
     const sub=n==null? "Folder" : `${n} item${n===1?'':'s'}`;
-    return `<div class="poster k-folder" onclick="location.hash='#/item/${it.id}'">
+    return `<div class="poster k-folder" onclick="location.hash='#/item/${itemId}'">
       <div class="artbox">${artHtml(it)}</div>
       <div class="meta"><div class="t">${esc(it.title)}</div><div class="s"><span class="stxt">${esc(sub)}</span></div></div></div>`;
   }
@@ -3337,7 +3531,7 @@ function homeCard(it){
 }
 function grid(items){
   // Remember this grid's photos so the lightbox can walk them with ←/→.
-  PHOTO_SET=(items||[]).filter(i=>i.kind==='photo').map(i=>({id:i.id,title:i.title,recorded_at:i.recorded_at}));
+  PHOTO_SET=(items||[]).filter(i=>i.kind==='photo').map(i=>({id:exactWireId(i),title:i.title,recorded_at:i.recorded_at}));
   return items.length? `<div class="grid">${items.map(i=>card(i)).join("")}</div>` : `<div class="empty">Nothing here yet.</div>`;
 }
 
@@ -3527,23 +3721,15 @@ function groupToggleHtml(group){
 // first; activity, settings, search, auth and the player keep their existing
 // renderers behind the layout chrome until a gate converts them.
 //
-// The hard rule for a conversion: it must not change the route's network
-// behaviour. Same endpoints, same counts, same order, before and after — which
-// is why loadHome() reproduces the original's awkward sequencing (one awaited
-// batch per category, or one awaited request per share) rather than tidying it
-// into a single Promise.all. Tidying it would be a performance change smuggled
-// in under a refactor, and it would show up as a diff in the request log the
-// gate compares.
-async function loadHome(){
-  // coming-soon is fetched with the rest but never allowed to fail the page:
-  // it depends on another application, and the home screen must not.
-  const [libs, hubs, soon] = await Promise.all([
-    api("/libraries"), api("/hubs"),
-    api("/coming-soon").catch(()=>({configured:false,entries:[]})),
-  ]);
-  const group=homeGroup();
+// Turn the fixed-size server batch into the layout-neutral Home model. The
+// browser never fans out by library: every roster size is the same three HTTP
+// requests (/hubs, /home/previews, and /coming-soon).
+function buildHomeSections(batch,group=homeGroup()){
+  const previews=(batch&&batch.libraries)||[];
+  const libs=previews.map(preview=>preview.library);
   const sections=[];
   if(libs.length){
+    const byId=Object.fromEntries(previews.map(preview=>[preview.library.id,preview]));
     if(group==="category"){
       // Bucket libraries by category, keeping Movies before TV before others.
       const order=[], byKey={};
@@ -3551,31 +3737,78 @@ async function loadHome(){
       order.sort((a,b)=>catOrder(a)-catOrder(b)||a.localeCompare(b));
       for(const key of order){
         const g=byKey[key];
-        const pages=await Promise.all(g.libs.map(l=>api(`/libraries/${l.id}/items?limit=24&sort=added`)));
+        const pages=g.libs.map(l=>byId[l.id]);
         sections.push({
           key,
           name:g.cat.name,
           items:[].concat(...pages.map(p=>p.items)).slice(0,24),
           total:pages.reduce((n,p)=>n+(p.total||0),0),
+          unavailable:false,
           // One share in this category → link straight to it; several → merged category page.
           href:g.libs.length===1 ? `#/library/${g.libs[0].id}` : `#/category/${encodeURIComponent(key)}`,
         });
       }
     } else {
       for(const lib of libs){
-        const page=await api(`/libraries/${lib.id}/items?limit=24&sort=added`);
-        sections.push({key:String(lib.id), name:lib.name, items:page.items, total:page.total, href:`#/library/${lib.id}`});
+        const page=byId[lib.id];
+        sections.push({key:String(lib.id), name:lib.name, items:page.items, total:page.total,
+          unavailable:false, href:`#/library/${lib.id}`});
       }
     }
   }
-  return {kind:"home", hubs, soon, libs, group, sections};
+  return {libs,group,sections};
 }
-async function viewHome(){
-  layoutChrome("home", `<div id="hubs"><div class="empty">Loading…</div></div>`);
-  const page=await loadHome();
-  document.getElementById("main").innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
-  wireRails();
-  restoreScroll();
+async function viewHome(generation=++PAGE_RENDER_GENERATION){
+  const route=location.hash;
+  const page={kind:"home",
+    hubs:{continue_watching:[],next_up:[],recently_added:[]},
+    soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
+    hubsPending:true,previewsPending:true,soonPending:true,
+    hubsError:false,previewsError:false,soonError:false};
+  const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
+  const commit=(name,content=false)=>{
+    if(!current()) return;
+    const main=document.getElementById("main"); if(!main) return;
+    const template=document.createElement("template");
+    const keepPhotos=name==="previews"?null:PHOTO_SET, keepLightboxAt=LB_AT;
+    template.innerHTML=layoutView("home",page)||`<div class="empty">Nothing here yet.</div>`;
+    if(keepPhotos){ PHOTO_SET=keepPhotos; LB_AT=keepLightboxAt; }
+    const incoming=template.content.querySelectorAll(`[data-home-region="${name}"]`);
+    for(const next of incoming){
+      const slot=next.dataset.homeSlot;
+      const old=main.querySelector(`[data-home-region="${name}"][data-home-slot="${slot}"]`);
+      if(old) old.replaceWith(next);
+    }
+    wireRails();
+    if(content) setPagePhase(route,generation,"content");
+    if(name==="previews") restoreScroll();
+  };
+  layoutChrome("home",layoutView("home",page));
+  setPagePhase(route,generation,"shell");
+  const region=(name,promise,apply)=>promise.then(value=>{
+    if(!current()) return;
+    page[`${name}Pending`]=false; const meaningful=apply(value); commit(name,meaningful);
+  }).catch(error=>{
+    if(error&&error.status===401) throw error;
+    if(!current()) return;
+    page[`${name}Pending`]=false; page[`${name}Error`]=true;
+    const visible=name==="hubs"||name==="previews";
+    if(visible) setPageFailure(route,generation,`${name}_error`);
+    commit(name,visible);
+  });
+  await Promise.allSettled([
+    region("hubs",api("/hubs"),value=>{
+      page.hubs=value;
+      return ["continue_watching","next_up","recently_added"].some(key=>(value[key]||[]).length);
+    }),
+    region("previews",api("/home/previews"),value=>{
+      Object.assign(page,buildHomeSections(value,page.group));
+      return true; // even an empty roster paints the useful "No libraries" state
+    }),
+    region("soon",api("/coming-soon"),value=>{ page.soon=value; return !!(value.entries||[]).length; }),
+  ]);
+  if(!current()) return;
+  setPagePhase(route,generation,"settled");
 }
 // ---- layout renderers -----------------------------------------------------
 // Attached to the registry declared in the <head> script. A layout supplies a
@@ -3616,26 +3849,35 @@ function layoutRegion(name, region, model){
 // It is the zero-diff baseline every other layout is measured against, so this
 // function changes only when the shipped app is meant to change.
 function classicHomeBody(p){
-  let html=installBannerHtml();
+  let hubs=installBannerHtml(), soon="", previews="";
   // The first two rails pass watchCtx: those rows are about where you are in
   // something, so the card carries "23m left" / "watched Tuesday".
-  if(p.hubs.continue_watching.length){ html+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
-  if(p.hubs.next_up && p.hubs.next_up.length){ html+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
-  if(p.hubs.recently_added.length){ html+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
+  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
+  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
+  if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
   // Coming soon: what monarr expects. Absent entirely when nothing is paired
   // or monarr had nothing to say — an empty rail is worse than no rail.
   if(p.soon && p.soon.entries && p.soon.entries.length){
-    html+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+    soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
   }
-  if(p.libs.length){
-    html+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
-      html+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· view all (${s.total})</a></h2>${grid(s.items)}`;
+      const count=s.total==null?"preview unavailable":`view all (${s.total})`;
+      const unavailable=s.unavailable?`<div class="hint">Some library previews are unavailable right now.</div>`:"";
+      previews+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
     }
   } else {
-    html+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':''}</div>`;
   }
-  return html;
+  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
 // One rail: a heading, and a strip with an arrow at each end.
 //
@@ -4128,7 +4370,7 @@ function dynamicRangeBadge(f, delivered, displayHdr){
   const displayLoss = delivered!=='sdr' && !displayHdr;
   const rendered = displayLoss ? 'sdr' : delivered;
   if(rendered===source) return {...lit, rendered, panel:`${RANGE_LONG[source]} (rendering)`};
-  const note = displayLoss ? "this display is not HDR"
+  const note = displayLoss ? "this browser did not expose HDR presentation"
     : (dynamicRangeReason()
       || (rendered==='sdr' ? `tone-mapped from ${RANGE_LONG[source]||'the source grade'}`
         : source==='dolby_vision' ? "Dolby Vision removed for this browser"
@@ -4250,7 +4492,7 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   if(tracks.length){
     if(collapse&&tracks.length>1){
       // Lead with what actually plays, rather than assuming the container's
-      // first subtitle is the useful one. The remaining source-ordered tracks
+      // first track is the useful one. The remaining source-ordered tracks
       // stay present in the document and are one click/tap away.
       const primary=tracks.find(t=>t.index===selectedIndex)||tracks[0];
       const rest=tracks.filter(t=>t!==primary);
@@ -4273,7 +4515,7 @@ function specBlock(f){
   // emptier than it was.
   const audRow=ad
     ? trackFactRow("Audio", auds, ad.selected_index==null?-1:ad.selected_index,
-        (a,on)=>trackChip(audioFactLabel(a),on), preferredLanguageNote("audio",ad))
+        (a,on)=>trackChip(audioFactLabel(a),on), preferredLanguageNote("audio",ad), true)
     : `<dt>Audio</dt><dd>${esc(auds.map(audioLabel).filter(Boolean).join("  /  ")||"—")}</dd>`;
   // Subtitles were previously not on this page at all: the only way to learn a
   // file's subtitles was to start playback and open the CC menu. A file with
@@ -4499,18 +4741,19 @@ function epThumb(ep){
   return `<div class="epthumb">${ep.episode_number!=null?ep.episode_number:"?"}${prog}</div>`;
 }
 function episodeRow(ep){
+  const itemId=exactWireId(ep);
   const bits=[ep.episode_number!=null?`Episode ${ep.episode_number}`:'',ep.air_date?fmtDate(ep.air_date):'',fmtDur(ep.runtime_ms)].filter(Boolean).map(m=>`<span>${esc(m)}</span>`);
   const epw=ep.watch, epdur=itemDurMs(ep);
   if(epw && !epw.watched && epw.position_ms>3000 && epdur) bits.push(`<span class="epleft">${esc(fmtDur(Math.max(0,epdur-epw.position_ms))+" left")}</span>`);
   if(ep.watch&&ep.watch.watched) bits.push('<span class="epwatched">✓ Watched</span>');
-  return `<div class="eprow" onclick="location.hash='#/item/${ep.id}'">
+  return `<div class="eprow" onclick="location.hash='#/item/${itemId}'">
     ${epThumb(ep)}
     <div style="min-width:0">
       <div class="eptitle">${ep.episode_number!=null?esc(ep.episode_number+". "):""}${esc(ep.title)}</div>
       <div class="epmeta">${bits.join("")}</div>
       ${ep.overview?`<div class="epov">${esc(ep.overview)}</div>`:""}
     </div>
-    <button class="ghost sm epplay" title="Play" onclick="event.stopPropagation();AUTOPLAY=${ep.id};location.hash='#/item/${ep.id}'">▶</button>
+    <button class="ghost sm epplay" title="Play" onclick="event.stopPropagation();AUTOPLAY='${itemId}';location.hash='#/item/${itemId}'">▶</button>
   </div>`;
 }
 // Set by an episode-row play button so the target item auto-plays on arrival.
@@ -4529,7 +4772,7 @@ async function loadItem(id){
   // French audio track chosen for one film quietly applying to the next.
   clearPrePlay();
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>ITEM_FOR_FILE[f.id]=Number(id));
+  d.files.forEach(f=>ITEM_FOR_FILE[f.id]=String(id));
   const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
@@ -4565,10 +4808,9 @@ async function loadItem(id){
   // A multipart audiobook owns one global timeline. Pick the part containing
   // the saved item position and hand the player a local offset inside it.
   let playable=available[0]||null, playStart=resume;
-  // A book can carry several original formats. The built-in action must pick
-  // an EPUB rather than whichever file happened to sort first; every other
-  // format keeps the honest platform fallback.
-  if(it.kind==='book') playable=available.find(isEpubFile)||playable;
+  // A book can carry several original formats. The server registry, not list
+  // order or an extension guess, decides which file owns the built-in action.
+  if(it.kind==='book') playable=available.find(canReadBookFile)||playable;
   if(it.kind==='audiobook' && available.length){
     playable=available[0];
     for(const f of available){
@@ -4578,7 +4820,10 @@ async function loadItem(id){
     }
     playStart=Math.max(0,resume-(playable.part_offset_ms||0));
   }
-  return {kind:"item", id:Number(id), item:it, files, ancestors, children,
+  // Route identifiers are opaque decimal strings. Cluster-backed stores may
+  // allocate the full signed 64-bit range, which JavaScript cannot represent
+  // exactly as a Number; rounding here made reader links target another item.
+  return {kind:"item", id:String(id), item:it, files, ancestors, children,
     editions:d.editions||[], lib,
     best, multi, runtime, resume, years, shape, reading:d.reading||null,
     // The one file a Play button should reach for, and the label for the
@@ -4611,12 +4856,23 @@ function playbackMetaFor(p,file){
 function playCall(p,file,startMs){
   return `play(${file.id},${esc(JSON.stringify(p.item.title))},${Math.max(0,startMs||0)},${file.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,file)))})`;
 }
-function bookContentUrl(file){ return tok(`/api/v1/files/${file.id}/content`); }
+function exactWireId(value){
+  return String(value&&value.id_text!=null?value.id_text:value&&value.id);
+}
+function bookContentUrl(file){ return tok(`/api/v1/files/${exactWireId(file)}/content`); }
 function isEpubFile(file){ return !!(file&&/\.epub$/i.test(file.filename||"")); }
-function readerFile(p){ return p.files.find(f=>f.available&&isEpubFile(f))||null; }
+function readerAction(file,surface,mode){
+  const capability=file&&file.reader&&file.reader[surface];
+  if(capability&&typeof capability[mode]==="string") return capability[mode];
+  // Compatibility with a server old enough not to advertise the registry.
+  return isEpubFile(file)?"read":"open_in";
+}
+function canReadBookFile(file){ return !!(file&&file.available&&readerAction(file,"web","online")==="read"); }
+function readerFile(p){ return p.files.find(canReadBookFile)||null; }
 function readingLabel(p,file){
   const state=p.reading;
-  if(!state||state.file_id!==file.id) return "Read";
+  const savedId=state&&String(state.file_id_text!=null?state.file_id_text:state.file_id);
+  if(!state||savedId!==exactWireId(file)) return "Read";
   const pct=Math.max(0,Math.min(100,Math.round((state.progression||0)*100)));
   return state.completed?"Read again · finished":`Resume reading · ${pct}%`;
 }
@@ -4625,9 +4881,9 @@ function bookActions(p){
   // action. A D-pad document reader is outside the product contract; phone,
   // tablet and desktop keep both the built-in action and the escape hatch.
   if(surfaceClass()==="tv") return "";
-  const original=p.playable, epub=readerFile(p);
+  const original=p.playable, readable=readerFile(p);
   if(!original) return `<div class="filemissing">⚠ No book file is currently available on the server.</div>`;
-  const read=epub?`<button class="btnplay" onclick="location.hash='#/read/${p.id}/${epub.id}'">${esc(readingLabel(p,epub))}</button>`:"";
+  const read=readable?`<button class="btnplay" onclick="location.hash='#/read/${p.id}/${exactWireId(readable)}'">${esc(readingLabel(p,readable))}</button>`:"";
   return `<div class="actions">${read}
     <a class="ghost" href="${esc(bookContentUrl(original))}" target="_blank" rel="noopener">Open in…</a>
     <a class="ghost" href="${esc(bookContentUrl(original))}" download="${esc(original.filename||p.item.title)}">Download original</a></div>`;
@@ -4660,7 +4916,7 @@ async function viewItem(id){
   document.getElementById("main").innerHTML=layoutView("item",page);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
-  if(AUTOPLAY===Number(id)){
+  if(AUTOPLAY===String(id)){
     AUTOPLAY=null;
     // Same file, same resume point, same metadata the buttons would have used:
     // the autoplay path is a third caller of the model, not a third derivation.
@@ -4684,7 +4940,7 @@ function classicItemBody(p){
   // Movies page rather than dumping you at Home.
   const trail=[{href:"#/",label:"Home"}]
     .concat(NAV_ORIGIN?[{href:NAV_ORIGIN.href,label:NAV_ORIGIN.label}]:[])
-    .concat((d.ancestors||[]).map(a=>({href:`#/item/${a.id}`,label:a.title})))
+    .concat((d.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
     .concat([{label:it.title}]);
   const crumbs=pageHead(trail);
 
@@ -5328,6 +5584,11 @@ function transcodeOpts(startSec, audioIndex, autoHeightOverride){
   // disagree about it mid-session.
   if(o.height==null) o.height=sessionHeight();
   if(audioIndex!=null) o.audio=audioIndex;
+  // `/decision` already proved the browser can decode Main10 PQ and selected
+  // the HDR10 grade. Preserve that immutable request across every session
+  // open; `deliveredRange` is display truth and mutates when a session lands,
+  // so using it here would turn one SDR fallback into permanent SDR on seek.
+  if(PLAYER && PLAYER.requestHdr10) o.hdr10=true;
   if(PLAYER && PLAYER.burnedSub!=null) o.subtitle_burn=PLAYER.burnedSub;
   if(PLAYER && PLAYER.aoffset) o.audio_offset_ms=PLAYER.aoffset;
   return o;
@@ -5678,18 +5939,18 @@ function transcodeHeight(){ return PlaybackPolicy.transcodeHeight(playQuality())
 // Original is that promise made explicitly, and it must survive the cases
 // where a transcode happens anyway — a bitmap-subtitle burn, or the browser
 // refusing the remux. Those sessions used to send no height at all, and the
-// server's Auto answered `min(source, 1080)`: the right bandwidth call for
-// Auto and the wrong one for a viewer who explicitly asked for max, which is
-// how a 4K film with forced PGS subs played at 1080p whatever the menu said.
+// server's old Auto answered `min(source, 1080)`: a separate policy cap and
+// the wrong answer for a viewer who explicitly asked for max, which is how a
+// 4K film with forced PGS subs played at 1080p whatever the menu said.
 //
 // An AUTO burn over a remux/direct verdict is the same promise made by the
 // server: the decision already chose to send this client the full-resolution
-// stream, so the burn may add a re-encode but not a downscale. The Auto cap
-// (PERF-PLAN §4.7) is about genuine transcodes — sessions whose client never
-// proved it could carry the source — and stays for them: a burn on top of a
-// transcode verdict keeps the Auto rung. Bandwidth agrees: the 4K rung's
-// 20 Mb/s is *less* than the 57 Mb/s remux it replaces, while on a genuine
-// transcode it would be 2.5× the rung Auto chose.
+// stream, so the burn may add a re-encode but not a downscale. Genuine
+// transcode verdicts still keep the server's Auto result rather than inheriting
+// that promise. Auto resolves encoder/pipeline capability first — preserving a
+// known SDR source on hardware — and lowers it only from stored network
+// evidence. Bandwidth still agrees for this burn: the 4K rung's 20 Mb/s is
+// *less* than the 57 Mb/s remux it replaces.
 //
 // A REFUSED original is that same promise again, and it was the case still
 // getting downscaled. When the browser rejects a remux outright the client
@@ -5804,6 +6065,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
   const ladder=decision.ladder||[];
   const priorKbps=decision.prior_kbps||null;
   const autoStartHeight=qualityForce()==='auto' && decision.method==='transcode'
+    // The decision ladder does not know this node's grade-specific hardware
+    // ceiling. Let the session endpoint choose its highest proved HDR10 rung
+    // instead of allowing an old 720p SDR last-good value to cap it.
+    && decision.delivered_dynamic_range!=='hdr10'
     ? PlaybackPolicy.initialAutoRung({ladder,persistedHeight:autoLastGoodHeight(),
         priorKbps,playerHeight:playerPixelHeight(video)})
     : null;
@@ -5856,6 +6121,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     bookParts:book?(meta.book_parts||[]):null,
     transcodeAudio:!!decision.transcode_audio,
     preserveDolbyVision:!!decision.preserve_dolby_vision, copyHls:false,
+    // What `/decision` asked the session builder to preserve. Unlike
+    // deliveredRange this never changes when a session response reports what
+    // it actually produced, so seek/audio/quality reopens retain the grade.
+    requestHdr10:decision.method==='transcode'&&decision.delivered_dynamic_range==='hdr10',
     // What grade the DECISION plans to put on the wire. A session overrides it
     // the moment one attaches (a burn or a forced rung transcodes something the
     // decision never promised); direct play has no session, so this stands for
@@ -7561,11 +7830,12 @@ function checkMarkers(){
 function renderSkip(m){
   const c=document.getElementById("pskip"); if(!c) return;
   if(!m){ if(c.dataset.k){ c.innerHTML=""; c.dataset.k=""; } return; }
-  const key=m.kind+m.start_ms;
+  const estimated=m.chapter===false;
+  const key=m.kind+m.start_ms+(estimated?"e":"");
   if(c.dataset.k===key) return; // avoid rebuilding every timeupdate tick
   c.dataset.k=key;
   const label=m.label||(m.kind==="intro"?"Skip Intro":"Skip Credits");
-  c.innerHTML=`<button onclick="skipCurrent()">${esc(label)} ›</button>`;
+  c.innerHTML=`<button onclick="skipCurrent()">${esc(label)}${estimated?" · Estimated":""} ›</button>`;
 }
 function skipCurrent(){
   const pos=markerNowMs();
@@ -7704,27 +7974,27 @@ async function playNextEpisode(){
   const anc=cur.ancestors||[], season=anc[anc.length-1], show=anc[anc.length-2];
   if(!season) return false;
   let next=null;
-  const sd=await api(`/items/${season.id}`).catch(()=>null);
+  const sd=await api(`/items/${exactWireId(season)}`).catch(()=>null);
   if(sd){
     const eps=(sd.children||[]).filter(c=>c.kind==='episode');
-    const i=eps.findIndex(e=>e.id===itemId);
+    const i=eps.findIndex(e=>exactWireId(e)===itemId);
     if(i>=0 && eps[i+1]) next=eps[i+1];
   }
   if(!next && show){                                         // roll over to next season
-    const shd=await api(`/items/${show.id}`).catch(()=>null);
+    const shd=await api(`/items/${exactWireId(show)}`).catch(()=>null);
     if(shd){
       const seasons=(shd.children||[]).filter(c=>c.kind==='season');
-      const si=seasons.findIndex(s=>s.id===season.id);
+      const si=seasons.findIndex(s=>exactWireId(s)===exactWireId(season));
       if(si>=0 && seasons[si+1]){
-        const nsd=await api(`/items/${seasons[si+1].id}`).catch(()=>null);
+        const nsd=await api(`/items/${exactWireId(seasons[si+1])}`).catch(()=>null);
         if(nsd) next=(nsd.children||[]).filter(c=>c.kind==='episode')[0]||null;
       }
     }
   }
   if(!next) return false;                                    // end of the series
-  AUTOPLAY=next.id;
+  AUTOPLAY=exactWireId(next);
   toast("▶ Up next: "+next.title);
-  location.hash="#/item/"+next.id;
+  location.hash="#/item/"+exactWireId(next);
   return true;
 }
 async function playNextAudiobookPart(){
@@ -8253,6 +8523,28 @@ async function switchAudio(idx){
 
 // ---- playback stats overlay (press i, or the Stats button) ----------------
 let STATS_TIMER=null;
+let STATS_MODE="standard";
+try{
+  const saved=localStorage.getItem("plurx_stats_mode");
+  if(["mini","standard","debug"].includes(saved)) STATS_MODE=saved;
+}catch(e){}
+function applyStatsMode(){
+  const ov=document.getElementById("statsov"); if(!ov) return;
+  ov.dataset.mode=STATS_MODE;
+  ov.querySelectorAll("[data-stats-mode]").forEach(button=>{
+    const selected=button.dataset.statsMode===STATS_MODE;
+    button.classList.toggle("on",selected);
+    button.setAttribute("aria-checked",selected?"true":"false");
+  });
+}
+function setStatsMode(mode){
+  if(!["mini","standard","debug"].includes(mode)) return;
+  STATS_MODE=mode;
+  try{ localStorage.setItem("plurx_stats_mode",mode); }catch(e){}
+  applyStatsMode();
+  updateStats();
+  positionStats();
+}
 function toggleStats(){
   const ov=document.getElementById("statsov"); if(!ov) return;
   const on=!ov.classList.contains("on");
@@ -8265,7 +8557,7 @@ function toggleStats(){
   const pl=document.getElementById("player"); if(pl) pl.classList.toggle("statson",on);
   const sb=document.getElementById("statsbtn"); if(sb) sb.classList.toggle("on",on);
   clearInterval(STATS_TIMER); STATS_TIMER=null;
-  if(on){ updateStats(); positionStats(); STATS_TIMER=setInterval(updateStats,1000); }
+  if(on){ applyStatsMode(); updateStats(); positionStats(); STATS_TIMER=setInterval(updateStats,1000); }
   else { ov.style.top=""; ov.style.maxHeight=""; }
   // The panel that just appeared (or left) changes where the menu belongs, and
   // a menu open across that change is anchored to the old geometry — same
@@ -8293,6 +8585,28 @@ window.addEventListener("orientationchange",()=>setTimeout(positionStats,150));
 function clockFromSec(s){ s=Math.max(0,Math.round(s)); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return (h?h+":":"")+String(m).padStart(h?2:1,"0")+":"+String(ss).padStart(2,"0"); }
 function hdrLabel(h){ return ({hdr10:"HDR10",hlg:"HLG",dolby_vision:"Dolby Vision"})[h]||(h?h.toUpperCase():""); }
+function statsToneClass(tone){ return tone?`stat-${tone}`:""; }
+function statsRunwayTone(seconds,suspended){
+  if(suspended) return "good";
+  if(seconds==null) return "muted";
+  if(seconds<1.5) return "bad";
+  if(seconds<5) return "warn";
+  return "good";
+}
+function statsIdleTone(milliseconds,suspended){
+  if(suspended) return "good";
+  if(milliseconds==null) return "muted";
+  if(milliseconds>20000) return "bad";
+  if(milliseconds>8000) return "warn";
+  return "";
+}
+function statsRateTone(rate,ahead,suspended,final){
+  if(suspended||final) return "good";
+  if(rate==null) return "muted";
+  if(rate<.65&&(ahead||0)<2) return "bad";
+  if(rate<1&&(ahead||0)<10) return "warn";
+  return "good";
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
@@ -8310,7 +8624,7 @@ function updateStats(){
   const aLine=a? ([ (a.codec||'').toUpperCase(), a.channels?fmtChannels(a.channels):null, a.language?(langName(a.language)||a.language):null ].filter(Boolean).join(" · ")||'—') : '—';
   // now decoding (what the <video> element actually reports)
   const tgtRes = v.videoWidth? `${v.videoWidth}×${v.videoHeight}` : '—';
-  let dropped='—';
+  let dropped='—', droppedCount=null;
   // How fast frames are actually reaching the screen, measured rather than
   // inferred. The dropped counter alone cannot see this: `droppedVideoFrames`
   // counts frames the compositor discarded, and a decoder that is merely
@@ -8328,6 +8642,7 @@ function updateStats(){
     const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
     if(q){
       dropped=`${q.droppedVideoFrames} / ${q.totalVideoFrames}`;
+      droppedCount=q.droppedVideoFrames;
       const now=performance.now(), prev=PLAYER._fps;
       // Only while actually playing: a paused or seeking element produces no
       // frames, and reporting 0 fps for a stream nobody asked to advance is
@@ -8363,34 +8678,43 @@ function updateStats(){
   // A full buffer means nobody is fetching, and the last measured rate is then
   // a memory rather than a measurement. Rather than blank the line (the whole
   // complaint) or quietly lie, it says so.
-  let net='';
+  // Rows are DATA now, not html strings: {l:label, v:value html, c:tone class,
+  // a:extra attributes, note:true to send it to the notes strip}. The layout
+  // decisions below — which column a section sits in, whether its values are
+  // numbers worth right-aligning, whether it is short enough to run two-up,
+  // which values are sentences that belong out of the grid — are all made by
+  // counting and measuring the rows, and a string of html cannot be counted.
+  // Every value expression is unchanged from when they were strings.
+  const net=[];
   if(PLAYER.health && PLAYER.health.delivered_bps!=null){
     const h=PLAYER.health;
     const stale=!h.final && (h.delivered_idle_ms||0) > 8000;
     const tag=h.final?' · final':(stale?' · idle':'');
     const why=h.final?'the stream finished — these are its last figures'
             :stale?'nothing has been fetched recently — a full buffer, not a slow link':'';
-    net+=`<div><b>Delivery rate</b><span${why?` style="opacity:.7" title="${why}"`:''}>`
-       + `${fmtMbps(h.delivered_bps)}${tag}</span></div>`;
+    const deliveryTone=h.final?"good":statsIdleTone(h.delivered_idle_ms,h.suspended);
+    net.push({l:"Delivery rate",c:statsToneClass(deliveryTone),
+      a:why?` style="opacity:.78" title="${why}"`:'',
+      v:`${fmtMbps(h.delivered_bps)}${tag}`});
   }
   if(PLAYER.hls){
-    if(PLAYER.hls.bandwidthEstimate) net+=`<div><b>Client estimate</b>${fmtMbps(PLAYER.hls.bandwidthEstimate)}</div>`;
+    if(PLAYER.hls.bandwidthEstimate) net.push({l:"Client estimate",v:`${fmtMbps(PLAYER.hls.bandwidthEstimate)}`});
     const lv=PLAYER.hls.levels&&PLAYER.hls.levels[PLAYER.hls.currentLevel];
-    if(lv&&lv.bitrate) net+=`<div><b>Stream rate</b>${fmtMbps(lv.bitrate)}</div>`;
+    if(lv&&lv.bitrate) net.push({l:"Stream rate",v:`${fmtMbps(lv.bitrate)}`});
   }
-  if(PLAYER.health && PLAYER.health.delivered_bytes) net+=`<div><b>Delivered</b>${fmtBytes(PLAYER.health.delivered_bytes)}</div>`;
+  if(PLAYER.health && PLAYER.health.delivered_bytes) net.push({l:"Delivered",v:`${fmtBytes(PLAYER.health.delivered_bytes)}`});
   // How the server side of this stream is doing. Until this existed, a
   // stutter had two indistinguishable explanations — the link can't carry it,
   // or the encoder can't make it fast enough — and the overlay could only
   // describe the client's half. `speed` under 1.0x names the second one
   // outright; "held" means the transcoder is deliberately parked because the
   // buffer ahead is already deep, which is health, not a problem.
-  let srv='';
+  const srv=[];
   if(PLAYER.vod){
     // A cache hit has no encoder, so it has no rate and no lead. Reporting the
     // usual figures would be actively misleading: "Server ahead 1:32:00" reads
     // as a runaway encoder rather than as a film that was finished yesterday.
-    srv+=`<div><b>Stream</b>already transcoded — served from the cache</div>`;
+    srv.push({l:"Stream",v:`already transcoded — served from the cache`,note:true});
   } else if(PLAYER.health){
     const h=PLAYER.health;
     // Prefer the recent rate over ffmpeg's cumulative one. A session that
@@ -8418,7 +8742,31 @@ function updateStats(){
                :slow?' — slower than realtime'
                :paced?' — at the configured pace'
                :fed?' — throttled by a full client buffer':'';
-      srv+=`<div><b>Encode speed</b><span${slow?' style="color:var(--warn,#fbbf24)"':''}>${rate.toFixed(2)}×${label}${note}</span></div>`;
+      const rateTone=statsRateTone(rate,reserve,h.suspended,h.final);
+      // WHERE a row lives is a property of the row, never of its value.
+      //
+      // This used to be `note:!!note`, and `note` is derived from live
+      // telemetry: at 0.92× the clause was "slower than realtime" and the row
+      // was a sentence in the notes strip; a second later at 1.00× against a
+      // readrate of 1.0 it was "at the configured pace" — still a note; a
+      // second after that at 1.40× the clause was empty and the row jumped
+      // back up into the Server ledger. The panel re-renders once a second, so
+      // "Encode speed" physically migrated between the right-hand column and
+      // the foot of the panel while someone was reading it, taking the
+      // section's row count — and therefore its numeric-alignment verdict for
+      // every OTHER row — with it. That is precisely the reflow instability
+      // the fixed section→column assignment above exists to eliminate, put
+      // back one row at a time.
+      //
+      // Now: the number is always a ledger row, and the clause is always a
+      // note. Both placements are constant; only the presence of the clause
+      // varies, which is what a clause is allowed to do. The row also carries
+      // the clause as a tooltip so the ledger alone answers "why 1.00×".
+      const clause=note?note.replace(/^\s*—\s*/,''):'';
+      srv.push({l:"Encode speed",c:statsToneClass(rateTone),
+        a:clause?` title="${esc(clause)}"`:'',
+        v:`${rate.toFixed(2)}×${label}`});
+      if(clause) srv.push({l:"Encode speed",c:statsToneClass(rateTone),note:true,v:`${esc(clause)}`});
     }
     if(h.ahead_seconds!=null){
       const release=!h.suspended?''
@@ -8429,16 +8777,17 @@ function updateStats(){
         :h.hold_reason==='global' && h.resume_below_bytes!=null
           ?` · global release ≤${fmtBytes(h.resume_below_bytes)}`:'';
       const transitions=h.suspend_count?` · ${h.suspend_count} suspend${h.suspend_count===1?'':'s'}`:'';
-      srv+=`<div><b>Server ahead</b>${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}</div>`;
+      srv.push({l:"Server ahead",c:statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended)),
+        v:`${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}`});
     }
     if(h.out_time_ms!=null && h.ahead_seconds==null){
       // A progressive stream has no published-media frontier to report; what
       // it can say is how much content ffmpeg has produced, which is the same
       // reserve seen from the other end.
-      srv+=`<div><b>Produced</b>${clockFromSec(h.out_time_ms/1000)}</div>`;
+      srv.push({l:"Produced",v:`${clockFromSec(h.out_time_ms/1000)}`});
     }
   }
-  if(PLAYER.ttffMs!=null) srv+=`<div><b>Started in</b>${(PLAYER.ttffMs/1000).toFixed(1)} s</div>`;
+  if(PLAYER.ttffMs!=null) srv.push({l:"Started in",v:`${(PLAYER.ttffMs/1000).toFixed(1)} s`});
   // Named by kind, because the two mean opposite things and the raw count sent
   // people to look at the wrong half of the system. `supply` ran out of
   // buffered video — a server or link problem. `decode` had video in hand and
@@ -8451,22 +8800,110 @@ function updateStats(){
     if(k.decode) parts.push(`${k.decode} decode`);
     // One <span> around the whole value, not a bare number plus a sibling:
     // the row is a two-column grid and a third child would drop into the next
-    // row's label column.
-    srv+=`<div><b>Stalls</b><span>${PLAYER.stalls}${parts.length?` <span style="opacity:.7">(${parts.join(" · ")})</span>`:''}</span></div>`;
+    // row's label column. The renderer below now guarantees that shape for
+    // every row — a value with parts nests them INSIDE the one span.
+    const stallTone=PLAYER.stalls>=3?"bad":"warn";
+    srv.push({l:"Stalls",c:statsToneClass(stallTone),
+      v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
   }
   const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
   const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
-  // Sections are WRAPPED now, not a flat run of siblings, because the panel
-  // lays them out in columns and a column break is free to fall between a
-  // header and its own rows. `break-inside:avoid` needs a box to avoid
-  // breaking inside of; this is that box.
-  const sec=(rows,title,cls)=> rows? `<div class="stsec${cls||''}">`+
-    `<div class="sechd">${title}</div>`+rows+`</div>` : '';
-  const autoLog=((PLAYER.abr&&PLAYER.abr.switches)||[]).map(entry=>
-    `<div><b>Auto log</b><span>${clockFromSec(entry.position)} · ${esc(entry.from)} → `+
-    `${esc(entry.to)} · ${esc(entry.reason)}</span></div>`).join("");
-  body.innerHTML=
-    sec(
+  // The value as a reader sees it, with the markup taken back out — the two
+  // layout tests below are about the TEXT (does it start with a digit, is it
+  // short) and a tone class or a nested opacity span is not text.
+  const plainVal=html=>String(html).replace(/<[^>]*>/g,"").trim();
+  // "Carries a numeric value" means it reads as a quantity: it opens with a
+  // number. "1920×1080", "0 / 512 frames" and "12.4 Mb/s" all do; "hardware",
+  // "Direct play" and "MKV" do not. Opening, not containing, on purpose —
+  // "software — this machine has no GPU path" contains digits nowhere near
+  // the front and is a sentence.
+  const rowIsNumeric=row=>/^[+-]?[\d.,]/.test(plainVal(row.v));
+  // …and the minority report. The section verdict below is a majority vote,
+  // so a section that is four numbers and one sentence sets the sentence
+  // flush right too — "Now decoding" scores 4 of 5 and right-ragged the
+  // Decoder line over three wrapped lines, plus the frame-rate clause over
+  // two. A row opts out of the section's alignment when its value is not a
+  // bare quantity: either it does not open with a digit at all ("MKV",
+  // "hardware", "Direct play", a subtitle track name) or it is long enough
+  // that whatever follows the number is a clause rather than a unit.
+  // "Longer than ~16 characters" alone was too blunt a proxy for the second
+  // case: "12 / 51200 frames" is seventeen characters and is still a count.
+  // What actually marks a clause is a clause JOINT — " · ", " — " or an
+  // opening parenthesis — so that is the test, with a generous length cap
+  // behind it for anything that runs long without one. Quantities with units
+  // ("12 / 51200 frames", "12.4 Mb/s", "1920×1080", "3.9 GB") keep their
+  // place in the number column; "38.2 Mb/s · final", "42 s · 2 suspends" and
+  // "22.0 fps rendered · playing at 95.0% speed" leave it.
+  const rowIsProse=row=>{ const t=plainVal(row.v);
+    return !rowIsNumeric(row) || /\s[·—(]/.test(t) || t.length>24; };
+  // Exactly one <span> holds the whole value, always. The row is a two-cell
+  // grid, so a bare text node beside a span would be a THIRD grid item and
+  // would fall into the next row's label column — the bug this shape exists
+  // to make unrepresentable.
+  const rowHtml=row=>`<div class="r${rowIsProse(row)?' txt':''}"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
+  // A section carries its own alignment, computed from the rows that actually
+  // rendered — not from the rows it might have had. A section whose values are
+  // nearly all numbers aligns right on tabular figures.
+  //
+  // There is no `.dense` two-up variant any more. It required ten-plus rows in
+  // one section and the web panel's sections have a structural ceiling of five
+  // (Playback 4, Source 4, Now decoding 5, Network 4, Server 4) — the branch
+  // and its `@media(min-width:721px)` stylesheet block could never run. The
+  // Android panel's equivalent IS reachable and is untouched; it groups rows
+  // differently.
+  const sec=(title,rows)=>{
+    const shown=(rows||[]).filter(row=>row&&!row.note);
+    if(!shown.length) return '';
+    const numeric=shown.filter(rowIsNumeric).length;
+    const cls=(numeric/shown.length>=0.7?' num':'');
+    return `<div class="stsec${cls}"><div class="sechd">${title}</div>`+shown.map(rowHtml).join("")+`</div>`;
+  };
+  // The two columns are named, not filled in order: a section knows which
+  // side it belongs on, and a section that has nothing to say this second
+  // simply isn't there rather than shuffling the others across.
+  const LEFT_COL=["Playback","Source","Now decoding"], RIGHT_COL=["Network","Server"];
+  const panelHtml=sections=>{
+    const find=name=>{ const s=sections.find(x=>x.t===name); return s?sec(s.t,s.rows):''; };
+    const left=LEFT_COL.map(find).join(""), right=RIGHT_COL.map(find).join("");
+    // A direct-play session has no health, no hls and no cache entry, so both
+    // Network and Server come back empty — correctly, no orphan headings. But
+    // the grid still reserved their track, leaving half a 1040px panel blank
+    // while the ledger that DOES have something to say was squeezed into
+    // 503px. panelHtml is the one place that knows both answers, so it is the
+    // one place that can say "one column"; `.statscols.one` and the panel's
+    // `.onecol` width do the rest.
+    const one=!left||!right;
+    // Sentences, grouped by the section that owns them. Flat, the strip was
+    // `Reason / Switched / Auto log / Auto log / Video / Audio / Dynamic range
+    // / Hitches / Buffer target` with nothing saying that Video and Audio
+    // describe the FILE while Dynamic range and Hitches describe this
+    // playback — a distinction the ledgers above make by position and which
+    // is lost the moment a row leaves the grid. The label only appears when
+    // more than one section contributed; on a single-source strip it would be
+    // a heading over the whole thing, which is what the panel heading already
+    // is. Order follows the sections, so the strip reads in the same order as
+    // the columns it hangs under.
+    const groups=sections.map(s=>({t:s.t,rows:(s.rows||[]).filter(row=>row&&row.note)}))
+                         .filter(g=>g.rows.length);
+    const noteHtml=row=>`<div class="snote"><b>${row.l}</b><span class="${row.c||''}"${row.a||''}>${row.v}</span></div>`;
+    const notes=groups.length
+      ? `<div class="snotes">`+groups.map(g=>
+          (groups.length>1?`<div class="snotegrp">${g.t}</div>`:'')+g.rows.map(noteHtml).join("")
+        ).join("")+`</div>`
+      : '';
+    return `<div class="statscols${one?' one':''}">`
+      + (left?`<div>${left}</div>`:'')
+      + (right?`<div>${right}</div>`:'')
+      + `</div>`
+      + notes;
+  };
+  // Each switch is its own note line: they are a log, and a log squashed into
+  // one cell is unreadable at the moment it matters.
+  const autoLog=((PLAYER.abr&&PLAYER.abr.switches)||[]).map(entry=>({l:"Auto log",note:true,
+    v:`${clockFromSec(entry.position)} · ${esc(entry.from)} → `+
+      `${esc(entry.to)} · ${esc(entry.reason)}`}));
+  const debugSections=[
+    {t:"Playback",rows:[
     // **Which build this is, in the place people photograph.**
     //
     // It lives on the admin-only System page and nowhere else, so the answer to
@@ -8478,55 +8915,56 @@ function updateStats(){
     // The page and the binary are the same artifact — index.html is
     // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
     // That is what makes one line able to answer for both.
-    `<div><b>Build</b><span class="muted">${esc(buildLabel())}</span></div>`+
-    `<div><b>Method</b>${esc(method)}</div>`+
+    {l:"Build",c:"stat-muted",v:`${esc(buildLabel())}`},
+    {l:"Method",v:`${esc(method)}`},
     // Said outright, because the two transports are different code paths in
     // the browser and "which one ran" was previously only inferable from
     // which other rows happened to be missing. The wire container is named
     // honestly: a transcode ships MPEG-TS segments that hls.js transmuxes,
     // a copy ships fMP4 that goes to the SourceBuffer untouched — and that
     // difference mattered to the stutter investigation (STUTTER-4K.md §4).
-    `<div><b>Transport</b><span class="muted">${
+    {l:"Transport",c:"stat-muted",v:`${
       PLAYER.hls ? (PLAYER.method==='transcode'
           ? "segmented MPEG-TS · MediaSource (hls.js transmuxes)"
           : "segmented fMP4 · MediaSource")
       : (PLAYER.copyHls||PLAYER.sessionId)
         ? `segmented ${PLAYER.method==='transcode'?'MPEG-TS':'fMP4'} · native HLS`
-        : "one continuous file · range requests"}</span></div>`+
-    ((PLAYER.reasons&&PLAYER.reasons.length)?`<div><b>Reason</b>${esc(PLAYER.reasons.join("; "))}</div>`:"")+
+        : "one continuous file · range requests"}`},
+    ((PLAYER.reasons&&PLAYER.reasons.length)?{l:"Reason",note:true,v:`${esc(PLAYER.reasons.join("; "))}`}:null),
     // A session the player moved off the original owes the viewer a standing
     // answer, not a toast that disappears. The Reason line above is the
     // server's verdict on the FILE and does not change when the client
     // switches, so it cannot carry this.
-    (PLAYER.rescuedNote?`<div><b>Switched</b><span style="color:var(--warn,#fbbf24)">${
-      esc(PLAYER.rescuedNote)}</span></div>`:"")+
-    autoLog+
-    `<div><b>Position</b>${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}</div>`
-    , "Playback", " wide")+
-    sec(
-    `<div><b>Video</b>${esc(srcVideo)}</div>`+
-    `<div><b>Resolution</b>${srcRes}</div>`+
-    `<div><b>Bitrate</b>${srcBr}</div>`+
-    `<div><b>Container</b>${esc(srcCont)}</div>`+
-    `<div><b>Audio</b>${esc(aLine)}</div>`+
-    `<div><b>AV offset</b><span>${(PLAYER.aoffset||0)+" ms"}${PLAYER.declared?` <span style="opacity:.6">(container ${PLAYER.declared>0?"+":""}${PLAYER.declared} ms)</span>`:''}</span></div>`
-    , "Source")+
-    sec(
-    `<div><b>Resolution</b>${tgtRes}</div>`+
+    (PLAYER.rescuedNote?{l:"Switched",c:"stat-warn",note:true,v:`${esc(PLAYER.rescuedNote)}`}:null),
+    ...autoLog,
+    {l:"Position",v:`${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}${rate}`}
+    ]},
+    {t:"Source",rows:[
+    {l:"Video",note:true,v:`${esc(srcVideo)}`},
+    {l:"Resolution",v:`${srcRes}`},
+    {l:"Bitrate",v:`${srcBr}`},
+    {l:"Container",v:`${esc(srcCont)}`},
+    {l:"Audio",note:true,v:`${esc(aLine)}`},
+    {l:"AV offset",v:`${(PLAYER.aoffset||0)+" ms"}${PLAYER.declared?` <span style="opacity:.6">(container ${PLAYER.declared>0?"+":""}${PLAYER.declared} ms)</span>`:''}`}
+    ]},
+    {t:"Now decoding",rows:[
+    {l:"Resolution",v:`${tgtRes}`},
     // The chip says it in three characters and an arrow; this says it in a
     // sentence, with the server's own reason. Same pure function, same parts —
     // the two can never drift into disagreeing. Absent for an SDR source:
     // there is no grade to have an opinion about.
     (()=>{ const d=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
-      return d?`<div><b>Dynamic range</b><span${d.off?' class="muted"':''}>${esc(d.panel)}</span></div>`:''; })()+
-    `<div><b>Dropped</b>${dropped} frames</div>`+
+      return d?{l:"Dynamic range",note:true,c:d.off?"stat-muted":"",v:`${esc(d.panel)}`}:null; })(),
+    {l:"Dropped",c:statsToneClass(droppedCount==null?'muted':droppedCount===0?'good':droppedCount<3?'warn':'bad'),
+      v:`${dropped} frames`},
     (fps!=null?(()=>{
       const h=PLAYER.hitches, want=(v.playbackRate||1);
       const chased=h&&h.rate!=null&&Math.abs(h.rate-want)>0.02;
-      return `<div><b>Frame rate</b><span${fps<20?' style="color:var(--warn,#fbbf24)"':''}>${fps.toFixed(1)} fps rendered</span>${
-        chased?` · <span style="color:var(--warn,#fbbf24)">playing at ${(h.rate*100).toFixed(1)}% speed${
-          want===1?" — the browser is rate-chasing":""}</span>`:''}</div>`;
-    })():'')+
+      return {l:"Frame rate",c:(fps<20?'stat-warn':''),
+        v:`${fps.toFixed(1)} fps rendered${
+        chased?` · <span class="stat-warn">playing at ${(h.rate*100).toFixed(1)}% speed${
+          want===1?" — the browser is rate-chasing":""}</span>`:''}`};
+    })():null),
     // The browser's own verdict on whether it is using the GPU for this. A
     // software 4K HEVC decode is a full buffer, few dropped frames and
     // constant judder — indistinguishable from a delivery problem on every
@@ -8537,18 +8975,25 @@ function updateStats(){
     // row would otherwise read as exoneration.
     (PLAYER.hitches&&!PLAYER.hitches.frames&&PLAYER.started
       &&PLAYER.hitchArmedAt&&(performance.now()-PLAYER.hitchArmedAt)>10000?
-      `<div><b>Hitches</b><span class="muted">this browser gives the detector no frame callbacks — faults here are invisible, not absent</span></div>`:'')+
+      {l:"Hitches",c:"stat-muted",note:true,
+       v:`this browser gives the detector no frame callbacks — faults here are invisible, not absent`}:null),
+    // One note, not three rows. The counts, the last fault and the verdict on
+    // what caused it are one statement: they were split across a row and two
+    // LABEL-LESS continuation rows, which in a two-column ledger read as
+    // orphaned values belonging to whatever was above them.
     (PLAYER.hitches&&(PLAYER.hitches.back||PLAYER.hitches.held||PLAYER.hitches.late||PLAYER.hitches.drop||PLAYER.hitches.gap||PLAYER.hitches.slow)?
-      `<div><b>Hitches</b><span style="color:var(--warn,#fbbf24)">${
+      (()=>{
+        const tail=[PLAYER.hitches.last||'', hitchBlame()||''].filter(Boolean)
+          .map(part=>` · <span class="stat-muted" style="font-size:9.5px">${esc(part)}</span>`).join("");
+        return {l:"Hitches",c:"stat-warn",note:true,v:`${
         [PLAYER.hitches.back?`${PLAYER.hitches.back} back`:null,
          PLAYER.hitches.held?`${PLAYER.hitches.held} held`:null,
          PLAYER.hitches.late?`${PLAYER.hitches.late} late`:null,
          PLAYER.hitches.drop?`${PLAYER.hitches.drop} drop`:null,
          PLAYER.hitches.gap?`${PLAYER.hitches.gap} skip`:null,
          PLAYER.hitches.slow?`${PLAYER.hitches.slow} slow`:null].filter(Boolean).join(" · ")
-      }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}</span></div>`
-      +`<div><b></b><span class="muted" style="font-size:11px">${esc(PLAYER.hitches.last||'')}</span></div>`
-      +(hitchBlame()?`<div><b></b><span class="muted" style="font-size:11px">${esc(hitchBlame())}</span></div>`:''):'')+
+      }${hitchInterval()?` · every ~${hitchInterval().toFixed(1)}s`:''}${tail}`};
+      })():null),
     (PLAYER.hls&&PLAYER.hls.config?(()=>{
       // The peak is the number that matters, and it was the number nobody was
       // looking at: the browser holds the forward buffer, the back buffer AND
@@ -8558,11 +9003,10 @@ function updateStats(){
       const t=PLAYER.bufTarget, q=(PLAYER.bufferLimits&&PLAYER.bufferLimits.quota)|0;
       const peak=(t&&t.budgeted)?` · peak ${Math.round(t.peakBytes/1e6)}MB of ~${
         Math.round(MSE_QUOTA_BYTES/1e6)}MB (+ a ${t.seg}s segment)`:'';
-      return `<div><b>Buffer target</b><span class="${q?'':'muted'}"${
-        q?' style="color:var(--warn,#fbbf24)"':''}>${
+      return {l:"Buffer target",note:true,c:(q?'stat-warn':'stat-muted'),v:`${
         PLAYER.hls.config.maxBufferLength}s ahead · ${PLAYER.hls.config.backBufferLength}s behind${
-        peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}</span></div>`;
-    })():'')+
+        peak}${q?` · ${q} quota refusals — the browser is refusing data`:''}`};
+    })():null),
     (PLAYER.decodeInfo?(()=>{
       // The measured margin, next to the browser's own claim — because the
       // claim was `powerEfficient: true` on the exact session whose median
@@ -8578,18 +9022,104 @@ function updateStats(){
         // gets healthier. A number that condemns every stream condemns none of
         // them, and dressing it in a warning colour is how it came to be
         // believed. Frames lost per minute is the row that means something —
-        // it is two lines up, under Hitches.
-        margin=` · <span class="muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
+        // it is in the notes below, under Hitches.
+        margin=` · <span class="stat-muted">${h.decodeMs.toFixed(0)}ms/frame in the pipeline `+
           `against a ${b.toFixed(0)}ms budget — latency, not load</span>`;
       }
-      return `<div><b>Decoder</b><span${PLAYER.decodeInfo.hw?'':' style="color:var(--warn,#fbbf24)"'}>${
+      return {l:"Decoder",c:(PLAYER.decodeInfo.hw?'stat-good':'stat-warn'),v:`${
         PLAYER.decodeInfo.hw?'hardware':'software — this machine has no GPU path for this stream'}${
-        PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}</span>${margin}</div>`;
-    })():'')+
-    `<div><b>Buffer</b>${buf}</div>`
-    , "Now decoding")+
-    sec(net, "Network")+
-    sec(srv, "Server");
+        PLAYER.decodeInfo.smooth?'':' · browser does not expect it to be smooth'}${margin}`};
+    })():null),
+    {l:"Buffer",c:statsToneClass(statsRunwayTone(bufSec,false)),v:`${buf}`}
+    ]},
+    {t:"Network",rows:net},
+    {t:"Server",rows:srv}
+  ];
+  const debugHtml=panelHtml(debugSections);
+
+  const rangeBadge=dynamicRangeBadge(PLAYER.source||{}, PLAYER.deliveredRange, displayIsHdr());
+  // Two forms, two audiences. `.panel` is the full sentence ("SDR — this
+  // browser did not expose HDR presentation") and it belongs in the standard
+  // and debug ledgers, where there is a column for a sentence. `.text` is the
+  // chip form ("DV P7 → SDR"): same fact, four words shorter, which is what
+  // mini's single line can carry. Mini used the sentence, and on any HDR or
+  // Dolby Vision source played to an ordinary display that one cell made the
+  // whole balloon 918px wide at 1440 — and squeezed the two numbers beside it
+  // until they ellipsized.
+  const rangeText=rangeBadge?rangeBadge.panel:"—";
+  const rangeShort=rangeBadge?rangeBadge.text:"—";
+  const selectedSub=PLAYER.curSub>=0
+    ? subLabelFor((PLAYER.subs||[]).find(track=>track.index===PLAYER.curSub),PLAYER.curSub)
+    : "Off";
+  const clientRate=PLAYER.health&&PLAYER.health.delivered_bps!=null
+    ? fmtMbps(PLAYER.health.delivered_bps)
+    : PLAYER.hls&&PLAYER.hls.bandwidthEstimate
+      ? fmtMbps(PLAYER.hls.bandwidthEstimate)
+      : "Measuring";
+  const health=PLAYER.health;
+  const serverState=PLAYER.vod?"Served from cache"
+    : health?(health.suspended?"Holding buffer":"Active")
+    : "No server-side session";
+  const serverRate=health&&((health.recent_speed!=null)?health.recent_speed:health.speed);
+  const deliveryTone=health
+    ? (health.final?"good":(statsIdleTone(health.delivered_idle_ms,health.suspended)||"good"))
+    : "muted";
+  const serverTone=health||PLAYER.vod?"good":"muted";
+  const serverRateTone=statsRateTone(
+    serverRate,
+    health&&health.ahead_seconds!=null?health.ahead_seconds:bufSec,
+    health&&health.suspended,
+    health&&health.final
+  );
+  const frameTone=droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad";
+  const runwayTone=statsRunwayTone(bufSec,false);
+  const cardRow=(label,value,tone)=>({l:label,c:statsToneClass(tone),v:value});
+  const reason=(PLAYER.reasons&&PLAYER.reasons.length)?esc(PLAYER.reasons.join(" · ")):"";
+  // The pill says in one word what the Server section's Status row says in
+  // three or four — same `serverState`, so the two can never disagree.
+  const healthWord=PLAYER.vod?"Cached":health?(health.suspended?"Held":"Active"):"Direct";
+  const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
+  const miniHtml=`<div class="statsmini">`
+    +`<div class="smethod">${esc(method)}</div>`+miniDiv
+    +`<div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div>`+miniDiv
+    +`<div class="sval ${statsToneClass(frameTone)}" title="${esc(rangeBadge?rangeBadge.full||rangeText:rangeText)}">${esc(tgtRes)} · ${esc(rangeShort)}</div>`+miniDiv
+    +`<div class="sval sfix ${statsToneClass(runwayTone)}">${esc(buf)}</div>`+miniDiv
+    +`<div class="sval sfix ${statsToneClass(deliveryTone)}">${esc(clientRate)}</div>`+miniDiv
+    +`<div class="spill ${statsToneClass(serverTone)}" title="${esc(serverState)}">`
+      +`<span class="sdot" aria-hidden="true"></span>${esc(healthWord)}</div>`
+    +`</div>`;
+  // Standard is the same ledger as debug, with fewer rows in it — it was three
+  // bordered cards with a stacked caption over every value, which is a third
+  // layout to hold in your head and half again the height for the same eleven
+  // facts. Its "Playing" card is debug's "Now decoding" section under the name
+  // debug already used; one name for one thing, in both sizes.
+  const standardHtml=panelHtml([
+    {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
+    {t:"Source",rows:[
+      cardRow("Resolution",esc(srcRes)),
+      Object.assign(cardRow("Video",esc(srcVideo)),{note:true}),
+      cardRow("Container",esc(srcCont)),
+      cardRow("Bitrate",esc(srcBr)),
+      Object.assign(cardRow("Audio",esc(aLine)),{note:true})]},
+    {t:"Now decoding",rows:[
+      cardRow("Resolution",esc(tgtRes)),
+      Object.assign(cardRow("Dynamic range",esc(rangeText)),{note:true}),
+      cardRow("Buffer",esc(buf),runwayTone),
+      cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
+      cardRow("Subtitles",esc(selectedSub))]},
+    {t:"Server",rows:[
+      cardRow("Status",esc(serverState),serverTone),
+      (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
+      serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
+      health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):null,
+      cardRow("Delivery",esc(clientRate),deliveryTone)]}
+  ]);
+  body.innerHTML=STATS_MODE==="mini"?miniHtml:STATS_MODE==="debug"?debugHtml:standardHtml;
+  // The panel is sized for two ledgers; when panelHtml only had one to give,
+  // narrow it to match rather than framing a column of blank. Read back off
+  // the DOM instead of threading a flag out of panelHtml, because which of
+  // the three strings actually rendered is decided on the line above.
+  ov.classList.toggle("onecol", !!body.querySelector(".statscols.one"));
 }
 // Poll the session's server-side health while the stats overlay is open, and
 // only then: this is a diagnostic readout, not telemetry the server needs, and
@@ -8712,15 +9242,63 @@ const ITEM_FOR_FILE={};
 // ---- activity page --------------------------------------------------------
 // Where the header pill lands: live streams (with a stop for admins),
 // per-library scan state, and the Trakt story — refreshed every 3s.
-async function viewActivity(){
-  layoutChrome("activity", `<div class="empty">Loading…</div>`);
-  await renderActivityBody();
-  setPageTimer(renderActivityBody, 3000);
+async function viewActivity(generation=++PAGE_RENDER_GENERATION){
+  layoutChrome("activity", `<h2 class="section" style="margin-top:6px">Now playing</h2>
+    <div class="empty" aria-busy="true">Checking current activity…</div>
+    <h2 class="section">Pre-transcoding</h2><h2 class="section">Offline downloads</h2>
+    <h2 class="section">Library</h2><h2 class="section">Trakt</h2>`);
+  setPagePhase("#/activity",generation,"shell");
+  if(ACTIVITY_SNAPSHOT){
+    paintActivityBody(ACTIVITY_SNAPSHOT);
+    setPagePhase("#/activity",generation,"content");
+  }
+  await renderActivityBody(generation);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  setPageTimer(()=>renderActivityBody(generation), 3000, generation);
 }
-async function renderActivityBody(){
-  if(location.hash!=="#/activity") return;
+let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
+function detailActivitySummary(d,deliveries){
+  const acts=[];
+  for(const scan of (d.scans||[])){
+    if(scan.status&&scan.status.running) acts.push({label:"Scanning library",detail:scan.library});
+  }
+  if(deliveries.length) acts.push({label:`${deliveries.length} active stream${deliveries.length===1?'':'s'}`});
+  if(d.producing) acts.push({label:"Pre-transcoding",detail:d.producing.title});
+  if((d.offline||[]).length) acts.push({label:`${d.offline.length} offline download${d.offline.length===1?'':'s'}`});
+  if(d.trakt&&d.trakt.syncing) acts.push({label:"Syncing Trakt"});
+  return acts;
+}
+async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
+  ACTIVITY_DETAIL_BUSY=generation;
+  try{
   let d; try{ d=await api("/activity/detail"); }
-  catch(e){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  catch(e){
+    if(e&&e.status===401) return;
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+    const m=document.getElementById("main");
+    if(ACTIVITY_SNAPSHOT){
+      let stale=document.getElementById("activity-stale");
+      if(!stale&&m){
+        stale=document.createElement("div"); stale.id="activity-stale"; stale.className="hint";
+        m.prepend(stale);
+      }
+      if(stale) stale.textContent=`Showing the last update — refresh failed: ${e.message}`;
+    }else if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`;
+    setPageFailure("#/activity",generation,"render_error");
+    setPagePhase("#/activity",generation,"content"); setPagePhase("#/activity",generation,"settled"); return;
+  }
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  ACTIVITY_SNAPSHOT=d;
+  paintActivityBody(d);
+  setPageFailure("#/activity",generation,null);
+  setPagePhase("#/activity",generation,"content");
+  setPagePhase("#/activity",generation,"settled");
+  } finally {
+    if(ACTIVITY_DETAIL_BUSY===generation) ACTIVITY_DETAIL_BUSY=0;
+  }
+}
+function paintActivityBody(d){
   // S2's consumer check. This table read `d.sessions`, which is the transcode
   // manager's list — so it showed transcodes and HLS copy-remuxes (mislabelled
   // as transcodes) and missed direct play and progressive remux entirely. It
@@ -8728,9 +9306,10 @@ async function renderActivityBody(){
   // recorded rather than inferred: the `encoder` label says "cached" on a cache
   // hit and is rewritten by the hardware-to-software fallback, so a copy remux
   // read off that string would relabel itself mid-play.
-  const dels=d.deliveries||d.sessions.map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
+  const dels=d.deliveries||(d.sessions||[]).map(se=>({method:"transcode",user:se.user_name,item_id:se.item_id,
     title:se.item_title,started_unix:se.started_unix,idle_seconds:se.idle_seconds,session_id:se.id,
     target_height:se.target_height,encoder:se.encoder}));
+  paintActivity(detailActivitySummary(d,dels));
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   const rows=dels.map(de=>{
     const se=de.session_id?sessionsById[de.session_id]:null;
@@ -8810,7 +9389,15 @@ async function stopOfflinePackage(id){
 }
 
 // ---- settings -------------------------------------------------------------
-function statusText(st){
+function currentScanStatus(st,lastScanAt){
+  if(!st||st.running||!st.error||st.finished_at==null||lastScanAt==null) return st;
+  // Scan status is node-local, while last_scan_at is replicated. If another
+  // node completed this library after the local failure, the failure is old
+  // news and must not remain as the cluster's apparent current state.
+  return Number(lastScanAt)>=Number(st.finished_at)?null:st;
+}
+function statusText(st,lastScanAt){
+  st=currentScanStatus(st,lastScanAt);
   if(!st) return "idle";
   if(st.running){
     if(st.phase==="enriching") return "fetching metadata…";
@@ -8867,41 +9454,159 @@ function statusText(st){
   }
   return "idle";
 }
-let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false;
-async function viewSettings(){
-  if(!ME.is_admin){ location.hash="#/"; return; }
-  layoutChrome("settings",`<div class="empty">Loading…</div>`);
-  const since7d=Date.now()-7*24*60*60*1000;
-  const [libs,settings,status,sys,users,trakt,playbackEvents]=await Promise.all([
-    api("/libraries"),api("/settings"),api("/scan/status"),api("/system"),api("/users"),
-    api("/trakt/status").catch(()=>null),
-    api(`/system/playback-events?since=${since7d}&limit=2000`).catch(()=>[])]);
-  SETTINGS=settings; TRAKT=trakt; TRAKT_EDIT=false;
-  // Re-entering Settings re-reads the roster and drops any token still held.
-  CLUSTER_LOADED=false; forgetJoinToken();
-  SETTINGS_DATA={libs,settings,status,sys,users,trakt,playbackEvents,cluster:null};
+let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=null;
+let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
+let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
+const SETTINGS_ENDPOINTS={
+  libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
+  sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
+  cluster:()=>api("/cluster/nodes").catch(error=>{
+    if(error&&error.status===401) throw error;
+    return {unavailable:true,code:error.code,message:error.message};
+  }),
+};
+const SETTINGS_MANIFEST={
+  libraries:{required:["settings","libs","status"],secondary:[]},
+  metadata:{required:["settings","trakt"],secondary:["libs"]},
+  playback:{required:["settings"],secondary:[]},
+  users:{required:["users"],secondary:[]},
+  system:{required:["sys"],secondary:["playbackEvents"]},
+  cluster:{required:["cluster"],secondary:[]},
+};
+function cacheSettings(value){
+  SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
+  return value;
+}
+function cacheTrakt(value){
+  TRAKT=value; SETTINGS_DATA.trakt=value; SETTINGS_LOADED.add("trakt");
+  return value;
+}
+function settingsCurrent(generation,tab){
+  const h=location.hash;
+  return generation===PAGE_RENDER_GENERATION&&(h==="#/settings"||h==="#/admin")&&settingsTab()===tab;
+}
+function loadSettingsKey(key,generation){
+  if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
+  const active=SETTINGS_LOADS.get(key);
+  let transport=active&&active.promise;
+  if(!transport){
+    transport=SETTINGS_ENDPOINTS[key]();
+    const entry={promise:transport};
+    SETTINGS_LOADS.set(key,entry);
+    transport.finally(()=>{
+      if(SETTINGS_LOADS.get(key)===entry) SETTINGS_LOADS.delete(key);
+    }).catch(()=>{});
+  }
+  return transport.then(value=>{
+    if(generation!==PAGE_RENDER_GENERATION) return value;
+    SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
+    if(key==="settings") cacheSettings(value);
+    if(key==="trakt") cacheTrakt(value);
+    if(key==="cluster") CLUSTER_LOADED=true;
+    return value;
+  });
+}
+function settingsTabsHtml(tab){
+  return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
+}
+function settingsShell(tab){
+  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+}
+function patchSettingsSecondary(tab,key){
+  if(tab==="metadata"&&key==="libs"){
+    const mount=document.getElementById("metadata-libraries");
+    if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
+  }
+  if(tab==="system"&&key==="playbackEvents"){
+    const mount=document.getElementById("settings-playback-events");
+    if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
+  }
+}
+function patchSettingsSecondaryError(tab,key,error){
+  const message=esc(error&&error.message||"request failed");
+  if(tab==="metadata"&&key==="libs"){
+    const mount=document.getElementById("metadata-libraries");
+    if(mount) mount.innerHTML=`<div class="hint">Library context is unavailable: ${message}</div>`;
+  }
+  if(tab==="system"&&key==="playbackEvents"){
+    const mount=document.getElementById("settings-playback-events");
+    if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
+  }
+}
+async function loadSettingsTab(generation,tab){
+  const route=location.hash, manifest=SETTINGS_MANIFEST[tab];
+  try{
+    await Promise.all(manifest.required.map(key=>loadSettingsKey(key,generation)));
+  }catch(error){
+    if(error&&error.status===401) return;
+    if(!settingsCurrent(generation,tab)) return;
+    const body=document.getElementById("setbody");
+    if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
+    setPageFailure(route,generation,"render_error");
+    setPagePhase(route,generation,"content"); setPagePhase(route,generation,"settled");
+    return false;
+  }
+  if(!settingsCurrent(generation,tab)) return false;
   renderSettings();
-  setPageTimer(settingsTick, 2000);
+  setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
+  const secondary=manifest.secondary.map(key=>loadSettingsKey(key,generation).then(()=>{
+    if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key);
+  }).catch(error=>{
+    if(error&&error.status===401) throw error;
+    if(settingsCurrent(generation,tab)){
+      patchSettingsSecondaryError(tab,key,error);
+      setPageFailure(route,generation,`${key}_error`);
+    }
+  }));
+  if(tab==="system") secondary.push(refreshLogs());
+  if(tab==="cluster") secondary.push(refreshClusterLogs());
+  await Promise.allSettled(secondary);
+  if(settingsCurrent(generation,tab)) setPagePhase(route,generation,"settled");
+  return settingsCurrent(generation,tab);
+}
+async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
+  if(!ME.is_admin){ location.hash="#/"; return; }
+  const route=location.hash;
+  if(reset){
+    SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_DATA={};
+    SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
+    CLUSTER_LOADED=false; forgetJoinToken();
+  }
+  const tab=settingsTab();
+  layoutChrome("settings",settingsShell(tab));
+  setPagePhase(route,generation,"shell");
+  const loaded=await loadSettingsTab(generation,tab);
+  if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
-let SETTINGS_DATA=null;
 const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["system","System"],["cluster","Cluster"]];
 function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
 // Leaving the tab drops any minted join token: it is bearer material, and the
 // operator who switched away is done with it whether or not they said so.
-function setSettingsTab(t){ forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){} renderSettings(); }
+function setSettingsTab(t){
+  if(t===settingsTab()) return;
+  forgetJoinToken(); try{ localStorage.setItem("plurx_settings_tab",t); }catch(e){}
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+function retrySettingsTab(){
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
+}
 function renderSettings(){
   // Settings work resolves asynchronously. The selected tab survives in
   // localStorage after navigation, so it cannot prove this route is still on
   // screen; a late cluster read or mutation must not repaint another page.
   const h=location.hash;
   if(h!=="#/settings"&&h!=="#/admin") return;
-  const d=SETTINGS_DATA; if(!d) return;
+  const d=SETTINGS_DATA;
   const tab=settingsTab();
-  const bar=SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
-  document.getElementById("main").innerHTML=`<div class="settabs">${bar}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
-  if(tab==="system") refreshLogs();     // the log box only exists on the System tab
-  if(tab==="cluster") loadCluster();    // the roster is fetched on first open, not with Settings
+  const manifest=SETTINGS_MANIFEST[tab];
+  if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
+  document.getElementById("main").innerHTML=`<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
+  if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
+  if(tab==="cluster") return refreshClusterLogs();
 }
 function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
@@ -9048,12 +9753,12 @@ function libRow(l,status){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';
   return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
-      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id])}</div>${schedRow(l)}</td>
-      <td class="row rowactions" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
+      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}</td>
+      <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
         <button class="ghost sm" onclick="editLib(${l.id})">Edit</button>
-        <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></td></tr>`;
+        <button class="ghost sm" onclick="delLib(${l.id})">Delete</button></div></td></tr>`;
 }
 function librariesPanel(libs,status,settings){
   const rows=libs.map(l=>libRow(l,status)).join("")||`<tr><td colspan="5" class="muted">No libraries yet.</td></tr>`;
@@ -9121,7 +9826,7 @@ async function backfillFromKey(){
 }
 function metadataPanel(settings,trakt){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[];
-  return `${keyBackfillHtml(libs)}<div class="card"><h2 class="section" style="margin-top:0">API keys</h2>
+  return `<div id="metadata-libraries">${keyBackfillHtml(libs)}</div><div class="card"><h2 class="section" style="margin-top:0">API keys</h2>
       <label>TMDB — posters, overviews, episode data</label>
       <p class="muted" style="margin:2px 0 6px">${settings.tmdb_configured?"Configured. Click the field to reveal it, or type a new key to replace it.":"Add a free key (<a href='https://www.themoviedb.org/settings/api' target='_blank' rel='noopener'>themoviedb.org</a>) to fetch posters, overviews, and episode data."}</p>
       <input id="tk" placeholder="TMDB API key" type="password" autocomplete="off" value="${esc(settings.tmdb_api_key||'')}" onfocus="this.type='text'" onblur="this.type='password'">
@@ -9354,7 +10059,7 @@ function systemPanel(sys,playbackEvents){
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>Right now</dt><dd>${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'} · Watch state: ${replicationText(sys.replication)}</dd>
       </dl></div>
-    ${playbackSummaryCard(playbackEvents)}
+    <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
     <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>
       <div class="row"><select id="loglvl" style="max-width:120px" onchange="refreshLogs()">
           <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
@@ -9382,6 +10087,7 @@ let CLUSTER_LOADED=false;
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
+let CLUSTER_LEAVING=false;
 // A minted join token lives here and nowhere else — never localStorage, never
 // the URL, never a log. Until it is redeemed or expires it is the complete
 // authority to join a node to this cluster (docs/SECURITY.md), so it is held
@@ -9390,15 +10096,10 @@ let CLUSTER_REFUSAL=null;
 let CLUSTER_TOKEN=null;
 function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; }
 async function loadCluster(){
-  if(CLUSTER_LOADED) return;
-  CLUSTER_LOADED=true;
-  let answer;
-  // A never-joined SQLite install refuses this with 409 `membership_unavailable`.
-  // That is a truthful answer about a healthy server, not an error to report.
-  try{ answer=await api("/cluster/nodes"); }
-  catch(e){ answer={unavailable:true,code:e.code,message:e.message}; }
-  if(SETTINGS_DATA) SETTINGS_DATA.cluster=answer;
-  if(settingsTab()==="cluster") renderSettings();
+  const generation=PAGE_RENDER_GENERATION;
+  SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+  await loadSettingsKey("cluster",generation);
+  if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 // A Raft majority is floor(n/2)+1, so the number of voters that may be lost is
 // n minus that majority: 1 of 3, 1 of 4, 2 of 5. Said once, here.
@@ -9463,14 +10164,27 @@ function membershipRefusalText(code,message){
       "downloads here, then retry the removal. plurx will move work only when a surviving node proves "+
       "it can read the source; otherwise it fails the package cleanly so the client can request it again.",
     cluster_leader_removal_refused:
-      "This node is the cluster's current leader, and a leader cannot remove itself. Leadership moves to "+
-      "another voter on its own when this node restarts or stops being reachable; wait for that, then "+
-      "try the removal again.",
+      "That node is the cluster's current leader, so another voter cannot remove it remotely. Open Cinema "+
+      "on the leader itself and use Leave this cluster; it coordinates its own removal with the surviving "+
+      "quorum and then shuts down.",
+    self_removal_requires_leave:
+      "That row is this server. Use Leave this cluster below so the daemon settles local work, commits its "+
+      "own removal, drains active connections, and shuts down instead of leaving a tombstoned process online.",
+    leave_node_mismatch:
+      "The leave confirmation reached a different backend than the roster you confirmed, so nothing was "+
+      "removed. Refresh this page and retry against the same node; configure sticky admin requests at the proxy.",
     cluster_node_not_found:
       "This node is not in the cluster's current membership — it may already have been removed from "+
       "another browser or another server. The current roster is being refreshed now.",
     membership_unavailable:
       "This server is not running a replicated store, so it has no cluster membership to change.",
+    membership_upgrade_required:
+      "Finish upgrading every active cluster node before changing membership, then retry. No new removal "+
+      "fence, offline-work settlement, leadership handoff, or Raft membership proposal was created by this request.",
+    membership_removal_pending:
+      "This node is still protected by a pending removal fence because another, ambiguous, or older-version "+
+      "attempt may still commit. Finish upgrading every cluster node and retry this same removal; do not return "+
+      "the fenced node to service while its outcome is unresolved.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
   return message?`The server refused this removal: ${message}`
@@ -9478,22 +10192,31 @@ function membershipRefusalText(code,message){
 }
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
-function clusterNodeRow(n){
+function clusterNodeRow(n,localNodeId){
   const voter=n.role==="voter";
   const role=voter
     ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
     : `<span class="pill" title="Admitted and catching up. A learner does not vote and is not counted toward quorum.">learner</span>`;
-  const reach=n.reachable
-    ? `<span style="color:var(--good)">reachable</span>`
-    : `<span style="color:var(--bad)">not reachable</span>`;
+  const heartbeat=n.reachable
+    ? `<span style="color:var(--good)">fresh</span>`
+    : `<span style="color:var(--bad)">stale</span>`;
   const seen=n.last_seen_at?esc(fmtAgo(Math.floor(n.last_seen_at/1000))):`<span class="muted">never</span>`;
-  return `<tr><td class="libname clnode">${esc(n.node_id)}</td>
+  const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
+  const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
+  const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
+  const hostname=n.hostname||n.node_id;
+  const advertised=n.advertised_host
+    ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
+  const action=n.node_id===localNodeId
+    ? `<span class="muted">Use graceful leave below</span>`
+    : `<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
+  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}</div>
+      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
     <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
     <td data-label="Role">${role}</td>
-    <td data-label="Reachable">${reach}</td>
+    <td data-label="Heartbeat">${heartbeat}</td>
     <td data-label="Last seen" class="muted">${seen}</td>
-    <td class="row rowactions" style="justify-content:flex-end">
-      <button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>Remove</button></td></tr>`;
+    <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
 }
 function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
@@ -9510,22 +10233,31 @@ function clusterPanel(d){
   // the same renderer as Settings → System.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
   const roster=nodes.length
-    ? `<table><thead><tr><th>Node</th><th>Raft id</th><th>Role</th><th>Reachable</th><th>Last seen</th><th></th></tr></thead>
-       <tbody>${nodes.map(clusterNodeRow).join("")}</tbody></table>`
+    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
+       <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
     <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
     ${roster}
+    <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
+      Leader, commit, and apply-lag readings below describe Raft replication health.</div>
     <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
       — the same reading as the Server card on the System tab.</div>
     ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
-    ${clustered?joinPanel():""}</div>`;
+    ${clustered?joinPanel()+leavePanel(cluster.local_node_id):""}</div>
+    <div class="card"><h2 class="section" style="margin-top:0">Cluster log</h2>
+      <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
+          <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
+          <option value="error">Errors</option><option value="debug">Debug+</option></select>
+        <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
+        <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
+      <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
+      <div class="logbox" id="cllogbox">Loading…</div></div>`;
 }
 function retryCluster(){
-  CLUSTER_LOADED=false;
-  if(SETTINGS_DATA) SETTINGS_DATA.cluster=null;
-  renderSettings();
+  SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+  viewSettings(++PAGE_RENDER_GENERATION,false);
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
@@ -9546,6 +10278,20 @@ function joinPanel(){
       <button onclick="mintJoinToken(this)">Create a join token</button></div>
     <div class="hint">A join token is single-use and short-lived, and it is shown once. Create it when the
       other machine is ready to start, not before.</div>`;
+}
+function leavePanel(localNodeId){
+  if(CLUSTER_LEAVING) return `<h2 class="section">Remove this node</h2>
+    <div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
+      Cinema node is draining connections and will shut down.</p></div>`;
+  if(!localNodeId) return `<h2 class="section">Remove this node</h2>
+    <div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
+      leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
+  return `<h2 class="section">Remove this node</h2>
+    <button class="ghost sm" onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+    <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
+      its owned offline work and coordinates a safe membership change with the surviving quorum. It then
+      drains and shuts down. Rejoining this machine requires a fresh data directory and
+      a new join token.</div>`;
 }
 // Deliberately loud. Anyone holding the complete token can join a node to this
 // cluster until it is redeemed or expires, so this says that plainly rather
@@ -9568,14 +10314,19 @@ function joinTokenHtml(issued){
       <button class="ghost sm" onclick="clearJoinToken()">Done — clear it</button></div>`;
 }
 async function mintJoinToken(btn){
+  const generation=PAGE_RENDER_GENERATION;
   const sel=document.getElementById("clttl");
   const expires_in_seconds=sel?Number(sel.value):600;
   const was=btn.textContent; btn.disabled=true; btn.textContent="Creating…";
   try{
-    CLUSTER_TOKEN=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
+    const token=await api("/cluster/join-tokens",{method:"POST",body:{expires_in_seconds}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_TOKEN=token;
     CLUSTER_REFUSAL=null;
     renderSettings();
   }catch(e){
+    if(e&&e.status===401) throw e;
+    if(!settingsCurrent(generation,"cluster")) return;
     btn.disabled=false; btn.textContent=was;
     toast(e.message||"Couldn't create a join token");
   }
@@ -9600,17 +10351,49 @@ async function removeNode(nodeId){
     `Bringing it back means stopping it, discarding that directory, and joining it again with a new token. `+
     `Media files are not touched.`)) return;
   CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
   try{
-    if(SETTINGS_DATA) SETTINGS_DATA.cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}`,{method:"DELETE"});
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}`,{method:"DELETE"});
+    SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
     toast("Node removed");
   }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_REFUSAL={node_id:nodeId, code:e.code, message:e.message};
-    // The refusal means the rendered roster lost a race. Let the guarded
-    // render below start a fresh read immediately instead of telling the
-    // operator to act on stale rows.
-    if(e.code==="cluster_node_not_found") CLUSTER_LOADED=false;
+    // Ordinary policy refusals belong beside the roster that produced them.
+    // A not-found refusal proves that roster lost a race, so paint the reason
+    // first and then replace only that cached roster with a guarded fresh read.
+    renderSettings();
+    if(e.code==="cluster_node_not_found"){
+      SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
+      loadSettingsKey("cluster",generation).then(()=>{
+        if(settingsCurrent(generation,"cluster")) renderSettings();
+      }).catch(()=>{});
+    }
+    return;
   }
-  renderSettings();
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+async function leaveCluster(btn,nodeId){
+  if(!confirm(`Permanently remove this Cinema node from the cluster and shut it down?\n\n`+
+    `Do not use this for an update or restart. Rejoining requires discarding this node's old Cinema `+
+    `data directory and using a new join token. Media files are not touched.`)) return;
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  const was=btn.textContent; btn.disabled=true; btn.textContent="Leaving…";
+  try{
+    await api("/cluster/leave",{method:"POST",body:{node_id:nodeId}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_LEAVING=true;
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    btn.disabled=false; btn.textContent=was;
+    CLUSTER_REFUSAL={node_id:"This node",code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
 }
 // Inline library editor: the row becomes an editable form (name · kind · paths).
 function editLib(id){
@@ -9652,35 +10435,89 @@ async function refreshAll(){
   await Promise.all(libs.map(l=>api(`/libraries/${l.id}/refresh`,{method:"POST"}).catch(()=>{})));
   toast("Refreshing all libraries…"); setTimeout(settingsTick,400);
 }
-async function settingsTick(){
+async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab()){
   const h=location.hash;
-  if(h!=="#/settings"&&h!=="#/admin") return;
+  if(generation!==PAGE_RENDER_GENERATION||(h!=="#/settings"&&h!=="#/admin")||settingsTab()!==tab||document.visibilityState==="hidden"||
+     (SETTINGS_TICKING&&SETTINGS_TICKING.generation===generation&&SETTINGS_TICKING.authGeneration===AUTH_GENERATION)) return;
+  const owner={generation,authGeneration:AUTH_GENERATION};
+  SETTINGS_TICKING=owner;
   try{
-    const status=await api("/scan/status");
-    for(const [id,st] of Object.entries(status)){
-      const el=document.getElementById("st-"+id);
-      if(el) el.innerHTML=statusText(st);
+    if(tab==="libraries"){
+      const status=await api("/scan/status");
+      if(!settingsCurrent(generation,tab)) return;
+      SETTINGS_DATA.status=status; SETTINGS_LOADED.add("status");
+      const lastScans=new Map((SETTINGS_DATA.libs||[]).map(l=>[String(l.id),l.last_scan_at]));
+      for(const [id,st] of Object.entries(status)){
+        const el=document.getElementById("st-"+id);
+        if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
+      }
     }
+    const secondary=[];
     const auto=document.getElementById("logauto");
-    if(auto&&auto.checked) refreshLogs();
+    if(auto&&auto.checked) secondary.push(refreshLogs());
+    const clusterAuto=document.getElementById("cllogauto");
+    if(clusterAuto&&clusterAuto.checked) secondary.push(refreshClusterLogs());
     // Live Trakt card: the device-link poll and sync state resolve server-side.
-    if(!TRAKT_EDIT){
+    if(tab==="metadata"&&!TRAKT_EDIT){
       const t=await api("/trakt/status");
-      if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ TRAKT=t; paintTrakt(); }
+      if(!settingsCurrent(generation,tab)) return;
+      if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ cacheTrakt(t); paintTrakt(); }
     }
-  }catch(e){}
+    await Promise.all(secondary);
+  }catch(e){ if(e&&e.status===401) return; }
+  finally{ if(SETTINGS_TICKING===owner) SETTINGS_TICKING=null; }
 }
-async function refreshLogs(){
-  const box=document.getElementById("logbox"); if(!box) return;
-  const sel=document.getElementById("loglvl");
+function sameLogRequest(left,right){ return !!left&&left.box===right.box&&left.level===right.level; }
+async function runLogRequest(request,cluster){
+  const {box,level}=request;
+  const boxId=cluster?"cllogbox":"logbox", levelId=cluster?"clloglvl":"loglvl";
   try{
-    const lines=await api(`/system/logs?level=${sel?sel.value:"info"}&limit=300`);
+    const scope=cluster?"scope=cluster&":"";
+    const lines=await api(`/system/logs?${scope}level=${level}&limit=300`);
+    const currentBox=document.getElementById(boxId);
+    const currentLevel=document.getElementById(levelId);
+    if(currentBox!==box||(currentLevel?currentLevel.value:"info")!==level) return;
     const stick = box.scrollHeight-box.scrollTop-box.clientHeight < 40;
     box.innerHTML=lines.map(l=>`<div class="log-${esc(l.level)}">${fmtTs(l.ts_ms)} <b>${esc(l.level)}</b> ${esc(l.target)} — ${esc(l.message)}</div>`).join("")
       ||'<span class="muted">Nothing at this level yet.</span>';
     if(stick) box.scrollTop=box.scrollHeight;
-  }catch(e){ box.textContent="Failed to load logs: "+e.message; }
+  }catch(e){
+    if(e&&e.status===401) throw e;
+    const currentBox=document.getElementById(boxId);
+    const currentLevel=document.getElementById(levelId);
+    if(currentBox===box&&(currentLevel?currentLevel.value:"info")===level){
+      box.textContent=`Failed to load ${cluster?"cluster ":""}logs: ${e.message}`;
+    }
+  }
 }
+function refreshLogStream(cluster){
+  const boxId=cluster?"cllogbox":"logbox", levelId=cluster?"clloglvl":"loglvl";
+  const box=document.getElementById(boxId); if(!box) return Promise.resolve();
+  const sel=document.getElementById(levelId);
+  const desired={box,level:sel?sel.value:"info"};
+  let run=cluster?CLUSTER_LOGS_RUN:LOGS_RUN;
+  if(run){
+    if(sameLogRequest(run.active,desired)) run.pending=null;
+    else run.pending=desired;
+    return run.promise;
+  }
+  run={active:null,pending:desired,promise:null,authGeneration:AUTH_GENERATION};
+  if(cluster) CLUSTER_LOGS_RUN=run; else LOGS_RUN=run;
+  run.promise=(async()=>{
+    try{
+      while(run.pending&&run.authGeneration===AUTH_GENERATION){
+        run.active=run.pending; run.pending=null;
+        await runLogRequest(run.active,cluster);
+      }
+    }finally{
+      if(cluster&&CLUSTER_LOGS_RUN===run) CLUSTER_LOGS_RUN=null;
+      if(!cluster&&LOGS_RUN===run) LOGS_RUN=null;
+    }
+  })();
+  return run.promise;
+}
+function refreshLogs(){ return refreshLogStream(false); }
+function refreshClusterLogs(){ return refreshLogStream(true); }
 async function addLib(){
   const name=ln.value.trim(), sel=lk.value, paths=lp.value.split(",").map(s=>s.trim()).filter(Boolean);
   // "Anime" is a shows library flagged anime (absolute numbering + AniList).
@@ -9727,7 +10564,7 @@ function langOpts(cur){ return LANG_CHOICES.map(([v,l])=>`<option value="${v}" $
 async function savePlayback(){
   const err=document.getElementById("perr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       default_audio_lang:document.getElementById("pal").value,
       default_sub_lang:document.getElementById("psl").value,
       sub_mode:document.getElementById("psm").value,
@@ -9735,7 +10572,7 @@ async function savePlayback(){
       hls_readrate:document.getElementById("phr").value,
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
-      hls_typeless_sliding:document.getElementById("phs").checked}});
+      hls_typeless_sliding:document.getElementById("phs").checked}}));
     toast("Playback defaults saved");
   }catch(e){ err.textContent=e.message; }
 }
@@ -9796,10 +10633,10 @@ async function testMonarr(){
 async function saveMonarr(){
   const err=document.getElementById("mnerr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       monarr_url:document.getElementById("mnurl").value.trim(),
       monarr_api_key:document.getElementById("mnkey").value.trim(),
-      monarr_watched_sync:document.getElementById("mnsync").checked}});
+      monarr_watched_sync:document.getElementById("mnsync").checked}}));
     toast("monarr settings saved");
     testMonarr(); // saving without checking is how a typo survives a week
 
@@ -9840,17 +10677,17 @@ function paintTrakt(){ const el=document.getElementById("traktcard"); if(el) el.
 async function saveTraktKeys(){
   const err=document.getElementById("tkerr"); err.textContent="";
   try{
-    SETTINGS=await api("/settings",{method:"PUT",body:{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
       trakt_client_id:document.getElementById("tcid").value.trim(),
-      trakt_client_secret:document.getElementById("tcs").value.trim()}});
+      trakt_client_secret:document.getElementById("tcs").value.trim()}}));
     TRAKT_EDIT=false;
-    TRAKT=await api("/trakt/status");
+    cacheTrakt(await api("/trakt/status"));
     paintTrakt(); toast("Trakt keys saved");
   }catch(e){ err.textContent=e.message; }
 }
-async function traktLink(){ try{ TRAKT=await api("/trakt/link",{method:"POST"}); paintTrakt(); }catch(e){ toast(e.message); } }
-async function traktUnlink(){ try{ TRAKT=await api("/trakt/link",{method:"DELETE"}); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
-async function traktSyncNow(){ try{ TRAKT=await api("/trakt/sync",{method:"POST"}); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
+async function traktLink(){ try{ cacheTrakt(await api("/trakt/link",{method:"POST"})); paintTrakt(); }catch(e){ toast(e.message); } }
+async function traktUnlink(){ try{ cacheTrakt(await api("/trakt/link",{method:"DELETE"})); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
+async function traktSyncNow(){ try{ cacheTrakt(await api("/trakt/sync",{method:"POST"})); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
 
 // ---- users (admin) --------------------------------------------------------
 function userRow(u){
@@ -9861,7 +10698,7 @@ function userRow(u){
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
   return `<tr><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
-    <td class="row rowactions" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</td></tr>`;
+    <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>`;
 }
 async function addUser(){
   const username=un.value.trim(), password=up.value, is_admin=ua.checked;
@@ -10231,16 +11068,21 @@ function catalogHomeBody(p){
   catalogFillNav();
 
   const hub=k=>(p.hubs&&p.hubs[k])||[];
-  let html=installBannerHtml();
+  let hubs=installBannerHtml(), soon="", previews="";
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) html+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           html+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
-  if(hub("recently_added").length)    html+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) html+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
+  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 
-  if(p.libs.length){
-    html+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
       const total=s.total==null?"":`<span class="px-n">${esc(String(s.total))}</span>`;
       // rail() interpolates its heading as HTML (classic passes plain text),
@@ -10253,14 +11095,17 @@ function catalogHomeBody(p){
       // holding photos, because grid() is what populates PHOTO_SET and without
       // it the lightbox opens on one picture and cannot page to the next.
       const photos=s.items.some(i=>i.kind==="photo");
-      html += (!s.items.length||photos)
+      previews += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
+      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   }else{
-    html+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
   }
-  return html;
+  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
 
 LAYOUTS.catalog={name:"Catalog", surfaces:["desktop","mobile","tv"], chrome:catalogChrome, views:{home:catalogHomeBody}};
@@ -10472,7 +11317,7 @@ function catalogItemBody(p){
 
   const trail=[{href:"#/",label:"Home"}]
     .concat(NAV_ORIGIN?[{href:NAV_ORIGIN.href,label:NAV_ORIGIN.label}]:[])
-    .concat((d.ancestors||[]).map(a=>({href:`#/item/${a.id}`,label:a.title})))
+    .concat((d.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
     .concat([{label:it.title}]);
   const crumbs=pageHead(trail);
 
@@ -10806,8 +11651,8 @@ function theaterHeroHtml(pick){
       ${it.overview?`<p class="th-desc">${esc(it.overview)}</p>`:""}
       ${prog}
       <div class="actions">
-        <button class="btnplay" onclick="AUTOPLAY=${it.id};location.hash='#/item/${it.id}'">${label}</button>
-        <button class="ghost" onclick="location.hash='#/item/${it.id}'">ⓘ Details</button>
+        <button class="btnplay" onclick="AUTOPLAY='${exactWireId(it)}';location.hash='#/item/${exactWireId(it)}'">${label}</button>
+        <button class="ghost" onclick="location.hash='#/item/${exactWireId(it)}'">ⓘ Details</button>
       </div>
     </div>
   </section>`;
@@ -10829,22 +11674,28 @@ function theaterHomeBody(p){
   // With no hero, main's own padding already clears the bar and the page
   // simply starts with the install banner — the empty-continue-hub and
   // empty-server paths are the same code path, not a special case.
-  let html = pick ? theaterHeroHtml(pick) : "";
-  let body = installBannerHtml();
+  let hero = pick ? theaterHeroHtml(pick) : "";
+  let hubs=installBannerHtml(), soon="", previews="";
 
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) body+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           body+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
-  if(hub("recently_added").length)    body+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
+  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
+  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
   // Coming soon: absent entirely when nothing is paired or monarr had nothing
   // to say — an empty rail is worse than no rail.
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) body+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 
-  if(p.libs.length){
-    body+=groupToggleHtml(p.group);
+  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
+  if(p.previewsPending){
+    previews+=`<div class="empty">Loading library previews…</div>`;
+  }else if(p.previewsError){
+    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
+  }else if(p.libs.length){
+    previews+=groupToggleHtml(p.group);
     for(const s of p.sections){
-      const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· view all (${esc(String(s.total))})</a>`;
+      const count=s.total==null?"preview unavailable":`view all (${esc(String(s.total))})`;
+      const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· ${count}</a>`;
       // Two cases still take a grid rather than a rail, both inherited from
       // the catalog drop's reasoning. An EMPTY section, because rail() on an
       // empty row renders a heading over nothing while grid([]) renders the
@@ -10853,14 +11704,18 @@ function theaterHomeBody(p){
       // without it the lightbox opens on one picture and cannot page to the
       // next.
       const photos=s.items.some(i=>i.kind==="photo");
-      body += (!s.items.length||photos)
+      previews += (!s.items.length||photos)
         ? `<h2 class="section">${head}</h2>${grid(s.items)}`
         : rail(head, s.items.map(i=>card(i)).join(""));
+      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
     }
   } else {
-    body+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
+    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings">Settings</a>.':""}</div>`;
   }
-  return html+`<div class="th-rails">${body}</div>`;
+  return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
+    `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
+    `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -10936,7 +11791,7 @@ function theaterItemBody(p){
 
   const trail=[{href:"#/",label:"Home"}]
     .concat(NAV_ORIGIN?[{href:NAV_ORIGIN.href,label:NAV_ORIGIN.label}]:[])
-    .concat((p.ancestors||[]).map(a=>({href:`#/item/${a.id}`,label:a.title})))
+    .concat((p.ancestors||[]).map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title})))
     .concat([{label:it.title}]);
   const crumbs=pageHead(trail);
 
@@ -11354,8 +12209,8 @@ async function saveReaderState(force){
         if(!r.locator||(!r.dirty&&!forceThis)) continue;
         const locator=JSON.parse(JSON.stringify(r.locator)), fingerprint=JSON.stringify(locator), completed=!!r.completed;
         try{
-          const saved=await api(`/items/${r.item.id}/reading-state`,{method:"PUT",body:{
-            file_id:r.file.id,revision:r.open.revision,locator,
+          const saved=await api(`/items/${r.itemId}/reading-state`,{method:"PUT",body:{
+            file_id:r.fileId,revision:r.open.revision,locator,
             progression:r.progression||0,completed,recorded_at:Math.floor(Date.now()/1000)
           }});
           if(READER===r){
@@ -11428,9 +12283,9 @@ async function readerSearchGo(index){
 
 function readerFlushKeepalive(r){
   if(!r||!r.open||!r.locator||!TOKEN) return;
-  const body=JSON.stringify({file_id:r.file.id,revision:r.open.revision,locator:r.locator,
+  const body=JSON.stringify({file_id:r.fileId,revision:r.open.revision,locator:r.locator,
     progression:r.progression||0,completed:!!r.completed,recorded_at:Math.floor(Date.now()/1000)});
-  fetch(`${API}/items/${r.item.id}/reading-state`,{method:"PUT",headers:{authorization:"Bearer "+TOKEN,"content-type":"application/json"},body,keepalive:true}).catch(()=>{});
+  fetch(`${API}/items/${r.itemId}/reading-state`,{method:"PUT",headers:{authorization:"Bearer "+TOKEN,"content-type":"application/json"},body,keepalive:true}).catch(()=>{});
 }
 function closeReaderSession(r){
   if(!r||!r.open||!r.open.session_id||!TOKEN) return;
@@ -11445,25 +12300,26 @@ function destroyReader(flush){
 }
 async function closeReader(){
   const r=READER; if(!r){ history.back(); return; }
-  await saveReaderState(true); const itemId=r.item.id; destroyReader(false);
-  if(NATIVE_READER_BOOT){ TOKEN=null; ME=null; nativeReaderPost("close"); return; }
+  await saveReaderState(true); const itemId=r.itemId; destroyReader(false);
+  if(NATIVE_READER_BOOT){ TOKEN=null; AUTH_GENERATION++; ME=null; nativeReaderPost("close"); return; }
   location.hash=`#/item/${itemId}`;
 }
 async function viewReader(itemId,fileId){
   if(surfaceClass()==="tv") throw new Error("The ebook reader is available on desktop, phone, and tablet screens.");
-  if(READER&&(READER.item.id!==Number(itemId)||READER.file.id!==Number(fileId))) destroyReader(true);
+  const routeItemId=String(itemId), routeFileId=String(fileId);
+  if(READER&&(READER.itemId!==routeItemId||READER.fileId!==routeFileId)) destroyReader(true);
   if(READER) return;
-  const detail=await api(`/items/${itemId}`), item=detail.item;
-  const file=(detail.files||[]).find(candidate=>candidate.id===Number(fileId));
-  if(!file||!file.available||!isEpubFile(file)) throw new Error("This EPUB is not available to read.");
+  const detail=await api(`/items/${routeItemId}`), item=detail.item;
+  const file=(detail.files||[]).find(candidate=>exactWireId(candidate)===routeFileId);
+  if(!canReadBookFile(file)) throw new Error("This ebook format is not available in Cinema's reader.");
   document.getElementById("app").innerHTML=readerShell(item,file);
   try{
     const [opened,state]=await Promise.all([
-      api(`/files/${file.id}/publication`,{method:"POST"}),
-      api(`/items/${item.id}/reading-state?file_id=${file.id}`)
+      api(`/files/${routeFileId}/publication`,{method:"POST"}),
+      api(`/items/${routeItemId}/reading-state?file_id=${routeFileId}`)
     ]);
     const saved=state&&!state.stale?state.state:null, prefs=readerPrefs();
-    READER={item,file,detail,open:opened,prefs,locator:saved&&saved.locator||null,
+    READER={itemId:routeItemId,fileId:routeFileId,item,file,detail,open:opened,prefs,locator:saved&&saved.locator||null,
       progression:saved&&saved.progression||0,completed:!!(saved&&saved.completed),dirty:false,
       index:0,href:opened.publication.readingOrder[0].href,searchGeneration:0,navigationGeneration:0};
     const frame=document.getElementById("reader-frame");
@@ -11479,7 +12335,7 @@ async function viewReader(itemId,fileId){
     READER.heartbeat=setInterval(()=>saveReaderState(true),30000);
     nativeReaderPost("ready");
   }catch(error){
-    if(!READER) READER={item,file,detail,open:null,locator:null,progression:0,completed:false};
+    if(!READER) READER={itemId:routeItemId,fileId:routeFileId,item,file,detail,open:null,locator:null,progression:0,completed:false};
     readerError(error.message);
     nativeReaderPost("error",error.message);
   }
@@ -11489,11 +12345,58 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 
 // ---- router ---------------------------------------------------------------
 // One page-scoped poller at a time; routing away always clears it.
-let PAGE_TIMER=null;
-function setPageTimer(fn,ms){ clearInterval(PAGE_TIMER); PAGE_TIMER=setInterval(fn,ms); }
-async function render(){
-  if(!TOKEN||!ME) return boot();
+let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
+function pagePhaseName(route){
+  if(route==="#/activity") return "activity";
+  if(route==="#/settings"||route==="#/admin") return "settings";
+  return "home";
+}
+function setPagePhase(route,generation,phase){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return false;
+  const order={shell:0,content:1,settled:2};
+  if(!(phase in order)) return false;
+  const main=document.getElementById("main");
+  if(!main) return false;
+  const page=pagePhaseName(route);
+  const sameGeneration=main.dataset.page===page&&main.dataset.pageGeneration===String(generation);
+  if(sameGeneration&&order[phase]<=order[main.dataset.phase]) return phase===main.dataset.phase;
+  if(phase==="shell"){
+    delete main.dataset.pageFailure;
+    if(typeof performance!=="undefined"&&performance.getEntriesByType&&performance.clearMarks){
+      for(const entry of performance.getEntriesByType("mark")){
+        if(entry.name.startsWith("plurx-page-phase:")) performance.clearMarks(entry.name);
+      }
+    }
+  }
+  main.dataset.page=page;
+  main.dataset.pageGeneration=String(generation);
+  main.dataset.phase=phase;
+  if(typeof performance!=="undefined"&&performance.mark){
+    performance.mark(`plurx-page-phase:${generation}:${page}:${phase}`);
+  }
+  return true;
+}
+function setPageFailure(route,generation,failure){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return false;
+  const main=document.getElementById("main");
+  if(!main||main.dataset.pageGeneration!==String(generation)) return false;
+  if(failure) main.dataset.pageFailure=failure;
+  else delete main.dataset.pageFailure;
+  return true;
+}
+function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION) return;
   clearInterval(PAGE_TIMER);
+  const timer=setInterval(()=>{
+    if(generation!==PAGE_RENDER_GENERATION){ clearInterval(timer); if(PAGE_TIMER===timer) PAGE_TIMER=null; return; }
+    fn();
+  },ms);
+  PAGE_TIMER=timer;
+}
+async function render(){
+  const generation=++PAGE_RENDER_GENERATION;
+  if(!TOKEN||!ME) return boot();
+  clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
   const h=location.hash||"#/";
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
@@ -11509,16 +12412,16 @@ async function render(){
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
-    else if(h==="#/activity") await viewActivity();
-    else if(h==="#/admin"||h==="#/settings") await viewSettings();
-    else await viewHome();
+    else if(h==="#/activity") await viewActivity(generation);
+    else if(h==="#/admin"||h==="#/settings") await viewSettings(generation);
+    else await viewHome(generation);
     // Converted routes restore at the moment their content lands; this catches
     // the ones that do not, and — because it is consume-once — guarantees a
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
-    restoreScroll();
+    if(generation===PAGE_RENDER_GENERATION) restoreScroll();
   }catch(e){
-    if(e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m) m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; else toast(e.message); }
+    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); }else toast(e.message); }
   }
 }
 window.addEventListener("hashchange",render);

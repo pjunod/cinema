@@ -9,5 +9,12 @@ use anyhow::Result;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
-    plurx_cluster_check::run(std::env::args().collect::<Vec<_>>()).await
+    match plurx_cluster_check::run(std::env::args().collect::<Vec<_>>()).await {
+        Ok(()) => Ok(()),
+        Err(error) if plurx_cluster_check::is_port_collision(&error) => {
+            eprintln!("{error:#}");
+            std::process::exit(plurx_cluster_check::BIND_FAILURE_EXIT);
+        }
+        Err(error) => Err(error),
+    }
 }

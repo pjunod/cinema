@@ -1,7 +1,7 @@
 use plurx_compat_plex::gdm::{response_for, Advertisement};
 
 #[test]
-fn clustered_gdm_keeps_logical_identity_and_adds_the_node() {
+fn clustered_gdm_uses_a_distinct_resource_and_keeps_logical_identity() {
     let response = response_for(
         &Advertisement {
             instance_id: "logical-server",
@@ -12,7 +12,8 @@ fn clustered_gdm_keeps_logical_identity_and_adds_the_node() {
         32400,
     );
     let response = String::from_utf8(response).expect("GDM response is UTF-8");
-    assert!(response.contains("Resource-Identifier: logical-server\r\n"));
+    assert!(response.contains("Resource-Identifier: node-b\r\n"));
+    assert!(response.contains("Logical-Identifier: logical-server\r\n"));
     assert!(response.contains("Node-Identifier: node-b\r\n"));
     assert!(response.contains("Name: Living Room\r\n"));
 }

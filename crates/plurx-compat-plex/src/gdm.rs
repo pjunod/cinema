@@ -11,8 +11,11 @@ pub const GDM_PORT: u16 = 32414;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Advertisement<'a> {
+    /// Replicated identity of the logical plurx server.
     pub instance_id: &'a str,
     pub name: &'a str,
+    /// Stable identity of this cluster node. Absent keeps the legacy
+    /// single-node wire response byte-for-byte unchanged.
     pub node_id: Option<&'a str>,
 }
 
@@ -38,22 +41,28 @@ pub fn response(machine_identifier: &str, name: &str, version: &str, port: u16) 
 
 /// Build a response for one node under a logical server identity.
 pub fn response_for(advertisement: &Advertisement<'_>, version: &str, port: u16) -> Vec<u8> {
-    // CRLF-separated HTTP/1.0-style headers. Clients dedupe on
-    // Resource-Identifier, which must match /identity's machineIdentifier.
-    let node = advertisement
-        .node_id
-        .map(|node_id| format!("Node-Identifier: {node_id}\r\n"))
-        .unwrap_or_default();
+    // Plex clients deduplicate GDM records on Resource-Identifier. A cluster
+    // must therefore advertise the node id there and return the same value
+    // from its Plex `/identity` facade; putting the node id only in a custom
+    // header collapses all voters into one unusable record. Plurx-aware clients
+    // retain the replicated server grouping through Logical-Identifier.
+    let resource_id = advertisement.node_id.unwrap_or(advertisement.instance_id);
+    let cluster = advertisement.node_id.map_or_else(String::new, |node_id| {
+        format!(
+            "Logical-Identifier: {}\r\nNode-Identifier: {node_id}\r\n",
+            advertisement.instance_id
+        )
+    });
     let body = format!(
         "HTTP/1.0 200 OK\r\n\
          Content-Type: plex/media-server\r\n\
          Resource-Identifier: {}\r\n\
-         {node}\
+         {cluster}\
          Name: {}\r\n\
          Port: {port}\r\n\
          Version: {version}\r\n\
          Server-Class: \r\n\r\n",
-        advertisement.instance_id, advertisement.name,
+        resource_id, advertisement.name,
     );
     body.into_bytes()
 }
@@ -81,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn clustered_response_keeps_logical_identity_and_adds_node_identity() {
+    fn clustered_response_is_distinct_and_keeps_logical_identity() {
         let response = response_for(
             &Advertisement {
                 instance_id: "logical",
@@ -92,7 +101,8 @@ mod tests {
             32400,
         );
         let text = String::from_utf8(response).expect("utf8");
-        assert!(text.contains("Resource-Identifier: logical\r\n"));
+        assert!(text.contains("Resource-Identifier: node-b\r\n"));
+        assert!(text.contains("Logical-Identifier: logical\r\n"));
         assert!(text.contains("Node-Identifier: node-b\r\n"));
         assert!(text.contains("Name: Living Room\r\n"));
     }

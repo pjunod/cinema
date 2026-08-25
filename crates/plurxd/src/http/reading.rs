@@ -22,6 +22,7 @@ pub struct ReadingQuery {
 
 #[derive(Deserialize)]
 pub struct PutReadingRequest {
+    #[serde(deserialize_with = "deserialize_i64_number_or_text")]
     pub file_id: i64,
     pub revision: RevisionDto,
     pub locator: Value,
@@ -29,6 +30,26 @@ pub struct PutReadingRequest {
     pub completed: bool,
     #[serde(default)]
     pub recorded_at: Option<i64>,
+}
+
+/// Existing native clients send JSON numbers; the web reader sends the exact
+/// decimal route spelling because JavaScript numbers cannot represent the
+/// full signed 64-bit identifier range.
+fn deserialize_i64_number_or_text<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireI64 {
+        Number(i64),
+        Text(String),
+    }
+
+    match WireI64::deserialize(deserializer)? {
+        WireI64::Number(value) => Ok(value),
+        WireI64::Text(value) => value.parse().map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -261,5 +282,28 @@ mod tests {
             serde_json::from_str(&canonical).expect("validated locator should remain JSON");
         assert_eq!(stored["locations"]["totalProgression"], 0.5);
         assert!(stored["locations"].get("total_progression").is_none());
+    }
+
+    #[test]
+    fn reading_writes_accept_lossless_decimal_file_ids() {
+        let request: PutReadingRequest = serde_json::from_value(serde_json::json!({
+            "file_id": "9223372036854775807",
+            "revision": {"size": 10, "mtime": 20},
+            "locator": {"version": 1, "href": "chapter.xhtml"},
+            "progression": 0.5,
+            "completed": false
+        }))
+        .expect("decimal file id");
+        assert_eq!(request.file_id, i64::MAX);
+
+        let numeric: PutReadingRequest = serde_json::from_value(serde_json::json!({
+            "file_id": 42,
+            "revision": {"size": 10, "mtime": 20},
+            "locator": {"version": 1, "href": "chapter.xhtml"},
+            "progression": 0.5,
+            "completed": false
+        }))
+        .expect("legacy numeric file id");
+        assert_eq!(numeric.file_id, 42);
     }
 }

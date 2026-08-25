@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1519a36f"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The separate-process serving proof now suspends the confirmed leader, requires the surviving majority to elect a successor, resumes the former leader on every exit path, and then requires readiness, HLS capability, and media admission to recover through the configured proxy pool. Reverting the correction restores the flaky one-shot election request that failed the retained CI cluster proof without demonstrating failover."

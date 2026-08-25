@@ -37,8 +37,8 @@ use crate::config::Config;
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest, SqliteStore,
-    Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    CatalogueReader, HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest,
+    SqliteStore, Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -49,8 +49,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hiqlite-store")]
 use super::membership::{
-    decode_join_token, join_token_digest, ClusterPeer, FinalizeJoinRequest, JoinPayload,
-    JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
+    decode_join_token, join_token_digest, ActivitySigningKey, ClusterPeer, FinalizeJoinRequest,
+    JoinPayload, JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
 };
 
 pub const SQLITE_FILENAME: &str = "plurx.db";
@@ -69,6 +69,8 @@ const ACTIVATION_ATTEMPT_FILENAME: &str = "hiqlite-activation.in-progress";
 const RAFT_SECRET_FILENAME: &str = "secret_raft";
 #[cfg(feature = "hiqlite-store")]
 const API_SECRET_FILENAME: &str = "secret_api";
+#[cfg(feature = "hiqlite-store")]
+const ACTIVITY_SIGNING_KEY_FILENAME: &str = "activity_http_signing_key";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_DATABASE_FILENAME: &str = "plurx.db";
 #[cfg(feature = "hiqlite-store")]
@@ -188,6 +190,8 @@ pub struct SelectedStore {
     pub credential_key: Arc<CredentialKey>,
     pub backend: SelectedBackend,
     membership: MembershipManager,
+    replication: status::ReplicationMonitor,
+    catalogue: CatalogueReader,
     local_client: Option<Client>,
     _daemon_lock: File,
 }
@@ -197,18 +201,13 @@ impl SelectedStore {
     /// Read-only watch-state replication projection for the server API.
     #[must_use]
     pub fn replication_monitor(&self) -> status::ReplicationMonitor {
-        match self.backend {
-            SelectedBackend::Replicated => status::ReplicationMonitor::replicated(
-                self.local_client
-                    .as_ref()
-                    .expect("replicated backend must carry its local client")
-                    .clone(),
-            ),
-            SelectedBackend::SqliteRecovery => {
-                debug_assert!(self.local_client.is_none());
-                status::ReplicationMonitor::sqlite()
-            }
-        }
+        self.replication.clone()
+    }
+
+    /// Named consistency boundary for eligible catalogue requests.
+    #[must_use]
+    pub fn catalogue_reader(&self) -> CatalogueReader {
+        self.catalogue.clone()
     }
 
     /// Membership lifecycle and privacy-safe node health for the daemon API.
@@ -352,12 +351,15 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
         remove_abandoned_incoming(&config.storage.data_dir)?;
         remove_activation_attempt(&config.storage.data_dir)?;
         let legacy = super::open_store(config).await?;
+        let catalogue = CatalogueReader::authority(Arc::clone(&legacy.store));
         return Ok(SelectedStore {
             store: legacy.store,
             identity: legacy.identity,
             credential_key: legacy.credential_key,
             backend: SelectedBackend::SqliteRecovery,
             membership: MembershipManager::unavailable(),
+            replication: status::ReplicationMonitor::sqlite(),
+            catalogue,
             local_client: None,
             _daemon_lock: daemon_lock,
         });
@@ -393,11 +395,11 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     let token = read_join_token_file(&config.cluster.join_token_file)?;
     let payload = decode_join_token(&token)
         .map_err(|error| StoreError::Migration(format!("{}: {}", error.code(), error)))?;
-    if payload.expires_at <= unix_time_millis()? {
-        return Err(StoreError::Migration(
-            "join_token_expired: join token expired before it was redeemed".to_owned(),
-        ));
-    }
+    // The coordinator owns the expiry verdict. Locally, an unused expired
+    // token and an interrupted join already reserved to this node have the
+    // same payload; only the replicated token record can distinguish them.
+    // Rechecking the embedded timestamp here would strand an identity-bound
+    // voter that failed after redemption and restarted after the token TTL.
     if payload.schema_version != AUTH_SCHEMA_VERSION
         || payload.protocol_version != crate::store::AUTH_PROTOCOL_VERSION
     {
@@ -415,7 +417,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         true,
         true,
         payload.secrets.api.clone(),
-        true,
+        false,
         None,
     )
     .await
@@ -462,8 +464,10 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             token_digest,
             raft_id: payload.raft_id,
             node_id: identity.node_id.clone(),
+            hostname: super::membership::system_short_hostname().unwrap_or_default(),
             raft_address: local.raft_address.clone(),
             api_address: local.api_address.clone(),
+            http_base: configured_artwork_url(config)?,
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
         },
@@ -513,13 +517,23 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     // graceful-shutdown handle, and no stop/rebind boundary is needed because
     // every durable file already lives at the final path.
     let credential_key = open_active_credential_key(config, &store).await?;
-    let store: Arc<dyn Store> = Arc::new(store);
+    let concrete_store = Arc::new(store);
+    let store: Arc<dyn Store> = concrete_store.clone();
+    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let catalogue = CatalogueReader::replicated(
+        Arc::clone(&store),
+        concrete_store,
+        replication.metrics_handle(),
+        config.cluster.bounded_replica_reads,
+        config.cluster.bounded_replica_max_lag_entries,
+    );
     let membership_manager = MembershipManager::replicated(
         client.clone(),
         Arc::clone(&store),
         identity.clone(),
         local,
         configured_join_url(config)?,
+        configured_artwork_url(config)?,
         JoinSecrets {
             raft: secrets.raft,
             api: secrets.api,
@@ -527,6 +541,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
                 &config.cluster.credential_key_path(&config.storage.data_dir),
             )?,
         },
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         payload.activation_marker,
     )
     .await
@@ -537,6 +552,8 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         credential_key,
         backend: SelectedBackend::Replicated,
         membership: membership_manager,
+        replication,
+        catalogue,
         local_client: Some(client),
         _daemon_lock: daemon_lock,
     };
@@ -695,15 +712,6 @@ struct JoinApiError {
     message: String,
 }
 
-#[cfg(feature = "hiqlite-store")]
-fn unix_time_millis() -> Result<i64, StoreError> {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| StoreError::Database(error.to_string()))?
-        .as_millis();
-    i64::try_from(millis).map_err(|_| StoreError::Database("clock overflow".to_owned()))
-}
-
 /// Connect a maintenance command to an already-running activated voter.
 ///
 /// This path never imports and never starts a second local voter. It is safe
@@ -723,7 +731,7 @@ pub async fn connect_activated_store(config: &Config) -> Result<Arc<dyn Store>, 
     let identity = super::initialize_identity(&config.storage.data_dir, &marker.cluster_id)?;
     let secret_api = read_secret(&config.storage.data_dir.join(API_SECRET_FILENAME))?;
     let address = local_voter_api_address(config, &identity)?;
-    let client = Client::remote(vec![address], true, true, secret_api, true, None)
+    let client = Client::remote(vec![address], true, true, secret_api, false, None)
         .await
         .map_err(|error| {
             StoreError::Database(format!(
@@ -870,7 +878,7 @@ impl ActivationMarker {
     }
 
     fn validate(&self) -> Result<(), StoreError> {
-        if self.marker_version != ACTIVATION_MARKER_VERSION {
+        if self.marker_version == 0 || self.marker_version > ACTIVATION_MARKER_VERSION {
             return Err(StoreError::Migration(format!(
                 "unsupported Hiqlite activation marker version {}",
                 self.marker_version
@@ -1298,7 +1306,16 @@ async fn open_active_store_with_key(
             }
         },
     };
-    let store: Arc<dyn Store> = Arc::new(store);
+    let concrete_store = Arc::new(store);
+    let store: Arc<dyn Store> = concrete_store.clone();
+    let replication = status::ReplicationMonitor::replicated(client.clone());
+    let catalogue = CatalogueReader::replicated(
+        Arc::clone(&store),
+        concrete_store,
+        replication.metrics_handle(),
+        config.cluster.bounded_replica_reads,
+        config.cluster.bounded_replica_max_lag_entries,
+    );
     let membership_file = match local_membership.take() {
         Some(mut membership) => {
             if membership.local != local {
@@ -1341,11 +1358,13 @@ async fn open_active_store_with_key(
         identity.clone(),
         membership_file.local,
         configured_join_url(config)?,
+        configured_artwork_url(config)?,
         JoinSecrets {
             raft: secrets.raft,
             api: secrets.api,
             credential_key: credential_key_secret,
         },
+        load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
     )
     .await
@@ -1356,6 +1375,8 @@ async fn open_active_store_with_key(
         credential_key,
         backend: SelectedBackend::Replicated,
         membership,
+        replication,
+        catalogue,
         local_client: Some(client),
         _daemon_lock: daemon_lock,
     })
@@ -1635,7 +1656,7 @@ async fn start_voter(
     nodes.push(local.clone());
     nodes.sort_by_key(|peer| peer.raft_id);
     nodes.dedup_by_key(|peer| peer.raft_id);
-    let nodes = nodes.iter().map(Node::from).collect::<Vec<_>>();
+    let nodes = hiqlite_nodes_for_voter(&nodes, local.raft_id)?;
 
     // The daemon lock guards one data directory, but these ports are host-wide
     // and default to fixed values, so two data directories on one host collide.
@@ -1711,6 +1732,30 @@ async fn start_voter(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok((client, local))
+}
+
+/// Build Hiqlite's connection roster without treating durable Raft ids as
+/// vector positions.
+#[cfg(feature = "hiqlite-store")]
+fn hiqlite_nodes_for_voter(
+    peers: &[ClusterPeer],
+    local_raft_id: u64,
+) -> Result<Vec<Node>, StoreError> {
+    if !peers.iter().any(|peer| peer.raft_id == local_raft_id) {
+        return Err(StoreError::Identity(format!(
+            "local Raft id {local_raft_id} is absent from the configured peer list"
+        )));
+    }
+
+    let mut ids = BTreeSet::new();
+    if let Some(duplicate) = peers.iter().find(|peer| !ids.insert(peer.raft_id)) {
+        return Err(StoreError::Identity(format!(
+            "configured peer list contains duplicate Raft id {}",
+            duplicate.raft_id
+        )));
+    }
+
+    Ok(peers.iter().map(Node::from).collect())
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -1919,12 +1964,42 @@ fn configured_advertise_host(config: &Config) -> Result<String, StoreError> {
 fn configured_join_url(config: &Config) -> Result<String, StoreError> {
     let configured = config.cluster.join_url.trim().trim_end_matches('/');
     if !configured.is_empty() {
-        if !(configured.starts_with("http://") || configured.starts_with("https://")) {
+        let url = reqwest::Url::parse(configured).map_err(|_| {
+            StoreError::Migration("cluster.join_url must be a valid http(s) URL".to_owned())
+        })?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err(StoreError::Migration(
-                "cluster.join_url must start with http:// or https://".to_owned(),
+                "cluster.join_url must be an http(s) URL without credentials, query, or fragment"
+                    .to_owned(),
             ));
         }
         return Ok(configured.to_owned());
+    }
+    Ok(format!(
+        "http://{}",
+        host_port(
+            &configured_advertise_host(config)?,
+            config.server.bind.port()
+        )
+    ))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn configured_artwork_url(config: &Config) -> Result<String, StoreError> {
+    let configured = config.cluster.artwork_url.trim();
+    if !configured.is_empty() {
+        return super::membership::normalize_internal_http_base(configured).ok_or_else(|| {
+            StoreError::Migration(
+                "cluster.artwork_url must be an http(s) origin without credentials or a path"
+                    .to_owned(),
+            )
+        });
     }
     Ok(format!(
         "http://{}",
@@ -2083,6 +2158,13 @@ fn load_or_create_secret(data_dir: &Path, filename: &str) -> Result<String, Stor
     }
     remove_file_if_present(&temporary)?;
     read_secret(&path)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn load_or_create_activity_signing_key(data_dir: &Path) -> Result<ActivitySigningKey, StoreError> {
+    let seed = load_or_create_secret(data_dir, ACTIVITY_SIGNING_KEY_FILENAME)?;
+    ActivitySigningKey::from_seed_hex(&seed)
+        .map_err(|error| StoreError::Identity(error.to_string()))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2754,6 +2836,32 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_url_preserves_reverse_proxy_prefix_but_peer_url_requires_an_origin() {
+        let mut config = Config::default();
+        config.cluster.join_url = "https://cluster.example/plurx/".to_owned();
+        assert_eq!(
+            configured_join_url(&config).expect("path-prefixed join coordinator"),
+            "https://cluster.example/plurx"
+        );
+
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        assert!(
+            configured_artwork_url(&config).is_err(),
+            "peer routes must not inherit a reverse-proxy path prefix"
+        );
+
+        for invalid in [
+            "https://user:secret@cluster.example/plurx",
+            "https://cluster.example/plurx?redirect=elsewhere",
+            "file:///tmp/plurx.sock",
+        ] {
+            config.cluster.join_url = invalid.to_owned();
+            assert!(configured_join_url(&config).is_err(), "accepted {invalid}");
+        }
+    }
     use crate::store::{SettingsStore, SqliteStore};
 
     #[cfg(feature = "hiqlite-store")]
@@ -2773,6 +2881,43 @@ mod tests {
     /// not observe a *different* live process may print it.
     #[cfg(feature = "hiqlite-store")]
     const SECOND_DAEMON_VERDICT: &str = "another plurxd process already owns the data directory";
+
+    /// Raft ids are durable identities, not positions in the bootstrap vector.
+    /// A live token can reserve id 2 while id 3 joins first, so Hiqlite must
+    /// accept the unique sparse roster rather than requiring a duplicate pad.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn hiqlite_accepts_a_unique_sparse_node_roster() {
+        let peers = [
+            ClusterPeer {
+                raft_id: 1,
+                raft_address: "127.0.0.1:32401".to_owned(),
+                api_address: "127.0.0.1:32402".to_owned(),
+            },
+            ClusterPeer {
+                raft_id: 3,
+                raft_address: "127.0.0.1:32501".to_owned(),
+                api_address: "127.0.0.1:32502".to_owned(),
+            },
+        ];
+        let nodes = hiqlite_nodes_for_voter(&peers, 3).expect("build sparse connection roster");
+        let config = NodeConfig {
+            node_id: 3,
+            nodes,
+            secret_raft: "0123456789abcdef".to_owned(),
+            secret_api: "fedcba9876543210".to_owned(),
+            ..NodeConfig::default()
+        };
+
+        config
+            .is_valid()
+            .expect("sparse Raft ids must be selected by id");
+        assert_eq!(
+            config.nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![1, 3],
+            "the compatibility path must not duplicate a connection target"
+        );
+    }
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
@@ -2804,6 +2949,27 @@ mod tests {
                 .validate()
                 .expect_err("unsupported marker must fail before voter startup");
             assert!(error.to_string().contains("incomplete"), "{error}");
+        }
+
+        // Version 0 has never been a valid writer-produced marker format.
+        {
+            let zero = ActivationMarker {
+                marker_version: 0,
+                cluster_id: "cluster-a".to_owned(),
+                source_backup_sha256: "0".repeat(64),
+                source_schema_version: 20,
+                replicated_schema_version: AUTH_SCHEMA_VERSION,
+                imported_rows: 0,
+                table_hashes: vec![SqliteImportTableDigest {
+                    table: "settings".to_owned(),
+                    row_count: 0,
+                    sha256: "0".repeat(64),
+                }],
+            };
+            let error = zero
+                .validate()
+                .expect_err("marker version 0 must fail closed");
+            assert!(error.to_string().contains("unsupported"), "{error}");
         }
     }
 
@@ -3474,18 +3640,57 @@ mod tests {
         );
         assert!(!expired_dir.path().join(HIQLITE_ACTIVE_DIRNAME).exists());
 
-        let issued = coordinator
+        // A still-live token may reserve the next Raft id while another
+        // machine starts first. OpenRaft permits that sparse membership, and
+        // the production daemon must not confuse the assigned id with the
+        // length of its bootstrap vector (Hiqlite 0.14 does exactly that
+        // without the compatibility adapter in `start_voter`).
+        let held_gap = coordinator
             .issue_token(Duration::from_secs(120))
             .await
+            .expect("reserve the preceding Raft id");
+        let issued = coordinator
+            .issue_token(Duration::from_secs(1))
+            .await
             .expect("issue daemon join token");
+        assert_eq!(
+            issued.raft_id,
+            held_gap.raft_id + 1,
+            "daemon join fixture must exercise a sparse assigned id"
+        );
         let joining_dir = tempfile::tempdir().expect("joining data dir");
         let token_path = joining_dir.path().join("join.token");
         std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
         let mut joining_config = membership_test_config(joining_dir.path());
         joining_config.cluster.join_token_file = token_path.clone();
+        let staged_identity = crate::cluster::initialize_join_identity(
+            joining_dir.path(),
+            &cluster_id,
+            issued.raft_id,
+        )
+        .expect("stage the joining node identity");
+        let staged_local = configured_local_peer(&joining_config, issued.raft_id)
+            .expect("configure the staged peer");
+        let issued_digest = join_token_digest(&issued.token);
+        coordinator
+            .redeem(&RedeemJoinRequest {
+                token_digest: issued_digest.clone(),
+                raft_id: issued.raft_id,
+                node_id: staged_identity.node_id,
+                hostname: "joining-test-node".to_owned(),
+                raft_address: staged_local.raft_address,
+                api_address: staged_local.api_address,
+                http_base: configured_artwork_url(&joining_config)
+                    .expect("derive the staged node artwork origin"),
+                schema_version: AUTH_SCHEMA_VERSION,
+                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            })
+            .await
+            .expect("reserve the token to the staged node before its failed start");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
         let joined = select_daemon_store(&joining_config)
             .await
-            .expect("join through daemon store selection");
+            .expect("resume an expired identity-bound join through daemon store selection");
         assert_eq!(joined.identity.cluster_id, cluster_id);
         assert_eq!(joined.identity.raft_id, issued.raft_id);
         assert!(
@@ -3495,7 +3700,6 @@ mod tests {
         let local = read_local_membership(joining_dir.path())
             .expect("read joined local membership")
             .expect("joined node persists local membership");
-        let issued_digest = join_token_digest(&issued.token);
         assert_eq!(
             local.join_token_digest.as_deref(),
             Some(issued_digest.as_str())
@@ -3747,12 +3951,25 @@ pub mod status {
     //! M3; this module only turns the backend and Raft metrics the daemon already
     //! has into an honest answer about watch-state convergence.
 
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Serialize};
 
-    use hiqlite::Client;
+    use hiqlite::{
+        Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+    };
+    pub use hiqlite::{
+        DbSnapshotHistogram, DbSnapshotMetricsSnapshot, DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
+    };
     use std::sync::{Arc, Mutex};
+
+    const PASSIVE_METRICS_REFRESH: Duration = Duration::from_secs(5);
+    const PASSIVE_METRICS_FRESHNESS_SECS: u64 = 15;
+    const QUORUM_WATERMARK_REFRESH: Duration = Duration::from_millis(500);
+    const QUORUM_WATERMARK_TIMEOUT: Duration = Duration::from_millis(750);
+    const QUORUM_WATERMARK_LEASE: Duration = Duration::from_secs(1);
 
     /// The durable backend serving this daemon process.
     #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -3819,11 +4036,799 @@ pub mod status {
         pub peer_matched_indexes: Option<Vec<Option<u64>>>,
     }
 
+    /// One coherent local Raft sample. `last_applied_index` is intentionally
+    /// not described as a commit index: OpenRaft's local watch does not prove a
+    /// quorum watermark on a follower.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PassiveRaftSample {
+        pub current_term: u64,
+        pub last_applied_index: Option<u64>,
+        pub leader_known: bool,
+        pub is_leader: bool,
+    }
+
+    /// Privacy-safe projection of the latest quorum-confirmed commit proof.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct QuorumWatermarkSample {
+        pub committed_index: u64,
+        pub apply_lag_entries: Option<u64>,
+    }
+
+    /// Store-free view consumed by the Prometheus handler.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PassiveRaftMetricsView {
+        pub local_source: bool,
+        pub sample: Option<PassiveRaftSample>,
+        pub age_seconds: Option<u64>,
+        pub valid: bool,
+        pub errors: u64,
+        pub leader_changes: u64,
+        pub watermark_source: bool,
+        /// `true` only when this proof is bound to this process's local Raft
+        /// term, leader observation, epoch, and applied index. A remote
+        /// authority-only proof must never be used for a bounded replica read.
+        pub watermark_requires_local_binding: bool,
+        pub watermark: Option<QuorumWatermarkSample>,
+        pub watermark_age_millis: Option<u64>,
+        pub watermark_valid: bool,
+        /// The current watermark source implements this binary's bounded
+        /// local-read protocol. False keeps rolling upgrades on Authority.
+        pub watermark_local_reads_supported: bool,
+        pub watermark_errors: u64,
+        pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
+    }
+
+    /// Private, single-operation state retained across one local query.
+    /// Callers never receive or replay this capability directly.
+    struct BoundedReplicaPermit {
+        metrics: PassiveRaftMetrics,
+        current_term: u64,
+        leader_id: u64,
+        committed_index: u64,
+        applied_index: u64,
+        local_observation_epoch: u64,
+        watermark_started_nanos: u64,
+        max_apply_lag_entries: u64,
+    }
+
+    impl BoundedReplicaPermit {
+        fn remains_valid(&self) -> bool {
+            let elapsed = self.metrics.started_at.elapsed();
+            self.remains_valid_at(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn remains_valid_at(&self, elapsed_seconds: u64, elapsed_nanos: u64) -> bool {
+            let original_deadline_valid = elapsed_nanos
+                .saturating_sub(self.watermark_started_nanos)
+                < duration_nanos(QUORUM_WATERMARK_LEASE);
+            original_deadline_valid
+                && self
+                    .metrics
+                    .bounded_replica_state_at(
+                        elapsed_seconds,
+                        elapsed_nanos,
+                        self.max_apply_lag_entries,
+                    )
+                    .is_some_and(|current| {
+                        current.current_term == self.current_term
+                            && current.leader_id == self.leader_id
+                            && current.committed_index >= self.committed_index
+                            && current.local_observation_epoch == self.local_observation_epoch
+                            && current.applied_index >= self.applied_index
+                    })
+        }
+    }
+
+    struct BoundedReplicaState {
+        current_term: u64,
+        leader_id: u64,
+        committed_index: u64,
+        applied_index: u64,
+        local_observation_epoch: u64,
+        watermark_started_nanos: u64,
+    }
+
+    #[derive(Default)]
+    struct PassiveRaftMetricsAtomics {
+        sequence: AtomicU64,
+        published: AtomicBool,
+        current_term: AtomicU64,
+        last_applied_present: AtomicBool,
+        last_applied_index: AtomicU64,
+        leader_known: AtomicBool,
+        is_leader: AtomicBool,
+        sampled_elapsed: AtomicU64,
+        errors: AtomicU64,
+        leader_changes: AtomicU64,
+        last_known_leader_present: AtomicBool,
+        last_known_leader: AtomicU64,
+        current_leader_present: AtomicBool,
+        current_leader: AtomicU64,
+        local_observation_epoch: AtomicU64,
+        watermark_published: AtomicBool,
+        watermark_term: AtomicU64,
+        watermark_leader: AtomicU64,
+        watermark_committed_index: AtomicU64,
+        watermark_local_read_protocol_version: AtomicU64,
+        watermark_started_nanos: AtomicU64,
+        watermark_local_epoch: AtomicU64,
+        watermark_errors: AtomicU64,
+        watermark_invalidated: AtomicBool,
+        sampler_started: AtomicBool,
+    }
+
+    /// Narrow atomics-only handle for passive local Raft observability.
+    #[derive(Clone)]
+    pub struct PassiveRaftMetrics {
+        inner: Arc<PassiveRaftMetricsAtomics>,
+        started_at: Instant,
+        local_source: bool,
+        watermark_source: bool,
+        watermark_requires_local_binding: bool,
+        snapshot_metrics: Option<LocalDbSnapshotMetrics>,
+    }
+
+    impl PassiveRaftMetrics {
+        fn new(local_source: bool) -> Self {
+            Self {
+                inner: Arc::new(PassiveRaftMetricsAtomics::default()),
+                started_at: Instant::now(),
+                local_source,
+                watermark_source: local_source,
+                watermark_requires_local_binding: local_source,
+                snapshot_metrics: None,
+            }
+        }
+
+        /// A distinct serving process has no local replica to bind or lag to.
+        /// Its readiness may use only the short quorum authority lease; this
+        /// mode deliberately exposes no local source and no apply-lag value.
+        fn remote_authority() -> Self {
+            Self {
+                inner: Arc::new(PassiveRaftMetricsAtomics::default()),
+                started_at: Instant::now(),
+                local_source: false,
+                watermark_source: true,
+                watermark_requires_local_binding: false,
+                snapshot_metrics: None,
+            }
+        }
+
+        fn with_snapshot_metrics(mut self, metrics: Option<LocalDbSnapshotMetrics>) -> Self {
+            self.snapshot_metrics = metrics;
+            self
+        }
+
+        /// Construct one current local/quorum proof for deterministic Store
+        /// boundary contracts. Production obtains both observations from the
+        /// live passive sampler; this helper is absent without the validation
+        /// feature.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn validation_bounded_ready() -> Self {
+            let metrics = Self::new(true);
+            assert!(metrics.publish_at(
+                &LocalDbRaftSnapshot {
+                    running: true,
+                    node_id: 1,
+                    current_term: 7,
+                    current_leader: Some(1),
+                    last_applied_term: Some(7),
+                    last_applied_index: Some(41),
+                },
+                0,
+            ));
+            assert!(metrics.publish_watermark_at(
+                DbQuorumWatermark {
+                    term: 7,
+                    leader_id: 1,
+                    committed_index: 41,
+                    local_read_protocol_version: hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+                },
+                0,
+                0,
+            ));
+            metrics
+        }
+
+        /// Revoke the current proof inside a validation-only local operation,
+        /// exercising production's post-query discard and Authority fallback.
+        #[cfg(feature = "cluster-read-cost-validation")]
+        #[doc(hidden)]
+        pub fn validation_revoke_bounded_proof(&self) {
+            let sequence = self.begin_write();
+            self.inner
+                .watermark_invalidated
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+        }
+
+        /// Read one coherent snapshot without locks, Store access, or IO.
+        #[must_use]
+        pub fn snapshot(&self) -> PassiveRaftMetricsView {
+            let elapsed = self.started_at.elapsed();
+            self.snapshot_at_times(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        /// Run exactly one local read between bounded-replica issue and
+        /// revalidation boundaries.
+        ///
+        /// Remote-only serving processes and SQLite backends always return
+        /// `None` without invoking `local_read`. A result is discarded when
+        /// the proof expires, changes generation, or exceeds the entry budget
+        /// while the query is running. Store code must then perform its named
+        /// authority fallback.
+        pub(crate) async fn run_bounded_replica<T, F, Fut>(
+            &self,
+            max_apply_lag_entries: u64,
+            local_read: F,
+        ) -> Option<T>
+        where
+            F: FnOnce() -> Fut,
+            Fut: Future<Output = T>,
+        {
+            let elapsed = self.started_at.elapsed();
+            let permit = self.try_bounded_replica_at(
+                elapsed.as_secs(),
+                duration_nanos(elapsed),
+                max_apply_lag_entries,
+            )?;
+            let result = local_read().await;
+            permit.remains_valid().then_some(result)
+        }
+
+        fn try_bounded_replica_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+            max_apply_lag_entries: u64,
+        ) -> Option<BoundedReplicaPermit> {
+            let state = self.bounded_replica_state_at(
+                elapsed_seconds,
+                elapsed_nanos,
+                max_apply_lag_entries,
+            )?;
+            Some(BoundedReplicaPermit {
+                metrics: self.clone(),
+                current_term: state.current_term,
+                leader_id: state.leader_id,
+                committed_index: state.committed_index,
+                applied_index: state.applied_index,
+                local_observation_epoch: state.local_observation_epoch,
+                watermark_started_nanos: state.watermark_started_nanos,
+                max_apply_lag_entries,
+            })
+        }
+
+        fn bounded_replica_state_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+            max_apply_lag_entries: u64,
+        ) -> Option<BoundedReplicaState> {
+            if !self.local_source
+                || !self.watermark_source
+                || !self.watermark_requires_local_binding
+            {
+                return None;
+            }
+            loop {
+                let before = self.inner.sequence.load(Ordering::Acquire);
+                if before & 1 != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let published = self.inner.published.load(Ordering::Relaxed);
+                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+                let current_term = self.inner.current_term.load(Ordering::Relaxed);
+                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
+                let applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
+                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
+                let current_leader_present =
+                    self.inner.current_leader_present.load(Ordering::Relaxed);
+                let leader_id = self.inner.current_leader.load(Ordering::Relaxed);
+                let local_observation_epoch =
+                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
+                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
+                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
+                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+                let committed_index = self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let local_read_protocol_version = self
+                    .inner
+                    .watermark_local_read_protocol_version
+                    .load(Ordering::Relaxed);
+                let watermark_started_nanos =
+                    self.inner.watermark_started_nanos.load(Ordering::Relaxed);
+                let watermark_local_epoch =
+                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+                let watermark_invalidated =
+                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let after = self.inner.sequence.load(Ordering::Acquire);
+                if before != after {
+                    continue;
+                }
+                let local_valid = published
+                    && elapsed_seconds.saturating_sub(sampled_elapsed)
+                        <= PASSIVE_METRICS_FRESHNESS_SECS;
+                let watermark_valid = watermark_published
+                    && elapsed_nanos.saturating_sub(watermark_started_nanos)
+                        < duration_nanos(QUORUM_WATERMARK_LEASE)
+                    && !watermark_invalidated;
+                let local_binding_valid = last_applied_present
+                    && leader_known
+                    && current_leader_present
+                    && current_term == watermark_term
+                    && leader_id == watermark_leader
+                    && local_observation_epoch == watermark_local_epoch;
+                let apply_lag_entries = committed_index.saturating_sub(applied_index);
+                return (local_valid
+                    && watermark_valid
+                    && local_binding_valid
+                    && local_read_protocol_version == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION
+                    && apply_lag_entries <= max_apply_lag_entries)
+                    .then_some(BoundedReplicaState {
+                        current_term,
+                        leader_id,
+                        committed_index,
+                        applied_index,
+                        local_observation_epoch,
+                        watermark_started_nanos,
+                    });
+            }
+        }
+
+        #[cfg(test)]
+        fn snapshot_at(&self, elapsed: u64) -> PassiveRaftMetricsView {
+            self.snapshot_at_times(elapsed, elapsed.saturating_mul(1_000_000_000))
+        }
+
+        fn snapshot_at_times(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> PassiveRaftMetricsView {
+            loop {
+                let before = self.inner.sequence.load(Ordering::Acquire);
+                if before & 1 != 0 {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let published = self.inner.published.load(Ordering::Relaxed);
+                let sampled_elapsed = self.inner.sampled_elapsed.load(Ordering::Relaxed);
+                let current_term = self.inner.current_term.load(Ordering::Relaxed);
+                let last_applied_present = self.inner.last_applied_present.load(Ordering::Relaxed);
+                let last_applied_index = self.inner.last_applied_index.load(Ordering::Relaxed);
+                let leader_known = self.inner.leader_known.load(Ordering::Relaxed);
+                let is_leader = self.inner.is_leader.load(Ordering::Relaxed);
+                let errors = self.inner.errors.load(Ordering::Relaxed);
+                let leader_changes = self.inner.leader_changes.load(Ordering::Relaxed);
+                let current_leader_present =
+                    self.inner.current_leader_present.load(Ordering::Relaxed);
+                let current_leader = self.inner.current_leader.load(Ordering::Relaxed);
+                let local_observation_epoch =
+                    self.inner.local_observation_epoch.load(Ordering::Relaxed);
+                let watermark_published = self.inner.watermark_published.load(Ordering::Relaxed);
+                let watermark_term = self.inner.watermark_term.load(Ordering::Relaxed);
+                let watermark_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+                let watermark_committed_index =
+                    self.inner.watermark_committed_index.load(Ordering::Relaxed);
+                let watermark_local_read_protocol_version = self
+                    .inner
+                    .watermark_local_read_protocol_version
+                    .load(Ordering::Relaxed);
+                let watermark_started_nanos =
+                    self.inner.watermark_started_nanos.load(Ordering::Relaxed);
+                let watermark_local_epoch =
+                    self.inner.watermark_local_epoch.load(Ordering::Relaxed);
+                let watermark_errors = self.inner.watermark_errors.load(Ordering::Relaxed);
+                let watermark_invalidated =
+                    self.inner.watermark_invalidated.load(Ordering::Relaxed);
+                let after = self.inner.sequence.load(Ordering::Acquire);
+                if before == after {
+                    let age_seconds =
+                        published.then(|| elapsed_seconds.saturating_sub(sampled_elapsed));
+                    let local_valid =
+                        age_seconds.is_some_and(|age| age <= PASSIVE_METRICS_FRESHNESS_SECS);
+                    let watermark_age_nanos = watermark_published
+                        .then(|| elapsed_nanos.saturating_sub(watermark_started_nanos));
+                    let local_binding_valid = !self.watermark_requires_local_binding
+                        || (published
+                            && local_valid
+                            && last_applied_present
+                            && leader_known
+                            && current_leader_present
+                            && current_term == watermark_term
+                            && current_leader == watermark_leader
+                            && local_observation_epoch == watermark_local_epoch);
+                    let watermark_valid = self.watermark_source
+                        && watermark_age_nanos
+                            .is_some_and(|age| age < duration_nanos(QUORUM_WATERMARK_LEASE))
+                        && !watermark_invalidated
+                        && local_binding_valid;
+                    let apply_lag_entries = (watermark_valid
+                        && self.watermark_requires_local_binding
+                        && last_applied_present)
+                        .then(|| watermark_committed_index.saturating_sub(last_applied_index));
+                    return PassiveRaftMetricsView {
+                        local_source: self.local_source,
+                        sample: published.then_some(PassiveRaftSample {
+                            current_term,
+                            last_applied_index: last_applied_present.then_some(last_applied_index),
+                            leader_known,
+                            is_leader,
+                        }),
+                        age_seconds,
+                        valid: local_valid,
+                        errors,
+                        leader_changes,
+                        watermark_source: self.watermark_source,
+                        watermark_requires_local_binding: self.watermark_requires_local_binding,
+                        watermark: watermark_published.then_some(QuorumWatermarkSample {
+                            committed_index: watermark_committed_index,
+                            apply_lag_entries,
+                        }),
+                        watermark_age_millis: watermark_age_nanos.map(|age| age / 1_000_000),
+                        watermark_valid,
+                        watermark_local_reads_supported: watermark_published
+                            && watermark_local_read_protocol_version
+                                == hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+                        watermark_errors,
+                        snapshot_metrics: self.snapshot_metrics.map(|metrics| metrics.snapshot()),
+                    };
+                }
+            }
+        }
+
+        fn publish(&self, source: &LocalDbRaftSnapshot) -> bool {
+            self.publish_at(source, self.started_at.elapsed().as_secs())
+        }
+
+        fn publish_at(&self, source: &LocalDbRaftSnapshot, elapsed: u64) -> bool {
+            if !source.running {
+                self.record_error();
+                return false;
+            }
+            if self.inner.published.load(Ordering::Acquire) {
+                let prior_term = self.inner.current_term.load(Ordering::Relaxed);
+                let prior_applied = self
+                    .inner
+                    .last_applied_present
+                    .load(Ordering::Relaxed)
+                    .then(|| self.inner.last_applied_index.load(Ordering::Relaxed));
+                let regressed = source.current_term < prior_term
+                    || (prior_applied.is_some() && source.last_applied_index.is_none())
+                    || matches!(
+                        (prior_applied, source.last_applied_index),
+                        (Some(prior), Some(current)) if current < prior
+                    );
+                if regressed {
+                    self.record_error();
+                    return false;
+                }
+            }
+
+            let sequence = self.begin_write();
+            let was_published = self.inner.published.load(Ordering::Relaxed);
+            let prior_leader = self
+                .inner
+                .current_leader_present
+                .load(Ordering::Relaxed)
+                .then(|| self.inner.current_leader.load(Ordering::Relaxed));
+            let observation_changed = !was_published
+                || source.current_term != self.inner.current_term.load(Ordering::Relaxed)
+                || source.current_leader != prior_leader;
+            if observation_changed {
+                saturating_increment(&self.inner.local_observation_epoch);
+            }
+            if observation_changed && self.inner.watermark_published.load(Ordering::Relaxed) {
+                self.inner
+                    .watermark_invalidated
+                    .store(true, Ordering::Relaxed);
+            }
+            if let Some(leader) = source.current_leader {
+                if self
+                    .inner
+                    .last_known_leader_present
+                    .swap(true, Ordering::Relaxed)
+                {
+                    let previous = self.inner.last_known_leader.swap(leader, Ordering::Relaxed);
+                    if previous != leader {
+                        saturating_increment(&self.inner.leader_changes);
+                    }
+                } else {
+                    self.inner
+                        .last_known_leader
+                        .store(leader, Ordering::Relaxed);
+                }
+            }
+            self.inner
+                .current_term
+                .store(source.current_term, Ordering::Relaxed);
+            self.inner
+                .current_leader_present
+                .store(source.current_leader.is_some(), Ordering::Relaxed);
+            self.inner
+                .current_leader
+                .store(source.current_leader.unwrap_or_default(), Ordering::Relaxed);
+            self.inner
+                .last_applied_present
+                .store(source.last_applied_index.is_some(), Ordering::Relaxed);
+            self.inner.last_applied_index.store(
+                source.last_applied_index.unwrap_or_default(),
+                Ordering::Relaxed,
+            );
+            self.inner
+                .leader_known
+                .store(source.current_leader.is_some(), Ordering::Relaxed);
+            self.inner.is_leader.store(
+                source.current_leader == Some(source.node_id),
+                Ordering::Relaxed,
+            );
+            self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
+            self.inner.published.store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            true
+        }
+
+        fn record_error(&self) {
+            let sequence = self.begin_write();
+            saturating_increment(&self.inner.errors);
+            self.inner
+                .watermark_invalidated
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+        }
+
+        fn elapsed_nanos(&self) -> u64 {
+            duration_nanos(self.started_at.elapsed())
+        }
+
+        fn publish_watermark(&self, source: DbQuorumWatermark, started_nanos: u64) -> bool {
+            self.publish_watermark_at(source, started_nanos, self.elapsed_nanos())
+        }
+
+        fn publish_watermark_at(
+            &self,
+            source: DbQuorumWatermark,
+            started_nanos: u64,
+            elapsed_nanos: u64,
+        ) -> bool {
+            let sequence = self.begin_write();
+            let expired = elapsed_nanos.saturating_sub(started_nanos)
+                >= duration_nanos(QUORUM_WATERMARK_LEASE);
+            let local_matches = !self.watermark_requires_local_binding
+                || (self.inner.published.load(Ordering::Relaxed)
+                    && self.inner.leader_known.load(Ordering::Relaxed)
+                    && self.inner.current_leader_present.load(Ordering::Relaxed)
+                    && self.inner.current_term.load(Ordering::Relaxed) == source.term
+                    && self.inner.current_leader.load(Ordering::Relaxed) == source.leader_id);
+            let prior_published = self.inner.watermark_published.load(Ordering::Relaxed);
+            let prior_term = self.inner.watermark_term.load(Ordering::Relaxed);
+            let prior_leader = self.inner.watermark_leader.load(Ordering::Relaxed);
+            let successor_or_conflicting_generation = prior_published
+                && (source.term > prior_term
+                    || (source.term == prior_term && source.leader_id != prior_leader));
+            let regressed = prior_published
+                && (source.term < prior_term
+                    || source.committed_index
+                        < self.inner.watermark_committed_index.load(Ordering::Relaxed)
+                    || (source.term == prior_term && source.leader_id != prior_leader));
+            if expired || !local_matches || regressed {
+                saturating_increment(&self.inner.watermark_errors);
+                if successor_or_conflicting_generation {
+                    self.inner
+                        .watermark_invalidated
+                        .store(true, Ordering::Relaxed);
+                }
+                self.end_write(sequence);
+                return false;
+            }
+            self.inner
+                .watermark_term
+                .store(source.term, Ordering::Relaxed);
+            self.inner
+                .watermark_leader
+                .store(source.leader_id, Ordering::Relaxed);
+            self.inner
+                .watermark_committed_index
+                .store(source.committed_index, Ordering::Relaxed);
+            self.inner
+                .watermark_local_read_protocol_version
+                .store(source.local_read_protocol_version, Ordering::Relaxed);
+            self.inner
+                .watermark_started_nanos
+                .store(started_nanos, Ordering::Relaxed);
+            self.inner.watermark_local_epoch.store(
+                self.inner.local_observation_epoch.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.inner
+                .watermark_invalidated
+                .store(false, Ordering::Relaxed);
+            self.inner
+                .watermark_published
+                .store(true, Ordering::Relaxed);
+            self.end_write(sequence);
+            true
+        }
+
+        fn record_watermark_error(&self) {
+            let sequence = self.begin_write();
+            saturating_increment(&self.inner.watermark_errors);
+            self.end_write(sequence);
+        }
+
+        fn begin_write(&self) -> u64 {
+            loop {
+                let current = self.inner.sequence.load(Ordering::Acquire);
+                if current & 1 == 0
+                    && self
+                        .inner
+                        .sequence
+                        .compare_exchange(
+                            current,
+                            current.wrapping_add(1),
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    return current;
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        fn end_write(&self, sequence: u64) {
+            self.inner
+                .sequence
+                .store(sequence.wrapping_add(2), Ordering::Release);
+        }
+    }
+
+    fn saturating_increment(value: &AtomicU64) {
+        let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        });
+    }
+
+    fn duration_nanos(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    #[async_trait::async_trait]
+    trait PassiveRaftSource: Send {
+        fn snapshot(&self) -> LocalDbRaftSnapshot;
+        async fn wait_for_change(&mut self) -> bool;
+    }
+
+    #[async_trait::async_trait]
+    impl PassiveRaftSource for LocalDbRaftMetrics {
+        fn snapshot(&self) -> LocalDbRaftSnapshot {
+            LocalDbRaftMetrics::snapshot(self)
+        }
+
+        async fn wait_for_change(&mut self) -> bool {
+            LocalDbRaftMetrics::wait_for_change(self).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    trait QuorumWatermarkSource: Send + Sync {
+        async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error>;
+    }
+
+    #[async_trait::async_trait]
+    impl QuorumWatermarkSource for Client {
+        async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
+            self.db_quorum_watermark().await
+        }
+    }
+
+    async fn run_quorum_watermark_loop<S, F>(
+        source: S,
+        metrics: PassiveRaftMetrics,
+        shutdown: F,
+        initial_delay: Duration,
+        refresh_period: Duration,
+        request_timeout: Duration,
+    ) where
+        S: QuorumWatermarkSource,
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(shutdown);
+        if !initial_delay.is_zero() {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = tokio::time::sleep(initial_delay) => {}
+            }
+        }
+        let mut refresh = tokio::time::interval(refresh_period);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                _ = refresh.tick() => {}
+            }
+            let started_nanos = metrics.elapsed_nanos();
+            let result = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = tokio::time::timeout(request_timeout, source.sample()) => result,
+            };
+            match result {
+                Ok(Ok(watermark)) => {
+                    if !metrics.publish_watermark(watermark, started_nanos) {
+                        tracing::warn!(
+                            term = watermark.term,
+                            committed_index = watermark.committed_index,
+                            "rejected quorum watermark that does not match local Raft state"
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    metrics.record_watermark_error();
+                    tracing::debug!(error = %error, "quorum watermark sample failed");
+                }
+                Err(_) => {
+                    metrics.record_watermark_error();
+                    tracing::debug!("quorum watermark sample timed out");
+                }
+            }
+        }
+    }
+
+    async fn run_passive_metrics_loop<S, F>(
+        mut source: S,
+        metrics: PassiveRaftMetrics,
+        shutdown: F,
+        refresh_period: Duration,
+    ) where
+        S: PassiveRaftSource,
+        F: Future<Output = ()> + Send,
+    {
+        let initial = source.snapshot();
+        if !metrics.publish(&initial) {
+            return;
+        }
+        let mut refresh = tokio::time::interval(refresh_period);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        refresh.tick().await;
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                changed = source.wait_for_change() => {
+                    if !changed {
+                        metrics.record_error();
+                        return;
+                    }
+                }
+                _ = refresh.tick() => {}
+            }
+            let sample = source.snapshot();
+            if !metrics.publish(&sample) {
+                tracing::warn!(
+                    current_term = sample.current_term,
+                    last_applied_index = sample.last_applied_index,
+                    "stopping passive metrics after an invalid local Raft observation"
+                );
+                return;
+            }
+        }
+    }
+
     /// Live status reader kept beside the selected store in daemon state.
     #[derive(Clone)]
     pub struct ReplicationMonitor {
         backend: ReplicationBackend,
         client: Option<Client>,
+        local_metrics: Option<LocalDbRaftMetrics>,
+        passive_metrics: PassiveRaftMetrics,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -3834,6 +4839,8 @@ pub mod status {
             Self {
                 backend: ReplicationBackend::Sqlite,
                 client: None,
+                local_metrics: None,
+                passive_metrics: PassiveRaftMetrics::new(false),
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -3841,10 +4848,94 @@ pub mod status {
         /// Monitor a local Hiqlite voter through the same client the Store uses.
         #[must_use]
         pub fn replicated(client: Client) -> Self {
+            let local_metrics = client.local_db_raft_metrics().ok();
+            let snapshot_metrics = client.local_db_snapshot_metrics().ok();
+            let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
+                .with_snapshot_metrics(snapshot_metrics);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
+                local_metrics,
+                passive_metrics,
                 previous: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Monitor a distinct serving process through a remote Hiqlite
+        /// client. Unlike the daemon's embedded-voter path this publishes only
+        /// a bounded quorum authority lease. It has no local applied-index
+        /// source, cannot claim apply lag, and is ineligible for bounded local
+        /// replica reads.
+        #[must_use]
+        pub fn replicated_remote(client: Client) -> Self {
+            Self {
+                backend: ReplicationBackend::Replicated,
+                client: Some(client),
+                local_metrics: None,
+                passive_metrics: PassiveRaftMetrics::remote_authority(),
+                previous: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Store-free metrics handle suitable for unauthenticated scrapes.
+        #[must_use]
+        pub fn metrics_handle(&self) -> PassiveRaftMetrics {
+            self.passive_metrics.clone()
+        }
+
+        /// Keep the atomics-only metrics projection fresh from the local Raft
+        /// watch. Changes publish immediately; the periodic refresh keeps an
+        /// idle healthy cluster from looking stale.
+        pub async fn passive_metrics_loop<F>(self, shutdown: F)
+        where
+            F: Future<Output = ()> + Send,
+        {
+            let Some(client) = self.client.clone() else {
+                return;
+            };
+            if self
+                .passive_metrics
+                .inner
+                .sampler_started
+                .swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
+            let stagger_slot = self
+                .local_metrics
+                .as_ref()
+                .map_or(0, |watch| watch.snapshot().node_id.saturating_sub(1) % 5);
+            let node_stagger = Duration::from_millis(stagger_slot.saturating_mul(75));
+            let local_metrics = self.local_metrics.clone();
+            let local_passive = self.passive_metrics.clone();
+            let watermark_passive = self.passive_metrics;
+            let local_loop = async move {
+                if let Some(watch) = local_metrics {
+                    run_passive_metrics_loop(
+                        watch,
+                        local_passive,
+                        std::future::pending(),
+                        PASSIVE_METRICS_REFRESH,
+                    )
+                    .await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let watermark_loop = run_quorum_watermark_loop(
+                client,
+                watermark_passive,
+                std::future::pending(),
+                node_stagger,
+                QUORUM_WATERMARK_REFRESH,
+                QUORUM_WATERMARK_TIMEOUT,
+            );
+            tokio::pin!(shutdown, local_loop, watermark_loop);
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {}
+                _ = &mut local_loop => {}
+                _ = &mut watermark_loop => {}
             }
         }
 
@@ -4059,6 +5150,960 @@ pub mod status {
             }
         }
 
+        fn local_sample(
+            current_term: u64,
+            last_applied_index: Option<u64>,
+            current_leader: Option<u64>,
+        ) -> LocalDbRaftSnapshot {
+            LocalDbRaftSnapshot {
+                running: true,
+                node_id: 1,
+                current_term,
+                current_leader,
+                last_applied_term: Some(current_term),
+                last_applied_index,
+            }
+        }
+
+        fn watermark(term: u64, leader_id: u64, committed_index: u64) -> DbQuorumWatermark {
+            watermark_with_protocol(
+                term,
+                leader_id,
+                committed_index,
+                hiqlite::DB_LOCAL_READ_PROTOCOL_VERSION,
+            )
+        }
+
+        fn watermark_with_protocol(
+            term: u64,
+            leader_id: u64,
+            committed_index: u64,
+            local_read_protocol_version: u64,
+        ) -> DbQuorumWatermark {
+            DbQuorumWatermark {
+                term,
+                leader_id,
+                committed_index,
+                local_read_protocol_version,
+            }
+        }
+
+        #[test]
+        fn quorum_watermark_deadline_is_anchored_before_the_request() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(40), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_000_000_000,
+                10_999_999_999,
+            ));
+            let before_deadline = metrics.snapshot_at_times(10, 10_999_999_999);
+            assert!(before_deadline.watermark_valid);
+            assert_eq!(
+                before_deadline
+                    .watermark
+                    .expect("watermark")
+                    .apply_lag_entries,
+                Some(2)
+            );
+
+            let at_deadline = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!at_deadline.watermark_valid);
+            assert_eq!(
+                at_deadline
+                    .watermark
+                    .expect("retained watermark")
+                    .apply_lag_entries,
+                None
+            );
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 43),
+                11_000_000_000,
+                12_000_000_000,
+            ));
+            assert_eq!(
+                metrics
+                    .snapshot_at_times(12, 12_000_000_000)
+                    .watermark_errors,
+                1
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_requires_both_fresh_proofs_and_the_entry_budget() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_200_000_000, 2)
+                    .is_none(),
+                "three unapplied entries exceed a two-entry budget"
+            );
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 3)
+                .expect("fresh local and quorum proofs");
+            assert_eq!(permit.committed_index, 45);
+            assert_eq!(permit.applied_index, 42);
+            assert_eq!(
+                permit.committed_index.saturating_sub(permit.applied_index),
+                3
+            );
+            assert!(permit.remains_valid_at(10, 10_999_999_999));
+            assert!(!permit.remains_valid_at(11, 11_000_000_000));
+        }
+
+        #[test]
+        fn bounded_replica_permit_requires_the_watermark_sources_read_protocol() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark_with_protocol(7, 1, 42, 0),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            let view = metrics.snapshot_at_times(10, 10_200_000_000);
+            assert!(view.watermark_valid, "authority proof remains usable");
+            assert!(!view.watermark_local_reads_supported);
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_200_000_000, 0)
+                    .is_none(),
+                "rolling-upgrade mismatch must use Authority"
+            );
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_500_000_000, 0)
+                    .is_some(),
+                "matching source and receiver protocols may use the local replica"
+            );
+        }
+
+        #[tokio::test]
+        async fn bounded_replica_wrapper_issues_before_and_revalidates_after_one_local_read() {
+            let metrics = PassiveRaftMetrics::new(true);
+            let calls = Arc::new(AtomicU64::new(0));
+            let unavailable_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica(0, move || {
+                        unavailable_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 41 }
+                    })
+                    .await,
+                None
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+            assert!(metrics.publish(&local_sample(7, Some(45), Some(1))));
+            let started_nanos = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(7, 1, 45), started_nanos));
+            let available_calls = Arc::clone(&calls);
+            assert_eq!(
+                metrics
+                    .run_bounded_replica(0, move || {
+                        available_calls.fetch_add(1, Ordering::Relaxed);
+                        async { 42 }
+                    })
+                    .await,
+                Some(42)
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn bounded_replica_permit_deadline_is_not_extended_by_a_newer_watermark() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("initial permit");
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_600_000_000,
+                10_700_000_000,
+            ));
+            assert!(permit.remains_valid_at(10, 10_999_999_999));
+            assert!(
+                !permit.remains_valid_at(11, 11_000_000_000),
+                "a refresh must not extend a capability issued from the older request"
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_rejects_remote_authority_and_generation_changes() {
+            let remote = PassiveRaftMetrics::remote_authority();
+            assert!(remote.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(
+                remote
+                    .try_bounded_replica_at(10, 10_200_000_000, u64::MAX)
+                    .is_none(),
+                "a remote serving process has no local replica proof"
+            );
+
+            let local = PassiveRaftMetrics::new(true);
+            assert!(local.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(local.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = local
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("initial permit");
+
+            assert!(local.publish_at(&local_sample(8, Some(46), Some(2)), 10));
+            assert!(local.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_500_000_000),
+                "a fresh proof in a new term cannot revive an old permit"
+            );
+        }
+
+        #[test]
+        fn successor_watermark_revokes_old_permit_before_the_local_watch_catches_up() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("old-generation permit");
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(6, 9, 44),
+                10_250_000_000,
+                10_300_000_000,
+            ));
+            assert!(
+                permit.remains_valid_at(10, 10_350_000_000),
+                "a genuinely delayed older generation must not revoke the retained proof"
+            );
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_600_000_000),
+                "a successful successor proof must immediately revoke the old capability"
+            );
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_600_000_000, u64::MAX)
+                    .is_none(),
+                "the stale local observation cannot negotiate a new permit"
+            );
+
+            assert!(metrics.publish_at(&local_sample(8, Some(46), Some(2)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_650_000_000,
+                10_700_000_000,
+            ));
+            assert!(
+                metrics
+                    .try_bounded_replica_at(10, 10_800_000_000, 0)
+                    .is_some(),
+                "matching local and quorum successor proofs recover eligibility"
+            );
+        }
+
+        #[test]
+        fn bounded_replica_permit_is_revoked_when_the_latest_entry_gap_grows() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let permit = metrics
+                .try_bounded_replica_at(10, 10_200_000_000, 0)
+                .expect("zero-lag permit");
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(
+                !permit.remains_valid_at(10, 10_500_000_000),
+                "the second phase must enforce the configured lag budget too"
+            );
+        }
+
+        #[test]
+        fn watermark_lease_path_has_no_wall_clock_dependency() {
+            let source = include_str!("migration.rs");
+            let snapshot_path = source
+                .split_once("pub fn snapshot(&self) -> PassiveRaftMetricsView")
+                .expect("snapshot path")
+                .1
+                .split_once("fn publish(&self")
+                .expect("end snapshot path")
+                .0;
+            let publication_path = source
+                .split_once("fn elapsed_nanos(&self)")
+                .expect("watermark publication path")
+                .1
+                .split_once("fn record_watermark_error")
+                .expect("end watermark publication path")
+                .0;
+            let sampler_path = source
+                .split_once("async fn run_quorum_watermark_loop")
+                .expect("watermark sampler path")
+                .1
+                .split_once("async fn run_passive_metrics_loop")
+                .expect("end watermark sampler path")
+                .0;
+
+            for (name, path) in [
+                ("snapshot", snapshot_path),
+                ("publication", publication_path),
+                ("sampler", sampler_path),
+            ] {
+                for forbidden in ["SystemTime", "UNIX_EPOCH", "Utc::", "unix_"] {
+                    assert!(
+                        !path.contains(forbidden),
+                        "{name} path introduced wall-clock dependency {forbidden}"
+                    );
+                }
+            }
+            assert!(snapshot_path.contains("started_at.elapsed()"));
+            assert!(publication_path.contains("started_at.elapsed()"));
+            assert!(sampler_path.contains("metrics.elapsed_nanos()"));
+        }
+
+        #[test]
+        fn every_term_or_leader_transition_invalidates_the_old_generation() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 10_200_000_000)
+                    .watermark_valid
+            );
+
+            assert!(metrics.publish_at(&local_sample(7, Some(42), None), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_300_000_000)
+                    .watermark_valid
+            );
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_400_000_000)
+                    .watermark_valid,
+                "Some -> None -> same leader must not resurrect the old proof"
+            );
+
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 42),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 10_600_000_000)
+                    .watermark_valid
+            );
+
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 10));
+            assert!(
+                !metrics
+                    .snapshot_at_times(10, 10_700_000_000)
+                    .watermark_valid
+            );
+            assert!(
+                !metrics.publish_watermark_at(watermark(7, 1, 44), 10_700_000_000, 10_800_000_000,),
+                "a delayed old-term response must not revalidate"
+            );
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 44),
+                10_800_000_000,
+                10_900_000_000,
+            ));
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 11_000_000_000)
+                    .watermark_valid
+            );
+        }
+
+        #[test]
+        fn watermark_failures_do_not_extend_or_regress_the_last_proof() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            metrics.record_watermark_error();
+            let retained = metrics.snapshot_at_times(10, 10_900_000_000);
+            assert!(retained.watermark_valid);
+            assert_eq!(retained.watermark_errors, 1);
+            assert_eq!(retained.watermark_age_millis, Some(900));
+
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 44),
+                10_900_000_000,
+                10_950_000_000,
+            ));
+            let expired = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!expired.watermark_valid);
+            assert_eq!(expired.watermark.expect("retained").committed_index, 45);
+            assert_eq!(expired.watermark_errors, 2);
+        }
+
+        #[test]
+        fn remote_authority_never_invents_a_local_replica_or_apply_lag() {
+            let metrics = PassiveRaftMetrics::remote_authority();
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+
+            let current = metrics.snapshot_at_times(10, 10_200_000_000);
+            assert!(!current.local_source);
+            assert!(current.sample.is_none());
+            assert!(current.watermark_source);
+            assert!(!current.watermark_requires_local_binding);
+            assert!(current.watermark_valid);
+            assert_eq!(
+                current
+                    .watermark
+                    .expect("remote authority")
+                    .apply_lag_entries,
+                None
+            );
+
+            metrics.record_watermark_error();
+            let retained = metrics.snapshot_at_times(10, 10_999_999_999);
+            assert!(retained.watermark_valid);
+            assert_eq!(retained.watermark_errors, 1);
+
+            let expired = metrics.snapshot_at_times(11, 11_000_000_000);
+            assert!(!expired.watermark_valid);
+            assert_eq!(
+                expired
+                    .watermark
+                    .expect("retained remote authority")
+                    .apply_lag_entries,
+                None
+            );
+        }
+
+        #[test]
+        fn remote_authority_rejects_delayed_and_invalidates_conflicting_generations() {
+            let metrics = PassiveRaftMetrics::remote_authority();
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            assert!(metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_200_000_000,
+                10_300_000_000,
+            ));
+            assert!(!metrics.publish_watermark_at(
+                watermark(7, 1, 47),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 3, 47),
+                10_400_000_000,
+                10_500_000_000,
+            ));
+
+            let current = metrics.snapshot_at_times(10, 10_600_000_000);
+            assert!(
+                !current.watermark_valid,
+                "a conflicting same-term leader must revoke the retained proof immediately"
+            );
+            let watermark = current.watermark.expect("latest remote authority");
+            assert_eq!(watermark.committed_index, 46);
+            assert_eq!(watermark.apply_lag_entries, None);
+            assert_eq!(current.watermark_errors, 2);
+        }
+
+        #[test]
+        fn remote_authority_sampler_never_polls_replica_management_metrics() {
+            let source = include_str!("migration.rs");
+            let constructor = source
+                .split_once("pub fn replicated_remote")
+                .expect("remote monitor constructor")
+                .1
+                .split_once("pub fn metrics_handle")
+                .expect("end remote monitor constructor")
+                .0;
+            let sampler = source
+                .split_once("pub async fn passive_metrics_loop")
+                .expect("passive sampler")
+                .1
+                .split_once("pub async fn status")
+                .expect("end passive sampler")
+                .0;
+
+            assert!(constructor.contains("PassiveRaftMetrics::remote_authority()"));
+            assert!(!constructor.contains("local_db_raft_metrics"));
+            assert!(!sampler.contains("metrics_db"));
+        }
+
+        #[test]
+        fn watermark_counter_saturates() {
+            let metrics = PassiveRaftMetrics::new(true);
+            metrics
+                .inner
+                .watermark_errors
+                .store(u64::MAX, Ordering::Relaxed);
+            metrics.record_watermark_error();
+            assert_eq!(metrics.snapshot().watermark_errors, u64::MAX);
+        }
+
+        #[test]
+        fn watermark_lease_is_shorter_than_the_vendor_election_floor() {
+            let config = hiqlite::NodeConfig::default_raft_config(1_000);
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < u128::from(config.election_timeout_min),
+                "an isolated former leader must lose its proof before a new election can finish"
+            );
+        }
+
+        #[test]
+        fn watermark_vendor_boundary_is_bounded_and_rolling_safe() {
+            let management = include_str!("../../../../vendor/hiqlite/src/client/mgmt.rs");
+            let api = include_str!("../../../../vendor/hiqlite/src/network/api.rs");
+            let stream = include_str!("../../../../vendor/hiqlite/src/client/stream.rs");
+            assert!(management.contains("DB_QUORUM_WATERMARK_MARKER"));
+            assert!(management.contains("query_remote_req"));
+            assert!(management.contains("ensure_linearizable"));
+            assert!(management.contains("Duration::from_secs(1)"));
+            assert!(api.contains("ApiStreamRequestPayload::QueryConsistent"));
+            assert!(api.contains("db_quorum_watermark_local"));
+            assert!(!api.contains("ApiStreamRequestPayload::QuorumWatermark"));
+            assert!(!stream.contains("ClientStreamReq::QuorumWatermark"));
+
+            let connection = rusqlite::Connection::open_in_memory().expect("SQLite");
+            let old_server_result =
+                connection.prepare("/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL");
+            assert!(
+                old_server_result.is_err(),
+                "an old leader must reject the reserved marker as harmless invalid SQL"
+            );
+        }
+
+        #[test]
+        fn snapshot_metrics_use_explicit_build_and_install_hooks() {
+            let builder = include_str!(
+                "../../../../vendor/hiqlite/src/store/state_machine/sqlite/snapshot_builder.rs"
+            );
+            let state_machine = include_str!(
+                "../../../../vendor/hiqlite/src/store/state_machine/sqlite/state_machine.rs"
+            );
+            let metrics = include_str!("../../../../vendor/hiqlite/src/snapshot_metrics.rs");
+            assert!(builder.contains("SnapshotTimer::start(SnapshotOperation::Build)"));
+            assert!(builder.contains("timer.success()"));
+            assert!(state_machine.contains("SnapshotTimer::start(SnapshotOperation::Install)"));
+            assert!(state_machine.contains("timer.success()"));
+            assert!(metrics.contains("impl Drop for SnapshotTimer"));
+            assert!(metrics.contains("cancellation, panic, and an early `?` are errors"));
+            let private_handle =
+                ["pub struct LocalDbSnapshot", "Metrics {\n    _private: (),"].concat();
+            let public_default = ["impl Default for LocalDb", "SnapshotMetrics"].concat();
+            let lazy_global = ["Once", "Lock"].concat();
+            assert!(metrics.contains(&private_handle));
+            assert!(metrics.contains("ArcSwapOption::const_empty()"));
+            assert!(metrics.contains("load_full()"));
+            assert!(!metrics.contains(&public_default));
+            assert!(!metrics.contains(&lazy_global));
+            assert!(!metrics.contains("node_id"));
+            assert!(!metrics.contains("snapshot_id"));
+            assert!(!metrics.contains("path_snapshots"));
+        }
+
+        #[test]
+        fn passive_metrics_refresh_idle_samples_and_expire_without_refresh() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            let stale = metrics.snapshot_at(41);
+            assert_eq!(stale.age_seconds, Some(31));
+            assert!(!stale.valid);
+
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 50));
+            let fresh = metrics.snapshot_at(51);
+            assert_eq!(fresh.age_seconds, Some(1));
+            assert!(fresh.valid);
+            assert_eq!(fresh.leader_changes, 0);
+        }
+
+        #[test]
+        fn passive_metrics_reject_regressions_and_preserve_the_last_sample() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(!metrics.publish_at(&local_sample(6, Some(41), Some(2)), 20));
+
+            let view = metrics.snapshot_at(21);
+            assert_eq!(view.errors, 1);
+            assert_eq!(view.age_seconds, Some(11));
+            assert_eq!(view.sample.expect("last good sample").current_term, 7);
+            assert_eq!(
+                view.sample.expect("last good sample").last_applied_index,
+                Some(42)
+            );
+            assert_eq!(view.leader_changes, 0, "a rejected sample is not observed");
+        }
+
+        #[test]
+        fn unhealthy_observation_stops_refreshing_the_last_good_sample() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            let mut unhealthy = local_sample(7, Some(42), Some(1));
+            unhealthy.running = false;
+            assert!(!metrics.publish_at(&unhealthy, 20));
+
+            let view = metrics.snapshot_at(26);
+            assert_eq!(view.errors, 1);
+            assert_eq!(view.age_seconds, Some(16));
+            assert!(!view.valid);
+            assert_eq!(view.sample.expect("retained sample").current_term, 7);
+        }
+
+        #[test]
+        fn transient_unknown_leader_does_not_double_count_the_same_identity() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_at(&local_sample(7, Some(42), None), 11));
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 12));
+            assert_eq!(metrics.snapshot_at(12).leader_changes, 0);
+
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 13));
+            let changed = metrics.snapshot_at(13);
+            assert_eq!(changed.leader_changes, 1);
+            assert!(!changed.sample.expect("sample").is_leader);
+        }
+
+        #[test]
+        fn passive_metric_counters_saturate() {
+            let metrics = PassiveRaftMetrics::new(true);
+            metrics.inner.errors.store(u64::MAX, Ordering::Relaxed);
+            metrics
+                .inner
+                .leader_changes
+                .store(u64::MAX, Ordering::Relaxed);
+            metrics.record_error();
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 10));
+            assert!(metrics.publish_at(&local_sample(8, Some(43), Some(2)), 11));
+            let view = metrics.snapshot_at(11);
+            assert_eq!(view.errors, u64::MAX);
+            assert_eq!(view.leader_changes, u64::MAX);
+        }
+
+        #[test]
+        fn passive_metrics_never_expose_a_torn_tuple() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(1, Some(10), Some(1)), 1));
+            let writer = metrics.clone();
+            let finished = Arc::new(AtomicBool::new(false));
+            let writer_finished = Arc::clone(&finished);
+            let handle = std::thread::spawn(move || {
+                for term in 2..=5_000 {
+                    let leader = if term % 2 == 0 { 2 } else { 1 };
+                    assert!(writer
+                        .publish_at(&local_sample(term, Some(term * 10), Some(leader)), term,));
+                }
+                writer_finished.store(true, Ordering::Release);
+            });
+
+            while !finished.load(Ordering::Acquire) {
+                let view = metrics.snapshot_at(5_000);
+                let sample = view.sample.expect("published sample");
+                assert_eq!(sample.last_applied_index, Some(sample.current_term * 10));
+                assert_eq!(sample.is_leader, !sample.current_term.is_multiple_of(2));
+                assert_eq!(view.leader_changes, sample.current_term.saturating_sub(1));
+            }
+            handle.join().expect("metrics writer");
+        }
+
+        #[test]
+        fn combined_local_and_watermark_view_never_exposes_a_torn_valid_lag() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(1, Some(10), Some(1))));
+            let started = metrics.elapsed_nanos();
+            assert!(metrics.publish_watermark(watermark(1, 1, 15), started));
+            let writer = metrics.clone();
+            let finished = Arc::new(AtomicBool::new(false));
+            let writer_finished = Arc::clone(&finished);
+            let handle = std::thread::spawn(move || {
+                for term in 2..=5_000 {
+                    let leader = if term % 2 == 0 { 2 } else { 1 };
+                    assert!(writer.publish(&local_sample(term, Some(term * 10), Some(leader))));
+                    let started = writer.elapsed_nanos();
+                    assert!(
+                        writer.publish_watermark(watermark(term, leader, term * 10 + 5), started,)
+                    );
+                }
+                writer_finished.store(true, Ordering::Release);
+            });
+
+            while !finished.load(Ordering::Acquire) {
+                let view = metrics.snapshot();
+                if view.watermark_valid {
+                    assert_eq!(
+                        view.watermark.expect("valid watermark").apply_lag_entries,
+                        Some(5)
+                    );
+                } else if let Some(watermark) = view.watermark {
+                    assert_eq!(watermark.apply_lag_entries, None);
+                }
+            }
+            handle.join().expect("metrics writer");
+        }
+
+        struct FakePassiveSource {
+            receiver: tokio::sync::watch::Receiver<LocalDbRaftSnapshot>,
+            snapshots: Arc<AtomicU64>,
+        }
+
+        struct FakeWatermarkSource {
+            sample: DbQuorumWatermark,
+            delay: Duration,
+            calls: Arc<AtomicU64>,
+        }
+
+        #[async_trait::async_trait]
+        impl QuorumWatermarkSource for FakeWatermarkSource {
+            async fn sample(&self) -> Result<DbQuorumWatermark, hiqlite::Error> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(self.delay).await;
+                Ok(self.sample)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl PassiveRaftSource for FakePassiveSource {
+            fn snapshot(&self) -> LocalDbRaftSnapshot {
+                self.snapshots.fetch_add(1, Ordering::Relaxed);
+                self.receiver.borrow().clone()
+            }
+
+            async fn wait_for_change(&mut self) -> bool {
+                self.receiver.changed().await.is_ok()
+            }
+        }
+
+        #[tokio::test]
+        async fn idle_observer_republishes_and_stops_on_cancellation() {
+            let (_sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            let snapshots = Arc::new(AtomicU64::new(0));
+            let metrics = PassiveRaftMetrics::new(true);
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::clone(&snapshots),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::from_millis(1),
+            ));
+
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 3 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("idle observer periodic refresh");
+            assert!(metrics.snapshot().valid);
+            cancel.send(()).expect("cancel observer");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("observer cancellation timeout")
+                .expect("observer task");
+        }
+
+        #[tokio::test]
+        async fn watch_change_publishes_without_waiting_for_the_fallback_tick() {
+            let (sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            let snapshots = Arc::new(AtomicU64::new(0));
+            let metrics = PassiveRaftMetrics::new(true);
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::clone(&snapshots),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::from_secs(60),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("initial watch sample");
+
+            sender
+                .send(local_sample(8, Some(43), Some(2)))
+                .expect("publish watch change");
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while snapshots.load(Ordering::Relaxed) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("watch change must beat fallback tick");
+            let view = metrics.snapshot();
+            assert_eq!(view.sample.expect("changed sample").current_term, 8);
+            assert_eq!(view.leader_changes, 1);
+            cancel.send(()).expect("cancel observer");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("observer cancellation timeout")
+                .expect("observer task");
+        }
+
+        #[tokio::test]
+        async fn closed_watch_records_one_error_and_exits_without_spinning() {
+            let (sender, receiver) =
+                tokio::sync::watch::channel(local_sample(7, Some(42), Some(1)));
+            drop(sender);
+            let metrics = PassiveRaftMetrics::new(true);
+            let task = tokio::spawn(run_passive_metrics_loop(
+                FakePassiveSource {
+                    receiver,
+                    snapshots: Arc::new(AtomicU64::new(0)),
+                },
+                metrics.clone(),
+                std::future::pending(),
+                Duration::from_millis(1),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("closed watch must not spin")
+                .expect("observer task");
+            assert_eq!(metrics.snapshot().errors, 1);
+        }
+
+        #[tokio::test]
+        async fn watermark_sampler_cancellation_publishes_neither_value_nor_error() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(42), Some(1))));
+            let calls = Arc::new(AtomicU64::new(0));
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_quorum_watermark_loop(
+                FakeWatermarkSource {
+                    sample: watermark(7, 1, 42),
+                    delay: Duration::from_secs(60),
+                    calls: Arc::clone(&calls),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::ZERO,
+                Duration::from_millis(1),
+                Duration::from_secs(120),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while calls.load(Ordering::Relaxed) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sampler request started");
+            cancel.send(()).expect("cancel sampler");
+            tokio::time::timeout(Duration::from_millis(100), task)
+                .await
+                .expect("sampler cancellation timeout")
+                .expect("sampler task");
+            let view = metrics.snapshot();
+            assert_eq!(view.watermark, None);
+            assert_eq!(view.watermark_errors, 0);
+        }
+
+        #[tokio::test]
+        async fn watermark_sampler_timeout_keeps_the_source_absent() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish(&local_sample(7, Some(42), Some(1))));
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_quorum_watermark_loop(
+                FakeWatermarkSource {
+                    sample: watermark(7, 1, 42),
+                    delay: Duration::from_secs(60),
+                    calls: Arc::new(AtomicU64::new(0)),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Duration::ZERO,
+                Duration::from_millis(50),
+                Duration::from_millis(1),
+            ));
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while metrics.snapshot().watermark_errors == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sampler timeout recorded");
+            cancel.send(()).expect("cancel sampler");
+            task.await.expect("sampler task");
+            let view = metrics.snapshot();
+            assert_eq!(view.watermark, None);
+            assert!(view.watermark_errors >= 1);
+        }
+
         #[tokio::test]
         async fn sqlite_is_single_node_instead_of_misleadingly_synced() {
             let status = ReplicationMonitor::sqlite().status().await;
@@ -4067,6 +6112,28 @@ pub mod status {
             assert!(!status.clustered);
             assert_eq!(status.last_converged_at, None);
             assert!(status.explanation.contains("stored only on this server"));
+        }
+
+        #[tokio::test]
+        async fn remote_client_cannot_construct_local_raft_observers() {
+            let remote = Client::remote(
+                vec!["127.0.0.1:1".to_owned()],
+                false,
+                false,
+                "not-used".to_owned(),
+                true,
+                None,
+            )
+            .await
+            .expect("construct remote client without discovery");
+            match remote.local_db_raft_metrics() {
+                Ok(_) => panic!("remote client must not expose a local watch"),
+                Err(error) => assert!(error.to_string().contains("require a local node client")),
+            }
+            match remote.local_db_snapshot_metrics() {
+                Ok(_) => panic!("remote client must not expose local snapshot metrics"),
+                Err(error) => assert!(error.to_string().contains("require a local node client")),
+            }
         }
 
         #[test]

@@ -9,6 +9,7 @@ const ROOT = path.resolve(__dirname, "../..");
 const Core = require(path.join(ROOT, "crates/plurxd/src/web/reader.js"));
 const INDEX = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/web/index.html"), "utf8");
 const SERVER = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/http/web.rs"), "utf8");
+const DTO = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/http/dto.rs"), "utf8");
 
 function test(name, fn) {
   try { fn(); process.stdout.write(`ok - ${name}\n`); }
@@ -88,6 +89,33 @@ test("reader assets are embedded in the single binary and loaded before the rout
   assert.ok(INDEX.indexOf("/assets/reader.js") < INDEX.indexOf("async function viewReader"));
 });
 
+test("reader open, save, keepalive, and close retain opaque 64-bit route identifiers", () => {
+  const loadItem = INDEX.slice(
+    INDEX.indexOf("async function loadItem"),
+    INDEX.indexOf("// Player metadata for an audiobook"),
+  );
+  assert.match(loadItem, /kind:"item", id:String\(id\)/);
+  assert.doesNotMatch(loadItem, /kind:"item", id:Number\(id\)/);
+
+  assert.equal((DTO.match(/pub id_text: String/g)||[]).length, 2, "item and file DTOs expose exact route ids");
+  assert.match(DTO, /pub file_id_text: String/);
+  const card = INDEX.slice(INDEX.indexOf("function card("), INDEX.indexOf("function grid("));
+  assert.match(card, /const itemId=exactWireId\(it\)/);
+  assert.match(card, /#\/item\/\$\{itemId\}/);
+  const actions = INDEX.slice(INDEX.indexOf("function bookActions"), INDEX.indexOf("function bookVersions"));
+  assert.match(actions, /#\/read\/\$\{p\.id\}\/\$\{exactWireId\(readable\)\}/);
+
+  const flow = INDEX.slice(INDEX.indexOf("async function saveReaderState"), INDEX.indexOf("// ---- router"));
+  assert.match(flow, /file_id:r\.fileId/);
+  assert.match(flow, /`\/items\/\$\{r\.itemId\}\/reading-state`/);
+  assert.match(flow, /const itemId=r\.itemId/);
+  assert.match(flow, /const routeItemId=String\(itemId\), routeFileId=String\(fileId\)/);
+  assert.match(flow, /api\(`\/files\/\$\{routeFileId\}\/publication`/);
+  assert.match(flow, /api\(`\/items\/\$\{routeItemId\}\/reading-state\?file_id=\$\{routeFileId\}`/);
+  assert.match(flow, /READER=\{itemId:routeItemId,fileId:routeFileId/);
+  assert.doesNotMatch(flow, /(?:READER|r)\.(?:item|file)\.id/);
+});
+
 test("native handoff carries no bearer in its URL or durable browser storage", () => {
   assert.match(INDEX, /new URLSearchParams\(location\.search\)\.get\("native-reader"\)==="1"/);
   assert.match(INDEX, /let TOKEN = NATIVE_READER_BOOT \? null/);
@@ -96,7 +124,9 @@ test("native handoff carries no bearer in its URL or durable browser storage", (
     INDEX.indexOf("// ---- api helpers")
   );
   assert.match(start, /TOKEN=token/);
+  assert.match(start, /const item=String\(itemId\), file=String\(fileId\)/);
   assert.match(start, /\?native-reader=1#\/read\/\$\{item\}\/\$\{file\}/);
+  assert.doesNotMatch(start, /Number\(itemId\)|Number\(fileId\)/);
   assert.doesNotMatch(start, /localStorage|token=/);
 });
 
@@ -104,7 +134,7 @@ test("native reader bridge is outbound-only and clears authority before dismissa
   assert.match(INDEX, /window\.webkit\.messageHandlers\.cinemaReader/);
   assert.match(INDEX, /window\.CinemaNative\.postMessage\(JSON\.stringify\(payload\)\)/);
   const close = INDEX.slice(INDEX.indexOf("async function closeReader"), INDEX.indexOf("async function viewReader"));
-  assert.match(close, /TOKEN=null; ME=null; nativeReaderPost\("close"\)/);
+  assert.match(close, /TOKEN=null; AUTH_GENERATION\+\+; ME=null; nativeReaderPost\("close"\)/);
   assert.match(INDEX, /nativeReaderPost\("session-ended"\)/);
   assert.doesNotMatch(INDEX, /CinemaNative\.(token|bearer|credential)/);
 });

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f90f2ee7"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process serving proof opens a watermark stream through the current leader's configured proxy, brackets it with stable leader and term observations, closes that established stream, moves leadership to an enabled voter, and requires recovery through the original proxy pool after the old authority lease expires. Exact vendored regressions pin independent DB/cache endpoint cursors, duplicate-address progress, configured-only routing, cancellation-safe shutdown of every client background task with all endpoints unavailable, stable errors for queued work, and no dropped-acknowledgement panic."

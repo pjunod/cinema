@@ -48,7 +48,9 @@ internal object NativeReaderHandoff {
 
     fun startScript(token: String, itemId: Long, fileId: Long): String? {
         if (token.isEmpty() || itemId < 1 || fileId < 1) return null
-        return "window.startNativeReader(${Net.json.encodeToString(token)},$itemId,$fileId);"
+        val item = Net.json.encodeToString(itemId.toString())
+        val file = Net.json.encodeToString(fileId.toString())
+        return "window.startNativeReader(${Net.json.encodeToString(token)},$item,$file);"
     }
 
     fun permitsNavigation(candidate: String, origin: String): Boolean {

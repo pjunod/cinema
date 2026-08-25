@@ -20,6 +20,10 @@ interface PlurxApi {
     @GET("server")
     suspend fun server(): Server
 
+    /** Signed-in only: the other ingresses a stream may be retried through. */
+    @GET("cluster/ingress")
+    suspend fun clusterIngress(): ClusterIngress
+
     @POST("auth/login")
     suspend fun login(@Body body: LoginReq): LoginResp
 
@@ -80,7 +84,7 @@ interface PlurxApi {
     @POST("items/{id}/unscrobble")
     suspend fun markUnwatched(@Path("id") id: Long): MutationResult
 
-    /** The runtime caps map (vcodec/acodec/container/hdr/force) rides as query params. */
+    /** Runtime caps (vcodec/vmaxheight/acodec/container/HDR/force) ride as query params. */
     @GET("files/{id}/decision")
     suspend fun decision(
         @Path("id") id: Long,
@@ -117,6 +121,9 @@ interface PlurxApi {
      */
     @POST("files/{id}/hls/sessions")
     suspend fun createHlsSession(@Path("id") id: Long, @Body body: CreateSessionReq): HlsStart
+
+    @GET("hls/{session}/status")
+    suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus
 
     /**
      * Release a session the moment playback ends, instead of leaving its

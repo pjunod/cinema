@@ -1,0 +1,13 @@
+version = 1
+
+[[coverage]]
+commits = ["7cc42dde"]
+points = [
+  "cluster.auth",
+  "core.media",
+  "playback.pipeline",
+  "server.api",
+  "web.experience",
+]
+checks = ["rust-gate", "reader-browser"]
+reason = "The retained Rust queue/cache fixtures use live absolute lease deadlines and require fenced yield, takeover, manifest completion, scrub, and cache preservation to succeed; the HTTP compatibility regressions require safe integer payloads to remain byte-identical while the deterministic reader fixture remaps item/file identities beyond JavaScript's 2^53 boundary and requires exact decimal route, publication, and reading-state behavior in Chromium. Reverting the corrections either expires every fixture owner immediately, adds a redundant field to established small-id responses, or prevents the high-id browser fixture from opening its seeded SQLite source."

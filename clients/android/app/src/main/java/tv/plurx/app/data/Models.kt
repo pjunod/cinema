@@ -18,6 +18,11 @@ data class Server(
 )
 
 @Serializable
+data class ClusterIngress(
+    val node_urls: List<String> = emptyList(),
+)
+
+@Serializable
 data class LoginReq(
     val username: String,
     val password: String,
@@ -164,6 +169,21 @@ data class PlaybackDefaults(
 )
 
 @Serializable
+data class ReaderSurfaceCapability(
+    val online: String = "unavailable",
+    val offline: String = "unavailable",
+)
+
+@Serializable
+data class ReaderCapability(
+    val format: String = "",
+    val web: ReaderSurfaceCapability = ReaderSurfaceCapability(),
+    val apple: ReaderSurfaceCapability = ReaderSurfaceCapability(),
+    val android: ReaderSurfaceCapability = ReaderSurfaceCapability(),
+    val television: ReaderSurfaceCapability = ReaderSurfaceCapability(),
+)
+
+@Serializable
 data class MediaFileDto(
     val id: Long,
     val filename: String,
@@ -190,11 +210,19 @@ data class MediaFileDto(
     val part_offset_ms: Long = 0,
     val chapters: List<BookChapter> = emptyList(),
     val available: Boolean = true,
+    /** Server-owned format/action verdict; absent on older servers. */
+    val reader: ReaderCapability? = null,
     val probed: Boolean = true,
     val missing_path: String? = null,
 ) {
     val isEpub: Boolean
         get() = container.equals("epub", ignoreCase = true) || filename.endsWith(".epub", ignoreCase = true)
+
+    val supportsOnlineBookReader: Boolean
+        get() = reader?.android?.online?.equals("read", ignoreCase = true) ?: isEpub
+
+    val supportsOfflineBookReader: Boolean
+        get() = reader?.android?.offline?.equals("read", ignoreCase = true) ?: isEpub
 }
 
 @Serializable
@@ -555,6 +583,37 @@ data class HlsStart(
     val delivered_dynamic_range: String? = null,
 )
 
+/** Live HLS telemetry shared by the web, Apple, and Android stats views. */
+@Serializable
+data class PlaybackSessionStatus(
+    val id: String,
+    val file_id: Long? = null,
+    val target_height: Long? = null,
+    val encoder: String? = null,
+    val speed: Double? = null,
+    val recent_speed: Double? = null,
+    val out_time_ms: Long? = null,
+    val progress_idle_ms: Long? = null,
+    val published_end_ms: Long? = null,
+    val fetched_end_ms: Long? = null,
+    val fetched_segment: Long? = null,
+    val first_retained_segment: Long? = null,
+    val playlist_shape: String? = null,
+    val ahead_seconds: Long? = null,
+    val ahead_bytes: Long? = null,
+    val hold_reason: String? = null,
+    val resume_below_seconds: Long? = null,
+    val resume_below_bytes: Long? = null,
+    val delivered_bytes: Long? = null,
+    val delivered_bps: Long? = null,
+    val delivered_idle_ms: Long? = null,
+    val readrate: Double? = null,
+    val suspended: Boolean? = null,
+    val suspend_count: Long? = null,
+    val last_request: String? = null,
+    val idle_seconds: Long? = null,
+)
+
 /**
  * Why a session is being reopened — typed so the server can tell a stall
  * downgrade from an ordinary seek. See docs/ADAPTIVE-QUALITY.md §"Native
@@ -585,6 +644,13 @@ data class CreateSessionReq(
      * a bitmap (PGS/VobSub) or a styled one the server won't serve as WebVTT.
      */
     val subtitle_burn: Int? = null,
+    /**
+     * Acknowledge that the plan selected before this request already delivers
+     * SDR. This lets an HDR source keep its forced bitmap subtitle when the
+     * base transcode was already tone-mapping; it is never sent for an HDR
+     * delivery, where the server's anti-downgrade guard must still win.
+     */
+    val subtitle_burn_sdr: Boolean? = null,
     /**
      * Advertise the source's WebVTT-convertible tracks as HLS renditions in
      * the master playlist. Changes only HLS metadata, never the video recipe,
@@ -618,9 +684,9 @@ data class CreateSessionReq(
     /**
      * When true, signals this session's height is a promise (the viewer is on
      * Auto), so the server must not treat the posted height as a sticky manual
-     * pick. Every Auto viewer that sends a promise-height — a burn or
-     * Original — must carry this flag, or the server can never step that
-     * session down.
+     * pick. Every Auto viewer that sends a promise-height — an otherwise-
+     * copyable burn or Original — must carry this flag, or the server can
+     * never step that session down.
      */
     val quality_auto: Boolean? = null,
 )

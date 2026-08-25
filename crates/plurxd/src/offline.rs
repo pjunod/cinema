@@ -21,6 +21,7 @@ const PRODUCE_PASS: Duration = Duration::from_secs(6 * 60 * 60);
 const DURATION_TOLERANCE_MS: i64 = 10_000;
 const TRANSFER_ACTIVE_FOR: Duration = Duration::from_secs(20);
 const TRANSFER_SAMPLE_TTL: Duration = Duration::from_secs(2 * 60);
+const TRANSFER_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const QUALITY_HEIGHTS: [i64; 4] = [360, 480, 720, 1080];
 const PREPARE_RESULTS: [&str; 3] = ["ok", "failed", "cancelled"];
 const PREPARE_BUCKETS: [u64; 7] = [60, 300, 900, 3_600, 10_800, 21_600, u64::MAX];
@@ -56,13 +57,18 @@ struct TransferSample {
     last_seen: Instant,
 }
 
+struct TransferRegistry {
+    samples: HashMap<String, TransferSample>,
+    last_pruned: Instant,
+}
+
 /// The one owner of bounded offline counters and preparation histograms.
 ///
 /// Prometheus history is intentionally process-local, like the existing scan
 /// counters. A scraper handles resets; durable package state supplies gauges.
 /// Arrays encode every permitted label value so request data can never create
 /// a new series.
-struct OfflineMetrics {
+pub(crate) struct OfflineMetrics {
     requests: [AtomicU64; 4],
     quota_rejections: [AtomicU64; 3],
     prepare_count: [AtomicU64; 3],
@@ -75,7 +81,7 @@ struct OfflineMetrics {
     transfer_bytes: AtomicU64,
     failures: [AtomicU64; 5],
     cancellations: AtomicU64,
-    transfers: Mutex<HashMap<String, TransferSample>>,
+    transfers: Mutex<TransferRegistry>,
 }
 
 impl OfflineMetrics {
@@ -93,7 +99,10 @@ impl OfflineMetrics {
             transfer_bytes: AtomicU64::new(0),
             failures: std::array::from_fn(|_| AtomicU64::new(0)),
             cancellations: AtomicU64::new(0),
-            transfers: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(TransferRegistry {
+                samples: HashMap::new(),
+                last_pruned: Instant::now(),
+            }),
         }
     }
 
@@ -185,8 +194,14 @@ impl OfflineMetrics {
             .transfers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        transfers.retain(|_, sample| now.duration_since(sample.last_seen) <= TRANSFER_SAMPLE_TTL);
+        if now.duration_since(transfers.last_pruned) >= TRANSFER_PRUNE_INTERVAL {
+            transfers
+                .samples
+                .retain(|_, sample| now.duration_since(sample.last_seen) <= TRANSFER_SAMPLE_TTL);
+            transfers.last_pruned = now;
+        }
         let sample = transfers
+            .samples
             .entry(package_id.to_owned())
             .or_insert(TransferSample {
                 bytes: 0,
@@ -201,7 +216,7 @@ impl OfflineMetrics {
             .transfers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        transfers.get(package_id).and_then(|sample| {
+        transfers.samples.get(package_id).and_then(|sample| {
             (sample.last_seen.elapsed() <= TRANSFER_ACTIVE_FOR).then_some(sample.bytes)
         })
     }
@@ -210,10 +225,11 @@ impl OfflineMetrics {
         self.transfers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .samples
             .remove(package_id);
     }
 
-    fn prometheus(&self) -> String {
+    pub(crate) fn prometheus(&self) -> String {
         let mut out = String::from(
             "# HELP plurx_offline_requests_total New offline packages accepted, by quality.\n\
              # TYPE plurx_offline_requests_total counter\n",
@@ -324,7 +340,7 @@ pub struct OfflineManager {
     transcode: Arc<TranscodeManager>,
     node_id: String,
     active: tokio::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
-    metrics: OfflineMetrics,
+    metrics: Arc<OfflineMetrics>,
 }
 
 impl OfflineManager {
@@ -338,7 +354,7 @@ impl OfflineManager {
             transcode,
             node_id,
             active: tokio::sync::Mutex::new(HashMap::new()),
-            metrics: OfflineMetrics::new(),
+            metrics: Arc::new(OfflineMetrics::new()),
         })
     }
 
@@ -366,6 +382,12 @@ impl OfflineManager {
         self.metrics.forget_transfer(package_id);
     }
 
+    /// Store-free counter handle for the Prometheus substate.
+    pub(crate) fn metrics_handle(&self) -> Arc<OfflineMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prometheus(&self) -> String {
         self.metrics.prometheus()
     }
@@ -538,7 +560,11 @@ impl OfflineManager {
                 self.publish_ready(&package, &file, produced, work_started)
                     .await
             }
-            Ok(OfflineProduceOutcome::Yielded) | Ok(OfflineProduceOutcome::ClaimedElsewhere) => {
+            Ok(OfflineProduceOutcome::Yielded)
+            | Ok(OfflineProduceOutcome::ClaimedElsewhere)
+            | Ok(OfflineProduceOutcome::StoreUnavailable)
+            | Ok(OfflineProduceOutcome::PolicyChanged)
+            | Ok(OfflineProduceOutcome::SourceChanged) => {
                 self.requeue(&package, work_started).await
             }
             Err(error) => {

@@ -107,7 +107,6 @@ catalog|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 catalog|activity@1280x860|focus|009|a "Settings"
 catalog|activity@1280x860|focus|010|<wrap>
 catalog|activity@1280x860|req|GET /api/v1/activity/detail|2
-catalog|activity@1280x860|req|GET /api/v1/activity|2
 catalog|activity@1280x860|req|GET /api/v1/me|1
 catalog|activity@1280x860|req|GET /api/v1/server|1
 catalog|activity@390x780|dom|^ > div#app|1
@@ -184,7 +183,6 @@ catalog|activity@390x780|focus|009|button.px-tab "Search"
 catalog|activity@390x780|focus|010|a.px-tab.on "Activity"
 catalog|activity@390x780|focus|011|<wrap>
 catalog|activity@390x780|req|GET /api/v1/activity/detail|2
-catalog|activity@390x780|req|GET /api/v1/activity|2
 catalog|activity@390x780|req|GET /api/v1/me|1
 catalog|activity@390x780|req|GET /api/v1/server|1
 catalog|auth@1280x860|dom|^ > div#app|1
@@ -515,6 +513,9 @@ catalog|home@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type
 catalog|home@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|home@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|home@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|home@1280x860|dom|div > div.libbar|1
+catalog|home@1280x860|dom|div > div.railbox|5
+catalog|home@1280x860|dom|div > h2.section[text]|5
 catalog|home@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|home@1280x860|dom|div#pxlibs > div.px-sec[text]|1
 catalog|home@1280x860|dom|div#pxlibs > nav.px-nav|1
@@ -573,9 +574,7 @@ catalog|home@1280x860|dom|div.rowscroll > div.k-show.poster.unw[role=link tabind
 catalog|home@1280x860|dom|div.s > span.resbadge.resgrad[text]|9
 catalog|home@1280x860|dom|div.s > span.stxt[text]|12
 catalog|home@1280x860|dom|h2.section[text] > a.px-seeall[text]|2
-catalog|home@1280x860|dom|main#main > div.libbar|1
-catalog|home@1280x860|dom|main#main > div.railbox|5
-catalog|home@1280x860|dom|main#main > h2.section[text]|5
+catalog|home@1280x860|dom|main#main > div|3
 catalog|home@1280x860|dom|nav.px-nav > a|2
 catalog|home@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|home@1280x860|dom|nav.px-nav[aria-label=*] > a|2
@@ -617,9 +616,8 @@ catalog|home@1280x860|focus|025|div.poster.k-show.unw "SH Signal Hill 2019"
 catalog|home@1280x860|focus|026|<wrap>
 catalog|home@1280x860|req|GET /api/v1/activity|2
 catalog|home@1280x860|req|GET /api/v1/coming-soon|1
+catalog|home@1280x860|req|GET /api/v1/home/previews|1
 catalog|home@1280x860|req|GET /api/v1/hubs|1
-catalog|home@1280x860|req|GET /api/v1/libraries/<id>/items|3
-catalog|home@1280x860|req|GET /api/v1/libraries|1
 catalog|home@1280x860|req|GET /api/v1/me|1
 catalog|home@1280x860|req|GET /api/v1/server|1
 catalog|home@390x780|dom|^ > div#app|1
@@ -646,6 +644,10 @@ catalog|home@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=
 catalog|home@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|home@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|home@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|home@390x780|dom|div > div.can-r.railbox|2
+catalog|home@390x780|dom|div > div.libbar|1
+catalog|home@390x780|dom|div > div.railbox|3
+catalog|home@390x780|dom|div > h2.section[text]|5
 catalog|home@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|home@390x780|dom|div#pxlibs > div.px-sec[text]|1
 catalog|home@390x780|dom|div#pxlibs > nav.px-nav|1
@@ -707,10 +709,7 @@ catalog|home@390x780|dom|div.rowscroll > div.k-show.poster.unw[role=link tabinde
 catalog|home@390x780|dom|div.s > span.resbadge.resgrad[text]|9
 catalog|home@390x780|dom|div.s > span.stxt[text]|12
 catalog|home@390x780|dom|h2.section[text] > a.px-seeall[text]|2
-catalog|home@390x780|dom|main#main > div.can-r.railbox|2
-catalog|home@390x780|dom|main#main > div.libbar|1
-catalog|home@390x780|dom|main#main > div.railbox|3
-catalog|home@390x780|dom|main#main > h2.section[text]|5
+catalog|home@390x780|dom|main#main > div|3
 catalog|home@390x780|dom|nav.px-nav > a|2
 catalog|home@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|home@390x780|dom|nav.px-nav[aria-label=*] > a|2
@@ -751,9 +750,8 @@ catalog|home@390x780|focus|024|a.px-tab "Activity"
 catalog|home@390x780|focus|025|<wrap>
 catalog|home@390x780|req|GET /api/v1/activity|2
 catalog|home@390x780|req|GET /api/v1/coming-soon|1
+catalog|home@390x780|req|GET /api/v1/home/previews|1
 catalog|home@390x780|req|GET /api/v1/hubs|1
-catalog|home@390x780|req|GET /api/v1/libraries/<id>/items|3
-catalog|home@390x780|req|GET /api/v1/libraries|1
 catalog|home@390x780|req|GET /api/v1/me|1
 catalog|home@390x780|req|GET /api/v1/server|1
 catalog|item@1280x860|dom|^ > div#app|1
@@ -1365,7 +1363,9 @@ catalog|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
 catalog|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
 catalog|player@1280x860|dom|div.row > button.pbtn[text]|1
 catalog|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
+catalog|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 catalog|player@1280x860|dom|div.statshd > span[text]|1
+catalog|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 catalog|player@1280x860|dom|div.trks > span.on.trk[text]|1
 catalog|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|player@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
@@ -1529,7 +1529,9 @@ catalog|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
 catalog|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
 catalog|player@390x780|dom|div.row > button.pbtn[text]|1
 catalog|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
+catalog|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 catalog|player@390x780|dom|div.statshd > span[text]|1
+catalog|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 catalog|player@390x780|dom|div.trks > span.on.trk[text]|1
 catalog|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|player@390x780|dom|div.vbadges > span.res.vbadge[text]|1
@@ -1813,7 +1815,7 @@ catalog|settings@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings@1280x860|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|settings@1280x860|dom|div.px-pop > div#thememenu.amenu|1
 catalog|settings@1280x860|dom|div.px-user > div.px-pop|1
-catalog|settings@1280x860|dom|div.row > button.ghost.sm[text]|2
+catalog|settings@1280x860|dom|div.row > button.ghost.sm[text]|14
 catalog|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 catalog|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 catalog|settings@1280x860|dom|div.row > select#lk|1
@@ -1876,23 +1878,23 @@ catalog|settings@1280x860|dom|td.muted > div#st-1[text]|1
 catalog|settings@1280x860|dom|td.muted > div#st-2[text]|1
 catalog|settings@1280x860|dom|td.muted > div#st-3[text]|1
 catalog|settings@1280x860|dom|td.muted > div.sched|3
-catalog|settings@1280x860|dom|td.row.rowactions > button.ghost.sm[text]|12
+catalog|settings@1280x860|dom|td.rowactions > div.row|3
 catalog|settings@1280x860|dom|thead > tr|1
 catalog|settings@1280x860|dom|tr > th[text]|4
 catalog|settings@1280x860|dom|tr > th|1
 catalog|settings@1280x860|dom|tr#librow-1 > td.libname|1
 catalog|settings@1280x860|dom|tr#librow-1 > td.muted|1
-catalog|settings@1280x860|dom|tr#librow-1 > td.row.rowactions|1
+catalog|settings@1280x860|dom|tr#librow-1 > td.rowactions|1
 catalog|settings@1280x860|dom|tr#librow-1 > td[text]|1
 catalog|settings@1280x860|dom|tr#librow-1 > td|1
 catalog|settings@1280x860|dom|tr#librow-2 > td.libname|1
 catalog|settings@1280x860|dom|tr#librow-2 > td.muted|1
-catalog|settings@1280x860|dom|tr#librow-2 > td.row.rowactions|1
+catalog|settings@1280x860|dom|tr#librow-2 > td.rowactions|1
 catalog|settings@1280x860|dom|tr#librow-2 > td[text]|1
 catalog|settings@1280x860|dom|tr#librow-2 > td|1
 catalog|settings@1280x860|dom|tr#librow-3 > td.libname|1
 catalog|settings@1280x860|dom|tr#librow-3 > td.muted|1
-catalog|settings@1280x860|dom|tr#librow-3 > td.row.rowactions|1
+catalog|settings@1280x860|dom|tr#librow-3 > td.rowactions|1
 catalog|settings@1280x860|dom|tr#librow-3 > td[text]|1
 catalog|settings@1280x860|dom|tr#librow-3 > td|1
 catalog|settings@1280x860|focus|000|a.logo "cinema"
@@ -1954,10 +1956,6 @@ catalog|settings@1280x860|req|GET /api/v1/me|1
 catalog|settings@1280x860|req|GET /api/v1/scan/status|3
 catalog|settings@1280x860|req|GET /api/v1/server|1
 catalog|settings@1280x860|req|GET /api/v1/settings|1
-catalog|settings@1280x860|req|GET /api/v1/system/playback-events|1
-catalog|settings@1280x860|req|GET /api/v1/system|1
-catalog|settings@1280x860|req|GET /api/v1/trakt/status|3
-catalog|settings@1280x860|req|GET /api/v1/users|1
 catalog|settings@390x780|dom|^ > div#app|1
 catalog|settings@390x780|dom|a > span.px-lbl[text]|2
 catalog|settings@390x780|dom|a > svg.px-ico[aria-hidden=true]|2
@@ -2014,7 +2012,7 @@ catalog|settings@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|settings@390x780|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|settings@390x780|dom|div.px-pop > div#thememenu.amenu|1
 catalog|settings@390x780|dom|div.px-user > div.px-pop|1
-catalog|settings@390x780|dom|div.row > button.ghost.sm[text]|2
+catalog|settings@390x780|dom|div.row > button.ghost.sm[text]|14
 catalog|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 catalog|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 catalog|settings@390x780|dom|div.row > select#lk|1
@@ -2077,23 +2075,23 @@ catalog|settings@390x780|dom|td.muted > div#st-1[text]|1
 catalog|settings@390x780|dom|td.muted > div#st-2[text]|1
 catalog|settings@390x780|dom|td.muted > div#st-3[text]|1
 catalog|settings@390x780|dom|td.muted > div.sched|3
-catalog|settings@390x780|dom|td.row.rowactions > button.ghost.sm[text]|12
+catalog|settings@390x780|dom|td.rowactions > div.row|3
 catalog|settings@390x780|dom|thead > tr|1
 catalog|settings@390x780|dom|tr > th[text]|4
 catalog|settings@390x780|dom|tr > th|1
 catalog|settings@390x780|dom|tr#librow-1 > td.libname|1
 catalog|settings@390x780|dom|tr#librow-1 > td.muted|1
-catalog|settings@390x780|dom|tr#librow-1 > td.row.rowactions|1
+catalog|settings@390x780|dom|tr#librow-1 > td.rowactions|1
 catalog|settings@390x780|dom|tr#librow-1 > td[text]|1
 catalog|settings@390x780|dom|tr#librow-1 > td|1
 catalog|settings@390x780|dom|tr#librow-2 > td.libname|1
 catalog|settings@390x780|dom|tr#librow-2 > td.muted|1
-catalog|settings@390x780|dom|tr#librow-2 > td.row.rowactions|1
+catalog|settings@390x780|dom|tr#librow-2 > td.rowactions|1
 catalog|settings@390x780|dom|tr#librow-2 > td[text]|1
 catalog|settings@390x780|dom|tr#librow-2 > td|1
 catalog|settings@390x780|dom|tr#librow-3 > td.libname|1
 catalog|settings@390x780|dom|tr#librow-3 > td.muted|1
-catalog|settings@390x780|dom|tr#librow-3 > td.row.rowactions|1
+catalog|settings@390x780|dom|tr#librow-3 > td.rowactions|1
 catalog|settings@390x780|dom|tr#librow-3 > td[text]|1
 catalog|settings@390x780|dom|tr#librow-3 > td|1
 catalog|settings@390x780|focus|000|a.logo "cinema"
@@ -2156,10 +2154,6 @@ catalog|settings@390x780|req|GET /api/v1/me|1
 catalog|settings@390x780|req|GET /api/v1/scan/status|3
 catalog|settings@390x780|req|GET /api/v1/server|1
 catalog|settings@390x780|req|GET /api/v1/settings|1
-catalog|settings@390x780|req|GET /api/v1/system/playback-events|1
-catalog|settings@390x780|req|GET /api/v1/system|1
-catalog|settings@390x780|req|GET /api/v1/trakt/status|3
-catalog|settings@390x780|req|GET /api/v1/users|1
 classic|activity@1280x860|dom|^ > div#app|1
 classic|activity@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|activity@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
@@ -2204,7 +2198,6 @@ classic|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 classic|activity@1280x860|focus|009|a "Settings"
 classic|activity@1280x860|focus|010|<wrap>
 classic|activity@1280x860|req|GET /api/v1/activity/detail|2
-classic|activity@1280x860|req|GET /api/v1/activity|2
 classic|activity@1280x860|req|GET /api/v1/me|1
 classic|activity@1280x860|req|GET /api/v1/server|1
 classic|activity@390x780|dom|^ > div#app|1
@@ -2251,7 +2244,6 @@ classic|activity@390x780|focus|008|button.ghost.sm.profile "Account"
 classic|activity@390x780|focus|009|a "Settings"
 classic|activity@390x780|focus|010|<wrap>
 classic|activity@390x780|req|GET /api/v1/activity/detail|2
-classic|activity@390x780|req|GET /api/v1/activity|2
 classic|activity@390x780|req|GET /api/v1/me|1
 classic|activity@390x780|req|GET /api/v1/server|1
 classic|auth@1280x860|dom|^ > div#app|1
@@ -2483,6 +2475,10 @@ classic|home@1280x860|dom|div > div#appmenu.amenu|1
 classic|home@1280x860|dom|div > div#profilemenu.amenu|1
 classic|home@1280x860|dom|div > div#sizemenu.amenu|1
 classic|home@1280x860|dom|div > div#thememenu.amenu|1
+classic|home@1280x860|dom|div > div.grid|2
+classic|home@1280x860|dom|div > div.libbar|1
+classic|home@1280x860|dom|div > div.railbox|3
+classic|home@1280x860|dom|div > h2.section[text]|5
 classic|home@1280x860|dom|div#app > header.top|1
 classic|home@1280x860|dom|div#app > main#main|1
 classic|home@1280x860|dom|div.artbox > div.art.ph[text]|12
@@ -2526,10 +2522,8 @@ classic|home@1280x860|dom|header.top > input#q.search[aria-label=*]|1
 classic|home@1280x860|dom|header.top > nav|1
 classic|home@1280x860|dom|header.top > span#activity.activity|1
 classic|home@1280x860|dom|header.top > span.spacer|1
-classic|home@1280x860|dom|main#main > div.grid|2
-classic|home@1280x860|dom|main#main > div.libbar|1
-classic|home@1280x860|dom|main#main > div.railbox|3
-classic|home@1280x860|dom|main#main > h2.section[text]|5
+classic|home@1280x860|dom|main#main > div.versionstamp[text]|1
+classic|home@1280x860|dom|main#main > div|3
 classic|home@1280x860|dom|nav > a.active[text]|1
 classic|home@1280x860|dom|nav > a[text]|2
 classic|home@1280x860|dom|select > option[text]|2
@@ -2549,9 +2543,8 @@ classic|home@1280x860|focus|011|a.muted "· view all (1)"
 classic|home@1280x860|focus|012|<wrap>
 classic|home@1280x860|req|GET /api/v1/activity|2
 classic|home@1280x860|req|GET /api/v1/coming-soon|1
+classic|home@1280x860|req|GET /api/v1/home/previews|1
 classic|home@1280x860|req|GET /api/v1/hubs|1
-classic|home@1280x860|req|GET /api/v1/libraries/<id>/items|3
-classic|home@1280x860|req|GET /api/v1/libraries|1
 classic|home@1280x860|req|GET /api/v1/me|1
 classic|home@1280x860|req|GET /api/v1/server|1
 classic|home@390x780|dom|^ > div#app|1
@@ -2569,6 +2562,11 @@ classic|home@390x780|dom|div > div#appmenu.amenu|1
 classic|home@390x780|dom|div > div#profilemenu.amenu|1
 classic|home@390x780|dom|div > div#sizemenu.amenu|1
 classic|home@390x780|dom|div > div#thememenu.amenu|1
+classic|home@390x780|dom|div > div.can-r.railbox|1
+classic|home@390x780|dom|div > div.grid|2
+classic|home@390x780|dom|div > div.libbar|1
+classic|home@390x780|dom|div > div.railbox|2
+classic|home@390x780|dom|div > h2.section[text]|5
 classic|home@390x780|dom|div#app > header.top|1
 classic|home@390x780|dom|div#app > main#main|1
 classic|home@390x780|dom|div.artbox > div.art.ph[text]|12
@@ -2615,11 +2613,8 @@ classic|home@390x780|dom|header.top > input#q.search[aria-label=*]|1
 classic|home@390x780|dom|header.top > nav|1
 classic|home@390x780|dom|header.top > span#activity.activity|1
 classic|home@390x780|dom|header.top > span.spacer|1
-classic|home@390x780|dom|main#main > div.can-r.railbox|1
-classic|home@390x780|dom|main#main > div.grid|2
-classic|home@390x780|dom|main#main > div.libbar|1
-classic|home@390x780|dom|main#main > div.railbox|2
-classic|home@390x780|dom|main#main > h2.section[text]|5
+classic|home@390x780|dom|main#main > div.versionstamp[text]|1
+classic|home@390x780|dom|main#main > div|3
 classic|home@390x780|dom|nav > a.active[text]|1
 classic|home@390x780|dom|nav > a[text]|2
 classic|home@390x780|dom|select > option[text]|2
@@ -2640,9 +2635,8 @@ classic|home@390x780|focus|012|a.muted "· view all (1)"
 classic|home@390x780|focus|013|<wrap>
 classic|home@390x780|req|GET /api/v1/activity|2
 classic|home@390x780|req|GET /api/v1/coming-soon|1
+classic|home@390x780|req|GET /api/v1/home/previews|1
 classic|home@390x780|req|GET /api/v1/hubs|1
-classic|home@390x780|req|GET /api/v1/libraries/<id>/items|3
-classic|home@390x780|req|GET /api/v1/libraries|1
 classic|home@390x780|req|GET /api/v1/me|1
 classic|home@390x780|req|GET /api/v1/server|1
 classic|item@1280x860|dom|^ > div#app|1
@@ -3071,7 +3065,9 @@ classic|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button.pbtn[text]|1
 classic|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
+classic|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 classic|player@1280x860|dom|div.statshd > span[text]|1
+classic|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 classic|player@1280x860|dom|div.topctl > div|4
 classic|player@1280x860|dom|div.trks > span.on.trk[text]|1
 classic|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
@@ -3206,7 +3202,9 @@ classic|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
 classic|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
 classic|player@390x780|dom|div.row > button.pbtn[text]|1
 classic|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
+classic|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 classic|player@390x780|dom|div.statshd > span[text]|1
+classic|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 classic|player@390x780|dom|div.topctl > div|4
 classic|player@390x780|dom|div.trks > span.on.trk[text]|1
 classic|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
@@ -3406,7 +3404,7 @@ classic|settings@1280x860|dom|div.card > table|1
 classic|settings@1280x860|dom|div.hint[text] > b[text]|8
 classic|settings@1280x860|dom|div.hint[text] > code[text]|1
 classic|settings@1280x860|dom|div.paths > span.pathchip[text]|3
-classic|settings@1280x860|dom|div.row > button.ghost.sm[text]|2
+classic|settings@1280x860|dom|div.row > button.ghost.sm[text]|14
 classic|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 classic|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 classic|settings@1280x860|dom|div.row > select#lk|1
@@ -3470,23 +3468,23 @@ classic|settings@1280x860|dom|td.muted > div#st-1[text]|1
 classic|settings@1280x860|dom|td.muted > div#st-2[text]|1
 classic|settings@1280x860|dom|td.muted > div#st-3[text]|1
 classic|settings@1280x860|dom|td.muted > div.sched|3
-classic|settings@1280x860|dom|td.row.rowactions > button.ghost.sm[text]|12
+classic|settings@1280x860|dom|td.rowactions > div.row|3
 classic|settings@1280x860|dom|thead > tr|1
 classic|settings@1280x860|dom|tr > th[text]|4
 classic|settings@1280x860|dom|tr > th|1
 classic|settings@1280x860|dom|tr#librow-1 > td.libname|1
 classic|settings@1280x860|dom|tr#librow-1 > td.muted|1
-classic|settings@1280x860|dom|tr#librow-1 > td.row.rowactions|1
+classic|settings@1280x860|dom|tr#librow-1 > td.rowactions|1
 classic|settings@1280x860|dom|tr#librow-1 > td[text]|1
 classic|settings@1280x860|dom|tr#librow-1 > td|1
 classic|settings@1280x860|dom|tr#librow-2 > td.libname|1
 classic|settings@1280x860|dom|tr#librow-2 > td.muted|1
-classic|settings@1280x860|dom|tr#librow-2 > td.row.rowactions|1
+classic|settings@1280x860|dom|tr#librow-2 > td.rowactions|1
 classic|settings@1280x860|dom|tr#librow-2 > td[text]|1
 classic|settings@1280x860|dom|tr#librow-2 > td|1
 classic|settings@1280x860|dom|tr#librow-3 > td.libname|1
 classic|settings@1280x860|dom|tr#librow-3 > td.muted|1
-classic|settings@1280x860|dom|tr#librow-3 > td.row.rowactions|1
+classic|settings@1280x860|dom|tr#librow-3 > td.rowactions|1
 classic|settings@1280x860|dom|tr#librow-3 > td[text]|1
 classic|settings@1280x860|dom|tr#librow-3 > td|1
 classic|settings@1280x860|focus|000|a.logo "cinema"
@@ -3548,10 +3546,6 @@ classic|settings@1280x860|req|GET /api/v1/me|1
 classic|settings@1280x860|req|GET /api/v1/scan/status|3
 classic|settings@1280x860|req|GET /api/v1/server|1
 classic|settings@1280x860|req|GET /api/v1/settings|1
-classic|settings@1280x860|req|GET /api/v1/system/playback-events|1
-classic|settings@1280x860|req|GET /api/v1/system|1
-classic|settings@1280x860|req|GET /api/v1/trakt/status|3
-classic|settings@1280x860|req|GET /api/v1/users|1
 classic|settings@390x780|dom|^ > div#app|1
 classic|settings@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|settings@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
@@ -3581,7 +3575,7 @@ classic|settings@390x780|dom|div.card > table|1
 classic|settings@390x780|dom|div.hint[text] > b[text]|8
 classic|settings@390x780|dom|div.hint[text] > code[text]|1
 classic|settings@390x780|dom|div.paths > span.pathchip[text]|3
-classic|settings@390x780|dom|div.row > button.ghost.sm[text]|2
+classic|settings@390x780|dom|div.row > button.ghost.sm[text]|14
 classic|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 classic|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 classic|settings@390x780|dom|div.row > select#lk|1
@@ -3645,23 +3639,23 @@ classic|settings@390x780|dom|td.muted > div#st-1[text]|1
 classic|settings@390x780|dom|td.muted > div#st-2[text]|1
 classic|settings@390x780|dom|td.muted > div#st-3[text]|1
 classic|settings@390x780|dom|td.muted > div.sched|3
-classic|settings@390x780|dom|td.row.rowactions > button.ghost.sm[text]|12
+classic|settings@390x780|dom|td.rowactions > div.row|3
 classic|settings@390x780|dom|thead > tr|1
 classic|settings@390x780|dom|tr > th[text]|4
 classic|settings@390x780|dom|tr > th|1
 classic|settings@390x780|dom|tr#librow-1 > td.libname|1
 classic|settings@390x780|dom|tr#librow-1 > td.muted|1
-classic|settings@390x780|dom|tr#librow-1 > td.row.rowactions|1
+classic|settings@390x780|dom|tr#librow-1 > td.rowactions|1
 classic|settings@390x780|dom|tr#librow-1 > td[text]|1
 classic|settings@390x780|dom|tr#librow-1 > td|1
 classic|settings@390x780|dom|tr#librow-2 > td.libname|1
 classic|settings@390x780|dom|tr#librow-2 > td.muted|1
-classic|settings@390x780|dom|tr#librow-2 > td.row.rowactions|1
+classic|settings@390x780|dom|tr#librow-2 > td.rowactions|1
 classic|settings@390x780|dom|tr#librow-2 > td[text]|1
 classic|settings@390x780|dom|tr#librow-2 > td|1
 classic|settings@390x780|dom|tr#librow-3 > td.libname|1
 classic|settings@390x780|dom|tr#librow-3 > td.muted|1
-classic|settings@390x780|dom|tr#librow-3 > td.row.rowactions|1
+classic|settings@390x780|dom|tr#librow-3 > td.rowactions|1
 classic|settings@390x780|dom|tr#librow-3 > td[text]|1
 classic|settings@390x780|dom|tr#librow-3 > td|1
 classic|settings@390x780|focus|000|a.logo "cinema"
@@ -3723,10 +3717,6 @@ classic|settings@390x780|req|GET /api/v1/me|1
 classic|settings@390x780|req|GET /api/v1/scan/status|3
 classic|settings@390x780|req|GET /api/v1/server|1
 classic|settings@390x780|req|GET /api/v1/settings|1
-classic|settings@390x780|req|GET /api/v1/system/playback-events|1
-classic|settings@390x780|req|GET /api/v1/system|1
-classic|settings@390x780|req|GET /api/v1/trakt/status|3
-classic|settings@390x780|req|GET /api/v1/users|1
 theater|activity@1280x860|dom|^ > div#app|1
 theater|activity@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|activity@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
@@ -3774,7 +3764,6 @@ theater|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
 theater|activity@1280x860|focus|009|a "Settings"
 theater|activity@1280x860|focus|010|<wrap>
 theater|activity@1280x860|req|GET /api/v1/activity/detail|2
-theater|activity@1280x860|req|GET /api/v1/activity|2
 theater|activity@1280x860|req|GET /api/v1/me|1
 theater|activity@1280x860|req|GET /api/v1/server|1
 theater|activity@390x780|dom|^ > div#app|1
@@ -3824,7 +3813,6 @@ theater|activity@390x780|focus|008|a.on "Activity"
 theater|activity@390x780|focus|009|a "Settings"
 theater|activity@390x780|focus|010|<wrap>
 theater|activity@390x780|req|GET /api/v1/activity/detail|2
-theater|activity@390x780|req|GET /api/v1/activity|2
 theater|activity@390x780|req|GET /api/v1/me|1
 theater|activity@390x780|req|GET /api/v1/server|1
 theater|auth@1280x860|dom|^ > div#app|1
@@ -4060,6 +4048,10 @@ theater|home@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|home@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|home@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|home@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
+theater|home@1280x860|dom|div > div.libbar|1
+theater|home@1280x860|dom|div > div.railbox|5
+theater|home@1280x860|dom|div > h2.section[text]|5
+theater|home@1280x860|dom|div > section.th-hero.th-noart[aria-label=*]|1
 theater|home@1280x860|dom|div#app > header.th-top|1
 theater|home@1280x860|dom|div#app > main#main|1
 theater|home@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -4113,9 +4105,7 @@ theater|home@1280x860|dom|div.th-pop > div#appmenu.amenu|1
 theater|home@1280x860|dom|div.th-pop > div#profilemenu.amenu|1
 theater|home@1280x860|dom|div.th-pop > div#sizemenu.amenu|1
 theater|home@1280x860|dom|div.th-pop > div#thememenu.amenu|1
-theater|home@1280x860|dom|div.th-rails > div.libbar|1
-theater|home@1280x860|dom|div.th-rails > div.railbox|5
-theater|home@1280x860|dom|div.th-rails > h2.section[text]|5
+theater|home@1280x860|dom|div.th-rails > div|3
 theater|home@1280x860|dom|h2.section[text] > a.muted[text]|2
 theater|home@1280x860|dom|header.th-top > a.logo[text]|1
 theater|home@1280x860|dom|header.th-top > div.th-ctl|1
@@ -4124,7 +4114,7 @@ theater|home@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|home@1280x860|dom|header.th-top > span#activity.activity|1
 theater|home@1280x860|dom|header.th-top > span.spacer|1
 theater|home@1280x860|dom|main#main > div.th-rails|1
-theater|home@1280x860|dom|main#main > section.th-hero.th-noart[aria-label=*]|1
+theater|home@1280x860|dom|main#main > div|1
 theater|home@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|home@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|home@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -4162,9 +4152,8 @@ theater|home@1280x860|focus|025|div.poster.k-show.unw "SH Signal Hill 2019"
 theater|home@1280x860|focus|026|<wrap>
 theater|home@1280x860|req|GET /api/v1/activity|2
 theater|home@1280x860|req|GET /api/v1/coming-soon|1
+theater|home@1280x860|req|GET /api/v1/home/previews|1
 theater|home@1280x860|req|GET /api/v1/hubs|1
-theater|home@1280x860|req|GET /api/v1/libraries/<id>/items|3
-theater|home@1280x860|req|GET /api/v1/libraries|1
 theater|home@1280x860|req|GET /api/v1/me|1
 theater|home@1280x860|req|GET /api/v1/server|1
 theater|home@390x780|dom|^ > div#app|1
@@ -4174,6 +4163,11 @@ theater|home@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|home@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|home@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|home@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
+theater|home@390x780|dom|div > div.can-r.railbox|2
+theater|home@390x780|dom|div > div.libbar|1
+theater|home@390x780|dom|div > div.railbox|3
+theater|home@390x780|dom|div > h2.section[text]|5
+theater|home@390x780|dom|div > section.th-hero.th-noart[aria-label=*]|1
 theater|home@390x780|dom|div#app > header.th-top|1
 theater|home@390x780|dom|div#app > main#main|1
 theater|home@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -4230,10 +4224,7 @@ theater|home@390x780|dom|div.th-pop > div#appmenu.amenu|1
 theater|home@390x780|dom|div.th-pop > div#profilemenu.amenu|1
 theater|home@390x780|dom|div.th-pop > div#sizemenu.amenu|1
 theater|home@390x780|dom|div.th-pop > div#thememenu.amenu|1
-theater|home@390x780|dom|div.th-rails > div.can-r.railbox|2
-theater|home@390x780|dom|div.th-rails > div.libbar|1
-theater|home@390x780|dom|div.th-rails > div.railbox|3
-theater|home@390x780|dom|div.th-rails > h2.section[text]|5
+theater|home@390x780|dom|div.th-rails > div|3
 theater|home@390x780|dom|h2.section[text] > a.muted[text]|2
 theater|home@390x780|dom|header.th-top > a.logo[text]|1
 theater|home@390x780|dom|header.th-top > div.th-ctl|1
@@ -4242,7 +4233,7 @@ theater|home@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|home@390x780|dom|header.th-top > span#activity.activity|1
 theater|home@390x780|dom|header.th-top > span.spacer|1
 theater|home@390x780|dom|main#main > div.th-rails|1
-theater|home@390x780|dom|main#main > section.th-hero.th-noart[aria-label=*]|1
+theater|home@390x780|dom|main#main > div|1
 theater|home@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|home@390x780|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|home@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -4280,9 +4271,8 @@ theater|home@390x780|focus|025|a "Settings"
 theater|home@390x780|focus|026|<wrap>
 theater|home@390x780|req|GET /api/v1/activity|2
 theater|home@390x780|req|GET /api/v1/coming-soon|1
+theater|home@390x780|req|GET /api/v1/home/previews|1
 theater|home@390x780|req|GET /api/v1/hubs|1
-theater|home@390x780|req|GET /api/v1/libraries/<id>/items|3
-theater|home@390x780|req|GET /api/v1/libraries|1
 theater|home@390x780|req|GET /api/v1/me|1
 theater|home@390x780|req|GET /api/v1/server|1
 theater|item@1280x860|dom|^ > div#app|1
@@ -4709,7 +4699,9 @@ theater|player@1280x860|dom|div.row > button#subsbtn.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button#syncbtn.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button.pbtn[text]|1
 theater|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
+theater|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 theater|player@1280x860|dom|div.statshd > span[text]|1
+theater|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 theater|player@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|player@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
 theater|player@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hidden=true]|1
@@ -4848,7 +4840,9 @@ theater|player@390x780|dom|div.row > button#subsbtn.pbtn[text]|1
 theater|player@390x780|dom|div.row > button#syncbtn.pbtn[text]|1
 theater|player@390x780|dom|div.row > button.pbtn[text]|1
 theater|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
+theater|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
 theater|player@390x780|dom|div.statshd > span[text]|1
+theater|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button[role=radio type=button text]|3
 theater|player@390x780|dom|div.th-ctl > div.th-pop|4
 theater|player@390x780|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
 theater|player@390x780|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hidden=true]|1
@@ -5074,7 +5068,7 @@ theater|settings@1280x860|dom|div.card > table|1
 theater|settings@1280x860|dom|div.hint[text] > b[text]|8
 theater|settings@1280x860|dom|div.hint[text] > code[text]|1
 theater|settings@1280x860|dom|div.paths > span.pathchip[text]|3
-theater|settings@1280x860|dom|div.row > button.ghost.sm[text]|2
+theater|settings@1280x860|dom|div.row > button.ghost.sm[text]|14
 theater|settings@1280x860|dom|div.row > input#ln[aria-label=*]|1
 theater|settings@1280x860|dom|div.row > input#lp[aria-label=*]|1
 theater|settings@1280x860|dom|div.row > select#lk|1
@@ -5148,23 +5142,23 @@ theater|settings@1280x860|dom|td.muted > div#st-1[text]|1
 theater|settings@1280x860|dom|td.muted > div#st-2[text]|1
 theater|settings@1280x860|dom|td.muted > div#st-3[text]|1
 theater|settings@1280x860|dom|td.muted > div.sched|3
-theater|settings@1280x860|dom|td.row.rowactions > button.ghost.sm[text]|12
+theater|settings@1280x860|dom|td.rowactions > div.row|3
 theater|settings@1280x860|dom|thead > tr|1
 theater|settings@1280x860|dom|tr > th[text]|4
 theater|settings@1280x860|dom|tr > th|1
 theater|settings@1280x860|dom|tr#librow-1 > td.libname|1
 theater|settings@1280x860|dom|tr#librow-1 > td.muted|1
-theater|settings@1280x860|dom|tr#librow-1 > td.row.rowactions|1
+theater|settings@1280x860|dom|tr#librow-1 > td.rowactions|1
 theater|settings@1280x860|dom|tr#librow-1 > td[text]|1
 theater|settings@1280x860|dom|tr#librow-1 > td|1
 theater|settings@1280x860|dom|tr#librow-2 > td.libname|1
 theater|settings@1280x860|dom|tr#librow-2 > td.muted|1
-theater|settings@1280x860|dom|tr#librow-2 > td.row.rowactions|1
+theater|settings@1280x860|dom|tr#librow-2 > td.rowactions|1
 theater|settings@1280x860|dom|tr#librow-2 > td[text]|1
 theater|settings@1280x860|dom|tr#librow-2 > td|1
 theater|settings@1280x860|dom|tr#librow-3 > td.libname|1
 theater|settings@1280x860|dom|tr#librow-3 > td.muted|1
-theater|settings@1280x860|dom|tr#librow-3 > td.row.rowactions|1
+theater|settings@1280x860|dom|tr#librow-3 > td.rowactions|1
 theater|settings@1280x860|dom|tr#librow-3 > td[text]|1
 theater|settings@1280x860|dom|tr#librow-3 > td|1
 theater|settings@1280x860|focus|000|a.logo "cinema"
@@ -5226,10 +5220,6 @@ theater|settings@1280x860|req|GET /api/v1/me|1
 theater|settings@1280x860|req|GET /api/v1/scan/status|3
 theater|settings@1280x860|req|GET /api/v1/server|1
 theater|settings@1280x860|req|GET /api/v1/settings|1
-theater|settings@1280x860|req|GET /api/v1/system/playback-events|1
-theater|settings@1280x860|req|GET /api/v1/system|1
-theater|settings@1280x860|req|GET /api/v1/trakt/status|3
-theater|settings@1280x860|req|GET /api/v1/users|1
 theater|settings@390x780|dom|^ > div#app|1
 theater|settings@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|settings@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
@@ -5252,7 +5242,7 @@ theater|settings@390x780|dom|div.card > table|1
 theater|settings@390x780|dom|div.hint[text] > b[text]|8
 theater|settings@390x780|dom|div.hint[text] > code[text]|1
 theater|settings@390x780|dom|div.paths > span.pathchip[text]|3
-theater|settings@390x780|dom|div.row > button.ghost.sm[text]|2
+theater|settings@390x780|dom|div.row > button.ghost.sm[text]|14
 theater|settings@390x780|dom|div.row > input#ln[aria-label=*]|1
 theater|settings@390x780|dom|div.row > input#lp[aria-label=*]|1
 theater|settings@390x780|dom|div.row > select#lk|1
@@ -5326,23 +5316,23 @@ theater|settings@390x780|dom|td.muted > div#st-1[text]|1
 theater|settings@390x780|dom|td.muted > div#st-2[text]|1
 theater|settings@390x780|dom|td.muted > div#st-3[text]|1
 theater|settings@390x780|dom|td.muted > div.sched|3
-theater|settings@390x780|dom|td.row.rowactions > button.ghost.sm[text]|12
+theater|settings@390x780|dom|td.rowactions > div.row|3
 theater|settings@390x780|dom|thead > tr|1
 theater|settings@390x780|dom|tr > th[text]|4
 theater|settings@390x780|dom|tr > th|1
 theater|settings@390x780|dom|tr#librow-1 > td.libname|1
 theater|settings@390x780|dom|tr#librow-1 > td.muted|1
-theater|settings@390x780|dom|tr#librow-1 > td.row.rowactions|1
+theater|settings@390x780|dom|tr#librow-1 > td.rowactions|1
 theater|settings@390x780|dom|tr#librow-1 > td[text]|1
 theater|settings@390x780|dom|tr#librow-1 > td|1
 theater|settings@390x780|dom|tr#librow-2 > td.libname|1
 theater|settings@390x780|dom|tr#librow-2 > td.muted|1
-theater|settings@390x780|dom|tr#librow-2 > td.row.rowactions|1
+theater|settings@390x780|dom|tr#librow-2 > td.rowactions|1
 theater|settings@390x780|dom|tr#librow-2 > td[text]|1
 theater|settings@390x780|dom|tr#librow-2 > td|1
 theater|settings@390x780|dom|tr#librow-3 > td.libname|1
 theater|settings@390x780|dom|tr#librow-3 > td.muted|1
-theater|settings@390x780|dom|tr#librow-3 > td.row.rowactions|1
+theater|settings@390x780|dom|tr#librow-3 > td.rowactions|1
 theater|settings@390x780|dom|tr#librow-3 > td[text]|1
 theater|settings@390x780|dom|tr#librow-3 > td|1
 theater|settings@390x780|focus|000|a.logo "cinema"
@@ -5404,7 +5394,3 @@ theater|settings@390x780|req|GET /api/v1/me|1
 theater|settings@390x780|req|GET /api/v1/scan/status|3
 theater|settings@390x780|req|GET /api/v1/server|1
 theater|settings@390x780|req|GET /api/v1/settings|1
-theater|settings@390x780|req|GET /api/v1/system/playback-events|1
-theater|settings@390x780|req|GET /api/v1/system|1
-theater|settings@390x780|req|GET /api/v1/trakt/status|3
-theater|settings@390x780|req|GET /api/v1/users|1

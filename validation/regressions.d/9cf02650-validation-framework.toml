@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9cf02650"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit retains the mapping from the default-feature SQLite contract compilation correction to its cluster artwork checks. Removing this ledger entry reproduces the policy failure, preventing a regression repair from landing without durable evidence."

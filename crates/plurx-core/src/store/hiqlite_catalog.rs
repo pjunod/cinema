@@ -416,6 +416,31 @@ fn one_returning_library(
     )
 }
 
+impl HiqliteAuthStore {
+    pub(super) async fn local_get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
+        one_library(
+            self.client()
+                .query_map::<LibraryRow, _>(
+                    format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
+                    params!(id),
+                )
+                .await?,
+        )
+    }
+
+    pub(super) async fn local_list_libraries(&self) -> Result<Vec<Library>, StoreError> {
+        self.client()
+            .query_map::<LibraryRow, _>(
+                format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
+                params!(),
+            )
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
+    }
+}
+
 #[async_trait]
 impl LibraryStore for HiqliteAuthStore {
     async fn create_library(&self, library: &NewLibrary) -> Result<Library, StoreError> {
@@ -438,8 +463,7 @@ impl LibraryStore for HiqliteAuthStore {
                     now
                 ),
             )
-            .await
-            .map_err(database_error)?;
+            .await?;
         row.try_into()
     }
 
@@ -466,8 +490,7 @@ impl LibraryStore for HiqliteAuthStore {
                         id
                     ),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -488,8 +511,7 @@ impl LibraryStore for HiqliteAuthStore {
                     sql,
                     params!(scan_interval_mins.max(0), refresh_interval_mins.max(0), id),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -519,8 +541,7 @@ impl LibraryStore for HiqliteAuthStore {
                     format!("SELECT {LIB_COLS} FROM libraries WHERE id = $1"),
                     params!(id),
                 )
-                .await
-                .map_err(database_error)?,
+                .await?,
         )
     }
 
@@ -530,8 +551,7 @@ impl LibraryStore for HiqliteAuthStore {
                 format!("SELECT {LIB_COLS} FROM libraries ORDER BY name"),
                 params!(),
             )
-            .await
-            .map_err(database_error)?
+            .await?
             .into_iter()
             .map(TryInto::try_into)
             .collect()

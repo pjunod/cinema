@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["de430a84"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process repair lifecycle assigns distinct durable items to the expired post-CAS claim and the ambiguously acknowledged mutation. It proves the expired local deadline follows a generation-one fence owned by the current leader while the later ambiguity begins from an untouched item and still applies exactly once."
