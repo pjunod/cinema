@@ -1384,8 +1384,8 @@ mod tests {
         let mut inconsistent_pool = artifact.clone();
         inconsistent_pool["runs"][1]["read_pool_size"] = serde_json::json!(8);
         assert!(
-            schema_validator.is_valid(&inconsistent_pool),
-            "named-runner pool selection is a cross-run semantic constraint"
+            !schema_validator.is_valid(&inconsistent_pool),
+            "semantic CI fixes every run to the production read-pool default"
         );
         assert!(validate_json_artifact(&inconsistent_pool).is_err());
 
