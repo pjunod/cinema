@@ -30,9 +30,12 @@ run: ## Run the server (http://localhost:32400)
 fmt: ## Auto-format all code
 	$(CARGO) fmt --all
 
+# `--no-fail-fast` because cargo otherwise abandons the run at the first red
+# target, so one broken crate hides every other crate's failures and the next
+# fix reveals a second one instead of the whole list.
 .PHONY: test
 test: ## Run the test suite
-	$(CARGO) test --workspace
+	$(CARGO) test --workspace --no-fail-fast
 
 ## ---- baseline gates ----------------------------------------------------
 
@@ -55,7 +58,19 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # Local development keeps `make rust-check`; this target exists for ci.yml.
 .PHONY: ci-rust-gate
 ci-rust-gate: fmt-check ## CI Rust gate: format + workspace tests minus the cluster member
-	$(CARGO) test --workspace --locked --exclude plurx-cluster-check
+	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+
+# The real mount-namespace exercises for scratch aliasing and mount points
+# inside scratch. They call `mount --bind`, so they need CAP_SYS_ADMIN and are
+# not part of `check`: a developer without privileges would get a failing
+# baseline for a machine capability rather than for the code. Both tests return
+# immediately unless PLURX_RUN_BIND_MOUNT_TEST is set, so they are inert
+# everywhere else — which is exactly why they need a target that sets it. Run
+# this on a privileged Linux host before shipping a change to fs_secure.
+.PHONY: bind-mount-check
+bind-mount-check: ## Privileged Linux: run the opt-in mount-namespace scratch tests
+	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core \
+	  fs_secure::tests:: -- --nocapture
 
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence

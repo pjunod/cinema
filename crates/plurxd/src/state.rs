@@ -108,6 +108,13 @@ pub struct Dirs {
     /// restarts, and the transcode scratch — which is cleared at boot and
     /// swept for orphans — must not contain it.
     pub subs: PathBuf,
+    /// Disposable ffmpeg bookkeeping. It may be regenerated, but it must be
+    /// resolved and fenced separately from live-session scratch so a symlink
+    /// or bind alias cannot put scratch cleanup over another managed root.
+    pub runtime_cache: PathBuf,
+    /// Persistent VOD rendition bytes, including admitted copy-cache entries.
+    /// Unlike `runtime_cache`, these survive restarts and cache relocation.
+    pub renditions: PathBuf,
 }
 
 const STORE_METRICS_FRESHNESS_SECS: u64 = 120;
@@ -453,6 +460,8 @@ impl AppState {
             transcode: transcode_dir,
             cache: cache_dir,
             subs: subs_dir,
+            runtime_cache,
+            renditions,
         } = dirs;
         let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
             Arc::clone(&store),
@@ -483,8 +492,11 @@ impl AppState {
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
-            .with_cache(
+            .with_cache_layout(
                 cache_dir.clone(),
+                runtime_cache,
+                subs_dir.clone(),
+                renditions,
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
             )

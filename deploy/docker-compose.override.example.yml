@@ -33,6 +33,14 @@ services:
       # filesystem and PLURX_SHARED_CACHE_ID on every participating voter;
       # the container path itself may differ between hosts.
       # - /mnt/shared/plurx-cache:/var/cache/plurx-shared
+      # Optional persistent-cache and disposable-scratch roots, paired with the
+      # PLURX_CACHE_DIR / PLURX_TRANSCODE_DIR block below. Create both host
+      # directories owned by PUID:PGID before the first start. The scratch
+      # directory must be empty on first claim and must not be a path under
+      # PLURX_DATA; plurx claims it with a .plurx-transcode-scratch marker and
+      # then empties it at every start:
+      # - /srv/plurx-cache:/var/cache/plurx
+      # - /srv/plurx-scratch:/var/tmp/plurx-transcode
 
     # Point at a specific ffmpeg build (e.g. jellyfin-ffmpeg), force an
     # encoder family, configure the optional verified shared cache, or leave
@@ -43,6 +51,17 @@ services:
     #   PLURX_HWACCEL: "vaapi"   # nvenc | qsv | vaapi | videotoolbox | software
     #   PLURX_SHARED_CACHE_DIR: "/var/cache/plurx-shared"
     #   PLURX_SHARED_CACHE_ID: "media-cache-a"
+    #   # Container-side paths of the two mounts above. Setting PLURX_CACHE_DIR
+    #   # on an existing install moves nothing: copy <data>/artwork,
+    #   # <data>/cache/transcode and <data>/cache/subs to <cache>/artwork,
+    #   # <cache>/transcode and <cache>/subs first — `cp -a <data>/cache
+    #   # <cache>` puts the finished transcodes and every completed offline
+    #   # package where nothing reads them. See docs/OPERATIONS.md.
+    #   PLURX_CACHE_DIR: "/var/cache/plurx"
+    #   PLURX_TRANSCODE_DIR: "/var/tmp/plurx-transcode"
+    #   # Local replicated-read pool, 1-16. Leave 4 without retained 4/8/16
+    #   # evidence for this workload.
+    #   PLURX_CLUSTER_READ_POOL_SIZE: "4"
 
     # --- Hardware transcode passthrough (uncomment for your GPU) ---
     #

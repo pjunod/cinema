@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b4242f5c"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained topology schema/serde fixture compiles in the all-target Rust gate and the separate-process cluster contract, so both semantic and named evidence exercise the same default read-pool declaration."

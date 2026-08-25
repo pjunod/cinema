@@ -19,8 +19,12 @@ use super::{
 };
 use plurx_core::cluster::migration::status::ReplicationHealth;
 
-pub const TOPOLOGY_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+pub const TOPOLOGY_ARTIFACT_SCHEMA_VERSION: u32 = 2;
 pub const TOPOLOGY_WRITE_OPERATIONS: u64 = 64;
+pub const TOPOLOGY_CATALOGUE_ROWS: u64 = 32;
+pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
+pub const TOPOLOGY_CATALOGUE_READ_CONCURRENCY: u64 = 32;
+pub(crate) const TOPOLOGY_CATALOGUE_TITLE_PREFIX: &str = "Topology Catalogue Read";
 const TOPOLOGY_VALUE_BYTES: usize = 64;
 const SEMANTIC_EVIDENCE_SCOPE: &str = "semantic_ci";
 const NAMED_RUNNER_EVIDENCE_SCOPE: &str = "named_runner";
@@ -49,6 +53,10 @@ pub struct TopologyWorkload {
     pub concurrency: u64,
     pub value_bytes: u64,
     pub value_pattern: String,
+    pub catalogue_read_operation: String,
+    pub catalogue_rows: u64,
+    pub catalogue_read_operations: u64,
+    pub catalogue_read_concurrency: u64,
     pub latency_unit: String,
     pub index_unit: String,
 }
@@ -72,6 +80,15 @@ pub struct TopologyRun {
     pub acknowledged_write_round_trip_p95_us: f64,
     pub acknowledged_write_round_trip_p99_us: f64,
     pub raw_acknowledged_write_round_trip_us: Vec<u64>,
+    pub read_pool_size: usize,
+    pub catalogue_read_target: u64,
+    pub catalogue_read_errors: u64,
+    pub catalogue_read_consistent_query_calls: u64,
+    pub catalogue_read_non_consistent_query_calls: u64,
+    pub local_catalogue_read_p50_us: f64,
+    pub local_catalogue_read_p95_us: f64,
+    pub local_catalogue_read_p99_us: f64,
+    pub raw_local_catalogue_read_us: Vec<u64>,
     pub dataset_rows: u64,
     pub dataset_payload_bytes: u64,
     pub expected_corpus_sha256: String,
@@ -124,12 +141,16 @@ pub struct ResourceSample {
 impl TopologyWorkload {
     pub(super) fn semantic() -> Self {
         Self {
-            id: "settings-put-v1".to_owned(),
+            id: "settings-put-and-local-catalogue-read-v2".to_owned(),
             operation: "quorum_acknowledged_put_setting".to_owned(),
             operations: TOPOLOGY_WRITE_OPERATIONS,
             concurrency: 1,
             value_bytes: TOPOLOGY_VALUE_BYTES as u64,
             value_pattern: "ordinal_hex_then_x_padding".to_owned(),
+            catalogue_read_operation: "bounded_local_catalogue_get_item".to_owned(),
+            catalogue_rows: TOPOLOGY_CATALOGUE_ROWS,
+            catalogue_read_operations: TOPOLOGY_CATALOGUE_READ_OPERATIONS,
+            catalogue_read_concurrency: TOPOLOGY_CATALOGUE_READ_CONCURRENCY,
             latency_unit: "microseconds".to_owned(),
             index_unit: "raft_entries".to_owned(),
         }
@@ -233,6 +254,7 @@ pub(super) struct ResourceIdentity {
 }
 
 pub(super) struct RunEvidence<'a> {
+    pub read_pool_size: usize,
     pub controller_host: &'a str,
     pub load_generator_host: &'a str,
     pub load_generator_isolation: Option<&'a str>,
@@ -244,6 +266,7 @@ pub(super) struct RunEvidence<'a> {
 impl RunEvidence<'static> {
     fn semantic() -> Self {
         Self {
+            read_pool_size: crate::default_read_pool_size(),
             controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
                 "github-hosted-ephemeral"
             } else {
@@ -282,6 +305,36 @@ pub(super) async fn exercise_topology(
 
     let leader = cluster.leader().await?;
     let leader_term = confirmed_leader_term(cluster, leader).await?;
+    let catalogue_item_ids = match cluster
+        .request(
+            leader,
+            Request::TopologySeedCatalogue {
+                rows: workload.catalogue_rows,
+            },
+        )
+        .await?
+    {
+        Response::TopologyCatalogueSeeded { item_ids }
+            if u64::try_from(item_ids.len())? == workload.catalogue_rows =>
+        {
+            item_ids
+        }
+        response => bail!("topology catalogue seed returned {response:?}"),
+    };
+    let catalogue_seed_index = metric_index(cluster, leader).await?;
+    wait_for_applied(cluster, &voters, catalogue_seed_index).await?;
+    let catalogue_read_target = voters
+        .iter()
+        .copied()
+        .find(|node_id| *node_id != leader)
+        .context("topology had no follower for local catalogue reads")?;
+    super::wait_for_local_catalogue_read(
+        cluster,
+        catalogue_read_target,
+        catalogue_item_ids[0],
+        &format!("{TOPOLOGY_CATALOGUE_TITLE_PREFIX} 0000"),
+    )
+    .await?;
     let applied_index_before = metric_index(cluster, leader).await?;
     let resource_baseline = if let Some(identities) = evidence.resources {
         Some(
@@ -320,6 +373,45 @@ pub(super) async fn exercise_topology(
     }
     let applied_index_after = metric_index(cluster, leader).await?;
     let applied_indexes = wait_for_applied(cluster, &voters, applied_index_after).await?;
+    let (
+        raw_local_catalogue_read_us,
+        catalogue_read_errors,
+        catalogue_read_consistent_query_calls,
+        catalogue_read_non_consistent_query_calls,
+    ) = match cluster
+        .request(
+            catalogue_read_target,
+            Request::TopologyCatalogueReads {
+                item_ids: catalogue_item_ids,
+                operations: workload.catalogue_read_operations,
+                concurrency: workload.catalogue_read_concurrency,
+            },
+        )
+        .await?
+    {
+        Response::TopologyCatalogueReads {
+            raw_round_trip_us,
+            errors,
+            consistent_query_calls,
+            non_consistent_query_calls,
+        } => (
+            raw_round_trip_us,
+            errors,
+            consistent_query_calls,
+            non_consistent_query_calls,
+        ),
+        response => bail!("topology catalogue read workload returned {response:?}"),
+    };
+    if catalogue_read_errors != 0
+        || catalogue_read_consistent_query_calls != 0
+        || catalogue_read_non_consistent_query_calls != workload.catalogue_read_operations
+    {
+        bail!(
+            "topology catalogue workload did not stay local: errors={catalogue_read_errors}, \
+             consistent={catalogue_read_consistent_query_calls}, \
+             local={catalogue_read_non_consistent_query_calls}"
+        );
+    }
     let final_leader_term = confirmed_leader_term(cluster, leader).await?;
     if final_leader_term != leader_term {
         bail!(
@@ -375,6 +467,15 @@ pub(super) async fn exercise_topology(
             0.99,
         )?,
         raw_acknowledged_write_round_trip_us,
+        read_pool_size: evidence.read_pool_size,
+        catalogue_read_target,
+        catalogue_read_errors,
+        catalogue_read_consistent_query_calls,
+        catalogue_read_non_consistent_query_calls,
+        local_catalogue_read_p50_us: percentile_type7(&raw_local_catalogue_read_us, 0.50)?,
+        local_catalogue_read_p95_us: percentile_type7(&raw_local_catalogue_read_us, 0.95)?,
+        local_catalogue_read_p99_us: percentile_type7(&raw_local_catalogue_read_us, 0.99)?,
+        raw_local_catalogue_read_us,
         dataset_rows: workload.operations,
         dataset_payload_bytes,
         expected_corpus_sha256,
@@ -688,13 +789,16 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
         bail!("topology artifact finished before it started");
     }
     if artifact.workload != TopologyWorkload::semantic() {
-        bail!("topology artifact does not use the version-one pinned workload");
+        bail!("topology artifact does not use the version-two pinned workload");
     }
     if artifact.workload.sha256()? != artifact.workload_sha256 {
         bail!("topology artifact workload hash does not match its declaration");
     }
     if artifact.runs.len() != 2 {
         bail!("topology artifact must contain exactly two topology runs");
+    }
+    if artifact.runs[0].read_pool_size != artifact.runs[1].read_pool_size {
+        bail!("topology pair changed read_pool_size between its two runs");
     }
 
     for (position, run) in artifact.runs.iter().enumerate() {
@@ -767,6 +871,27 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
         {
             bail!("topology run sample count does not match the declared workload");
         }
+        if !(1..=16).contains(&run.read_pool_size)
+            || (artifact.evidence_scope == SEMANTIC_EVIDENCE_SCOPE
+                && run.read_pool_size != super::default_read_pool_size())
+        {
+            bail!("topology run did not attest a supported read_pool_size");
+        }
+        if run.catalogue_read_target == 0
+            || run.catalogue_read_target > run.voter_count
+            || run.catalogue_read_target == run.leader
+        {
+            bail!("topology local catalogue workload did not target a follower");
+        }
+        if u64::try_from(run.raw_local_catalogue_read_us.len())?
+            != artifact.workload.catalogue_read_operations
+            || run.catalogue_read_errors != 0
+            || run.catalogue_read_consistent_query_calls != 0
+            || run.catalogue_read_non_consistent_query_calls
+                != artifact.workload.catalogue_read_operations
+        {
+            bail!("topology catalogue samples do not prove the pinned local-read workload");
+        }
         if run.physical_commit_entries != artifact.workload.operations
             || run
                 .applied_index_after
@@ -783,6 +908,16 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             let expected = percentile_type7(&run.raw_acknowledged_write_round_trip_us, quantile)?;
             if (expected - actual).abs() > f64::EPSILON {
                 bail!("topology run percentile does not match its raw samples");
+            }
+        }
+        for (quantile, actual) in [
+            (0.50, run.local_catalogue_read_p50_us),
+            (0.95, run.local_catalogue_read_p95_us),
+            (0.99, run.local_catalogue_read_p99_us),
+        ] {
+            let expected = percentile_type7(&run.raw_local_catalogue_read_us, quantile)?;
+            if (expected - actual).abs() > f64::EPSILON {
+                bail!("topology local-read percentile does not match its raw samples");
             }
         }
         let expected_corpus = expected_corpus(&artifact.workload)?;
@@ -934,6 +1069,8 @@ mod tests {
         let expected_corpus_sha256 = corpus_sha256(&corpus).expect("hash fixture corpus");
         let raw_acknowledged_write_round_trip_us =
             (1..=TOPOLOGY_WRITE_OPERATIONS).collect::<Vec<_>>();
+        let raw_local_catalogue_read_us =
+            (1..=TOPOLOGY_CATALOGUE_READ_OPERATIONS).collect::<Vec<_>>();
         TopologyRun {
             voter_count,
             quorum: voter_count / 2 + 1,
@@ -963,6 +1100,18 @@ mod tests {
             )
             .expect("fixture p99"),
             raw_acknowledged_write_round_trip_us,
+            read_pool_size: crate::default_read_pool_size(),
+            catalogue_read_target: 2,
+            catalogue_read_errors: 0,
+            catalogue_read_consistent_query_calls: 0,
+            catalogue_read_non_consistent_query_calls: TOPOLOGY_CATALOGUE_READ_OPERATIONS,
+            local_catalogue_read_p50_us: percentile_type7(&raw_local_catalogue_read_us, 0.50)
+                .expect("fixture read p50"),
+            local_catalogue_read_p95_us: percentile_type7(&raw_local_catalogue_read_us, 0.95)
+                .expect("fixture read p95"),
+            local_catalogue_read_p99_us: percentile_type7(&raw_local_catalogue_read_us, 0.99)
+                .expect("fixture read p99"),
+            raw_local_catalogue_read_us,
             dataset_rows: TOPOLOGY_WRITE_OPERATIONS,
             dataset_payload_bytes: TOPOLOGY_WRITE_OPERATIONS * TOPOLOGY_VALUE_BYTES as u64,
             expected_corpus_sha256: expected_corpus_sha256.clone(),
@@ -1137,7 +1286,7 @@ mod tests {
         assert!(schema_validator.is_valid(&artifact));
         assert_eq!(
             schema.get("$id").and_then(serde_json::Value::as_str),
-            Some("https://plurx.tv/schemas/cluster-topology-v1.json")
+            Some("https://plurx.tv/schemas/cluster-topology-v2.json")
         );
         assert_closed_schema_matches_fixture(&schema, None, &artifact);
         assert_closed_schema_matches_fixture(&schema, Some("workload"), &artifact["workload"]);
@@ -1172,6 +1321,23 @@ mod tests {
                 "/$defs/run/properties/raw_acknowledged_write_round_trip_us/maxItems",
                 64,
             ),
+            ("/$defs/workload/properties/catalogue_rows/const", 32),
+            (
+                "/$defs/workload/properties/catalogue_read_operations/const",
+                256,
+            ),
+            (
+                "/$defs/workload/properties/catalogue_read_concurrency/const",
+                32,
+            ),
+            (
+                "/$defs/run/properties/raw_local_catalogue_read_us/minItems",
+                256,
+            ),
+            (
+                "/$defs/run/properties/raw_local_catalogue_read_us/maxItems",
+                256,
+            ),
         ] {
             assert_eq!(
                 schema.pointer(pointer).and_then(serde_json::Value::as_u64),
@@ -1199,6 +1365,35 @@ mod tests {
             .pop();
         assert!(!schema_validator.is_valid(&short_samples));
         assert!(validate_json_artifact(&short_samples).is_err());
+
+        let mut short_read_samples = artifact.clone();
+        short_read_samples["runs"][0]["raw_local_catalogue_read_us"]
+            .as_array_mut()
+            .expect("local-read latency samples")
+            .pop();
+        assert!(!schema_validator.is_valid(&short_read_samples));
+        assert!(validate_json_artifact(&short_read_samples).is_err());
+
+        let mut fallback_read = artifact.clone();
+        fallback_read["runs"][0]["catalogue_read_consistent_query_calls"] = serde_json::json!(1);
+        fallback_read["runs"][0]["catalogue_read_non_consistent_query_calls"] =
+            serde_json::json!(255);
+        assert!(!schema_validator.is_valid(&fallback_read));
+        assert!(validate_json_artifact(&fallback_read).is_err());
+
+        let mut inconsistent_pool = artifact.clone();
+        inconsistent_pool["runs"][1]["read_pool_size"] = serde_json::json!(8);
+        assert!(
+            !schema_validator.is_valid(&inconsistent_pool),
+            "semantic CI fixes every run to the production read-pool default"
+        );
+        assert!(validate_json_artifact(&inconsistent_pool).is_err());
+
+        let mut invented_read_percentile = artifact.clone();
+        invented_read_percentile["runs"][0]["local_catalogue_read_p95_us"] =
+            serde_json::json!(9_999.0);
+        assert!(schema_validator.is_valid(&invented_read_percentile));
+        assert!(validate_json_artifact(&invented_read_percentile).is_err());
 
         for (name, mut invalid) in [
             ("three-voter quorum", artifact.clone()),
@@ -1273,7 +1468,7 @@ mod tests {
             .remove("runner_image_digest");
         assert!(schema_validator.is_valid(&legacy_semantic));
         validate_json_artifact(&legacy_semantic)
-            .expect("schema v1 semantic artifact without digest");
+            .expect("schema v2 semantic artifact without digest");
 
         let mut cross_field_hash_mismatch = artifact;
         cross_field_hash_mismatch["runs"][0]["corpus_observations"][0]["corpus_sha256"] =

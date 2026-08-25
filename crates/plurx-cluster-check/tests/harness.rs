@@ -374,6 +374,7 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
             api: format!("127.0.0.1:{}", free_port().expect("api port")),
         }],
         listen_addr: "127.0.0.1".to_owned(),
+        read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };
@@ -803,6 +804,7 @@ async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
             api: format!("127.0.0.1:{api}"),
         }],
         listen_addr: "127.0.0.1".to_owned(),
+        read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };
@@ -979,6 +981,7 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(3).expect("allocate voters").into_specs(),
         listen_addr: "127.0.0.1".to_owned(),
+        read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };
@@ -1049,6 +1052,7 @@ async fn a_malformed_request_is_answered_and_the_voter_keeps_serving() {
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(1).expect("allocate one voter").into_specs(),
         listen_addr: "127.0.0.1".to_owned(),
+        read_pool_size: plurx_cluster_check::default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };

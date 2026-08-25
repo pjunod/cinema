@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://plurx.tv/schemas/cluster-topology-v1.json",
+  "$id": "https://plurx.tv/schemas/cluster-topology-v2.json",
   "title": "plurx three-versus-four-voter topology evidence",
   "$comment": "Draft 2020-12 validates the complete shape, topology cardinality, and evidence-scope resource contract. Cross-field hashes, percentile recomputation, timestamps, applied lag, and stable leader/term semantics require validate_topology_artifact in plurx-cluster-check.",
   "type": "object",
@@ -17,7 +17,7 @@
     "runs"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "evidence_scope": { "enum": ["semantic_ci", "named_runner"] },
     "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "runner_image_digest": {
@@ -55,6 +55,7 @@
           "runs": {
             "items": {
               "properties": {
+                "read_pool_size": { "const": 4 },
                 "load_generator_isolation": { "type": "null" },
                 "controller_machine_fingerprint": { "type": "null" },
                 "voter_machine_fingerprints": { "type": "null" },
@@ -125,16 +126,24 @@
         "concurrency",
         "value_bytes",
         "value_pattern",
+        "catalogue_read_operation",
+        "catalogue_rows",
+        "catalogue_read_operations",
+        "catalogue_read_concurrency",
         "latency_unit",
         "index_unit"
       ],
       "properties": {
-        "id": { "const": "settings-put-v1" },
+        "id": { "const": "settings-put-and-local-catalogue-read-v2" },
         "operation": { "const": "quorum_acknowledged_put_setting" },
         "operations": { "const": 64 },
         "concurrency": { "const": 1 },
         "value_bytes": { "const": 64 },
         "value_pattern": { "const": "ordinal_hex_then_x_padding" },
+        "catalogue_read_operation": { "const": "bounded_local_catalogue_get_item" },
+        "catalogue_rows": { "const": 32 },
+        "catalogue_read_operations": { "const": 256 },
+        "catalogue_read_concurrency": { "const": 32 },
         "latency_unit": { "const": "microseconds" },
         "index_unit": { "const": "raft_entries" }
       }
@@ -159,6 +168,15 @@
         "acknowledged_write_round_trip_p95_us",
         "acknowledged_write_round_trip_p99_us",
         "raw_acknowledged_write_round_trip_us",
+        "read_pool_size",
+        "catalogue_read_target",
+        "catalogue_read_errors",
+        "catalogue_read_consistent_query_calls",
+        "catalogue_read_non_consistent_query_calls",
+        "local_catalogue_read_p50_us",
+        "local_catalogue_read_p95_us",
+        "local_catalogue_read_p99_us",
+        "raw_local_catalogue_read_us",
         "dataset_rows",
         "dataset_payload_bytes",
         "expected_corpus_sha256",
@@ -189,6 +207,20 @@
           "type": "array",
           "minItems": 64,
           "maxItems": 64,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "read_pool_size": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "catalogue_read_target": { "type": "integer", "minimum": 1 },
+        "catalogue_read_errors": { "const": 0 },
+        "catalogue_read_consistent_query_calls": { "const": 0 },
+        "catalogue_read_non_consistent_query_calls": { "const": 256 },
+        "local_catalogue_read_p50_us": { "type": "number", "minimum": 0 },
+        "local_catalogue_read_p95_us": { "type": "number", "minimum": 0 },
+        "local_catalogue_read_p99_us": { "type": "number", "minimum": 0 },
+        "raw_local_catalogue_read_us": {
+          "type": "array",
+          "minItems": 256,
+          "maxItems": 256,
           "items": { "type": "integer", "minimum": 0 }
         },
         "dataset_rows": { "const": 64 },

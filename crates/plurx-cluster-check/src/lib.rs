@@ -25,6 +25,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::StreamExt;
 use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
@@ -41,7 +42,9 @@ use plurx_core::cluster::membership::{
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
 };
-use plurx_core::cluster::migration::{ActivationMarker, HIQLITE_WAL_SIZE_BYTES};
+use plurx_core::cluster::migration::{
+    production_hiqlite_defaults_with_read_pool, ActivationMarker,
+};
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
     BookMetadataPatch, BookMetadataSource, ItemKind, ItemSort, LibraryKind, MetadataPatch, NewItem,
@@ -2861,6 +2864,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     root: cluster_root.clone(),
                     nodes: specs[..node_id as usize].to_vec(),
                     listen_addr: default_listen_addr(),
+                    read_pool_size: default_read_pool_size(),
                     emulate_old_watermark_handler: false,
                     emulate_p3a_watermark_handler: false,
                 },
@@ -4742,6 +4746,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
         root,
         nodes: specs,
         listen_addr: default_listen_addr(),
+        read_pool_size: default_read_pool_size(),
         emulate_old_watermark_handler: false,
         emulate_p3a_watermark_handler: false,
     };
@@ -5535,6 +5540,12 @@ pub struct NodeLaunch {
     pub nodes: Vec<NodeSpec>,
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+    /// Local read-only connection pool, carried to the voter that is actually
+    /// measured. Without it every arm of a 4/8/16 comparison would launch on
+    /// the same default pool and the run would validate whichever number the
+    /// report happened to claim.
+    #[serde(default = "default_read_pool_size")]
+    pub read_pool_size: usize,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
     #[serde(default)]
@@ -5543,6 +5554,12 @@ pub struct NodeLaunch {
 
 fn default_listen_addr() -> String {
     LISTEN_ADDR.to_owned()
+}
+
+/// The daemon's own default, read from the daemon's own config type so the two
+/// cannot drift.
+pub fn default_read_pool_size() -> usize {
+    plurx_core::config::ClusterConfig::default().read_pool_size
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5761,6 +5778,14 @@ pub enum Request {
         ordinal: u64,
         value: String,
     },
+    TopologySeedCatalogue {
+        rows: u64,
+    },
+    TopologyCatalogueReads {
+        item_ids: Vec<i64>,
+        operations: u64,
+        concurrency: u64,
+    },
     TopologyResources {
         hardware: String,
         storage_device: String,
@@ -5834,6 +5859,15 @@ pub enum Response {
     },
     TopologyResources {
         sample: ResourceSample,
+    },
+    TopologyCatalogueSeeded {
+        item_ids: Vec<i64>,
+    },
+    TopologyCatalogueReads {
+        raw_round_trip_us: Vec<u64>,
+        errors: u64,
+        consistent_query_calls: u64,
+        non_consistent_query_calls: u64,
     },
     Dump {
         digest: String,
@@ -6563,6 +6597,7 @@ impl ClusterProcesses {
                 root: root.to_path_buf(),
                 nodes: specs.clone(),
                 listen_addr: default_listen_addr(),
+                read_pool_size: default_read_pool_size(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
                 emulate_p3a_watermark_handler: p3a_handler_node == Some(node_id),
             };
@@ -8287,6 +8322,23 @@ async fn handle_request(
                 .await?;
             Ok(Response::Ok)
         }
+        Request::TopologySeedCatalogue { rows } => Ok(Response::TopologyCatalogueSeeded {
+            item_ids: seed_topology_catalogue(store_ref(store)?, rows).await?,
+        }),
+        Request::TopologyCatalogueReads {
+            item_ids,
+            operations,
+            concurrency,
+        } => {
+            run_topology_catalogue_reads(
+                catalogue_ref(catalogue)?.clone(),
+                store_ref(catalogue_store)?,
+                item_ids,
+                operations,
+                concurrency,
+            )
+            .await
+        }
         Request::TopologyResources {
             hardware,
             storage_device,
@@ -9135,6 +9187,87 @@ async fn seed_offline_work_during_removal(
         bail!("the download requested during the removal was not admitted");
     }
     Ok(())
+}
+
+async fn seed_topology_catalogue(store: &HiqliteAuthStore, rows: u64) -> Result<Vec<i64>> {
+    if rows == 0 || rows > 256 {
+        bail!("topology catalogue row count must be between 1 and 256");
+    }
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Topology Read Pool".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/cluster/topology-read-pool")],
+            anime: false,
+        })
+        .await?;
+    let mut item_ids = Vec::with_capacity(usize::try_from(rows)?);
+    for ordinal in 0..rows {
+        item_ids.push(
+            store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("{} {ordinal:04}", topology::TOPOLOGY_CATALOGUE_TITLE_PREFIX),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await?,
+        );
+    }
+    Ok(item_ids)
+}
+
+async fn run_topology_catalogue_reads(
+    catalogue: CatalogueReader,
+    store: &HiqliteAuthStore,
+    item_ids: Vec<i64>,
+    operations: u64,
+    concurrency: u64,
+) -> Result<Response> {
+    if item_ids.is_empty() {
+        bail!("topology catalogue read workload has no corpus");
+    }
+    if operations == 0 || operations > 16_384 {
+        bail!("topology catalogue read operations must be between 1 and 16384");
+    }
+    if concurrency == 0 || concurrency > 256 || concurrency > operations {
+        bail!("topology catalogue read concurrency must be inside 1..=min(256, operations)");
+    }
+
+    store.validation_reset_operation_counts();
+    let item_count = u64::try_from(item_ids.len())?;
+    let read_ids = (0..operations)
+        .map(|ordinal| {
+            let index = usize::try_from(ordinal % item_count)?;
+            Ok(item_ids[index])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let samples = futures_util::stream::iter(read_ids)
+        .map(|item_id| {
+            let catalogue = catalogue.clone();
+            async move {
+                let started = Instant::now();
+                let result = catalogue.get_item(item_id).await;
+                let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                let failed = result
+                    .map(|item| item.is_none_or(|item| item.id != item_id))
+                    .unwrap_or(true);
+                (elapsed, failed)
+            }
+        })
+        .buffer_unordered(usize::try_from(concurrency)?)
+        .collect::<Vec<_>>()
+        .await;
+    let counts = store.validation_operation_counts();
+    Ok(Response::TopologyCatalogueReads {
+        raw_round_trip_us: samples.iter().map(|(elapsed, _)| *elapsed).collect(),
+        errors: u64::try_from(samples.iter().filter(|(_, failed)| *failed).count())?,
+        consistent_query_calls: counts.consistent_query_calls,
+        non_consistent_query_calls: counts.non_consistent_query_calls,
+    })
 }
 
 async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
@@ -10124,10 +10257,10 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         secret_api: API_SECRET.to_owned(),
         tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
         tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
-        health_check_delay_secs: 0,
-        wal_size: HIQLITE_WAL_SIZE_BYTES,
-        raft_config: NodeConfig::default_raft_config(10_000),
-        ..Default::default()
+        // Raft, WAL, and read-pool settings come from the daemon's own builder
+        // rather than a second copy here, so a harness run cannot measure a
+        // configuration production never runs.
+        ..production_hiqlite_defaults_with_read_pool(launch.read_pool_size)
     })
 }
 
@@ -10308,6 +10441,8 @@ pub fn install_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
+    use plurx_core::cluster::migration::HIQLITE_WAL_SIZE_BYTES;
+
     use super::*;
 
     #[test]
@@ -10484,23 +10619,57 @@ mod tests {
         assert!(snapshot_trigger_plan(Some(u64::MAX), u64::MAX).is_err());
     }
 
-    #[test]
-    fn voter_config_uses_the_production_wal_size() {
-        let root = tempfile::tempdir().expect("config test root");
-        let launch = NodeLaunch {
+    fn test_launch(root: &Path, read_pool_size: usize) -> NodeLaunch {
+        NodeLaunch {
             node_id: 1,
-            root: root.path().to_path_buf(),
+            root: root.to_path_buf(),
             nodes: vec![NodeSpec {
                 id: 1,
                 raft: "127.0.0.1:19001".to_owned(),
                 api: "127.0.0.1:19002".to_owned(),
             }],
             listen_addr: default_listen_addr(),
+            read_pool_size,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
-        };
+        }
+    }
+
+    #[test]
+    fn voter_config_uses_the_production_wal_size() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch = test_launch(root.path(), default_read_pool_size());
 
         let config = node_config(&launch).expect("build the voter config");
         assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        assert_eq!(config.health_check_delay_secs, 0);
+    }
+
+    /// A read-pool comparison is only evidence if the voter under measurement
+    /// actually runs the pool the arm claims. The harness built its own
+    /// `NodeConfig` and never set this, so 4, 8, and 16 all measured Hiqlite's
+    /// default pool.
+    #[test]
+    fn the_launched_voter_runs_the_read_pool_it_was_given() {
+        let root = tempfile::tempdir().expect("config test root");
+        for size in [4, 8, 16] {
+            let config =
+                node_config(&test_launch(root.path(), size)).expect("build the voter config");
+            assert_eq!(config.read_pool_size, size);
+            // The extracted defaults must arrive with it, not be traded for it.
+            assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        }
+    }
+
+    /// A launch written by an older controller carries no pool size, and must
+    /// land on the daemon's default rather than Hiqlite's.
+    #[test]
+    fn a_launch_without_a_read_pool_size_uses_the_daemon_default() {
+        let launch: NodeLaunch = serde_json::from_str(
+            r#"{"node_id":1,"root":"/data","nodes":[{"id":1,"raft":"127.0.0.1:19001","api":"127.0.0.1:19002"}]}"#,
+        )
+        .expect("decode a legacy launch");
+        assert_eq!(launch.read_pool_size, default_read_pool_size());
+        assert_eq!(launch.read_pool_size, 4);
     }
 }

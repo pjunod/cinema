@@ -677,6 +677,8 @@ mod tests {
             transcode: base.join("transcode"),
             cache: base.join("cache"),
             subs: base.join("subs"),
+            runtime_cache: base.join("runtime"),
+            renditions: base.join("renditions"),
         }
     }
 

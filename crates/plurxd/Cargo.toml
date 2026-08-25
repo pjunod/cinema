@@ -39,7 +39,12 @@ zip = { workspace = true }
 [dev-dependencies]
 # `fixtures` builds plurx-core's shared media-fixture helper for the copyseg
 # tests. A dev-dependency, so a release build never compiles it.
-plurx-core = { path = "../plurx-core", features = ["fixtures"] }
+plurx-core = { path = "../plurx-core", features = [
+  "fixtures",
+  # Lets the startup tests fail a scratch clear the same way for root and for
+  # an unprivileged uid; a permission-based injection is a no-op for uid 0.
+  "scratch-fault-injection",
+] }
 http-body-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
