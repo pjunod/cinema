@@ -2149,6 +2149,42 @@ async fn session_info(
     }
 }
 
+fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
+    SessionInfo {
+        id: info.id,
+        file_id: info.file_id,
+        item_id: info.item_id,
+        item_title: info.item_title,
+        user_name: info.user_name,
+        target_height: info.target_height,
+        encoder: "vod",
+        started_unix: info.started_unix,
+        idle_seconds: info.idle_seconds,
+        last_request: "vod",
+        speed: None,
+        recent_speed: None,
+        out_time_ms: None,
+        progress_idle_ms: 0,
+        published_end_ms: None,
+        fetched_end_ms: 0,
+        fetched_segment: None,
+        first_retained_segment: None,
+        playlist_shape: "vod",
+        ahead_seconds: None,
+        hold_reason: None,
+        resume_below_seconds: None,
+        resume_below_bytes: None,
+        ahead_bytes: None,
+        delivered_bytes: 0,
+        delivered_bps: None,
+        delivered_idle_ms: i64::try_from(info.idle_seconds.saturating_mul(1_000))
+            .unwrap_or(i64::MAX),
+        readrate: 0.0,
+        suspended: false,
+        suspend_count: 0,
+    }
+}
+
 /// A segment, open and ready to stream.
 pub struct SegmentFile {
     pub file: tokio::fs::File,
@@ -8100,7 +8136,7 @@ impl TranscodeManager {
     async fn create_session_inner(
         &self,
         req: &SessionRequest,
-        _user_name: &str,
+        user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
@@ -8148,7 +8184,7 @@ impl TranscodeManager {
                         req.audio_index,
                         req.subtitle_burn,
                         req.audio_offset_ms,
-                        _user_name,
+                        user_name,
                         supersession_user,
                         replacement_deadline,
                         takeover,
@@ -8171,7 +8207,7 @@ impl TranscodeManager {
                             transcode_audio: aac,
                             preserve_dolby_vision,
                         },
-                        _user_name,
+                        user_name,
                         supersession_user,
                         replacement_deadline,
                         takeover,
@@ -8184,6 +8220,7 @@ impl TranscodeManager {
         } else {
             self.try_vod_session(
                 req,
+                user_name,
                 supersession_user,
                 replacement_deadline,
                 takeover.is_some(),
@@ -8194,6 +8231,7 @@ impl TranscodeManager {
         let info = self
             .try_vod_session(
                 req,
+                user_name,
                 supersession_user,
                 replacement_deadline,
                 takeover.is_some(),
@@ -8216,6 +8254,7 @@ impl TranscodeManager {
     async fn try_vod_session(
         &self,
         req: &SessionRequest,
+        user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
@@ -8250,9 +8289,27 @@ impl TranscodeManager {
         self.reap_superseded_before(replacement_deadline, supersession_user, &req.playback_id)
             .await?;
         let session_id = uuid::Uuid::new_v4().to_string();
+        let item_title = self
+            .store
+            .get_item(file.item_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|item| item.title)
+            .unwrap_or_else(|| format!("#{}", file.item_id));
         let start = self
             .vod
-            .try_create(req, &file, &settings, supersession_user, session_id)
+            .try_create(
+                req,
+                &file,
+                &settings,
+                crate::vodserve::VodAttribution {
+                    user_name,
+                    item_title: &item_title,
+                    supersession_user,
+                },
+                session_id,
+            )
             .await?;
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
@@ -8413,6 +8470,22 @@ impl TranscodeManager {
         let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
             return false;
         };
+        let user_name = self
+            .store
+            .get_user(user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.username)
+            .unwrap_or_else(|| format!("user #{user_id}"));
+        let item_title = self
+            .store
+            .get_item(file.item_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|item| item.title)
+            .unwrap_or_else(|| format!("#{}", file.item_id));
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
         match self
             .vod
@@ -8420,7 +8493,11 @@ impl TranscodeManager {
                 &req,
                 &file,
                 &settings,
-                &supersession_user,
+                crate::vodserve::VodAttribution {
+                    user_name: &user_name,
+                    item_title: &item_title,
+                    supersession_user: &supersession_user,
+                },
                 session_id.to_owned(),
             )
             .await
@@ -10553,9 +10630,10 @@ impl TranscodeManager {
         })
     }
 
-    /// Number of live transcode sessions (for /metrics).
+    /// Number of active HLS sessions across the public VOD registry and the
+    /// test-only historical live registry (for /metrics and activity).
     pub async fn active_sessions(&self) -> usize {
-        self.sessions.lock().await.len()
+        self.sessions.lock().await.len() + self.vod.active_sessions().await
     }
 
     /// Publish a provisional successor under the incarnation's stable bearer
@@ -10704,10 +10782,25 @@ impl TranscodeManager {
             .into_iter()
             .map(|detail| (detail.0.id.clone(), detail))
             .collect::<HashMap<_, _>>();
-        candidates
+        let mut deliveries = candidates
             .into_iter()
             .filter_map(|candidate| details.remove(&candidate.id))
-            .collect()
+            .collect::<Vec<_>>();
+        deliveries.extend(self.vod.delivery_infos().await.into_iter().map(|info| {
+            (
+                vod_delivery_session_info(info),
+                crate::delivery::Method::HlsCopy,
+            )
+        }));
+        deliveries.sort_by(|left, right| {
+            right
+                .0
+                .started_unix
+                .cmp(&left.0.started_unix)
+                .then(left.0.id.cmp(&right.0.id))
+        });
+        deliveries.truncate(limit);
+        deliveries
     }
 
     /// Top-K session identities without awaiting any per-session telemetry.

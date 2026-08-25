@@ -173,12 +173,35 @@ pub struct VodSessionInfo {
     pub final_: bool,
 }
 
+/// The identity/lifetime slice needed by the shared activity inventory.
+/// Producer diagnostics stay in [`VodSessionInfo`]; this shape deliberately
+/// contains only facts that can be read without taking a rendition manifest
+/// lock for every open activity page.
+#[derive(Debug, Clone)]
+pub struct VodDeliveryInfo {
+    pub id: String,
+    pub file_id: i64,
+    pub item_id: i64,
+    pub item_title: String,
+    pub user_name: String,
+    pub target_height: i64,
+    pub started_unix: i64,
+    pub idle_seconds: u64,
+}
+
 /// What [`VodServe::try_create`] answers when the VOD presentation can serve
 /// this request.
 #[derive(Debug)]
 pub struct VodStart {
     pub session_id: String,
     pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VodAttribution<'a> {
+    pub user_name: &'a str,
+    pub item_title: &'a str,
+    pub supersession_user: &'a str,
 }
 
 /// Playlist / segment answers. `None` from any method = "not a VOD session,
@@ -333,6 +356,9 @@ impl Rendition {
 struct Session {
     rendition: Arc<Rendition>,
     playback_id: String,
+    user_name: String,
+    item_title: String,
+    started_unix: i64,
     /// Echoed on an idempotent create replay (`request_id` recovery).
     target_height: i64,
     /// Echoed on an idempotent create replay.
@@ -433,7 +459,7 @@ impl VodServe {
         req: &SessionRequest,
         file: &MediaFile,
         settings: &VodSettings,
-        supersession_user: &str,
+        attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
         let SessionKind::Copy {
@@ -511,9 +537,15 @@ impl VodServe {
             Session {
                 rendition: Arc::clone(&rendition),
                 playback_id: req.playback_id.clone(),
+                user_name: attribution.user_name.to_owned(),
+                item_title: attribution.item_title.to_owned(),
+                started_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+                    .unwrap_or(0),
                 target_height: file.height.unwrap_or(0),
                 kind: req.kind,
-                supersession_user: supersession_user.to_owned(),
+                supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
                 last_touch: StdMutex::new(Instant::now()),
                 tombstone: None,
@@ -538,6 +570,49 @@ impl VodServe {
             session_id,
             duration_ms,
         })
+    }
+
+    /// Every active VOD handle for the operator activity/session inventory.
+    /// Tombstones remain addressable long enough to return their typed 410,
+    /// but they are no longer deliveries and therefore stay out of this list.
+    pub async fn delivery_infos(&self) -> Vec<VodDeliveryInfo> {
+        let sessions = self.shared.sessions.lock().await;
+        let mut infos = sessions
+            .iter()
+            .filter(|(_, session)| session.tombstone.is_none())
+            .map(|(id, session)| VodDeliveryInfo {
+                id: id.clone(),
+                file_id: session.rendition.recipe.file.id,
+                item_id: session.rendition.recipe.file.item_id,
+                item_title: session.item_title.clone(),
+                user_name: session.user_name.clone(),
+                target_height: session.target_height,
+                started_unix: session.started_unix,
+                idle_seconds: session
+                    .last_touch
+                    .lock()
+                    .expect("touch lock")
+                    .elapsed()
+                    .as_secs(),
+            })
+            .collect::<Vec<_>>();
+        infos.sort_by(|left, right| {
+            right
+                .started_unix
+                .cmp(&left.started_unix)
+                .then(left.id.cmp(&right.id))
+        });
+        infos
+    }
+
+    pub async fn active_sessions(&self) -> usize {
+        self.shared
+            .sessions
+            .lock()
+            .await
+            .values()
+            .filter(|session| session.tombstone.is_none())
+            .count()
     }
 
     /// Immutable playlist bytes: the same bytes for the session's whole life.
@@ -2657,7 +2732,11 @@ mod tests {
                 &request(playback_id, 0.0),
                 file,
                 settings,
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 session_id.to_string(),
             )
             .await
@@ -3078,7 +3157,11 @@ mod tests {
                 &request("play-a", 0.0),
                 &file,
                 &settings(),
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 "sess-a".into(),
             )
             .await
@@ -3103,7 +3186,11 @@ mod tests {
                 &transcode,
                 &file,
                 &settings(),
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 "sess-t".into(),
             )
             .await
@@ -3118,7 +3205,11 @@ mod tests {
                 &burn,
                 &file,
                 &settings(),
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 "sess-s".into(),
             )
             .await
@@ -3133,7 +3224,11 @@ mod tests {
                 &request("play-a", 0.0),
                 &file,
                 &settings(),
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 "sess-n".into(),
             )
             .await
@@ -3181,6 +3276,9 @@ mod tests {
             Session {
                 rendition: Arc::clone(&rendition),
                 playback_id: "play-a".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
                 target_height: 360,
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
@@ -3231,6 +3329,9 @@ mod tests {
             Session {
                 rendition,
                 playback_id: "play-a".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
                 target_height: 360,
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
@@ -3426,7 +3527,11 @@ mod tests {
                 &request("play-a", 10.5),
                 &file,
                 &settings(),
-                "[\"user_id\",1]",
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
                 "sess-a".to_string(),
             )
             .await
