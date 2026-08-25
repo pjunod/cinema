@@ -3292,10 +3292,20 @@ mod tests {
         let fd = unsafe { libc::dirfd(entries) };
         assert!(fd >= 0, "the stream must expose its descriptor");
         assert!(unsafe { libc::dup2(devnull.as_raw_fd(), fd) } >= 0);
+        // Darwin may populate the DIR buffer when `fdopendir` attaches to the
+        // descriptor. Rewind after replacement so the assertion exercises a
+        // fresh kernel read from the injected non-directory on every Unix.
+        unsafe { libc::rewinddir(entries) };
 
         let error = unsafe { readdir_checked(entries) }
             .expect_err("a faulting readdir must not read as end-of-directory");
-        assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR), "{error}");
+        assert!(
+            matches!(
+                error.raw_os_error(),
+                Some(libc::ENOTDIR) | Some(libc::EINVAL)
+            ),
+            "{error}"
+        );
         unsafe { libc::closedir(entries) };
     }
 

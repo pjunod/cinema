@@ -1149,6 +1149,12 @@ mod tests {
     };
     use crate::store::{LibraryStore, MediaStore, SettingsStore, SqliteStore};
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical system temporary directory");
+        tempfile::tempdir_in(root).expect("temporary directory")
+    }
+
     fn fixture(package: &str, cover: Option<&[u8]>) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp EPUB");
         let mut writer = zip::ZipWriter::new(file.reopen().expect("reopen EPUB"));
@@ -1428,8 +1434,8 @@ mod tests {
     #[tokio::test]
     async fn curator_identity_without_provider_origin_rebuilds_the_embedded_epub_cover() {
         let store = SqliteStore::open_in_memory().expect("store");
-        let media = tempfile::tempdir().expect("media");
-        let artwork = tempfile::tempdir().expect("artwork");
+        let media = canonical_tempdir();
+        let artwork = canonical_tempdir();
         let epub = fixture(
             r#"<package><metadata><title>Proof</title></metadata><manifest><item id="cover" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest></package>"#,
             Some(&[0xff, 0xd8, 0xff, 0x00]),

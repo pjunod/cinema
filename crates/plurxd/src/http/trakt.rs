@@ -165,7 +165,7 @@ mod tests {
             .await
             .expect("linked auth");
 
-        let temp = tempfile::tempdir().expect("state directory");
+        let temp = crate::test_tempdir().expect("state directory");
         let dirs = Dirs {
             artwork: temp.path().join("artwork"),
             transcode: temp.path().join("transcode"),

@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn manifest_is_complete_snapshots_with_clear_gaps_and_deduplicated_images() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let generation = generation(&file, 0);
         let track = NormalizedTrack {
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn manifest_clamps_a_missing_final_clear_to_media_duration() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let mut file = file(dir.path().join("source.mkv"));
         file.duration_ms = Some(10_000);
         let generation = generation(&file, 0);
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn identical_timestamps_keep_the_last_display_set_in_file_order() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let generation = generation(&file, 0);
         let first = object();
@@ -1263,7 +1263,7 @@ mod tests {
 
     #[test]
     fn same_timestamp_replacement_coalesces_with_the_preceding_state() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let generation = generation(&file, 0);
         let mut transient = object();
@@ -1326,7 +1326,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_requests_coalesce_and_publish_only_after_runner_completes() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let runs = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_torn_published_generation_is_deleted_and_reprepared() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let final_dir = generation_dir(dir.path(), &file, 0);
         tokio::fs::create_dir_all(&final_dir)
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn timed_out_preparation_is_negatively_memoized() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = file(dir.path().join("source.mkv"));
         let runs = Arc::new(AtomicUsize::new(0));
         let runner: PrepareRunner = {
@@ -1564,7 +1564,7 @@ mod tests {
     #[tokio::test]
     async fn ffmpeg_demux_to_published_manifest_preserves_source_timing() {
         crate::transcode::require_ffmpeg();
-        let dir = tempfile::tempdir().expect("fixture directory");
+        let dir = crate::test_tempdir().expect("fixture directory");
         let sup = dir.path().join("fixture.sup");
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/mkpgs");
         let authored = std::process::Command::new(script)
@@ -1658,7 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_prune_removes_the_least_recently_accessed_generation() {
-        let root = tempfile::tempdir().expect("cache");
+        let root = crate::test_tempdir().expect("cache");
         let older = root.path().join("older");
         let newer = root.path().join("newer");
         tokio::fs::create_dir(&older).await.expect("older");
@@ -1678,7 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_staging_ownership_reaps_partial_output() {
-        let root = tempfile::tempdir().expect("cache");
+        let root = crate::test_tempdir().expect("cache");
         let path = root.path().join(".tmp-cancelled");
         tokio::fs::create_dir(&path).await.expect("stage");
         tokio::fs::write(path.join("partial.png"), b"partial")

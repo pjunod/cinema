@@ -1287,6 +1287,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical system temporary directory");
+        tempfile::tempdir_in(root).expect("temporary directory")
+    }
+
     #[test]
     fn television_hero_art_keeps_source_resolution() {
         assert_eq!(BACKDROP_SIZE, "original");
@@ -1306,7 +1312,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_during_blocking_publication_leaves_no_output() {
-        let artwork = tempfile::tempdir().expect("artwork");
+        let artwork = canonical_tempdir();
         let target = artwork.path().join("42-poster.jpg");
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let release = Arc::new(std::sync::Barrier::new(2));
@@ -1359,7 +1365,7 @@ mod tests {
     async fn artwork_publication_stays_bound_to_the_open_parent_directory() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().expect("root");
+        let root = canonical_tempdir();
         let artwork = root.path().join("artwork");
         let held = root.path().join("held-artwork");
         let redirected = root.path().join("redirected-artwork");
@@ -1497,7 +1503,7 @@ mod tests {
 
         let base = serve(tmdb_mock()).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib.id), false, None).await;
         assert_eq!(report.matched, 2, "movie + show");
@@ -1574,7 +1580,7 @@ mod tests {
 
         let base = serve(tmdb_mock()).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
         let report = enrich_library_for_targets(
             &store,
             &tmdb,
@@ -1825,7 +1831,7 @@ mod tests {
         };
         let base = serve(mock).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib.id), false, None).await;
         assert_eq!(report.matched, 4, "two movies and two shows");
@@ -1923,7 +1929,7 @@ mod tests {
             .fallback(get(|| async { vec![0u8, 1, 2, 3] }));
         let base = serve(app).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib.id), false, None).await;
         assert_eq!(
@@ -1973,7 +1979,7 @@ mod tests {
         let searches = Arc::new(AtomicUsize::new(0));
         let base = serve(counting_mock(searches.clone())).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib), false, None).await;
         assert_eq!(report.matched, 1, "the id-carrying item was enriched");
@@ -2018,7 +2024,7 @@ mod tests {
         let searches = Arc::new(AtomicUsize::new(0));
         let base = serve(counting_mock(searches.clone())).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib), false, None).await;
         assert_eq!(report.matched, 1);
@@ -2049,7 +2055,7 @@ mod tests {
         let searches = Arc::new(AtomicUsize::new(0));
         let base = serve(counting_mock(searches.clone())).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         // Not due normally — already enriched.
         assert_eq!(
@@ -2073,7 +2079,7 @@ mod tests {
         // pins down that an unmatched item is not counted as an error.
         let base = serve(counting_mock(searches.clone())).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib), false, None).await;
         assert_eq!(searches.load(Ordering::SeqCst), 1, "the search ran");
@@ -2121,7 +2127,7 @@ mod tests {
         );
         let base = serve(app).await;
         let client = AniListClient::new().with_base(&base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_anime_library(&store, &client, art.path(), lib.id, false, None).await;
         assert_eq!(report.matched, 1);
@@ -2163,7 +2169,7 @@ mod tests {
         // decide), so this is one clean failed attempt.
         let base = serve(image_refusing_mock(axum::http::StatusCode::NOT_FOUND)).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(&store, &tmdb, art.path(), Some(lib), false, None).await;
         assert_eq!(report.matched, 1, "the metadata itself still landed");
@@ -2220,7 +2226,7 @@ mod tests {
             );
         let base = serve(app).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         enrich_library(&store, &tmdb, art.path(), Some(lib), false, None).await;
         let m = store.get_item(movie).await.expect("get").expect("item");
@@ -2267,7 +2273,7 @@ mod tests {
 
         let base = serve(tmdb_mock()).await;
         let tmdb = TmdbClient::new("k").with_base(&base, &base);
-        let art = tempfile::tempdir().expect("tmp");
+        let art = canonical_tempdir();
 
         let report = enrich_library(
             &store,
