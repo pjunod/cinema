@@ -24,7 +24,7 @@ jobs:
   # merge groups, pushes, and tags deliberately enable every surface.
   scope:
     name: validation scope
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -58,7 +58,7 @@ jobs:
     name: mobile release version
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -124,10 +124,9 @@ jobs:
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; the merge queue re-runs it always.
     if: needs.scope.outputs.rust == 'true'
-    # Pinned, not floating: this job's playback assertions are written against
-    # one ffmpeg major, and apt on `ubuntu-latest` supplies whichever one that
-    # week's image ships. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    # The fleet image is fixed by the runner playbook, and this job's playback
+    # assertions also pin the ffmpeg major. See .github/actions/ffmpeg.
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -193,9 +192,9 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ubuntu-latest
-    # A cold hosted runner currently spends about fourteen minutes compiling
-    # the isolated harness before its three-voter proof completes. Keep enough
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    # A cold runner currently spends about fourteen minutes compiling the
+    # isolated harness before its three-voter proof completes. Keep enough
     # headroom for the already-passing proof and artifact cleanup instead of
     # cancelling a successful run at the job boundary.
     timeout-minutes: 25
@@ -235,7 +234,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -264,7 +263,7 @@ jobs:
     name: Android JVM tests and lint
     needs: [scope, preflight]
     if: needs.scope.outputs.android_jvm == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     permissions:
       contents: read
@@ -356,7 +355,7 @@ jobs:
     name: Android instrumented UI tests
     needs: [scope, preflight]
     if: needs.scope.outputs.android_device == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -441,7 +440,7 @@ jobs:
     name: coverage
     # Same suite as `check`, so the same pinned ffmpeg. See
     # .github/actions/ffmpeg.
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lab, general]
     needs: check
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
@@ -495,7 +494,7 @@ jobs:
 
   build:
     name: release build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true'
     timeout-minutes: 30
@@ -556,7 +555,7 @@ jobs:
   # PR / branch smoke test that the image both builds and runs, without publishing.
   docker:
     name: docker runtime smoke
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     needs: [scope, preflight]
     if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 30
@@ -598,7 +597,7 @@ jobs:
       - android_device
       - build
       - docker
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     steps:
       - name: Require every selected job to pass

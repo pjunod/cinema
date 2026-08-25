@@ -436,6 +436,43 @@ class OperationsContractCase(unittest.TestCase):
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
+        general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
+        android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
+        hosted_linux = "    runs-on: ubuntu-latest"
+        apple = "    runs-on: macos-15"
+
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/fix-evidence.yml",
+            ".github/workflows/lint.yml",
+            ".github/workflows/release-readiness.yml",
+            ".github/workflows/validation-nightly.yml",
+        ):
+            for name, block in workflow_job_blocks(path).items():
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                if runs_on is None:
+                    self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
+                    continue
+                expected = general
+                if path == ".github/workflows/ci.yml" and name == "apple":
+                    expected = apple
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "android_jvm",
+                    "android_device",
+                }:
+                    expected = android
+                self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
+
+        for path in (
+            ".github/workflows/publish-release.yml",
+            ".github/workflows/rust-audit.yml",
+        ):
+            for name, block in workflow_job_blocks(path).items():
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
+                self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
+
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):
         # An unpinned `apt-get install -y ffmpeg` on `ubuntu-latest` made the
         # gate's ffmpeg whichever build GitHub promoted that week — which is why
