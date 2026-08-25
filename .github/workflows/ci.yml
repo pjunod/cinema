@@ -138,6 +138,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The general runner image intentionally carries no floating Node
+      # installation. The functionality catalog can select JS contracts, so
+      # provision the same pinned runtime used by the browser acceptance lane.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       # Functionality-point selection can include real-browser contracts (for
       # example the EPUB reader) in this job. Keep this provisioning beside
       # the validator rather than relying on the parallel web-layout job: each
