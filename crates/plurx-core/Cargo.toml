@@ -22,6 +22,10 @@ cluster-read-cost-validation = ["hiqlite-store", "hiqlite/validation-test-helper
 # daemon never enables this feature, so production callers cannot bypass
 # write coalescing accidentally.
 cluster-validation = ["hiqlite-store"]
+# Compiles the scratch-cleanup fault injection plurxd's startup tests use to
+# prove that a failed clear fails startup without deleting anything. The
+# daemon never enables it, so no production build carries the failpoint.
+scratch-fault-injection = []
 
 [dependencies]
 async-trait = { workspace = true }

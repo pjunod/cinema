@@ -222,6 +222,8 @@ mod tests {
                 transcode: root.join("transcode"),
                 cache: root.join("cache"),
                 subs: root.join("subs"),
+                runtime_cache: root.join("runtime"),
+                renditions: root.join("renditions"),
             },
             "test-node".to_owned(),
             Default::default(),

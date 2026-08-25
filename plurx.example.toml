@@ -16,12 +16,17 @@ bind = "0.0.0.0:32400"
 # missing. Empty cache/transcode overrides preserve the legacy child layout.
 data_dir = "./data"
 # Optional persistent node-local artwork, finished-transcode/offline, and
-# subtitle-cache root. Empty keeps them under data_dir.
+# subtitle-cache root. Empty keeps them under data_dir. Setting it on an
+# existing install migrates nothing: copy <data_dir>/artwork,
+# <data_dir>/cache/transcode, and <data_dir>/cache/subs to <cache_dir>/artwork,
+# <cache_dir>/transcode, and <cache_dir>/subs yourself (docs/OPERATIONS.md).
 cache_dir = ""
-# Optional disposable live-session scratch. Empty uses <data_dir>/transcode.
-# An explicit root is claimed only when empty and carries an ownership marker;
-# startup refuses a populated unowned directory rather than clearing it. The
-# root must be owned by the daemon uid and not group/world-writable.
+# Optional disposable live-session scratch, which must sit outside data_dir;
+# naming <data_dir>/transcode here is refused. Empty uses <data_dir>/transcode.
+# An explicit root is claimed only when empty and carries an ownership marker
+# naming the durable root; startup refuses a populated unowned directory rather
+# than clearing it. The root must be owned by the daemon uid; a group- or
+# world-writable daemon-owned root is repaired to 0700 with a warning.
 transcode_dir = ""
 # A complete scan may remove at most this percentage of known files. Set 0 to
 # require manual cleanup; values above 100 are rejected.

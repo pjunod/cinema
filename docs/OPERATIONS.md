@@ -571,18 +571,22 @@ concurrent build, scan, backup, or benchmark work, and every `/var/tmp` root is
 the declared local durable device rather than tmpfs or a network mount.
 
 Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
-every raw `pair-NN.json`. After at least three pairs it computes the paired
-four-voter ÷ three-voter ratios for write p99, CPU seconds, storage-write bytes,
-and network-transmit bytes. Resource counters are captured concurrently on all
-voters at the stable pre-write barrier and again after convergence; the
-artifact retains monotone workload-window deltas, while Linux `VmHWM` is reset
-at the opening barrier. It may stop only when all two-sided 95% Student-t
-intervals have at most 5% multiplicative half-width, or after seven pairs with
-an `inconclusive` result. `campaign.json` records the medians, intervals,
-stopping verdict, isolated load-generator declaration, and reviewed budgets.
-Every raw run repeats the same isolation declaration and records the exact
-controller and voter fingerprint set used for that topology. Validate retained
-bytes and every cross-file hash with:
+every raw `pair-NN.json`. Each run seeds the same 32-row catalogue, then issues
+256 bounded reads at concurrency 32 against a caught-up follower. The raw
+artifact records every read latency, p50/p95/p99, whether any read fell back to
+Authority, and the configured `read_pool_size`; a fallback invalidates the
+run. After at least three pairs the campaign computes paired four-voter ÷
+three-voter ratios for write p99, local-catalogue read p95, aggregate peak RSS,
+CPU seconds, storage-write bytes, and network-transmit bytes. Resource counters
+are captured concurrently on all voters at the stable pre-workload barrier and
+again after convergence; the artifact retains monotone workload-window deltas,
+while Linux `VmHWM` is reset at the opening barrier. It may stop only when all
+two-sided 95% Student-t intervals have at most 5% multiplicative half-width, or
+after seven pairs with an `inconclusive` result. `campaign.json` records the
+pool size, medians, intervals, stopping verdict, isolated load-generator
+declaration, and reviewed budgets. Every raw run repeats the same isolation
+declaration and records the exact controller and voter fingerprint set used for
+that topology. Validate retained bytes and every cross-file hash with:
 
 ```bash
 cargo run --locked -p plurx-cluster-check -- \
@@ -629,27 +633,53 @@ read_pool_size = 4
 ```
 
 When omitted, both new paths preserve the exact legacy layout. With
-`cache_dir` set, persistent children are `artwork/`, `transcode/`, and `subs/`.
-`transcode_dir` names the disposable live-session directory itself and is
-claimed only when new or empty. Plurx writes an exact
-`.plurx-transcode-scratch` marker bound to the authoritative data root, verifies
-it before every cleanup, removes only verified children, and fails startup on
-an incomplete cleanup. First ownership uses a durable non-authorizing
-`.plurx-transcode-scratch.claiming` state; restart promotes it only when the
-directory is still otherwise empty. An interrupted claim beside any other
-content fails closed and leaves every byte untouched. A populated unowned root
-is left untouched. Startup also requires scratch, authority, and every resolved
-persistent-cache child to be disjoint in both directions and to have distinct
-device/inode identities;
-symlink and bind-mount aliases are refused before cleanup. The explicit scratch
-root must be owned by the daemon uid and not group/world-writable; the marker is
-an exact daemon-owned `0600` regular file. Cleanup retains no-follow directory
+`cache_dir` set, persistent children are `artwork/`, `transcode/`, `subs/`, and
+`renditions/`; regenerable ffmpeg state lives under `runtime/`.
+`transcode_dir` names the disposable live-session directory itself and must sit
+outside `data_dir`. Naming the legacy path explicitly — `transcode_dir =
+"<data_dir>/transcode"`, or any other scratch below `data_dir` — is refused at
+startup. Omitting the key is the supported way to run the legacy layout.
+
+Scratch ownership is one contract for both roots: the legacy
+`<data_dir>/transcode` and an explicit `transcode_dir` are treated identically.
+The root must be owned by the daemon uid, and a root owned by another uid
+refuses startup. A daemon-owned root that is group- or world-writable is
+repaired to `0700` with a warning, and startup continues. Plurx writes an exact
+owner-only `0600` `.plurx-transcode-scratch` marker naming the durable root it
+was claimed for, verifies it before every cleanup, removes only verified
+children, and fails startup on an incomplete cleanup. First ownership uses a
+durable non-authorizing `.plurx-transcode-scratch.claiming` state; restart
+promotes it only when the directory is still otherwise empty. A `.claiming`
+marker left empty or truncated by a crash is an interrupted claim and is
+retried instead of wedging startup; a truncated *published*
+`.plurx-transcode-scratch` still fails closed, because that one authorizes
+deletion. A populated root plurx does not own refuses startup and is left
+untouched, byte for byte. A scratch directory that cannot be read — an EIO from
+a FUSE, NFS, or mergerfs backing store — is that error, never an empty
+directory.
+
+Inside a root plurx owns, the entries are its own leftovers. Their permission
+bits and owning uid are not refusal conditions; they are removed. A symbolic
+link, device, socket, or FIFO inside scratch still aborts startup without
+touching anything, and a mount point inside scratch is reported explicitly as
+one. Traversal is also bounded by entry count and depth, as a safety device for
+a directory plurx does not already own: exceeding a bound in an owned root
+leaves that scratch untouched for the boot, logs a warning, and lets startup
+continue, and the next boot retries. In an unowned root a bound is a refusal.
+The depth ceiling has a test in the owned-root direction; the entry-count
+ceiling does not, so read that half as design intent.
+
+Startup requires scratch, authority, and every resolved persistent-cache child
+to be disjoint in both directions and to have distinct device/inode identities;
+symlink aliases are refused before cleanup. Cleanup retains no-follow directory
 and marker descriptors throughout, so a concurrent rename, mount replacement,
 or marker swap aborts startup without touching the replacement.
-Do not mount another filesystem below the scratch root. Cross-device children
-are rejected explicitly, and same-device bind-mount children cannot pass the
-descriptor-relative quarantine step; either case fails startup rather than
-traversing the mounted tree.
+Do not mount another filesystem below the scratch root. A mount point inside
+scratch is named in the startup error, and a cross-device child is refused.
+Neither is covered by a default gate: the mount-point error and the
+bind-alias refusal are exercised only by `make bind-mount-check`, which calls
+`mount --bind` and therefore needs a privileged Linux host, and the cross-device
+bound has no test at all. Treat the group as design intent and mount elsewhere.
 
 An available `cluster.shared_cache_dir` is a fourth persistent root. It must be
 disjoint from authority, the local cache, and scratch; its verified identity is
@@ -662,8 +692,8 @@ below scratch.
 | Path | Durability | Placement |
 |---|---|---|
 | `storage.data_dir` and the authority set below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
-| `storage.cache_dir` or the legacy cache/artwork children | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | stable local persistent storage with capacity monitoring |
-| `storage.transcode_dir` or `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; emptied only at daemon startup |
+| `storage.cache_dir` or the legacy cache/artwork children | persistent node-local bytes, including user-visible offline packages and admitted VOD renditions; only the `runtime/` child is disposable | stable local persistent storage with capacity monitoring |
+| `storage.transcode_dir` or `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or a tmpfs mounted `-o uid=<daemon-uid>,mode=0700`; emptied only at daemon startup |
 
 Create and mount every child before the first `plurxd` start; an empty fallback
 directory on the root filesystem is not a successful installation. The
@@ -678,8 +708,12 @@ with the same durable backup set. If
 `cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
 that exact owner-only file is authoritative and belongs in the same backup and
 move procedure. Its canonical path must remain outside scratch and every
-managed cache root; startup protects the selected key inode during post-lock
-scratch cleanup so a bind alias cannot erase it. Each voter owns its own Hiqlite storage: sharing that directory
+managed cache root; startup refuses a key inside either. Startup also passes the
+selected key inode into post-lock scratch cleanup as a protected identity, which
+is meant to stop a bind alias erasing it. The cleanup half of that is tested —
+a protected identity found at any depth aborts cleanup with its bytes intact —
+but nothing tests that the credential key is the identity handed in, so place
+the key outside the managed roots rather than relying on the belt. Each voter owns its own Hiqlite storage: sharing that directory
 between machines defeats Raft's independent failure model.
 
 Create every configured root with the daemon uid/gid and monitor space and
@@ -688,22 +722,69 @@ data. Move one non-leader at a time. Eject it from the load balancer, stop
 `plurxd`, copy persistent bytes with ownership, modes, timestamps, and links,
 set the new paths, and restart. Require `/readyz`, current applied-index
 catch-up, and the expected cache/offline/artwork inventory before moving the
-next voter. A full cache or scratch device may fail local work, but it must
-never cause a database to be created or relocated there.
+next voter. Expect a full cache or scratch device to fail local work without
+causing a database to be created or relocated there: `storage.data_dir` is the
+only root plurx selects a durable target from. That is an operational
+expectation, not a proven property — the deterministic test substitutes an
+ENOTDIR failure for a full device, and any real out-of-space exercise is
+privilege-gated.
+
+Setting `storage.cache_dir` migrates nothing. The legacy trees stay where they
+are; the daemon logs a warning while they still hold bytes and starts anyway.
+Copy each tree to its own new name, because the children do not nest the same
+way on both sides:
+
+| Legacy path | With `cache_dir` set | Action and reason |
+|---|---|---|
+| `<data_dir>/artwork` | `<cache_dir>/artwork` | Copy; artwork is persistent node-local data. |
+| `<data_dir>/cache/transcode` | `<cache_dir>/transcode` | Copy; this includes completed offline packages visible to users. |
+| `<data_dir>/cache/subs` | `<cache_dir>/subs` | Copy; extracted subtitles survive restarts. |
+| `<data_dir>/cache/renditions` | `<cache_dir>/renditions` | Copy; admitted VOD copy-cache entries are persistent. |
+| `<data_dir>/cache/runtime` | `<cache_dir>/runtime` | Do not copy. Stop the daemon, delete the old tree, and let the next start regenerate it. |
+
+`cp -a <data_dir>/cache <cache_dir>` is the obvious move and the wrong one: it
+lands every child below `<cache_dir>/cache`, where nothing reads it. Completed
+offline packages live in the transcode tree and admitted VOD bytes live in the
+rendition tree; stranding either silently discards user-visible or already
+admitted work.
+
+Moving `storage.data_dir` needs one more step. The scratch marker names the
+durable root it was claimed for, so a daemon started with a new `data_dir` and
+the same scratch root refuses with a `claimed by another durable root` error
+naming the marker file. Stop `plurxd`, delete
+`<transcode_dir>/.plurx-transcode-scratch` along with the scratch contents —
+they are disposable by definition — then start on the new `data_dir` and let
+the daemon claim the empty root again. Never delete the marker under a running
+daemon.
 
 Rollback in reverse. Stop one non-leader, copy persistent bytes back to their
-legacy data-root children, remove both new strict `[storage]` keys, restart and
-prove readiness/catch-up, then continue. Do not install an older binary until
-every voter has its bytes back and its config no longer contains the new keys.
-Never move two voters concurrently and retain both verified copies through a
-soak period.
+legacy data-root children, discard the regenerable runtime tree, remove both
+new strict `[storage]` keys, restart and prove readiness/catch-up, then
+continue. Do not install an older binary until
+every voter has its bytes back and its config no longer contains the new keys:
+`[storage]` rejects unknown fields, so an older binary does not ignore
+`cache_dir`/`transcode_dir` — it fails to parse the file and the node does not
+start at all. Never move two voters concurrently and retain both verified copies
+through a soak period.
 
 `cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
 changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
 snapshot trigger, disaster-recovery log retention, heartbeat, and election
-timers remain unchanged. Compare 4, 8, and 16 with the same named workload and
-retain the smallest value whose catalogue p95 improves without a write-p99 or
-memory-budget regression. Until that artifact exists for a voter, keep 4.
+timers remain unchanged. The setting now reaches the named-host runner's node
+configuration and is repeated in schema-versioned raw and campaign evidence,
+so a 4/8/16 sweep measures and attests three different pools; an earlier runner
+built its own configuration and would have measured the default three times,
+so no deferred artifact from before that change means anything.
+
+Run three campaigns from the same clean source/image, changing only
+`read_pool_size` and the new output directory. Validate all three directories,
+then compare the four-voter medians in their `campaign.json` files. Retain the
+smallest value whose local-catalogue p95 improves over pool 4 while neither
+write p99 nor aggregate peak RSS regresses by more than the recorded 10%
+guardrail. If no larger pool clears all three conditions, or any arm is
+inconclusive, keep 4. Preserve all raw pair files with the three campaign
+summaries; a summary without its hash-bound raw evidence is not a selection
+artifact.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
@@ -1142,8 +1223,8 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
-| `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional persistent node-local artwork/cache/offline root; empty preserves the legacy layout under `data_dir` |
-| `PLURX_TRANSCODE_DIR` | `storage.transcode_dir` | empty | Optional disposable live-session scratch directory; emptied on startup and refused if it contains authoritative or persistent paths |
+| `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional node-local artwork, transcode, subtitle, rendition, and ffmpeg-runtime root; everything except `runtime/` is persistent. Empty preserves the legacy layout under `data_dir`. Setting it on an existing install moves no bytes — copy the persistent legacy trees and discard the old runtime tree, per the path table above |
+| `PLURX_TRANSCODE_DIR` | `storage.transcode_dir` | empty | Optional disposable live-session scratch directory, emptied on startup. Must be owned by the daemon uid and outside `data_dir`; naming `<data_dir>/transcode` or any other path below `data_dir` is refused |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
 | `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
@@ -1926,8 +2007,9 @@ run.
 
 ### Where the transcode scratch lives
 
-Session segments are written under `<data_dir>/transcode`, which is wiped at
-every start. Two consequences worth acting on:
+Session segments are written under `<data_dir>/transcode`, or under
+`storage.transcode_dir` when that key names a root outside `data_dir`. Either
+way it is wiped at every start. Two consequences worth acting on:
 
 - **Keep the data directory off the NAS.** If `PLURX_DATA_DIR` sits on a
   network mount, every segment crosses the network twice — written by ffmpeg,
@@ -1936,9 +2018,17 @@ every start. Two consequences worth acting on:
 - **tmpfs is a good fit if you have the RAM.** The buffer limit bounds a
   session, so the size is predictable: roughly `(ahead limit + 60 s) ×
   bitrate`. At the 180 s default that is well under a gigabyte for a 720p
-  transcode and around 1.5 GB for a 4K copy-video session. Mount
-  `<data_dir>/transcode` as tmpfs and size it for the concurrent sessions you
-  expect, or lower the buffer limit to fit.
+  transcode and around 1.5 GB for a 4K copy-video session. Size it for the
+  concurrent sessions you expect, or lower the buffer limit to fit. **Mount it
+  with `-o uid=<daemon-uid>,mode=0700`.** A default tmpfs is `root:root` mode
+  `1777`; under a non-root daemon that is a foreign owner and startup refuses
+  it, and under a root daemon plurx repairs the mode to `0700` and warns on
+  every boot. The fstab form carries the same `uid=`, `gid=`, and `mode=0700`
+  options:
+
+  ```
+  tmpfs /srv/plurx-state/transcode tmpfs rw,uid=1000,gid=1000,mode=0700,size=8G 0 0
+  ```
 
 For media on NFS or SMB, the head start is read from the NAS at whatever rate
 the mount can serve, so a starved mount now shows up as an encode speed below
@@ -2177,12 +2267,13 @@ legacy path.
 
 ### Offline package storage and quotas
 
-Phone downloads are prepared under `<data_dir>/cache` beside finished
-content-addressed transcodes. Ready and in-progress offline recipes are pinned:
+Phone downloads are prepared beside finished content-addressed transcodes:
+under `<data_dir>/cache/transcode`, or `<cache_dir>/transcode` when
+`storage.cache_dir` is set. Ready and in-progress offline recipes are pinned:
 ordinary playback-cache cleanup cannot evict them, and their bytes do not
-consume `cache_max_gb`. Give the data directory enough local space for both
-budgets; unlike session scratch, this cache must survive a daemon restart and
-must not live on tmpfs.
+consume `cache_max_gb`. Give whichever root holds that tree enough local space
+for both budgets; unlike session scratch, this cache must survive a daemon
+restart and must not live on tmpfs.
 
 The authenticated settings API exposes four operator controls:
 

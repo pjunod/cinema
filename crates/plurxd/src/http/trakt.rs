@@ -171,6 +171,8 @@ mod tests {
             transcode: temp.path().join("transcode"),
             cache: temp.path().join("cache"),
             subs: temp.path().join("subs"),
+            runtime_cache: temp.path().join("runtime"),
+            renditions: temp.path().join("renditions"),
         };
         let mut state = AppState::new(
             "test".into(),

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8d0e7a16"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This validation-only integration change registered the mountinfo lint and topology-fixture evidence without changing runtime behavior."
