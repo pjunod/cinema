@@ -613,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_extraction_is_deduplicated_and_survives_waiter_cancellation() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -685,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_invalid_sidecar_repair_cannot_remove_the_replacement() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let cached = vtt_path(dir.path(), &file, 0);
         tokio::fs::write(&cached, vec![b'x'; 65])
@@ -748,7 +748,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn http_sidecar_reads_reject_a_symlink_replacement() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let outside = tempfile::NamedTempFile::new().expect("outside file");
         std::fs::write(outside.path(), b"outside subtitle bytes").expect("outside bytes");
         let file = media_file(dir.path().join("source.mkv"));
@@ -773,7 +773,7 @@ mod tests {
     async fn burn_in_keeps_the_exact_bounded_sidecar_handle() {
         use std::io::{Read, Seek};
 
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let cached = vtt_path(dir.path(), &file, 0);
         let original = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\noriginal\n";
@@ -804,7 +804,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn extraction_never_publishes_a_symlink_swapped_temp_file() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let outside = tempfile::NamedTempFile::new().expect("outside file");
         std::fs::write(outside.path(), b"WEBVTT\n\noutside\n").expect("outside bytes");
         let file = media_file(dir.path().join("source.mkv"));
@@ -848,7 +848,7 @@ mod tests {
     /// and the request after them must be answered from the memo.
     #[tokio::test]
     async fn a_wedged_extraction_times_out_and_the_failure_is_memoized() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -925,7 +925,7 @@ mod tests {
     /// in the map.
     #[tokio::test]
     async fn an_expired_memo_relaunches_and_success_clears_it() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let key = vtt_path(dir.path(), &file, 0);
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -974,7 +974,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_sidecar_is_rejected_and_negative_memoized() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let cached = vtt_path(dir.path(), &file, 0);
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1012,7 +1012,7 @@ mod tests {
     /// other failure is, leaving neither a cache entry nor a temp file.
     #[tokio::test]
     async fn an_oversized_sidecar_is_rejected_and_leaves_no_file() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let limits = ExtractionLimits {
             max_sidecar_bytes: 64,
@@ -1054,7 +1054,7 @@ mod tests {
     /// the published answer.
     #[tokio::test]
     async fn a_sidecar_published_after_the_cache_read_is_joined_not_re_extracted() {
-        let dir = tempfile::tempdir().expect("cache");
+        let dir = crate::test_tempdir().expect("cache");
         let file = media_file(dir.path().join("source.mkv"));
         let cached = vtt_path(dir.path(), &file, 0);
         tokio::fs::write(&cached, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n")

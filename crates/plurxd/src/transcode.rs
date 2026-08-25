@@ -1052,6 +1052,10 @@ fn spawn_ffmpeg(
                         return Err(std::io::Error::last_os_error());
                     }
                 }
+                #[cfg(target_os = "macos")]
+                if output.is_some() && libc::fchdir(4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -7778,12 +7782,22 @@ impl TranscodeManager {
             } else {
                 (file, None)
             };
+            // Linux resolves descendants below a directory descriptor through
+            // procfs. Darwin's fdesc filesystem reopens `/dev/fd/4` itself but
+            // does not resolve `/dev/fd/4/child`; `spawn_ffmpeg` therefore
+            // anchors the macOS child cwd to descriptor 4 and the muxer uses a
+            // relative path. Both routes remain bound to the held directory.
+            let output_directory = if cfg!(target_os = "macos") {
+                part_name.clone()
+            } else {
+                format!("/dev/fd/4/{part_name}")
+            };
             let args = transcode::hls_args(
                 ffmpeg_file,
                 encoder,
                 &part_opts,
                 self.producer.pacing,
-                &format!("/dev/fd/4/{part_name}"),
+                &output_directory,
             );
             tracing::info!(
                 recipe = %hash, part = parts.len(), from_s = part_opts.start_seconds,
@@ -12871,7 +12885,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let dir = tempfile::tempdir().expect("work");
+        let dir = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(
             store,
             dir.path().to_owned(),
@@ -12898,7 +12912,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let dir = tempfile::tempdir().expect("work");
+        let dir = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(
             store,
             dir.path().to_owned(),
@@ -12964,8 +12978,8 @@ mod tests {
     async fn specifically_configured_overlapping_source_root_wins_without_trusting_nested_links() {
         use std::os::unix::fs::symlink;
 
-        let broad = tempfile::tempdir().expect("broad library root");
-        let relocated = tempfile::tempdir().expect("relocated library root");
+        let broad = crate::test_tempdir().expect("broad library root");
+        let relocated = crate::test_tempdir().expect("relocated library root");
         let source = relocated.path().join("movie.mkv");
         tokio::fs::write(&source, b"bound source")
             .await
@@ -13002,7 +13016,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bound_source_rejects_same_size_same_mtime_path_replacement() {
-        let root = tempfile::tempdir().expect("library root");
+        let root = crate::test_tempdir().expect("library root");
         let source = root.path().join("movie.mkv");
         tokio::fs::write(&source, b"original media")
             .await
@@ -13068,7 +13082,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let dir = tempfile::tempdir().expect("work");
+        let dir = crate::test_tempdir().expect("work");
         let caps = EncoderCaps {
             qsv: true,
             ..EncoderCaps::default()
@@ -13242,7 +13256,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let dir = tempfile::tempdir().expect("work");
+        let dir = crate::test_tempdir().expect("work");
         let file = profile5_file();
         let manager = TranscodeManager::new(
             Arc::clone(&store),
@@ -13400,7 +13414,7 @@ mod tests {
     fn ffmpeg_gets_the_app_owned_runtime_cache() {
         use plurx_core::store::SqliteStore;
 
-        let root = tempfile::tempdir().expect("root");
+        let root = crate::test_tempdir().expect("root");
         let work = root.path().join("transcode");
         let finished = root.path().join("cache").join("transcode");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -13470,7 +13484,7 @@ mod tests {
     /// generation ever produced.
     #[tokio::test]
     async fn a_session_measures_its_offset_from_the_origin_it_reached() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let takeover = SessionTakeoverStart {
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 120_000,
@@ -13509,7 +13523,7 @@ mod tests {
     async fn delete_reaches_a_taken_over_session_with_no_request_record() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = TranscodeManager::new(
             store,
@@ -14059,7 +14073,7 @@ mod tests {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = later;
 
-        let dir = tempfile::tempdir().expect("session dir");
+        let dir = crate::test_tempdir().expect("session dir");
         let session = test_session(dir.path().to_path_buf());
         let mut opts = mgr.options_for_tone_map(
             Encoder::VideoToolbox,
@@ -14198,7 +14212,7 @@ mod tests {
     async fn the_advertised_ladder_never_offers_a_rung_the_pipeline_cannot_serve() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let hardware = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -14308,7 +14322,7 @@ mod tests {
     async fn auto_follows_the_source_only_when_hardware_can_carry_it() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let hardware = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -14371,7 +14385,7 @@ mod tests {
     async fn hdr10_auto_starts_at_the_highest_qsv_rung_proved_at_boot() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let manager = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -14414,7 +14428,7 @@ mod tests {
     async fn hardware_auto_preserves_a_four_k_av1_sdr_source() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let hardware = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -14735,7 +14749,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -14866,7 +14880,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_and_assembled_publications_reject_empty_segments() {
-        let directory = tempfile::tempdir().expect("generation");
+        let directory = crate::test_tempdir().expect("generation");
         tokio::fs::write(
             directory.path().join("index.m3u8"),
             "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n",
@@ -14894,7 +14908,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_part_validation_rejects_overwritten_extinf_but_allows_killed_tail() {
-        let directory = tempfile::tempdir().expect("retained part");
+        let directory = crate::test_tempdir().expect("retained part");
         tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
             .await
             .expect("segment");
@@ -15300,7 +15314,7 @@ mod tests {
     async fn flow_limits_are_snapshotted_until_stale() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -15606,7 +15620,7 @@ mod tests {
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let dir = tempfile::tempdir().expect("segment-delivery directory");
+        let dir = crate::test_tempdir().expect("segment-delivery directory");
         let mut raw_session = test_session(dir.path().to_path_buf());
         raw_session.file_id = file_id;
         let session = Arc::new(raw_session);
@@ -15754,7 +15768,7 @@ mod tests {
     async fn first_live_transcode_playlist_waits_for_two_segments() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 1, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -15795,7 +15809,7 @@ mod tests {
     async fn playlist_fails_promptly_when_the_producer_exits_unsuccessfully() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 1, 2.0).await;
         let mut child = tokio::process::Command::new("false")
             .kill_on_drop(true)
@@ -15887,7 +15901,7 @@ mod tests {
         }
 
         // Published late — but inside the budget. Held, then served.
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let session = watchdog_session(dir.path(), None, false);
         let mgr = manager(dir.path(), 4_000).await;
         mgr.sessions
@@ -15915,7 +15929,7 @@ mod tests {
 
         // Never published. Refused at the deadline — and as a retryable
         // "still starting", never as a session that failed or went away.
-        let empty = tempfile::tempdir().expect("tempdir");
+        let empty = crate::test_tempdir().expect("tempdir");
         let stuck = watchdog_session(empty.path(), None, false);
         let mgr = manager(empty.path(), 600).await;
         mgr.sessions
@@ -15950,7 +15964,7 @@ mod tests {
     async fn a_terminal_verdict_names_its_cause_to_every_later_reader() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let session = watchdog_session(dir.path(), None, false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = TranscodeManager::new(
@@ -16035,7 +16049,7 @@ mod tests {
     async fn playlist_does_not_report_a_clean_producer_exit_as_failure() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let mut child = tokio::process::Command::new("true")
             .kill_on_drop(true)
             .spawn()
@@ -16074,7 +16088,7 @@ mod tests {
     async fn playlist_waits_while_a_killed_producer_is_being_replaced() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let child = tokio::process::Command::new("false")
             .kill_on_drop(true)
             .spawn()
@@ -16121,7 +16135,7 @@ mod tests {
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
-        let dir = tempfile::tempdir().expect("session dir");
+        let dir = crate::test_tempdir().expect("session dir");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         mgr.sessions
             .lock()
@@ -16186,7 +16200,7 @@ mod tests {
     async fn a_waiting_playlist_returns_session_gone_when_the_session_is_retired() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let session = watchdog_session(dir.path(), None, false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
@@ -16238,7 +16252,7 @@ mod tests {
     async fn playlist_exit_check_does_not_block_an_unrelated_session() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let wedged = watchdog_session(dir.path(), None, false);
         let unrelated = watchdog_session(dir.path(), None, false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -16281,7 +16295,7 @@ mod tests {
     #[tokio::test]
     async fn unchanged_flow_control_state_does_not_touch_the_motion_clock() {
         use plurx_core::store::SqliteStore;
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 1, 4.0).await;
         let session = test_session(dir.path().to_path_buf());
         session.refresh_segments().await;
@@ -16321,7 +16335,7 @@ mod tests {
     /// used to calculate the window.
     #[tokio::test]
     async fn retention_keeps_a_reload_margin_above_the_observed_fetch_lead() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         let p = dir.path();
         // 100 segments of 4s = 400s of media.
         seeded_session_dir(p, 100, 4.0).await;
@@ -16413,7 +16427,7 @@ mod tests {
         );
 
         // A frontier that has not yet passed the window prunes nothing.
-        let fresh = tempfile::tempdir().expect("tempdir");
+        let fresh = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(fresh.path(), 10, 4.0).await;
         let young = test_session(fresh.path().to_path_buf());
         young.refresh_segments().await;
@@ -16426,7 +16440,7 @@ mod tests {
     /// budget would hold a session for scratch it already reclaimed.
     #[tokio::test]
     async fn pruned_bytes_stop_counting_toward_the_budget() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 100, 4.0).await;
         let session = test_session(dir.path().to_path_buf());
         session.refresh_segments().await;
@@ -16494,13 +16508,13 @@ mod tests {
     async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
-        let media = tempfile::tempdir().expect("media dir");
+        let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("clip.mp4");
         write_real_video(&src, 60);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file_at(&store, &src.to_string_lossy()).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -16790,7 +16804,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work_dir = tempfile::tempdir().expect("work");
+        let work_dir = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             store,
             work_dir.path().to_path_buf(),
@@ -16849,7 +16863,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work_dir = tempfile::tempdir().expect("work");
+        let work_dir = crate::test_tempdir().expect("work");
         let mgr = Arc::new(TranscodeManager::new(
             store,
             work_dir.path().to_path_buf(),
@@ -16914,7 +16928,7 @@ mod tests {
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let root = tempfile::tempdir().expect("root");
+        let root = crate::test_tempdir().expect("root");
         let not_a_directory = root.path().join("not-a-directory");
         tokio::fs::write(&not_a_directory, b"occupied")
             .await
@@ -16954,7 +16968,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         // A box that believes it has NVENC. The encode will fail (there is no
         // GPU here) but admission happens before the spawn, which is the point.
         let mgr = Arc::new(TranscodeManager::new(
@@ -17020,7 +17034,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -17100,7 +17114,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -17136,7 +17150,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -17179,7 +17193,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -17318,7 +17332,7 @@ mod tests {
     async fn serving_fence_kills_existing_and_transition_racing_children() {
         use plurx_core::store::SqliteStore;
 
-        let root = tempfile::tempdir().expect("serving-fence root");
+        let root = crate::test_tempdir().expect("serving-fence root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(TranscodeManager::new(
             store,
@@ -17456,7 +17470,7 @@ mod tests {
     /// only real thing here is the child process the verdict must kill.
     #[tokio::test(start_paused = true)]
     async fn the_watchdog_outlives_the_first_segment() {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         // The playlist lists a finished segment: the session HAS produced.
         tokio::fs::write(
             dir.path().join("index.m3u8"),
@@ -17492,7 +17506,7 @@ mod tests {
     /// wait until the motion clock turns an ordinary stop into a false stall.
     #[tokio::test(start_paused = true)]
     async fn an_ordinary_kill_ends_the_watchdog_without_a_stall() {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         tokio::fs::write(
             dir.path().join("index.m3u8"),
             "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
@@ -17521,7 +17535,7 @@ mod tests {
     /// that observation. The successor must survive the stale verdict, and
     /// the same watchdog must still judge a later successor stall.
     async fn assert_copy_replacement_invalidates_watchdog_verdict(next: WatchNext) {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let child = match next {
             WatchNext::Done => {
                 let mut child = tokio::process::Command::new("false")
@@ -17627,7 +17641,7 @@ mod tests {
     /// reader can begin the replacement. A terminal predecessor verdict must
     /// not be followed by an unmonitored successor.
     async fn assert_watchdog_first_copy_replacement(next: WatchNext) {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let child = match next {
             WatchNext::Done => {
                 let mut child = tokio::process::Command::new("false")
@@ -17771,7 +17785,7 @@ mod tests {
     async fn stop_waits_for_copy_replacement_and_kills_its_successor() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
@@ -17856,7 +17870,7 @@ mod tests {
     async fn fenced_session_is_not_renewable_while_teardown_is_blocked() {
         use plurx_core::store::SqliteStore;
 
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let session = watchdog_session(dir.path(), Some(long_running_child()), false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = TranscodeManager::new(
@@ -17899,7 +17913,7 @@ mod tests {
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
-        let dir = tempfile::tempdir().expect("session dir");
+        let dir = crate::test_tempdir().expect("session dir");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let predecessor_pid = session
             .child
@@ -17977,7 +17991,7 @@ mod tests {
     /// back as one.
     #[tokio::test(start_paused = true)]
     async fn a_suspended_session_is_never_judged() {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         tokio::fs::write(
             dir.path().join("index.m3u8"),
             "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
@@ -18022,7 +18036,7 @@ mod tests {
     /// ends without a verdict — nothing here may mark that session failed.
     #[tokio::test(start_paused = true)]
     async fn an_exited_encoder_ends_the_watch_without_a_verdict() {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let mut child = tokio::process::Command::new("true")
             .kill_on_drop(true)
             .spawn()
@@ -18053,7 +18067,7 @@ mod tests {
     /// viewers want.
     #[tokio::test(start_paused = true)]
     async fn a_cached_session_is_not_watched() {
-        let dir = tempfile::tempdir().expect("dir");
+        let dir = crate::test_tempdir().expect("dir");
         let session = watchdog_session(dir.path(), None, true);
         force_stalled(&session.progress);
         settle(tokio::spawn(watch_for_stall(
@@ -18077,8 +18091,8 @@ mod tests {
     fn cached_manager(
         store: &Arc<dyn Store>,
     ) -> (TranscodeManager, tempfile::TempDir, tempfile::TempDir) {
-        let work = tempfile::tempdir().expect("work");
-        let cache = tempfile::tempdir().expect("cache");
+        let work = crate::test_tempdir().expect("work");
+        let cache = crate::test_tempdir().expect("cache");
         let mgr = TranscodeManager::new(
             Arc::clone(store),
             work.path().to_path_buf(),
@@ -18385,7 +18399,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let manager = TranscodeManager::new(
             store,
             work.path().to_owned(),
@@ -18660,7 +18674,7 @@ mod tests {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
+        let media = crate::test_tempdir().expect("media");
         let source = media.path().join("Heat.mkv");
         write_real_video(&source, 6);
         let file_id = seed_real_file(&store, &source).await;
@@ -18785,7 +18799,7 @@ mod tests {
         }
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
+        let media = crate::test_tempdir().expect("media");
         let source = media.path().join("Heat.mkv");
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
@@ -18978,7 +18992,7 @@ mod tests {
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let user = store.create_user("paul", "hash", true).await.expect("user");
-        let media = tempfile::tempdir().expect("media");
+        let media = crate::test_tempdir().expect("media");
         let source = media.path().join("Heat.mkv");
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
@@ -19099,7 +19113,7 @@ mod tests {
             .put_setting(keys::SW_POOL_THREADS, "8")
             .await
             .expect("software budget");
-        let media = tempfile::tempdir().expect("media");
+        let media = crate::test_tempdir().expect("media");
         let source = media.path().join("Handoff.mkv");
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
@@ -19218,7 +19232,7 @@ mod tests {
         }
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let media = tempfile::tempdir().expect("media");
+        let media = crate::test_tempdir().expect("media");
         let source = media.path().join("Heat.mkv");
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
@@ -19430,7 +19444,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19472,7 +19486,7 @@ mod tests {
     async fn speculative_policy_generation_tracks_replicated_track_preferences() {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19521,7 +19535,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19618,7 +19632,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19737,7 +19751,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19843,7 +19857,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19892,7 +19906,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -19942,7 +19956,7 @@ mod tests {
             .put_setting(keys::SW_POOL_THREADS, "64")
             .await
             .expect("pool headroom");
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -20008,9 +20022,9 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let old_dir = tempfile::tempdir().expect("old session");
-        let seek_dir = tempfile::tempdir().expect("seek session");
+        let work = crate::test_tempdir().expect("work");
+        let old_dir = crate::test_tempdir().expect("old session");
+        let seek_dir = crate::test_tempdir().expect("seek session");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20073,8 +20087,8 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let previous_dir = tempfile::tempdir().expect("previous session");
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20125,7 +20139,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20165,8 +20179,8 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let predecessor_dir = tempfile::tempdir().expect("predecessor");
+        let work = crate::test_tempdir().expect("work");
+        let predecessor_dir = crate::test_tempdir().expect("predecessor");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20227,8 +20241,8 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let previous_dir = tempfile::tempdir().expect("previous session");
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20298,8 +20312,8 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let previous_dir = tempfile::tempdir().expect("previous session");
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20372,7 +20386,7 @@ mod tests {
         assert_eq!(one_rung_below(0), MIN_HEIGHT);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
+        let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20385,7 +20399,7 @@ mod tests {
         for (index, height) in [MIN_HEIGHT, 240].into_iter().enumerate() {
             let session_id = format!("sub-floor-{height}");
             let playback_id = format!("sub-floor-player-{height}");
-            let dir = tempfile::tempdir().expect("previous session");
+            let dir = crate::test_tempdir().expect("previous session");
             insert_reopen_fixture(
                 &mgr,
                 ReopenFixture {
@@ -20435,9 +20449,9 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let a_dir = tempfile::tempdir().expect("device a");
-        let b_dir = tempfile::tempdir().expect("device b");
+        let work = crate::test_tempdir().expect("work");
+        let a_dir = crate::test_tempdir().expect("device a");
+        let b_dir = crate::test_tempdir().expect("device b");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20530,8 +20544,8 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = tempfile::tempdir().expect("work");
-        let previous_dir = tempfile::tempdir().expect("previous session");
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
         let mgr = TranscodeManager::new(
             store,
             work.path().to_path_buf(),
@@ -20575,7 +20589,7 @@ mod tests {
 
     #[tokio::test]
     async fn producing_requires_a_listed_segment() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::test_tempdir().expect("tempdir");
         // No playlist yet.
         assert!(!session_producing(dir.path()).await);
         // Header only, no segment listed (ffmpeg has started but nothing finished).

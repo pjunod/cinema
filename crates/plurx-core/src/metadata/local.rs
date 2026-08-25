@@ -534,6 +534,12 @@ mod tests {
     use crate::scan::scan_library;
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical system temporary directory");
+        tempfile::tempdir_in(root).expect("temporary directory")
+    }
+
     /// Make a real (tiny) clip with ffmpeg. Returns false when ffmpeg isn't
     /// installed, so the suite degrades to "not run here" rather than "broken".
     async fn make_clip(path: &Path, seconds: &str) -> bool {
@@ -559,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn home_artwork_adopts_generates_and_inherits() {
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = canonical_tempdir();
         let media = dir.path().join("media/2019");
         std::fs::create_dir_all(&media).expect("mkdir");
         if !make_clip(&media.join("Beach.mp4"), "2").await {
@@ -784,7 +790,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::time::Duration;
 
-        let dir = tempfile::tempdir().expect("tmp");
+        let dir = canonical_tempdir();
         let script = dir.path().join("hung-ffmpeg");
         let pid_file = dir.path().join("encoder.pid");
         std::fs::write(

@@ -968,7 +968,7 @@ mod tests {
             );
             return;
         }
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
 
         let clip = fixture(&Spawn, dir.path()).await.expect("fixture");
         // Really HDR10, in the stream, not just a 10-bit pixel format — the
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_software_encoder_skips_the_probe_entirely() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         // Through the real entry point: a software encode must not reach the
         // tools at all, so this cannot spawn anything.
         assert_eq!(
@@ -1245,7 +1245,7 @@ mod tests {
     /// — stated with the reason, rather than a silent GPU claim.
     #[tokio::test]
     async fn a_node_that_cannot_build_a_fixture_stays_on_the_cpu_chain() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         // A work dir that cannot exist: its parent is a regular file.
         let blocked = dir.path().join("not-a-dir");
         std::fs::write(&blocked, b"file").expect("write");
@@ -1267,7 +1267,7 @@ mod tests {
     /// The fixture costs a few seconds once per boot, not once per candidate.
     #[tokio::test]
     async fn an_existing_fixture_is_reused_rather_than_regenerated() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let path = dir.path().join("hdr10-probe.mkv");
         std::fs::write(&path, b"pretend this is HDR10").expect("write");
         // No recorded run is configured, so reaching ffmpeg at all would fail.
@@ -1288,7 +1288,7 @@ mod tests {
     /// the next boot would reuse it.
     #[tokio::test]
     async fn a_fixture_that_fails_to_generate_reports_the_encoders_complaint() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let tools = Recorded {
             ffmpeg: vec![failed_output("Unknown encoder 'libx265'\n")],
             ..Recorded::default()
@@ -1318,7 +1318,7 @@ mod tests {
     /// runs, the output is confirmed SDR-tagged, and the picture is measured.
     #[tokio::test]
     async fn a_successful_run_measures_the_picture_it_confirmed_was_bt709() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let clip = dir.path().join("hdr10-probe.mkv");
         let out = dir.path().join("out.mp4");
         let tools = Recorded {
@@ -1346,7 +1346,7 @@ mod tests {
     /// they send whoever reads the log to three different places.
     #[tokio::test]
     async fn each_way_a_run_can_fail_reports_its_own_reason() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let clip = dir.path().join("hdr10-probe.mkv");
         let out = dir.path().join("out.mp4");
         let go = |tools: Recorded| {
@@ -1395,7 +1395,7 @@ mod tests {
     /// times faster takes the job.
     #[tokio::test]
     async fn a_candidate_that_is_the_same_picture_and_faster_wins_the_probe() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let tools = Recorded {
             // fixture, reference encode, candidate encode
             ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
@@ -1437,7 +1437,7 @@ mod tests {
     /// chain and says so, rather than claiming an unprobed GPU graph.
     #[tokio::test]
     async fn a_probe_with_no_working_ffmpeg_claims_nothing() {
-        let dir = tempfile::tempdir().expect("workdir");
+        let dir = crate::test_tempdir().expect("workdir");
         let report = probe_with(
             &Recorded {
                 ffmpeg: vec![Err("could not run ffmpeg: No such file".to_owned())],

@@ -278,12 +278,32 @@ mod tests {
 
     /// The process state letter from `/proc/<pid>/stat` — field three, read
     /// from after the closing paren so a comm with spaces cannot shift it.
+    #[cfg(target_os = "linux")]
     async fn proc_state(pid: u32) -> Option<char> {
         let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat"))
             .await
             .ok()?;
         let (_, rest) = stat.rsplit_once(')')?;
         rest.split_whitespace().next()?.chars().next()
+    }
+
+    /// Darwin has no procfs. Its `ps` state column uses the same leading
+    /// process-state letters these assertions need (`T`, `S`, and `Z`).
+    #[cfg(target_os = "macos")]
+    async fn proc_state(pid: u32) -> Option<char> {
+        let pid = pid.to_string();
+        let output = tokio::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .chars()
+            .next()
     }
 
     /// Signal delivery is fast but not instant; poll briefly rather than

@@ -2533,7 +2533,7 @@ mod tests {
     async fn store_with_index(file: &MediaFile) -> (Arc<dyn Store>, FragmentIndex) {
         testfixtures::require_ffmpeg();
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let runtime = tempfile::tempdir().expect("runtime cache dir");
+        let runtime = crate::test_tempdir().expect("runtime cache dir");
         let outcome = crate::fragindex::build(
             file,
             have_dovi,
@@ -2719,7 +2719,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_playlist_bytes_are_identical_across_the_sessions_whole_life() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
@@ -2747,7 +2747,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_blocking_get_materializes_the_segment_and_a_re_get_serves_the_same_bytes() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
@@ -2771,7 +2771,7 @@ mod tests {
 
     #[tokio::test]
     async fn deadline_expiry_answers_a_typed_pending() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         let tight = VodSettings {
             block_budget: Duration::from_millis(1),
@@ -2797,7 +2797,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_killed_producer_child_answers_every_waiter_producer_failed() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
         let rendition = rendition_of(&serve, "sess-a").await;
@@ -2851,7 +2851,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_terminal_cause_answers_gone_and_supersession_spares_the_keeper() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
@@ -2951,7 +2951,7 @@ mod tests {
     /// rides the admitted rendition with no producer at all.
     #[tokio::test]
     async fn a_completed_rendition_admits_and_serves_a_second_session_without_a_producer() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
         let len = plan_len(&serve, "sess-a").await;
@@ -3004,7 +3004,7 @@ mod tests {
     /// served without re-production.
     #[tokio::test]
     async fn a_new_vodserve_on_the_same_base_resurrects_the_rendition() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
         let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
@@ -3070,7 +3070,7 @@ mod tests {
             .put_fragment_index(file.id, &index)
             .await
             .expect("replace the index");
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let serve = VodServe::new(base.path().to_path_buf(), store);
 
         let error = serve
@@ -3092,7 +3092,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_the_vod_presentation_cannot_serve_fail_typed() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
 
         // A transcode recipe: gated on the D6 device measurement.
@@ -3143,7 +3143,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_and_unsafe_segment_names_answer_a_404_shape() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
@@ -3171,7 +3171,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_describes_vod_without_touching_its_idle_lease() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;
         rendition.attach_reader("sess-a", 0).await;
@@ -3219,7 +3219,7 @@ mod tests {
 
     #[tokio::test]
     async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
         let mut rendition = synthetic_rendition(base.path()).await;
         Arc::get_mut(&mut rendition)
@@ -3272,7 +3272,7 @@ mod tests {
             },
         );
         let mut manifest = Manifest::new(plan.clone());
-        let temp = tempfile::tempdir().expect("dir");
+        let temp = crate::test_tempdir().expect("dir");
         let dir = RenditionDir::new(temp.path().join("r"));
         dir.create().await.expect("create");
         let count = manifest.len() as u32;
@@ -3382,7 +3382,7 @@ mod tests {
     #[tokio::test]
     async fn a_seek_into_the_audio_tail_spawns_at_the_last_video_entry_and_serves_the_tail() {
         testfixtures::require_ffmpeg();
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         // Video 9 s, audio 12 s, no -shortest: an honest 3 s audio tail —
         // the c58a4307 shape the plan's tail entries exist for.
         let source = temp.path().join("audiotail.mkv");
@@ -3461,7 +3461,7 @@ mod tests {
     /// the head regeneration at attach is what puts the init back.
     #[tokio::test]
     async fn a_resurrection_missing_only_its_init_regenerates_the_head_and_keeps_the_segments() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
         let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
@@ -3510,7 +3510,7 @@ mod tests {
     /// the next real generation.
     #[tokio::test]
     async fn a_resurrection_whose_identity_cannot_be_verified_purges_and_reproduces() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
         let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
@@ -3558,7 +3558,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_generations_write_is_refused() {
         use crate::vodgen::Sink;
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
@@ -3609,7 +3609,7 @@ mod tests {
     /// claimed, so the rebuild's adoption counts the same bytes exactly once.
     #[tokio::test]
     async fn replacing_a_failed_rendition_keeps_the_working_set_honest() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
         let rendition = rendition_of(&serve, "sess-a").await;
@@ -3659,7 +3659,7 @@ mod tests {
     /// keeps its rendition.
     #[tokio::test]
     async fn a_purge_never_takes_a_rendition_a_create_just_attached() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
         let rendition = rendition_of(&serve, "sess-a").await;
@@ -3697,7 +3697,7 @@ mod tests {
     /// bytes instead of sleeping a whole budget on them.
     #[tokio::test]
     async fn a_satisfy_that_raced_registration_is_not_a_lost_wakeup() {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
@@ -3739,7 +3739,7 @@ mod tests {
     /// a producer failure — answer promptly instead of sleeping the budget.
     #[tokio::test]
     async fn an_init_write_wakes_a_blocked_init_get() {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
@@ -3761,7 +3761,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_wakes_a_blocked_init_get() {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
@@ -3786,7 +3786,7 @@ mod tests {
     /// evict-and-regenerate whose length happens to match still changes it.
     #[tokio::test]
     async fn the_etag_changes_across_an_evict_and_regenerate() {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("temp");
         let serve = bare_serve(temp.path());
         let rendition = synthetic_rendition(temp.path()).await;
 
@@ -3828,7 +3828,7 @@ mod tests {
     /// live ids and frontier, and the stall-reopen's predecessor facts.
     #[tokio::test]
     async fn lease_and_reopen_surfaces_report_live_sessions_only() {
-        let base = tempfile::tempdir().expect("base");
+        let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
