@@ -481,10 +481,13 @@ impl RenditionDir {
             let file = tokio::fs::File::open(self.segment_path(index)).await?;
             file.sync_all().await?;
         }
-        if self.has_init().await {
-            let init = tokio::fs::File::open(self.dir.join(INIT_NAME)).await?;
-            init.sync_all().await?;
-        }
+        // The init is a member like any other, and a missing one is an error
+        // exactly as a missing segment is — not a skip. Every segment under a
+        // rendition decodes with the init's parameter sets, so a durably
+        // admitted directory without one is a promise of an unplayable
+        // rendition, kept for weeks with nothing left to notice.
+        let init = tokio::fs::File::open(self.dir.join(INIT_NAME)).await?;
+        init.sync_all().await?;
         // The directory entry itself. Opening a directory read-only and
         // syncing it is the portable way to make renames durable.
         let dir = tokio::fs::File::open(&self.dir).await?;
@@ -883,6 +886,23 @@ mod tests {
             .await
             .expect("remove");
         assert!(rendition.make_durable(&manifest).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn making_a_rendition_durable_fails_loudly_when_the_init_is_missing() {
+        // The same rule as a missing member, for a sharper reason: every
+        // segment decodes with the init's parameter sets, so admitting a
+        // directory without one durably promises an unplayable rendition.
+        let (_temp, rendition) = dir().await;
+        let mut manifest = manifest(24);
+        rendition
+            .materialize(&mut manifest, 0, b"bytes", 1)
+            .await
+            .expect("materialize");
+        assert!(
+            rendition.make_durable(&manifest).await.is_err(),
+            "a missing init must refuse durability, not skip it"
+        );
     }
 
     // ---- init identity (plan §2.2) ---------------------------------------

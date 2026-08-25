@@ -36,7 +36,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{segment_name, CutPolicy, FragmentReader, Init, Unit};
-use plurx_core::segplan::{FragmentIndex, SegmentPlan, SourceIdentity, TrackDurations};
+use plurx_core::segplan::{
+    FragmentIndex, PlanEntryKind, SegmentPlan, SourceIdentity, TrackDurations,
+};
 use plurx_core::store::Store;
 use plurx_core::transcode::{
     copy_pipe_args_with_dolby_vision, Pacing, COPY_FIRST_SEGMENT_SECONDS, COPY_SEGMENT_MAX_BYTES,
@@ -52,7 +54,7 @@ use crate::prodexec::{next_step, Producer, Step, Termination};
 use crate::prodrun::{Performed, ProducerSlot};
 use crate::prodsched::{decide, Demand, Position, WorkingSet, AHEAD_HORIZON_SECONDS};
 use crate::renditiondir::{InitIdentity, InitRefused, RenditionDir, INIT_NAME};
-use crate::titlestore::{Budgets, Manifest, ReaderWindow};
+use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
 use crate::waitpool::{WaitKey, WaitOutcome, WaitPool};
@@ -115,6 +117,16 @@ pub struct RecoveredVod {
     pub kind: SessionKind,
 }
 
+/// The facts a stall-reopen's normalization checks against its predecessor.
+// TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ReopenFacts {
+    pub supersession_user: String,
+    pub playback_id: String,
+    pub file_id: i64,
+}
+
 /// What [`VodServe::try_create`] answers when the VOD presentation can serve
 /// this request.
 #[derive(Debug)]
@@ -144,7 +156,7 @@ pub enum VodError {
 pub struct SegmentReady {
     pub file: tokio::fs::File,
     pub len: u64,
-    /// Strong: rendition key + plan index + length.
+    /// Strong: rendition key + plan index + materialization instant + length.
     pub etag: String,
 }
 
@@ -531,6 +543,68 @@ impl VodServe {
         self.shared.sessions.lock().await.keys().cloned().collect()
     }
 
+    /// Session ids still live (tombstoned excluded) — what the durable lease
+    /// loop may renew.
+    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
+    #[allow(dead_code)]
+    pub async fn live_session_ids(&self) -> Vec<String> {
+        self.shared
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, session)| session.tombstone.is_none())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// What a lease renewal reports for one live session: the film-time end,
+    /// in ms, of the last segment it was served (0 before the first). `None`
+    /// for unknown/tombstoned.
+    // TODO(m3-wire): the allow comes out when the lease loop wiring lands.
+    #[allow(dead_code)]
+    pub async fn frontier_ms(&self, session_id: &str) -> Option<i64> {
+        let rendition = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            Arc::clone(&session.rendition)
+        };
+        let last_served = {
+            let readers = rendition.readers.lock().await;
+            readers
+                .get(session_id)
+                .and_then(|reader| reader.last_served)
+        };
+        Some(match last_served {
+            None => 0,
+            Some(index) => rendition
+                .plan
+                .entry(index)
+                .map(|entry| ticks_to_ms(entry.end_ticks(), rendition.timescale))
+                .unwrap_or(0),
+        })
+    }
+
+    /// The facts a stall-reopen's normalization checks against its
+    /// predecessor. `None` for unknown/tombstoned.
+    // TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
+    #[allow(dead_code)]
+    pub async fn reopen_facts(&self, session_id: &str) -> Option<ReopenFacts> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if session.tombstone.is_some() {
+            return None;
+        }
+        Some(ReopenFacts {
+            supersession_user: session.supersession_user.clone(),
+            playback_id: session.playback_id.clone(),
+            file_id: session.rendition.recipe.file.id,
+        })
+    }
+
     /// The file a live VOD session is serving, for callers that need source
     /// facts at response time (the Apple init-record rewrite).
     pub async fn session_file_id(&self, session_id: &str) -> Option<i64> {
@@ -598,8 +672,11 @@ impl VodServe {
             );
         }
 
-        // Purge un-admitted renditions dormant past their TTL.
-        let dormant: Vec<Arc<Rendition>> = {
+        // Purge un-admitted renditions dormant past their TTL. The collection
+        // is only a cheap pre-filter; `purge_if_dormant` re-checks everything
+        // under the renditions lock, because a create can attach between this
+        // scan and the purge committing.
+        let dormant: Vec<String> = {
             let renditions = self.shared.renditions.lock().await;
             renditions
                 .values()
@@ -610,14 +687,13 @@ impl VodServe {
                         .expect("dormant lock")
                         .is_some_and(|since| now.duration_since(since) > DORMANT_RENDITION_TTL)
                 })
-                .map(Arc::clone)
+                .map(|rendition| rendition.key.clone())
                 .collect()
         };
-        for rendition in dormant {
-            if rendition.manifest.lock().await.is_admitted() {
-                continue;
-            }
-            self.shared.purge_rendition(&rendition).await;
+        for key in dormant {
+            self.shared
+                .purge_if_dormant(&key, DORMANT_RENDITION_TTL)
+                .await;
         }
 
         // Kick every driver so holds and idle reclaims are re-examined.
@@ -660,10 +736,15 @@ impl VodServe {
         rendition.kick();
         let deadline = Instant::now() + budget;
         loop {
-            // Arm the notification before checking the disk, so a write that
-            // lands between the check and the wait is not a lost wakeup.
+            // Arm the notification — created AND enabled — before checking
+            // the disk. `Notified` registers with its `Notify` only on first
+            // poll or `enable()`; without the explicit enable, a
+            // `notify_waiters` firing between the disk check and the await
+            // wakes nobody, and the first init fetch stalls a full budget for
+            // bytes that are already there.
             let notified = rendition.init_notify.notified();
             tokio::pin!(notified);
+            notified.as_mut().enable();
             if rendition.dir.has_init().await {
                 let path = rendition.dir.path().join(INIT_NAME);
                 let ready = open_ready(&path, &format!("{}-init", rendition.key))
@@ -712,6 +793,19 @@ impl VodServe {
             }
         }
         rendition.kick();
+        self.blocked_wait(rendition, session_id, index, budget)
+            .await
+    }
+
+    /// The blocking half of a segment GET: register on the wait pool, close
+    /// the lost-wakeup window, and sleep until one of the four named ends.
+    async fn blocked_wait(
+        &self,
+        rendition: &Arc<Rendition>,
+        session_id: &str,
+        index: u32,
+        budget: Duration,
+    ) -> Result<SegmentReady, VodError> {
         let key = WaitKey {
             rendition: rendition.key.clone(),
             index,
@@ -728,6 +822,20 @@ impl VodServe {
             std::task::Poll::Ready(outcome) => outcome,
             std::task::Poll::Pending => {
                 rendition.kick();
+                // The lost-wakeup window: a materialize (or a failure) that
+                // landed between the caller's materialized-miss and the
+                // registration above fired its satisfy/fail against an empty
+                // pool — and the driver then sees the index as not owed, so
+                // nothing would ever satisfy it again. One re-check after
+                // registering, before sleeping, closes it; dropping `wait`
+                // deregisters synchronously.
+                if let Some(ready) = self.open_materialized(rendition, index).await? {
+                    self.note_served(rendition, session_id, index).await;
+                    return Ok(ready);
+                }
+                if let Some(cause) = rendition.failure() {
+                    return Err(VodError::ProducerFailed(cause));
+                }
                 wait.await
             }
         };
@@ -762,14 +870,14 @@ impl VodServe {
         index: u32,
     ) -> Result<Option<SegmentReady>, VodError> {
         let manifest = rendition.manifest.lock().await;
-        if !manifest
-            .state(index)
-            .is_some_and(|state| state.is_materialized())
-        {
+        let Some(SegState::Materialized { at_ms, .. }) = manifest.state(index) else {
             return Ok(None);
-        }
+        };
         let path = rendition.dir.path().join(segment_name(u64::from(index)));
-        match open_ready(&path, &format!("{}-{index}", rendition.key)).await {
+        // The materialization instant is part of the etag: key-index-length
+        // alone collides across an evict-and-regenerate whose bytes differ
+        // while its length happens to match.
+        match open_ready(&path, &format!("{}-{index}-{at_ms}", rendition.key)).await {
             Ok(ready) => Ok(Some(ready)),
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -804,18 +912,34 @@ impl Shared {
     ) -> Result<Option<Arc<Rendition>>, String> {
         let mut renditions = self.renditions.lock().await;
         if let Some(existing) = renditions.get(key) {
-            if existing.failure().is_none() {
+            // A closed rendition is one a purge already committed against —
+            // its driver has exited and its wait keys answer nothing, so a
+            // session pinned to it would pend forever. Rebuild instead.
+            if existing.failure().is_none() && !existing.closed.load(Relaxed) {
                 *existing.dormant_since.lock().expect("dormant lock") = None;
                 return Ok(Some(Arc::clone(existing)));
             }
-            // A failed rendition is replaced by the next create: close the
-            // old handle (its waiters were already answered typed) and adopt
-            // whatever its directory still holds.
+            // A failed (or closed) rendition is replaced by the next create:
+            // close the old handle (its waiters were already answered typed)
+            // and adopt whatever its directory still holds.
             existing.closed.store(true, Relaxed);
             existing.gen_epoch.fetch_add(1, Relaxed);
             existing.kick();
             self.pool.close(key);
-            renditions.remove(key);
+            let stale = renditions.remove(key).expect("the entry just looked up");
+            // The node-wide counters stop claiming what the detached handle
+            // claimed; the rebuild re-adds exactly what it adopts. Skipping
+            // this double-counts the same bytes forever, and the working-set
+            // budget becomes fiction that stalls every producer on the node.
+            {
+                let manifest = stale.manifest.lock().await;
+                let claimed = manifest.materialized_bytes();
+                if manifest.is_admitted() {
+                    sub_saturating(&self.completed_cache, claimed);
+                } else {
+                    sub_saturating(&self.working_set, claimed);
+                }
+            }
             tracing::info!(rendition = %key, "replacing a failed rendition on create");
         }
 
@@ -854,11 +978,7 @@ impl Shared {
             return Ok(plan);
         }
         let policy = shipped_policy(index.timescale);
-        let tracks = TrackDurations {
-            video_ms: duration_ms,
-            audio_ms: duration_ms,
-            audio_bits_per_second: audio_rate(recipe),
-        };
+        let tracks = track_durations(index, recipe, duration_ms);
         let plan = plurx_core::segplan::plan_copy(index, &policy, &tracks);
         if plan.is_empty() {
             // Never stored: an empty plan under the key would poison it.
@@ -922,14 +1042,61 @@ impl Shared {
             }
             match load_identity(&dir.path().join(IDENTITY_NAME)).await {
                 Some(identity) => {
-                    // Even with init.mp4 missing this keeps every surviving
-                    // segment: the stored digests let the FIRST generation
-                    // verify (vodgen refuses InitDrift before any write) and
-                    // re-write the init.
-                    identity_state = IdentityState {
-                        identity: Some(identity),
-                        from_disk: true,
-                    };
+                    if !report.init_present && manifest.materialized_count() > 0 {
+                        // Handoff §5's missing-init arm, and it cannot wait
+                        // for the next ordinary generation: a fully adopted
+                        // manifest has no gap, so the scheduler answers Idle
+                        // forever, no generation ever spawns to re-write the
+                        // init, and every init GET pends to deadline for the
+                        // session's life. Run a HEAD regeneration now — spawn
+                        // the generation child, read only to its muxer init,
+                        // verify against the stored digests.
+                        match regenerate_init_head(&recipe, &identity).await {
+                            Ok(served) => {
+                                // Match keeps every surviving segment.
+                                dir.write_init(&served.bytes).await.map_err(|error| {
+                                    format!("re-writing the regenerated init: {error}")
+                                })?;
+                                tracing::info!(
+                                    rendition = %key,
+                                    "head regeneration re-derived a missing init.mp4; \
+                                     every adopted segment kept"
+                                );
+                                identity_state = IdentityState {
+                                    identity: Some(identity),
+                                    from_disk: true,
+                                };
+                            }
+                            Err(why) => {
+                                // Mismatch (or an unverifiable head): purge to
+                                // planned-only and establish fresh — before
+                                // the counters below, so nothing is adopted.
+                                let freed = dir.purge(&mut manifest).await;
+                                if let Some(error) = freed.error {
+                                    tracing::warn!(
+                                        rendition = %key,
+                                        "purging after a failed head regeneration: {error}"
+                                    );
+                                }
+                                let _ =
+                                    tokio::fs::remove_file(dir.path().join(IDENTITY_NAME)).await;
+                                tracing::info!(
+                                    rendition = %key,
+                                    "head regeneration could not verify the adopted \
+                                     rendition; purged to planned-only: {why}"
+                                );
+                            }
+                        }
+                    } else {
+                        // Init present (or nothing adopted): the stored
+                        // digests let the FIRST ordinary generation verify
+                        // (vodgen refuses InitDrift before any write) and
+                        // re-write the init if it is the missing piece.
+                        identity_state = IdentityState {
+                            identity: Some(identity),
+                            from_disk: true,
+                        };
+                    }
                 }
                 None => {
                     // No identity means nothing on disk is verifiable: purge
@@ -999,7 +1166,7 @@ impl Shared {
     /// Completion → admission (plan §2.4): reserve, make durable, complete —
     /// in that order, because admission is the durability boundary and
     /// reversing it publishes a promise before the bytes behind it are real.
-    async fn try_admit(&self, rendition: &Rendition, manifest: &mut Manifest) {
+    async fn try_admit(self: &Arc<Shared>, rendition: &Rendition, manifest: &mut Manifest) {
         if manifest.is_admitted() {
             return;
         }
@@ -1036,6 +1203,11 @@ impl Shared {
             Ok(bytes) => {
                 sub_saturating(&self.working_set, bytes);
                 self.completed_cache.fetch_add(bytes, Relaxed);
+                // The working set just shrank node-wide: producers on OTHER
+                // renditions terminated for NoRoom are waiting on exactly
+                // this, and the next maintain tick is a viewer's deadline
+                // away.
+                self.kick_all();
                 tracing::info!(
                     rendition = %rendition.key,
                     bytes,
@@ -1053,8 +1225,40 @@ impl Shared {
         }
     }
 
-    /// Give a dormant, un-admitted rendition up whole.
-    async fn purge_rendition(&self, rendition: &Arc<Rendition>) {
+    /// Give a dormant, un-admitted rendition up whole — but only after
+    /// re-verifying, under the renditions lock, that it is still dormant.
+    ///
+    /// The re-check is the point: maintain's collect-then-purge scan races a
+    /// create, and a session attached between the scan and the commit would
+    /// be pinned to a closed rendition — its driver exited, its wait keys
+    /// answering nothing, every GET pending forever. `attach_rendition`
+    /// clears `dormant_since` while holding the same lock, so the two cannot
+    /// interleave.
+    async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
+        let rendition = {
+            let mut renditions = self.renditions.lock().await;
+            let Some(rendition) = renditions.get(key).map(Arc::clone) else {
+                return;
+            };
+            if !rendition.readers.lock().await.is_empty() {
+                return;
+            }
+            let dormant = rendition
+                .dormant_since
+                .lock()
+                .expect("dormant lock")
+                .is_some_and(|since| since.elapsed() > ttl);
+            if !dormant {
+                return;
+            }
+            if rendition.manifest.lock().await.is_admitted() {
+                return;
+            }
+            renditions.remove(key);
+            rendition
+        };
+        // Committed: from here the map no longer answers this key, so no new
+        // session can attach to the handle being torn down.
         rendition.closed.store(true, Relaxed);
         rendition.gen_epoch.fetch_add(1, Relaxed);
         let _ = rendition
@@ -1071,6 +1275,10 @@ impl Shared {
             let mut manifest = rendition.manifest.lock().await;
             let freed = rendition.dir.purge(&mut manifest).await;
             sub_saturating(&self.working_set, freed.bytes);
+            // Whatever a failing unlink left both on disk and claimed is no
+            // longer managed by anything; keeping it in the counter would
+            // hold budget nothing can ever release.
+            sub_saturating(&self.working_set, manifest.materialized_bytes());
             if let Some(error) = freed.error {
                 tracing::warn!(
                     rendition = %rendition.key,
@@ -1079,12 +1287,36 @@ impl Shared {
             }
         }
         let _ = tokio::fs::remove_file(rendition.identity_path()).await;
-        self.renditions.lock().await.remove(&rendition.key);
         rendition.kick();
+        // Freed bytes are node-wide news (see `try_admit`).
+        self.kick_all();
         tracing::info!(
             rendition = %rendition.key,
             "purged a dormant un-admitted rendition"
         );
+    }
+
+    /// Kick EVERY rendition's driver — for events that change the node-wide
+    /// working set. A producer terminated for `NoRoom` on another rendition
+    /// is waiting on exactly this; without it, the hold stands until the next
+    /// maintain tick while a blocked viewer's deadline burns.
+    ///
+    /// Spawned rather than inline so callers already holding the renditions
+    /// lock (or a manifest lock ordered after it) cannot deadlock.
+    fn kick_all(self: &Arc<Shared>) {
+        let shared = Arc::clone(self);
+        tokio::spawn(async move {
+            let renditions: Vec<Arc<Rendition>> = shared
+                .renditions
+                .lock()
+                .await
+                .values()
+                .map(Arc::clone)
+                .collect();
+            for rendition in renditions {
+                rendition.kick();
+            }
+        });
     }
 }
 
@@ -1174,8 +1406,13 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                             "eviction sweep stopped early: {error}"
                         );
                     }
-                    // Room may now exist; decide again promptly.
+                    // Room may now exist; decide again promptly — and the
+                    // freed bytes are node-wide news, so every other
+                    // rendition's driver re-examines its hold too.
                     rendition.kick();
+                    if freed.bytes > 0 {
+                        shared.kick_all();
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(rendition = %rendition.key, "make_room: {error}");
@@ -1191,6 +1428,11 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
 async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: u32) {
+    // A spawn position must be a VIDEO entry — the scheduler can name an
+    // audio-tail index (a blocked GET on the tail is real demand), but the
+    // generation that serves it starts at the last video boundary and its
+    // `finish` produces the tail entries.
+    let at = video_entry_at_or_before(&rendition.plan, at);
     let Some(entry) = rendition.plan.entry(at) else {
         tracing::warn!(rendition = %rendition.key, "no plan entry {at} to spawn at");
         return;
@@ -1229,6 +1471,14 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
         );
         return;
     };
+    // The rendition can be closed between the spawn above and the attach
+    // below (a purge committing on the maintain task). Attaching would leave
+    // a live ffmpeg in a slot whose driver has already exited — a child
+    // nothing reaps until the Arc drops.
+    if rendition.closed.load(Relaxed) {
+        let _ = child.kill().await;
+        return;
+    }
     rendition
         .last_child_pid
         .store(child.id().unwrap_or(0), Relaxed);
@@ -1308,6 +1558,7 @@ async fn run_generation(
     let sink = RenditionSink {
         shared: Arc::clone(&shared),
         rendition: Arc::clone(&rendition),
+        epoch,
     };
     let outcome = vodgen::run(src, generation, &sink, &rendition.key).await;
     on_generation_end(&shared, &rendition, outcome, epoch).await;
@@ -1484,6 +1735,10 @@ fn record_failure(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: Strin
     tracing::warn!(rendition = %rendition.key, "producer failed: {cause}");
     *rendition.failed.lock().expect("failed lock") = Some(cause.clone());
     shared.pool.fail(&rendition.key, &cause);
+    // Init waiters block on their own Notify, not the wait pool — without
+    // this, a GET waiting for `init.mp4` sleeps its whole budget to learn
+    // what every segment waiter was told immediately.
+    rendition.init_notify.notify_waiters();
 }
 
 fn describe_failure(failure: &Failure) -> String {
@@ -1501,6 +1756,13 @@ fn describe_failure(failure: &Failure) -> String {
 struct RenditionSink {
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
+    /// The generation epoch this sink was built for. A write from a stale
+    /// epoch — a killed generation's queued materialize landing after a
+    /// Restart — is refused under the manifest lock: letting it through would
+    /// advance the NEW producer's belief with the OLD generation's progress
+    /// (one spurious kill of the healthy replacement) and, worse, let a dead
+    /// generation keep writing bytes under the replacement's feet.
+    epoch: u64,
 }
 
 impl vodgen::Sink for RenditionSink {
@@ -1513,6 +1775,11 @@ impl vodgen::Sink for RenditionSink {
         let len = bytes.len() as u64;
         {
             let mut manifest = self.rendition.manifest.lock().await;
+            // Checked under the manifest lock, so a driver bumping the epoch
+            // cannot interleave between the check and the write.
+            if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
             self.rendition
                 .dir
@@ -1570,6 +1837,37 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// The per-track durations `plan_copy`'s audio tail (the c58a4307 rule) is
+/// computed from — and the split matters more than either number:
+///
+/// - `video_ms` comes honestly from the **fragment index** (the video-only
+///   pipe's own summed ticks), because the tail is `audio_ms - video_ms` and
+///   the container duration is the max of both tracks. Using the container
+///   number for video makes the tail identically zero on every file, so any
+///   title whose audio outruns its video would emit trailing audio the plan
+///   never named — an out-of-plan chunk that poisons the rendition at the end
+///   of every complete watch.
+/// - `audio_ms` is the container's probed duration: audio is the track that
+///   outruns, and the probe's number is what the c58a4307 rule was written
+///   against.
+fn track_durations(index: &FragmentIndex, recipe: &Recipe, container_ms: i64) -> TrackDurations {
+    TrackDurations {
+        video_ms: index_video_ms(index),
+        audio_ms: container_ms,
+        audio_bits_per_second: audio_rate(recipe),
+    }
+}
+
+/// The index's total video duration in ms — the sum of its fragment ticks on
+/// its own timescale.
+fn index_video_ms(index: &FragmentIndex) -> i64 {
+    ticks_to_ms(index.ticks(), index.timescale)
+}
+
+fn ticks_to_ms(ticks: u64, timescale: u32) -> i64 {
+    (ticks.saturating_mul(1000) / u64::from(timescale.max(1))) as i64
+}
+
 /// The audio rate the plan's byte headroom is computed from: what the
 /// production pipe asks for (`-b:a`, mirrored from `copy_pipe_args`' branch)
 /// when the audio is re-encoded, and a deliberately generous stand-in when it
@@ -1607,10 +1905,12 @@ fn planned_index(name: &str) -> Option<u32> {
 }
 
 /// The plan entry containing `start_seconds` — where the session's first
-/// demand points, not where the plan starts.
+/// demand points, not where the plan starts. Always a VIDEO entry: a start
+/// inside the audio tail positions at the last video entry instead, because
+/// that is the generation that produces the tail.
 fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
     if start_seconds <= 0.0 {
-        return 0;
+        return video_entry_at_or_before(plan, 0);
     }
     let ticks = (start_seconds * f64::from(plan.timescale.max(1))) as u64;
     let mut at = 0u32;
@@ -1621,7 +1921,28 @@ fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
             break;
         }
     }
-    at
+    video_entry_at_or_before(plan, at)
+}
+
+/// The last VIDEO entry at or before `at` — the only kind a generation may be
+/// positioned on. Audio-tail entries carry no video boundary of their own
+/// ([`crate::titlestore::Manifest::is_audio_tail`]'s "a scheduler must not
+/// chase them as if they were independently seekable" — this is that caller
+/// arriving): `vodgen` categorically refuses a generation started inside the
+/// tail, so an unclamped spawn there would answer `producer_failed` on every
+/// seek to the end of an affected film. The tail entries are produced by this
+/// generation's own `finish`.
+fn video_entry_at_or_before(plan: &SegmentPlan, at: u32) -> u32 {
+    let mut best = 0u32;
+    for entry in &plan.entries {
+        if entry.index > at {
+            break;
+        }
+        if entry.kind == PlanEntryKind::Video {
+            best = entry.index;
+        }
+    }
+    best
 }
 
 fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
@@ -1630,12 +1951,19 @@ fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
 
 /// A reader's eviction guard: back two segments from the playhead, ahead a
 /// horizon's worth from the frontier.
+///
+/// The high edge covers `max(last_served + 1, frontier)`, not last_served
+/// alone: a forward seek's blocked GET moves the frontier past the playhead,
+/// and a window that forgot it would let `make_room` evict the just-
+/// materialized seek target before the waiter opens it — a Pending → produce
+/// → evict livelock under working-set pressure.
 fn reader_window(reader: Reader, seconds_per_segment: f64) -> ReaderWindow {
     let playhead = reader.last_served.unwrap_or(reader.frontier);
     let frontier = reader
         .last_served
         .map(|served| served.saturating_add(1))
-        .unwrap_or(reader.frontier);
+        .unwrap_or(reader.frontier)
+        .max(reader.frontier);
     let per = if seconds_per_segment > 0.0 {
         seconds_per_segment
     } else {
@@ -1671,6 +1999,46 @@ fn sub_saturating(counter: &AtomicU64, bytes: u64) {
     let _ = counter.fetch_update(Relaxed, Relaxed, |current| {
         Some(current.saturating_sub(bytes))
     });
+}
+
+/// Handoff §5's regenerate-and-verify: spawn the generation child at entry 0,
+/// read its pipe only to the muxer init, kill the child, and answer the
+/// served init the stored identity derives from it — or why it refused.
+///
+/// This is how a resurrected rendition with a complete (or gap-free-enough)
+/// manifest gets its `init.mp4` back without producing a single segment: the
+/// §2 ruling made the init reproducible independently of the segments, so a
+/// verified head is proof enough to keep every adopted byte.
+async fn regenerate_init_head(recipe: &Recipe, identity: &InitIdentity) -> Result<Init, String> {
+    let args = copy_pipe_args_with_dolby_vision(
+        &recipe.file,
+        0.0,
+        recipe.audio_index,
+        recipe.aac,
+        Pacing::unpaced(),
+        recipe.have_dovi,
+        recipe.preserve_dolby_vision,
+    );
+    let mut child = tokio::process::Command::new(ffmpeg_bin())
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("spawning the head regeneration: {error}"))?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill().await;
+        return Err("the head regeneration started without a stdout".to_string());
+    };
+    let head = read_muxer_init(&mut stdout).await;
+    // Only the head is wanted; the rest of the pipe is not read.
+    let _ = child.kill().await;
+    let (_consumed, muxer) =
+        head.map_err(|error| format!("reading the head regeneration's init: {error}"))?;
+    identity
+        .served_init_for(&muxer)
+        .map_err(|refused| refused.to_string())
 }
 
 /// Read a generation's pipe up to (and through) its muxer init, keeping every
@@ -1763,13 +2131,17 @@ mod tests {
     use crate::fragindex::IndexOutcome;
 
     fn fixture_file() -> MediaFile {
+        media_file_at(testfixtures::source("clean-cra"), 12_000)
+    }
+
+    fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
         MediaFile {
             id: 1,
             item_id: 1,
-            path: testfixtures::source("clean-cra"),
+            path,
             size: 1,
             mtime: 1,
-            duration_ms: Some(12_000),
+            duration_ms: Some(duration_ms),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
             video_profile: Some("Main".into()),
@@ -1847,6 +2219,90 @@ mod tests {
         let file = fixture_file();
         let (store, _) = store_with_index(&file).await;
         (VodServe::new(base.to_path_buf(), store), file)
+    }
+
+    /// A `VodServe` with an empty store, for tests that drive internals
+    /// directly against a hand-built rendition.
+    fn bare_serve(base: &Path) -> Arc<VodServe> {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        VodServe::new(base.to_path_buf(), store)
+    }
+
+    /// A synthetic ~7 s-per-segment index, prodsched's own fixture shape.
+    fn synthetic_index(fragments: usize) -> FragmentIndex {
+        use plurx_core::fmp4::CutClass;
+        use plurx_core::segplan::IndexRow;
+        let mut rows = Vec::new();
+        let mut dts = 0u64;
+        for i in 0..fragments {
+            let duration = if i % 2 == 0 { 28_016 } else { 28_032 };
+            rows.push(IndexRow {
+                dts,
+                duration,
+                bytes: 100_000,
+                video_bytes: 99_400,
+                class: CutClass::CleanIdr,
+            });
+            dts += duration;
+        }
+        FragmentIndex::new(
+            16_000,
+            rows,
+            "sha",
+            SourceIdentity::new(1, 1, "fingerprint"),
+        )
+    }
+
+    /// A rendition built by hand — no driver, no store, no producer — for
+    /// tests that exercise one internal mechanism deterministically.
+    async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
+        let index = synthetic_index(240);
+        let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
+        let ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: ms,
+                audio_ms: ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let dir = RenditionDir::new(base.join("synthetic"));
+        dir.create().await.expect("create rendition dir");
+        Arc::new(Rendition {
+            key: "synthetic-rendition".to_string(),
+            dir,
+            recipe: Recipe {
+                file: media_file_at(PathBuf::from("unused.mkv"), ms),
+                audio_index: None,
+                aac: true,
+                preserve_dolby_vision: false,
+                have_dovi: false,
+            },
+            playlist: plan.playlist().into_bytes(),
+            timescale: plan.timescale,
+            seconds_per_segment: plan.duration_ticks() as f64
+                / f64::from(plan.timescale)
+                / plan.len() as f64,
+            index,
+            policy,
+            working_set_budget: 8 << 30,
+            completed_cache_budget: 50 << 30,
+            manifest: Mutex::new(Manifest::new(plan.clone())),
+            plan,
+            identity: Mutex::new(IdentityState::default()),
+            slot: ProducerSlot::new(),
+            readers: Mutex::new(HashMap::new()),
+            failed: StdMutex::new(None),
+            init_notify: Notify::new(),
+            wake: Notify::new(),
+            gen_epoch: AtomicU64::new(0),
+            last_child_pid: AtomicU32::new(0),
+            dormant_since: StdMutex::new(None),
+            closed: AtomicBool::new(false),
+            warned_admission: AtomicBool::new(false),
+        })
     }
 
     async fn create(
@@ -2330,31 +2786,9 @@ mod tests {
     /// anything outside a 180 s ahead window).
     #[tokio::test]
     async fn make_room_never_evicts_inside_a_live_readers_window() {
-        use plurx_core::fmp4::CutClass;
-        use plurx_core::segplan::IndexRow;
-
-        // A synthetic 7 s-per-segment plan, prodsched's own fixture shape.
-        let mut rows = Vec::new();
-        let mut dts = 0u64;
-        for i in 0..240 {
-            let duration = if i % 2 == 0 { 28_016 } else { 28_032 };
-            rows.push(IndexRow {
-                dts,
-                duration,
-                bytes: 100_000,
-                video_bytes: 99_400,
-                class: CutClass::CleanIdr,
-            });
-            dts += duration;
-        }
-        let index = plurx_core::segplan::FragmentIndex::new(
-            16_000,
-            rows,
-            "sha",
-            SourceIdentity::new(1, 1, "fingerprint"),
-        );
+        let index = synthetic_index(240);
         let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
-        let ms = (dts * 1000 / 16_000) as i64;
+        let ms = index_video_ms(&index);
         let plan = plurx_core::segplan::plan_copy(
             &index,
             &policy,
@@ -2406,5 +2840,554 @@ mod tests {
             manifest.state(5).expect("planned").is_materialized(),
             "the segment the reader just fetched must survive"
         );
+
+        // A forward seek's blocked GET moves the frontier past the playhead;
+        // the window's high edge must follow it, or `make_room` evicts the
+        // just-materialized seek target before the waiter opens it.
+        let seeked = reader_window(
+            Reader {
+                frontier: 30,
+                last_served: Some(5),
+            },
+            seconds_per_segment,
+        );
+        assert!(
+            seeked.covers(30),
+            "the blocked seek target sits inside its own reader's window"
+        );
+    }
+
+    /// Fix 1's derivation, as a unit: `video_ms` from the fragment index,
+    /// `audio_ms` from the container — the split that makes the audio tail
+    /// plannable at all. A container-for-both derivation makes the tail
+    /// identically zero on every file.
+    #[test]
+    fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
+        let index = synthetic_index(24);
+        let recipe = Recipe {
+            file: media_file_at(PathBuf::from("unused.mkv"), 0),
+            audio_index: None,
+            aac: true,
+            preserve_dolby_vision: false,
+            have_dovi: false,
+        };
+        let video_ms = index_video_ms(&index);
+        assert!(video_ms > 0);
+
+        // Audio outruns video by three seconds: the tail must be planned.
+        let tracks = track_durations(&index, &recipe, video_ms + 3_000);
+        assert_eq!(tracks.video_ms, video_ms, "video honestly from the index");
+        assert_eq!(
+            tracks.audio_ms,
+            video_ms + 3_000,
+            "audio from the container"
+        );
+        let plan = plurx_core::segplan::plan_copy(&index, &shipped_policy(16_000), &tracks);
+        let last = plan.entries.last().expect("a planned entry");
+        assert_eq!(
+            last.kind,
+            PlanEntryKind::AudioTail,
+            "a 3 s overrun plans an audio tail"
+        );
+
+        // Tracks of equal length plan no tail.
+        let flat = track_durations(&index, &recipe, video_ms);
+        let plan = plurx_core::segplan::plan_copy(&index, &shipped_policy(16_000), &flat);
+        assert!(
+            plan.entries
+                .iter()
+                .all(|entry| entry.kind == PlanEntryKind::Video),
+            "no overrun, no tail"
+        );
+    }
+
+    /// Fix 3, end to end on a real audiotail-shaped source: a seek into the
+    /// audio tail positions the session (and every spawn) at the last VIDEO
+    /// entry, and a blocked GET on the tail index materializes through that
+    /// generation's own `finish` — never through a generation started inside
+    /// the tail, which vodgen categorically refuses.
+    #[tokio::test]
+    async fn a_seek_into_the_audio_tail_spawns_at_the_last_video_entry_and_serves_the_tail() {
+        testfixtures::require_ffmpeg();
+        let temp = tempfile::tempdir().expect("temp");
+        // Video 9 s, audio 12 s, no -shortest: an honest 3 s audio tail —
+        // the c58a4307 shape the plan's tail entries exist for.
+        let source = temp.path().join("audiotail.mkv");
+        let mut cmd = std::process::Command::new(testfixtures::ffmpeg());
+        cmd.args(["-y", "-v", "error"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=24:duration=9",
+            ])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=12",
+            ])
+            .args(["-c:v", "libx265", "-preset", "ultrafast"])
+            .args([
+                "-x265-params",
+                "keyint=42:min-keyint=42:open-gop=1:bframes=0:scenecut=0:\
+                 repeat-headers=1:log-level=none",
+            ])
+            .args([
+                "-c:a", "aac", "-pix_fmt", "yuv420p", "-ac", "2", "-f", "matroska",
+            ])
+            .arg(&source);
+        testfixtures::run(&mut cmd);
+        // The index is built against the VIDEO duration (the video-only index
+        // pipe can never cover the audio's extra three seconds — its coverage
+        // check reads the duration it is handed); the CREATE carries the
+        // container duration, which is what the probe reports and what the
+        // audio tail is derived from.
+        let (store, _) = store_with_index(&media_file_at(source.clone(), 9_000)).await;
+        let file = media_file_at(source, 12_000);
+        let serve = VodServe::new(temp.path().join("renditions"), store);
+
+        // Seek into the tail (video ends ~9 s).
+        serve
+            .try_create(
+                &request("play-a", 10.5),
+                &file,
+                &settings(),
+                "[\"user_id\",1]",
+                "sess-a".to_string(),
+            )
+            .await
+            .expect("try_create")
+            .expect("the audiotail source is VOD-presentable");
+        let rendition = rendition_of(&serve, "sess-a").await;
+        let tail = rendition
+            .plan
+            .entries
+            .iter()
+            .find(|entry| entry.kind == PlanEntryKind::AudioTail)
+            .expect("the plan must carry an audio tail")
+            .index;
+        // The clamp itself: a start inside the tail is a video position.
+        let positioned = entry_containing(&rendition.plan, 10.5);
+        assert!(
+            rendition.plan.entry(positioned).expect("entry").kind == PlanEntryKind::Video,
+            "a seek into the tail positions at a video entry, got {positioned}"
+        );
+        assert!(positioned < tail);
+
+        // The blocked GET on the tail index itself materializes and serves.
+        let ready = fetch(&serve, "sess-a", &segment_name(u64::from(tail))).await;
+        assert!(ready.len > 0);
+        assert!(
+            rendition.failure().is_none(),
+            "the tail must be produced, not refused as an in-tail spawn"
+        );
+    }
+
+    /// Fix 2: a resurrected rendition whose `init.mp4` is gone but whose
+    /// manifest adopted every segment has no gap for the scheduler to fill —
+    /// the head regeneration at attach is what puts the init back.
+    #[tokio::test]
+    async fn a_resurrection_missing_only_its_init_regenerates_the_head_and_keeps_the_segments() {
+        let base = tempfile::tempdir().expect("base");
+        let file = fixture_file();
+        let (store, _) = store_with_index(&file).await;
+        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        create(&first, &file, "sess-a", "play-a", &settings()).await;
+        let len = plan_len(&first, "sess-a").await;
+        for segment in 0..len {
+            fetch(&first, "sess-a", &segment_name(segment as u64)).await;
+        }
+        let rendition = rendition_of(&first, "sess-a").await;
+        wait_until("the first producer ended", Duration::from_secs(30), || {
+            let rendition = Arc::clone(&rendition);
+            async move { matches!(rendition.slot.belief().await, Producer::Absent { .. }) }
+        })
+        .await;
+        let dir_path = rendition.dir.path().to_path_buf();
+        drop(first);
+        tokio::fs::remove_file(dir_path.join(INIT_NAME))
+            .await
+            .expect("take the init away");
+
+        let second = VodServe::new(base.path().to_path_buf(), store);
+        create(&second, &file, "sess-b", "play-b", &settings()).await;
+        let adopted = rendition_of(&second, "sess-b").await;
+        assert_eq!(
+            adopted.manifest.lock().await.materialized_count(),
+            len,
+            "a verified head keeps every adopted segment"
+        );
+        assert!(
+            adopted.dir.has_init().await,
+            "the head regeneration re-derived init.mp4 at attach"
+        );
+        // And the init is servable without any producer having spawned.
+        match second.segment("sess-b", INIT_NAME).await.expect("ours") {
+            Ok(Some(ready)) => assert!(ready.len > 0),
+            other => panic!("init.mp4 must serve: {:?}", describe(Some(other))),
+        }
+        assert!(
+            matches!(adopted.slot.belief().await, Producer::Absent { .. }),
+            "no generation was needed beyond the head"
+        );
+    }
+
+    /// Fix 2's mismatch arm: an adopted identity the pipeline cannot
+    /// reproduce purges to planned-only at attach and establishes fresh on
+    /// the next real generation.
+    #[tokio::test]
+    async fn a_resurrection_whose_identity_cannot_be_verified_purges_and_reproduces() {
+        let base = tempfile::tempdir().expect("base");
+        let file = fixture_file();
+        let (store, _) = store_with_index(&file).await;
+        let first = VodServe::new(base.path().to_path_buf(), Arc::clone(&store));
+        create(&first, &file, "sess-a", "play-a", &settings()).await;
+        fetch(&first, "sess-a", "seg00000.m4s").await;
+        let rendition = rendition_of(&first, "sess-a").await;
+        let dir_path = rendition.dir.path().to_path_buf();
+        wait_until("the first producer ended", Duration::from_secs(30), || {
+            let rendition = Arc::clone(&rendition);
+            async move { matches!(rendition.slot.belief().await, Producer::Absent { .. }) }
+        })
+        .await;
+        drop(first);
+        // A stored identity this pipeline never produced, and no init to
+        // trust: the head regeneration must refuse and purge.
+        let bogus = InitIdentity {
+            muxer_init: "not-a-real-digest".to_string(),
+            served_init: "not-a-real-digest-either".to_string(),
+            promotion: plurx_core::fmp4::PromotionInputs::default(),
+        };
+        store_identity(&dir_path.join(IDENTITY_NAME), &bogus)
+            .await
+            .expect("plant the bogus identity");
+        tokio::fs::remove_file(dir_path.join(INIT_NAME))
+            .await
+            .expect("take the init away");
+
+        let second = VodServe::new(base.path().to_path_buf(), store);
+        create(&second, &file, "sess-b", "play-b", &settings()).await;
+        let adopted = rendition_of(&second, "sess-b").await;
+        assert_eq!(
+            adopted.manifest.lock().await.materialized_count(),
+            0,
+            "an unverifiable adoption is purged to planned-only"
+        );
+        // And the rendition is healthy: a fresh generation establishes a new
+        // identity and serves.
+        let ready = fetch(&second, "sess-b", "seg00000.m4s").await;
+        assert!(ready.len > 0);
+    }
+
+    /// Fix 4: a stale generation's queued materialize — landing after the
+    /// driver restarted the producer — is refused under the manifest lock and
+    /// touches neither the manifest nor the counters.
+    #[tokio::test]
+    async fn a_stale_generations_write_is_refused() {
+        use crate::vodgen::Sink;
+        let temp = tempfile::tempdir().expect("temp");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: rendition.gen_epoch.load(Relaxed),
+        };
+        // The driver kills and replaces the generation this sink belongs to.
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let error = sink
+            .materialize(0, b"stale bytes".to_vec())
+            .await
+            .expect_err("a stale epoch must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            !rendition
+                .manifest
+                .lock()
+                .await
+                .state(0)
+                .expect("planned")
+                .is_materialized(),
+            "a refused write must not touch the manifest"
+        );
+        assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+
+        // The replacement's own sink — current epoch — writes normally.
+        let fresh = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: rendition.gen_epoch.load(Relaxed),
+        };
+        fresh
+            .materialize(0, b"fresh bytes".to_vec())
+            .await
+            .expect("the live generation writes");
+        assert!(rendition
+            .manifest
+            .lock()
+            .await
+            .state(0)
+            .expect("planned")
+            .is_materialized());
+    }
+
+    /// Fix 5: replacing a failed rendition subtracts what its manifest still
+    /// claimed, so the rebuild's adoption counts the same bytes exactly once.
+    #[tokio::test]
+    async fn replacing_a_failed_rendition_keeps_the_working_set_honest() {
+        let base = tempfile::tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+        // Freeze the producer before it materializes anything, so the fake
+        // member below is the rendition's whole claim.
+        wait_until("the producer spawned", Duration::from_secs(10), || {
+            let rendition = Arc::clone(&rendition);
+            async move { rendition.last_child_pid.load(Relaxed) != 0 }
+        })
+        .await;
+        let pid = rendition.last_child_pid.load(Relaxed);
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) }, 0);
+        assert_eq!(
+            rendition.manifest.lock().await.materialized_count(),
+            0,
+            "frozen before its first segment"
+        );
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            rendition
+                .dir
+                .materialize(&mut manifest, 0, b"0123456789", now_ms())
+                .await
+                .expect("inject a member");
+        }
+        serve.shared.working_set.fetch_add(10, Relaxed);
+        assert_eq!(serve.shared.working_set.load(Relaxed), 10);
+        record_failure(&serve.shared, &rendition, "boom".to_string());
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+        let renewed = rendition_of(&serve, "sess-b").await;
+        assert!(
+            !Arc::ptr_eq(&rendition, &renewed),
+            "a failed rendition is replaced, not reattached"
+        );
+        let claimed = renewed.manifest.lock().await.materialized_bytes();
+        assert_eq!(
+            serve.shared.working_set.load(Relaxed),
+            claimed,
+            "the stale rendition's bytes are subtracted exactly once"
+        );
+    }
+
+    /// Fix 6: the purge re-checks dormancy under the renditions lock, so a
+    /// create that attached between maintain's scan and the purge committing
+    /// keeps its rendition.
+    #[tokio::test]
+    async fn a_purge_never_takes_a_rendition_a_create_just_attached() {
+        let base = tempfile::tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+        let key = rendition.key.clone();
+
+        // The interleave: maintain's scan saw the rendition dormant (simulate
+        // by planting a dormant mark), but a session attached before the
+        // purge could commit. The re-check must skip it.
+        *rendition.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+        assert!(
+            serve.shared.renditions.lock().await.contains_key(&key),
+            "a rendition with a live reader survives the purge"
+        );
+        assert!(!rendition.closed.load(Relaxed));
+        assert!(
+            serve.playlist("sess-a").await.expect("ours").is_ok(),
+            "the attached session still serves"
+        );
+
+        // Genuinely dormant — no readers, past TTL — the purge commits.
+        assert!(serve.end("sess-a", Terminal::Deleted).await);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+        assert!(
+            !serve.shared.renditions.lock().await.contains_key(&key),
+            "a dormant rendition purges"
+        );
+        assert!(rendition.closed.load(Relaxed));
+    }
+
+    /// Fix 8: a satisfy that fired between the materialized-miss and the wait
+    /// registration woke nobody — the post-registration re-check serves the
+    /// bytes instead of sleeping a whole budget on them.
+    #[tokio::test]
+    async fn a_satisfy_that_raced_registration_is_not_a_lost_wakeup() {
+        let temp = tempfile::tempdir().expect("temp");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+
+        // The raced state: the bytes landed (their satisfy hit an empty
+        // pool), and nothing will ever satisfy this index again.
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            rendition
+                .dir
+                .materialize(&mut manifest, 5, b"already here", now_ms())
+                .await
+                .expect("materialize");
+        }
+        let served = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve.blocked_wait(&rendition, "sess-x", 5, Duration::from_secs(60)),
+        )
+        .await
+        .expect("the re-check must answer without sleeping the budget")
+        .expect("the materialized segment serves");
+        assert!(served.len > 0);
+
+        // Same window, failure flavor: a failure recorded in the gap answers
+        // typed instead of sleeping.
+        record_failure(&serve.shared, &rendition, "boom".to_string());
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            serve.blocked_wait(&rendition, "sess-x", 6, Duration::from_secs(60)),
+        )
+        .await
+        .expect("the re-check must answer without sleeping the budget")
+        {
+            Err(VodError::ProducerFailed(cause)) => assert_eq!(cause, "boom"),
+            other => panic!("expected ProducerFailed, got {other:?}"),
+        }
+    }
+
+    /// Fix 9: both wake paths for a blocked init GET — the init landing, and
+    /// a producer failure — answer promptly instead of sleeping the budget.
+    #[tokio::test]
+    async fn an_init_write_wakes_a_blocked_init_get() {
+        let temp = tempfile::tempdir().expect("temp");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+
+        let waiter = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        rendition.dir.write_init(b"moov").await.expect("init");
+        rendition.init_notify.notify_waiters();
+        let ready = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the write must wake the waiter")
+            .expect("waiter task")
+            .expect("the init serves");
+        assert!(ready.etag.contains("-init-"));
+    }
+
+    #[tokio::test]
+    async fn a_failure_wakes_a_blocked_init_get() {
+        let temp = tempfile::tempdir().expect("temp");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+
+        let waiter = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        record_failure(&serve.shared, &rendition, "boom".to_string());
+        match tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the failure must wake the waiter")
+            .expect("waiter task")
+        {
+            Err(VodError::ProducerFailed(cause)) => assert_eq!(cause, "boom"),
+            other => panic!("expected ProducerFailed, got {other:?}"),
+        }
+    }
+
+    /// Fix 10: the etag folds the materialization instant in, so an
+    /// evict-and-regenerate whose length happens to match still changes it.
+    #[tokio::test]
+    async fn the_etag_changes_across_an_evict_and_regenerate() {
+        let temp = tempfile::tempdir().expect("temp");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            rendition
+                .dir
+                .materialize(&mut manifest, 0, b"first bytes!", 1_000)
+                .await
+                .expect("materialize");
+        }
+        let first = serve
+            .open_materialized(&rendition, 0)
+            .await
+            .expect("open")
+            .expect("materialized");
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            rendition
+                .dir
+                .materialize(&mut manifest, 0, b"other bytes!", 2_000)
+                .await
+                .expect("re-materialize");
+        }
+        let second = serve
+            .open_materialized(&rendition, 0)
+            .await
+            .expect("open")
+            .expect("materialized");
+        assert_eq!(first.len, second.len, "the collision the instant breaks");
+        assert_ne!(
+            first.etag, second.etag,
+            "same key, index and length must still not collide across a \
+             regeneration"
+        );
+    }
+
+    /// The three surfaces the integrator wires this round: the lease loop's
+    /// live ids and frontier, and the stall-reopen's predecessor facts.
+    #[tokio::test]
+    async fn lease_and_reopen_surfaces_report_live_sessions_only() {
+        let base = tempfile::tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        assert_eq!(serve.live_session_ids().await, vec!["sess-a".to_string()]);
+        assert_eq!(
+            serve.frontier_ms("sess-a").await,
+            Some(0),
+            "0 before the first served segment"
+        );
+        let facts = serve.reopen_facts("sess-a").await.expect("live facts");
+        assert_eq!(facts.playback_id, "play-a");
+        assert_eq!(facts.supersession_user, "[\"user_id\",1]");
+        assert_eq!(facts.file_id, file.id);
+
+        fetch(&serve, "sess-a", "seg00000.m4s").await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+        let expected = ticks_to_ms(
+            rendition.plan.entry(0).expect("entry 0").end_ticks(),
+            rendition.timescale,
+        );
+        assert_eq!(
+            serve.frontier_ms("sess-a").await,
+            Some(expected),
+            "the film-time end of the last served segment"
+        );
+
+        assert!(serve.end("sess-a", Terminal::Deleted).await);
+        assert!(serve.live_session_ids().await.is_empty());
+        assert_eq!(serve.frontier_ms("sess-a").await, None);
+        assert!(serve.reopen_facts("sess-a").await.is_none());
+        assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
+        assert!(serve.frontier_ms("sess-x").await.is_none());
     }
 }
