@@ -109,6 +109,24 @@ impl ProducerSlot {
         inner.belief = after(inner.belief, Step::Start { at });
     }
 
+    /// Record produced-through progress from a running generation's sink.
+    ///
+    /// Only a producer believed `Running` advances — progress reported by a
+    /// generation the executor no longer believes in (killed, reaped, or
+    /// replaced) must not resurrect a belief `after` already settled. The
+    /// value only ever moves forward, because a generation's segments leave
+    /// the segmenter in plan order and a late report must not walk the
+    /// frontier back.
+    pub async fn produced(&self, through: u32) {
+        let mut inner = self.inner.lock().await;
+        if let Producer::Running {
+            produced_through, ..
+        } = &mut inner.belief
+        {
+            *produced_through = Some(produced_through.map_or(through, |sofar| sofar.max(through)));
+        }
+    }
+
     /// Perform one step. Signals are sent under the slot lock; belief is
     /// updated only after the operation succeeds, and only through [`after`].
     ///

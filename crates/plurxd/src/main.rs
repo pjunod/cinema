@@ -35,6 +35,7 @@ mod trakt;
 mod transcode;
 mod version;
 mod vodgen;
+mod vodserve;
 mod waitpool;
 mod watched;
 
