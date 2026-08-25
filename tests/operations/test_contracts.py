@@ -180,17 +180,23 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_provisions_concrete_apple_devices_before_testing(self):
         workflow = read(".github/workflows/ci.yml")
         makefile = read("Makefile")
-        self.assertIn("sudo xcodebuild -runFirstLaunch", workflow)
-        self.assertEqual(workflow.count("xcrun simctl create"), 2)
-        self.assertIn("SimDeviceType.iPhone-16-Pro", workflow)
-        self.assertIn("xcrun simctl list devices available -j", workflow)
-        self.assertIn('runtime.endswith("iOS-18-5")', workflow)
-        self.assertIn('device["name"].startswith("iPad")', workflow)
-        self.assertIn('device["udid"]', workflow)
+        self.assertIn("DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer", workflow)
+        self.assertIn('= "26.6"', workflow)
+        self.assertIn('= "17F113"', workflow)
+        self.assertIn('= "Version: 2.46.0"', workflow)
+        self.assertNotIn("sudo xcode", workflow)
+        self.assertEqual(workflow.count("xcrun simctl create"), 3)
+        self.assertIn("SimDeviceType.iPhone-17-Pro", workflow)
+        self.assertIn("SimDeviceType.iPad-Pro-13-inch-M4-8GB", workflow)
+        self.assertEqual(workflow.count("SimRuntime.iOS-26-5"), 2)
         self.assertIn("SimDeviceType.Apple-TV-4K-3rd-generation-4K", workflow)
+        self.assertIn("SimRuntime.tvOS-26-5", workflow)
         self.assertIn('APPLE_IOS_SIM=platform=iOS Simulator,id=$ios_id', workflow)
         self.assertIn('APPLE_IPAD_SIM=platform=iOS Simulator,id=$ipad_id', workflow)
         self.assertIn('APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id', workflow)
+        self.assertIn("name: Delete the run's simulators", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn('xcrun simctl delete "$udid"', workflow)
         self.assertIn('$${APPLE_IPAD_SIM:-}', makefile)
         self.assertLess(workflow.index("xcrun simctl create"), workflow.index("run: make apple-test"))
 
@@ -436,7 +442,7 @@ class OperationsContractCase(unittest.TestCase):
         high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
         android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
         hosted_linux = "    runs-on: ubuntu-latest"
-        apple = "    runs-on: macos-15"
+        apple = "    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]"
 
         for path in (
             ".github/workflows/ci.yml",

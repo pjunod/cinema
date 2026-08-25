@@ -354,10 +354,21 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
     timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
+      - name: Verify the pinned Apple toolchain
+        run: |
+          test "$(xcodebuild -version | sed -n '1s/^Xcode //p')" = "26.6"
+          test "$(xcodebuild -version | sed -n '2s/^Build version //p')" = "17F113"
+          test "$(xcrun --sdk iphoneos --show-sdk-version)" = "26.5"
+          test "$(xcrun --sdk appletvos --show-sdk-version)" = "26.5"
+          test "$(xcodegen --version)" = "Version: 2.46.0"
+          xcrun simctl list runtimes | grep -Fq "iOS 26.5"
+          xcrun simctl list runtimes | grep -Fq "tvOS 26.5"
       # Warm Swift incrementals: the Makefile builds into
       # clients/apple/build/DerivedData precisely so this cache can restore it.
       # restore-keys accepts the newest prior entry when sources moved — an
@@ -371,33 +382,35 @@ jobs:
           restore-keys: |
             apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
             apple-dd-
-      - name: Select the pinned Xcode and install the project generator
+      - name: Create isolated iPhone, iPad, and Apple TV simulators
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
-          sudo xcodebuild -runFirstLaunch
-          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ios_id=$(xcrun simctl create \
-            "plurx CI iPhone" \
-            com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro \
-            com.apple.CoreSimulator.SimRuntime.iOS-18-5)
-          ipad_id=$(xcrun simctl list devices available -j | python3 -c '
-          import json, sys
-          devices = json.load(sys.stdin)["devices"]
-          print(next(device["udid"]
-                     for runtime, entries in devices.items()
-                     if runtime.endswith("iOS-18-5")
-                     for device in entries
-                     if device["name"].startswith("iPad")))
-          ')
-          tvos_id=$(xcrun simctl create \
-            "plurx CI Apple TV" \
-            com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K \
-            com.apple.CoreSimulator.SimRuntime.tvOS-18-5)
+            "plurx CI iPhone ${suffix}" \
+            com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro \
+            com.apple.CoreSimulator.SimRuntime.iOS-26-5)
           echo "APPLE_IOS_SIM=platform=iOS Simulator,id=$ios_id" >> "$GITHUB_ENV"
+          ipad_id=$(xcrun simctl create \
+            "plurx CI iPad ${suffix}" \
+            com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB \
+            com.apple.CoreSimulator.SimRuntime.iOS-26-5)
           echo "APPLE_IPAD_SIM=platform=iOS Simulator,id=$ipad_id" >> "$GITHUB_ENV"
+          tvos_id=$(xcrun simctl create \
+            "plurx CI Apple TV ${suffix}" \
+            com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K \
+            com.apple.CoreSimulator.SimRuntime.tvOS-26-5)
           echo "APPLE_TVOS_SIM=platform=tvOS Simulator,id=$tvos_id" >> "$GITHUB_ENV"
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
         run: make apple-test
+      - name: Delete the run's simulators
+        if: always()
+        run: |
+          for destination in "${APPLE_IOS_SIM:-}" "${APPLE_IPAD_SIM:-}" "${APPLE_TVOS_SIM:-}"; do
+            udid="${destination##*,id=}"
+            if [ -n "$destination" ] && [ "$udid" != "$destination" ]; then
+              xcrun simctl delete "$udid" || true
+            fi
+          done
 
   android_device:
     name: Android instrumented UI tests
