@@ -2,36 +2,44 @@ use crate::error::Error;
 use crate::reader::LogReadMemo;
 use crate::utils::{bin_to_u32, bin_to_u64, crc, u32_to_bin, u64_to_bin};
 use memmap2::{Mmap, MmapMut, MmapOptions};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, fs};
 use tracing::{debug, info, warn};
 
 static MAGIC_NO_WAL: &[u8] = b"HQL_WAL";
 static MIN_WAL_SIZE: u32 = 8 * 1024;
+static NEXT_WAL_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+fn next_wal_incarnation() -> u64 {
+    NEXT_WAL_INCARNATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |incarnation| {
+            incarnation.checked_add(1)
+        })
+        .expect("process-local WAL incarnation space exhausted")
+}
 
 #[derive(Debug)]
 pub struct WalRecord<'a> {
     log_id: u64,
     crc: &'a [u8],
     data: &'a [u8],
+    len: u32,
 }
 
 impl WalRecord<'_> {
     #[inline]
     fn len(&self) -> u32 {
-        debug_assert!(self.data.len() < u32::MAX as usize);
-        // - 8 byte id
-        // - 4 byte crc (u32)
-        // - 4 byte data length
-        // - variable length data
-        8 + 4 + 4 + self.data.len() as u32
+        self.len
     }
 }
 
 #[derive(Debug)]
 pub struct WalFile {
+    incarnation: u64,
     pub version: u8,
     pub wal_no: u64,
     pub path: String,
@@ -94,7 +102,7 @@ impl WalFile {
             let data_end = self.data_end.unwrap();
 
             loop {
-                let record = self.read_record_unchecked(offset)?;
+                let record = self.read_record(offset)?;
 
                 if let Some(id_before) = id_before
                     && record.log_id != id_before + 1
@@ -178,7 +186,7 @@ impl WalFile {
             }
 
             // This will fail if only null data is read and the `data_len` is 0
-            if let Ok(record) = self.read_record_unchecked(offset) {
+            if let Ok(record) = self.read_record(offset) {
                 if record.log_id > 0 {
                     // We found unexpected data. In case of any errors, we will ignore this
                     // unexpected data and let the next append logs action overwrite it.
@@ -335,6 +343,7 @@ impl WalFile {
     #[inline]
     pub fn clone_no_mmap(&self) -> Self {
         Self {
+            incarnation: self.incarnation,
             version: self.version,
             wal_no: self.wal_no,
             path: self.path.clone(),
@@ -350,7 +359,11 @@ impl WalFile {
 
     #[inline]
     pub fn clone_from_no_mmap(&mut self, other: &Self) {
-        debug_assert_eq!(self.path, other.path);
+        assert_eq!(self.path, other.path, "WAL path changed within one incarnation");
+        assert_eq!(
+            self.incarnation, other.incarnation,
+            "WAL incarnation changed on the append-only refresh path"
+        );
         self.id_from = other.id_from;
         self.id_until = other.id_until;
         self.data_start = other.data_start;
@@ -396,6 +409,7 @@ impl WalFile {
         let mut offset = 0;
 
         if let Some(memo) = memo
+            && memo.wal_incarnation == self.incarnation
             && memo.last_wal_no == self.wal_no
             // Purging every retained entry deletes the last WAL and creates a
             // fresh file numbered one. A reader memo from the deleted file is
@@ -405,21 +419,37 @@ impl WalFile {
             // must therefore be discarded before its offset is reused.
             && memo.last_log_id >= self.id_from
             && memo.last_log_id < id_from
+            && memo.data_end >= data_start
+            && memo.data_end < data_end
         {
             // we can use the memoized last log as our start position
             // `data_end` is inclusive
-            idx = memo.data_end + 1;
+            idx = memo.data_end.checked_add(1).ok_or_else(|| {
+                Error::Integrity("LogReadMemo byte offset overflow".into())
+            })?;
             debug!("LogReadMemo match, shifting start idx to: {}", idx);
         }
+        let mut next_memo = None;
         loop {
-            let record = self.read_record_unchecked(idx)?;
+            let record = self.read_record(idx)?;
+            let record_end = idx.checked_add(record.len()).ok_or_else(|| {
+                Error::Integrity(format!("WAL record end overflow at byte {idx}\n{self:?}").into())
+            })?;
 
             if record.log_id == id_from {
                 offset = idx;
             }
             if record.log_id >= id_from {
                 if record.log_id <= id_until {
-                    debug_assert!(idx + record.len() <= data_end);
+                    if record_end > data_end {
+                        return Err(Error::Integrity(
+                            format!(
+                                "WAL record {} ends beyond declared data_end {}\n{self:?}",
+                                record.log_id, data_end
+                            )
+                            .into(),
+                        ));
+                    }
                     if record.crc != crc!(record.data) {
                         return Err(Error::Integrity("Invalid CRC for WAL Record".into()));
                     }
@@ -429,14 +459,13 @@ impl WalFile {
                 }
             }
             if record.log_id >= id_until {
-                debug_assert!(record.data.len() < u32::MAX as usize);
                 match self.version {
                     1 => {
-                        *memo = Some(LogReadMemo {
+                        next_memo = Some(LogReadMemo {
+                            wal_incarnation: self.incarnation,
                             last_wal_no: self.wal_no,
                             last_log_id: record.log_id,
-                            // id, crc, length, data
-                            data_end: idx + 8 + 4 + 4 + record.data.len() as u32,
+                            data_end: record_end,
                         });
                     }
                     _ => unreachable!(),
@@ -445,52 +474,97 @@ impl WalFile {
             }
 
             // add 1 because the `len` is inclusive and points at the last byte of data
-            idx += record.len() + 1;
-            debug_assert!(idx - 1 <= data_end);
+            idx = record_end.checked_add(1).ok_or_else(|| {
+                Error::Integrity(format!("WAL next-record offset overflow\n{self:?}").into())
+            })?;
+            if idx > data_end {
+                return Err(Error::Integrity(
+                    format!(
+                        "WAL metadata claims logs through {id_until}, but data ends after log {}\n{self:?}",
+                        record.log_id
+                    )
+                    .into(),
+                ));
+            }
         }
 
-        debug_assert_eq!(
-            id_until + 1 - id_from,
-            buf.len() as u64,
-            "expected id_from {id_from} until {id_until}: {:?}",
-            self
-        );
+        let expected = id_until
+            .checked_sub(id_from)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| Error::Integrity("requested WAL range length overflow".into()))?;
+        if expected != buf.len() as u64 {
+            return Err(Error::Integrity(
+                format!(
+                    "WAL metadata claims range {id_from}..={id_until}, but only {} records were readable\n{self:?}",
+                    buf.len()
+                )
+                .into(),
+            ));
+        }
+
+        *memo = next_memo;
 
         Ok(offset)
     }
 
-    /// Reads a record at the given `offset`. Does NOT do any boundary checking or any other
-    /// validation. Only extracts the data itself.
+    /// Reads and bounds-checks a record at the given byte offset.
     #[inline(always)]
-    fn read_record_unchecked(&self, offset: u32) -> Result<WalRecord<'_>, Error> {
-        debug_assert!(offset + 8 + 4 + 4 < self.len_max);
-
+    fn read_record(&self, offset: u32) -> Result<WalRecord<'_>, Error> {
         // id, crc, length
-        let head = self.read_bytes(offset, offset + 8 + 4 + 4)?;
+        let head_end = offset.checked_add(8 + 4 + 4).ok_or_else(|| {
+            Error::Integrity(format!("WAL record header offset overflow\n{self:?}").into())
+        })?;
+        let head = self.read_bytes(offset, head_end)?;
 
         let log_id = bin_to_u64(&head[..8])?;
         let crc = &head[8..12];
 
-        let data_from = offset + 8 + 4 + 4;
+        let data_from = head_end;
         let data_len = bin_to_u32(&head[12..16])?;
         if data_len == 0 {
             return Err(Error::Integrity(
                 format!("Attempt to read non-existent data of length 0\n{self:?}").into(),
             ));
         }
-        let data = self.read_bytes(data_from, data_from + data_len)?;
+        let data_until = data_from.checked_add(data_len).ok_or_else(|| {
+            Error::Integrity(format!("WAL record data offset overflow\n{self:?}").into())
+        })?;
+        let len = (8_u32 + 4 + 4).checked_add(data_len).ok_or_else(|| {
+            Error::Integrity(format!("WAL record length overflow\n{self:?}").into())
+        })?;
+        let data = self.read_bytes(data_from, data_until)?;
 
-        Ok(WalRecord { log_id, crc, data })
+        Ok(WalRecord {
+            log_id,
+            crc,
+            data,
+            len,
+        })
     }
 
-    /// Does NOT do any boundary checks for the given range!
+    /// Returns one checked byte range from the active mapping.
     #[inline(always)]
     fn read_bytes(&self, from: u32, until: u32) -> Result<&[u8], Error> {
-        debug_assert!(from < until, "from < until -> {from} < {until}");
+        if from >= until {
+            return Err(Error::Integrity(
+                format!("invalid WAL byte range {from}..{until}\n{self:?}").into(),
+            ));
+        }
+        let range = from as usize..until as usize;
         if let Some(mmap) = &self.mmap {
-            Ok(&mmap[from as usize..until as usize])
+            mmap.get(range).ok_or_else(|| {
+                Error::Integrity(
+                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}")
+                        .into(),
+                )
+            })
         } else if let Some(mmap) = &self.mmap_mut {
-            Ok(&mmap[from as usize..until as usize])
+            mmap.get(range).ok_or_else(|| {
+                Error::Integrity(
+                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}")
+                        .into(),
+                )
+            })
         } else {
             Err(Error::Generic("No mmap exists".into()))
         }
@@ -593,6 +667,7 @@ impl WalFile {
         let path = Self::build_full_path(base_path, wal_no);
 
         Ok(Self {
+            incarnation: next_wal_incarnation(),
             wal_no,
             path,
             version: 1,
@@ -660,6 +735,7 @@ impl WalFile {
         let data_end = bin_to_u32(&buf[28..32])?;
 
         Ok(Self {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no,
             path: path_full,
@@ -872,26 +948,29 @@ impl WalFileSet {
     }
 
     #[inline]
-    pub fn clone_files_from_no_mmap(&mut self, other: &VecDeque<WalFile>) {
-        // in case old WAL files have been cleaned up
-        self.files
-            .retain(|f| other.iter().any(|upd| upd.wal_no == f.wal_no));
-
-        self.files.iter_mut().enumerate().for_each(|(i, f)| {
-            // this has top work, the files MUST always be in order and we have cleanup up
-            // old files in the step before
-            let upd = &other[i];
-            debug_assert_eq!(f.wal_no, upd.wal_no);
-            f.id_from = upd.id_from;
-            f.id_until = upd.id_until;
-            f.data_start = upd.data_start;
-            f.data_end = upd.data_end;
-        });
-
-        // the last case is that `other` contains new files because of log roll-overs
-        for upd in other.iter().skip(self.files.len()) {
-            self.files.push_back(upd.clone_no_mmap());
+    pub fn refresh_from_no_mmap(&mut self, other: &WalFileSet) {
+        let mut existing = HashMap::with_capacity(self.files.len());
+        for file in std::mem::take(&mut self.files) {
+            let identity = (file.wal_no, file.incarnation);
+            assert!(
+                existing.insert(identity, file).is_none(),
+                "duplicate WAL identity in reader refresh"
+            );
         }
+
+        let mut refreshed = VecDeque::with_capacity(other.files.len());
+        for update in &other.files {
+            let identity = (update.wal_no, update.incarnation);
+            if let Some(mut file) = existing.remove(&identity) {
+                file.clone_from_no_mmap(update);
+                refreshed.push_back(file);
+            } else {
+                refreshed.push_back(update.clone_no_mmap());
+            }
+        }
+
+        self.files = refreshed;
+        self.active = other.active;
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1106,7 +1185,7 @@ mod tests {
         wal_disk.read_logs(1, 3, &mut memo, &mut logs)?;
         assert_eq!(logs.len(), 3);
 
-        let (id, data) = logs.get(0).unwrap();
+        let (id, data) = logs.first().unwrap();
         assert_eq!(id, &1);
         assert_eq!(data, d1);
         let (id, data) = logs.get(1).unwrap();
@@ -1120,7 +1199,7 @@ mod tests {
         logs.clear();
         wal_disk.read_logs(2, 3, &mut memo, &mut logs)?;
         assert_eq!(logs.len(), 2);
-        let (id, data) = logs.get(0).unwrap();
+        let (id, data) = logs.first().unwrap();
         assert_eq!(id, &2);
         assert_eq!(data, d2);
         let (id, data) = logs.get(1).unwrap();
@@ -1131,7 +1210,7 @@ mod tests {
         logs.clear();
         wal_disk.read_logs(2, 2, &mut memo, &mut logs)?;
         assert_eq!(logs.len(), 1);
-        let (id, data) = logs.get(0).unwrap();
+        let (id, data) = logs.first().unwrap();
         assert_eq!(id, &2);
         assert_eq!(data, d2);
 
@@ -1184,12 +1263,12 @@ mod tests {
         };
         buf.clear();
         set.add_file(MB2, &mut buf).unwrap();
-        assert_eq!(fs::exists(&path_h1)?, true);
-        assert_eq!(fs::exists(&path_h2)?, false);
+        assert!(fs::exists(&path_h1)?);
+        assert!(!fs::exists(&path_h2)?);
 
         buf.clear();
         set.add_file(MB2, &mut buf).unwrap();
-        assert_eq!(fs::exists(&path_h2)?, true);
+        assert!(fs::exists(&path_h2)?);
 
         Ok(())
     }
@@ -1203,6 +1282,7 @@ mod tests {
 
         let mut files = VecDeque::with_capacity(4);
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 1,
             path: "".to_string(),
@@ -1216,6 +1296,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 2,
             path: "".to_string(),
@@ -1229,6 +1310,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 3,
             path: "".to_string(),
@@ -1257,6 +1339,7 @@ mod tests {
         // missing logs - invalid if_until -> next id_from
         let mut files = VecDeque::with_capacity(4);
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 1,
             path: "".to_string(),
@@ -1270,6 +1353,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 3,
             path: "".to_string(),
@@ -1291,6 +1375,7 @@ mod tests {
 
         let mut files = VecDeque::with_capacity(4);
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 1,
             path: "".to_string(),
@@ -1304,6 +1389,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 2,
             path: "".to_string(),
@@ -1317,6 +1403,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 4,
             path: "".to_string(),
@@ -1338,6 +1425,7 @@ mod tests {
 
         let mut files = VecDeque::with_capacity(4);
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 1,
             path: "".to_string(),
@@ -1351,6 +1439,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 2,
             path: "".to_string(),
@@ -1364,6 +1453,7 @@ mod tests {
             mmap_mut: None,
         });
         files.push_back(WalFile {
+            incarnation: next_wal_incarnation(),
             version: 1,
             wal_no: 3,
             path: "".to_string(),
@@ -1580,6 +1670,7 @@ mod tests {
         // the new file's first retained index. Reusing that byte offset used to
         // make a real first entry look absent immediately after snapshot install.
         let mut memo = Some(LogReadMemo {
+            wal_incarnation: next_wal_incarnation(),
             last_wal_no: 1,
             last_log_id: 42,
             data_end: 256,
@@ -1588,6 +1679,180 @@ mod tests {
         wal.read_logs(10_001, 10_001, &mut memo, &mut logs)?;
 
         assert_eq!(logs, vec![(10_001, b"new generation".to_vec())]);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_rebuilds_in_writer_order_when_only_the_front_identity_changes() -> Result<(), Error> {
+        let base_path = format!("{}/refresh_partial_identity", PATH);
+        let mut old_front = WalFile::new(1, &base_path, 1, 10, MB2)?;
+        old_front.data_start = Some(32);
+        old_front.data_end = Some(64);
+        let mut suffix = WalFile::new(2, &base_path, 11, 20, MB2)?;
+        suffix.data_start = Some(32);
+        suffix.data_end = Some(64);
+        let suffix_incarnation = suffix.incarnation;
+
+        let mut reader = WalFileSet {
+            active: Some(1),
+            base_path: base_path.clone(),
+            files: VecDeque::from([old_front, suffix]),
+        };
+
+        let mut replacement_front = WalFile::new(1, &base_path, 100, 110, MB2)?;
+        replacement_front.data_start = Some(32);
+        replacement_front.data_end = Some(96);
+        let replacement_incarnation = replacement_front.incarnation;
+        let mut retained_suffix = reader.files[1].clone_no_mmap();
+        retained_suffix.id_until = 25;
+        retained_suffix.data_end = Some(80);
+        let writer = WalFileSet {
+            active: Some(1),
+            base_path,
+            files: VecDeque::from([replacement_front, retained_suffix]),
+        };
+
+        reader.refresh_from_no_mmap(&writer);
+
+        assert_eq!(reader.active, Some(1));
+        assert_eq!(reader.files.len(), 2);
+        assert_eq!(reader.files[0].wal_no, 1);
+        assert_eq!(reader.files[0].incarnation, replacement_incarnation);
+        assert_eq!(reader.files[0].id_from, 100);
+        assert_eq!(reader.files[1].wal_no, 2);
+        assert_eq!(reader.files[1].incarnation, suffix_incarnation);
+        assert_eq!(reader.files[1].id_until, 25);
+        assert_eq!(reader.files[1].data_end, Some(80));
+        Ok(())
+    }
+
+    #[test]
+    fn full_purge_replaces_stale_mmap_and_memo_across_reused_wal_numbers() -> Result<(), Error> {
+        let base_path = format!("{}/full_purge_replaces_reader_generation", PATH);
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut header = Vec::with_capacity(32);
+        let mut records = Vec::with_capacity(4);
+        let mut writer = WalFileSet {
+            active: None,
+            base_path: base_path.clone(),
+            files: VecDeque::new(),
+        };
+        writer.add_file(MB2, &mut header)?;
+        writer.active().mmap_mut()?;
+        header.clear();
+        writer.active().append_log(1, b"old-1", &mut header)?;
+        header.clear();
+        writer.active().append_log(2, b"old-2", &mut header)?;
+
+        let mut reader = writer.clone_no_map();
+        reader.active().mmap()?;
+        let old_incarnation = reader.active().incarnation;
+        let mut memo = None;
+        reader
+            .active()
+            .read_logs(1, 2, &mut memo, &mut records)?;
+        assert_eq!(records.len(), 2);
+        assert!(reader.active().mmap.is_some());
+
+        header.clear();
+        records.clear();
+        writer.shift_delete_logs(0, 3, MB2, &mut header, &mut records)?;
+        header.clear();
+        writer
+            .active()
+            .append_log(10_001, b"generation-b-1", &mut header)?;
+        header.clear();
+        writer.roll_over(MB2, &mut header)?;
+        header.clear();
+        writer
+            .active()
+            .append_log(10_002, b"generation-b-2", &mut header)?;
+        header.clear();
+        writer.roll_over(MB2, &mut header)?;
+        header.clear();
+        writer
+            .active()
+            .append_log(10_003, b"generation-b-3", &mut header)?;
+
+        reader.refresh_from_no_mmap(&writer);
+        assert_eq!(reader.files.len(), 3);
+        assert_ne!(reader.files[0].incarnation, old_incarnation);
+        assert!(reader.files.iter().all(|file| file.mmap.is_none()));
+
+        records.clear();
+        let mut generation_b = Vec::with_capacity(3);
+        for (position, id) in (10_001..=10_003).enumerate() {
+            let file = reader.files.get_mut(position).unwrap();
+            file.mmap()?;
+            records.clear();
+            file.read_logs(id, id, &mut memo, &mut records)?;
+            generation_b.append(&mut records);
+        }
+        assert_eq!(
+            generation_b,
+            vec![
+                (10_001, b"generation-b-1".to_vec()),
+                (10_002, b"generation-b-2".to_vec()),
+                (10_003, b"generation-b-3".to_vec()),
+            ]
+        );
+
+        let generation_b_incarnation = reader.files[0].incarnation;
+        header.clear();
+        records.clear();
+        writer.shift_delete_logs(0, 10_004, MB2, &mut header, &mut records)?;
+        header.clear();
+        writer
+            .active()
+            .append_log(20_001, b"generation-c", &mut header)?;
+
+        reader.refresh_from_no_mmap(&writer);
+        assert_eq!(reader.files.len(), 1);
+        assert_ne!(reader.files[0].incarnation, generation_b_incarnation);
+        assert!(reader.files[0].mmap.is_none());
+        reader.active().mmap()?;
+        records.clear();
+        reader
+            .active()
+            .read_logs(20_001, 20_001, &mut memo, &mut records)?;
+        assert_eq!(records, vec![(20_001, b"generation-c".to_vec())]);
+
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_record_length_returns_integrity_error_instead_of_panicking() -> Result<(), Error> {
+        let base_path = format!("{}/malformed_record_length", PATH);
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut header = Vec::with_capacity(32);
+        let mut wal = WalFile::new(1, &base_path, 0, 0, MB2)?;
+        wal.create_file(&mut header)?;
+        wal.mmap_mut()?;
+        header.clear();
+        wal.append_log(1, b"one", &mut header)?;
+
+        let length_offset = wal.data_start.unwrap() as usize + 8 + 4;
+        header.clear();
+        u32_to_bin(u32::MAX, &mut header)?;
+        wal.mmap_mut.as_mut().unwrap()[length_offset..length_offset + 4]
+            .copy_from_slice(&header);
+
+        let mut memo = None;
+        let mut records = Vec::with_capacity(1);
+        let error = wal
+            .read_logs(1, 1, &mut memo, &mut records)
+            .expect_err("overflowing record length must be rejected");
+        assert!(matches!(error, Error::Integrity(_)));
+
+        drop(wal);
         fs::remove_dir_all(base_path)?;
         Ok(())
     }

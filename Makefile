@@ -121,6 +121,12 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  writer::tests::single_file_snapshot_tail_restores_its_missing_purge_boundary \
 	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  wal::tests::full_purge_replaces_stale_mmap_and_memo_across_reused_wal_numbers \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  reader::tests::failed_claimed_range_does_not_poison_the_next_reader_action \
+	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
 	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \

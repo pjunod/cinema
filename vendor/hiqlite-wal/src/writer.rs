@@ -205,8 +205,7 @@ fn run(
                             wal.roll_over(wal_size, &mut buf)?;
                             {
                                 let mut lock = wal_locked.write().unwrap();
-                                lock.active = wal.active;
-                                lock.clone_files_from_no_mmap(&wal.files);
+                                lock.refresh_from_no_mmap(&wal);
                             }
                             active = wal.active();
                         }
@@ -255,8 +254,7 @@ fn run(
                     wal.roll_over(wal_size, &mut buf)?;
                     {
                         let mut lock = wal_locked.write().unwrap();
-                        lock.active = wal.active;
-                        lock.clone_files_from_no_mmap(&wal.files);
+                        lock.refresh_from_no_mmap(&wal);
                     }
                 }
             }
@@ -296,8 +294,7 @@ fn run(
                         }
                         {
                             let mut lock = wal_locked.write().unwrap();
-                            lock.active = wal.active;
-                            lock.clone_files_from_no_mmap(&wal.files);
+                            lock.refresh_from_no_mmap(&wal);
                         }
                         ack.send(Ok(())).unwrap();
                     }
