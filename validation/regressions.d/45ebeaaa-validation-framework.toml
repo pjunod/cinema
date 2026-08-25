@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["45ebeaaa"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit requires the newly merged Darwin secure-path correction to retain one current regression mapping. Commit `45ebeaaa` adds that missing SHA to the existing storage-pressure coverage row; `history-regressions` directly rejects a tree where that registration is removed."
