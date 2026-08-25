@@ -307,6 +307,9 @@ leave the tab. Everything after that — the owner-only file, `join_token_file`,
 the fresh data directory — is the terminal procedure below, unchanged. Treat the
 displayed token exactly as the runbook treats the `curl` response: anyone
 holding it can join a node to this cluster until it is redeemed or expires.
+That Settings control deliberately remains the voter-default path. To add a
+non-voting replicated learner, use the role-specific terminal endpoint below;
+the same token file setting consumes either format.
 
 **Remove** calls the removal endpoint and renders its refusal as a sentence with
 a next step rather than a code. `node_owns_offline_work` tells you to let active
@@ -867,12 +870,32 @@ curl -fsS -X POST "$PLURX/api/v1/cluster/join-tokens" \
   | jq -er .token > "$JOIN_TOKEN_FILE"
 ```
 
+The command above admits a voter and remains the default. To admit a
+non-voting learner instead, change only the issuance endpoint:
+
+```bash
+curl -fsS -X POST "$PLURX/api/v1/cluster/learner-join-tokens" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"expires_in_seconds":600}' \
+  | jq -er .token > "$JOIN_TOKEN_FILE"
+```
+
+A learner is a trusted cluster principal: its v2 token carries the same shared
+Hiqlite Raft/API secrets required for replication. Protect its host and private
+cluster ports exactly like a voter. The public role-specific endpoint prevents
+accidental voter admission; it is not an authorization boundary against a
+compromised admitted host.
+
 **Start a fresh joining node.** Its data directory must not contain
 `plurx.db`; joining never overwrites an installation. Copy the protected token
 file there, configure this node's own reachable addresses, and start `plurxd`.
 It checks schema/protocol compatibility before admission, creates a distinct
-`node.id`, catches up as a learner, becomes a voter, verifies the unchanged
-replicated `instance.id`, and deletes the token file only after finalization.
+`node.id`, catches up, verifies the unchanged replicated `instance.id`, and
+deletes the token file only after finalization. A v1 token promotes the node to
+a voter as before. A v2 token commits it as a learner and writes
+`membership.json` version 2 with `role = "learner"`; startup and finalization
+require it to remain outside the voter set.
 An interrupted join reuses its staged identity instead of minting another one.
 `membership.json` records that token's digest. A leftover token from another
 node therefore produces a warning and is ignored rather than taking an already

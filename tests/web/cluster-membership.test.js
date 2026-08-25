@@ -281,7 +281,7 @@ test("a replicated one-node install says one node is a complete configuration", 
   assert.match(view.body, /complete, supported configuration/i);
 });
 
-test("a learner is named as not voting yet", () => {
+test("a learner is non-voting and never promises automatic promotion", () => {
   const ui = sandbox();
   const view = ui.clusterStateView(
     status("single_node", [
@@ -289,8 +289,10 @@ test("a learner is named as not voting yet", () => {
       node("node-b", 2, "learner"),
     ]),
   );
-  assert.match(view.body, /catching up as a learner/i);
-  assert.match(view.body, /do(es)? not vote yet/i);
+  assert.match(view.body, /non-voting learner/i);
+  assert.match(view.body, /does not add voting redundancy/i);
+  assert.match(view.body, /promotion is not automatic/i);
+  assert.doesNotMatch(view.body, /becomes a voter once caught up/i);
 });
 
 // ---- every refusal is a sentence with a next step -------------------------

@@ -235,31 +235,35 @@ join token carries it with `secret_raft` and `secret_api` inside one encrypted,
 single-use envelope. Raft and the redemption/finalization HTTP bodies never
 carry the key or that envelope.
 
-## Cluster admission — one bearer, one voter, one use
+## Cluster admission — one bearer, one bound role, one use
 
 `POST /api/v1/cluster/join-tokens` requires an admin login token and returns a
-join token once. The joining node opens that token locally, then sends only its
-SHA-256 digest to the narrow redeem/finalize endpoints. That digest proves
-possession against the coordinator's stored digest without putting the
-self-contained cluster secrets on the public HTTP wire. Requiring a user login
-there would make a fresh node impossible to admit, while accepting an admin
-token as a node credential would give it much broader authority than it needs.
+v1 voter token once. `POST /api/v1/cluster/learner-join-tokens` does the same
+for a v2 non-voting learner token. The joining node opens its token locally,
+then sends only the SHA-256 digest to the role-specific redeem/finalize
+endpoints. That digest proves possession against the coordinator's stored
+digest without putting the self-contained cluster secrets on the public HTTP
+wire. Requiring a user login there would make a fresh node impossible to admit,
+while accepting an admin token as a node credential would give it much broader
+authority than it needs.
 
-The token is `plxjoin:v1:<key>:<nonce+ciphertext+tag>`. XChaCha20-Poly1305
-authenticates and hides cluster id · assigned Raft id · bootstrap addresses ·
-expiry · schema/protocol versions · activation proof · Raft/API secrets · the
-credential-wrapping key. The self-contained key makes this an opaque bearer,
-not protection from its holder: anyone who steals the complete token can use
-its authority until redemption or expiry. Encryption prevents casual payload
-disclosure and tampering; single-use state and a short lifetime limit replay.
+Voter tokens are `plxjoin:v1:<key>:<nonce+ciphertext+tag>` under the v1 AAD;
+learner tokens use `plxjoin:v2` and distinct v2 AAD. XChaCha20-Poly1305
+authenticates and hides cluster id · assigned Raft id · bound role · bootstrap
+addresses · expiry · schema/protocol versions · activation proof · Raft/API
+secrets · the credential-wrapping key. The self-contained key makes this an
+opaque bearer, not protection from its holder: anyone who steals the complete
+token can use its authority until redemption or expiry. Encryption prevents
+casual payload disclosure and tampering; single-use state and a short lifetime
+limit replay.
 
 | Boundary | Rule and reason |
 |---|---|
 | Issuance | Admin-only, 10 minutes by default, clamped to 60–3,600 seconds. A typo must not mint a near-permanent cluster credential |
-| Replicated record | SHA-256 token digest · expiry · assigned Raft id · state · admitted node id. The token and cluster secrets never enter replicated SQL |
-| Redemption | The fresh node sends the token digest, assigned Raft id, compatibility versions, node id, and peer addresses — never the full token. The stored digest changes atomically from `issued` to `redeeming` and is reserved to one generated `node.id`. Another node gets `join_token_reserved` rather than sharing authority |
-| Finalization | Only after Hiqlite reports the assigned Raft id as a voter does state become `redeemed`. Later redemption gets `join_token_reused`; an expired token gets `join_token_expired` |
-| Local material | Put the token in an owner-only file named by `cluster.join_token_file`, never in TOML or a command transcript. Successful finalization deletes that file; interrupted startup retains it only to resume the same staged identity. Local membership stores its digest, so an unrelated or copied token file warns and is ignored rather than bricking a healthy voter |
+| Replicated record | SHA-256 token digest · expiry · assigned Raft id · state · admitted node id. An additive immutable role row binds every v2 token to `learner`; no role row retains the exact v1 voter meaning. The token and cluster secrets never enter replicated SQL |
+| Redemption | The fresh node sends the token digest, assigned Raft id, compatibility versions, node id, and peer addresses — never the full token and never a caller-selected role. The role-specific endpoint derives role from the replicated record. The stored digest changes atomically from `issued` to `redeeming` and is reserved to one generated `node.id`. Another node gets `join_token_reserved`; using a learner token on the voter endpoint gets `join_token_invalid` without reserving it |
+| Finalization | Only after Hiqlite reports the assigned Raft id in its bound committed role does state become `redeemed`: a voter must be in the voter set; a learner must be present and outside it. Later redemption gets `join_token_reused`; an expired token gets `join_token_expired` |
+| Local material | Put the token in an owner-only file named by `cluster.join_token_file`, never in TOML or a command transcript. Successful finalization deletes that file; interrupted startup retains it only to resume the same staged identity. v1 `membership.json` means voter and omits role; v2 explicitly records `learner`. Local membership stores its digest, so an unrelated or copied token file warns and is ignored rather than bricking a healthy member |
 | Public status | Node id · Raft id · role · reachability · last-seen and the existing replication projection. It omits token material, peer addresses, media paths, and library data |
 
 A joining data directory must be fresh: the presence of `plurx.db` refuses the
@@ -267,6 +271,14 @@ join instead of overwriting an installation. Schema and auth-protocol versions
 are checked against the existing cluster before the process enters membership.
 The join path is LAN-only and contacts only addresses carried by the token; it
 has no discovery service or cloud dependency.
+
+All admitted voters and learners are trusted cluster principals. Hiqlite uses
+one shared Raft secret and one shared private-API secret for replication, and a
+learner must receive both to replicate. A learner host holding that API secret
+can call Hiqlite's private membership routes directly; the role-specific public
+Plurx endpoints are a correctness boundary, not an authorization boundary.
+Protect learner hosts, data directories, and network reachability to private
+Raft/API listeners to the same standard as voters.
 
 Removal is also fail-closed. It refuses the current leader, a change that would
 leave fewer than two voters, and any target owning offline work. A replicated

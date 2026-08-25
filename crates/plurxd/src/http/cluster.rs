@@ -45,6 +45,20 @@ pub async fn issue_join_token(
         .map_err(api_error)
 }
 
+pub async fn issue_learner_join_token(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<IssueJoinTokenRequest>,
+) -> Result<Json<IssuedJoinToken>, ApiError> {
+    let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
+    state
+        .membership
+        .issue_learner_token(Duration::from_secs(seconds))
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
 pub async fn nodes(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -161,6 +175,18 @@ pub async fn redeem_join(
         .map_err(api_error)
 }
 
+pub async fn redeem_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<RedeemJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .redeem_learner(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
 pub async fn finalize_join(
     State(state): State<AppState>,
     Json(request): Json<FinalizeJoinRequest>,
@@ -168,6 +194,18 @@ pub async fn finalize_join(
     state
         .membership
         .finalize(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
+pub async fn finalize_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<FinalizeJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .finalize_learner(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)

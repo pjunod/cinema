@@ -783,6 +783,20 @@ the resulting two-voter set reports `degraded_reconfiguration`, and any 2→1
 removal is deliberately refused with `removal_would_lose_quorum` until a later
 milestone proves a downgrade protocol.
 
+**P6a delivered 2026-08-25.** Learner admission is wire-distinct from M3a:
+admin issuance uses `/api/v1/cluster/learner-join-tokens`, the bearer uses a
+`plxjoin:v2` prefix and distinct authenticated-encryption context, and redeem
+and finalize have learner-only endpoints. An additive replicated role record
+binds v2 credentials to `learner`; requests never supply role. The joining
+daemon writes a v2 `membership.json`, sets Hiqlite's learner-only startup hint,
+and finalizes only after committed membership contains the node outside the
+voter set. v1 token bytes, endpoints, local-file meaning, and voter-default
+behavior remain unchanged. The standard cluster gate starts three v1 voters
+and a fourth v2 process, rejects cross-role redemption without consuming the
+credential, checks the voter count remains three, and restarts the learner from
+its v2 file. Every admitted node remains inside the shared-secret trust
+boundary; [SECURITY.md](SECURITY.md) states that choice explicitly.
+
 **M3c delivered.** Node removal resolves the offline work owned by that node
 before the membership change commits, closing the activation blocker M3a
 answered with a blanket refusal. A package still cannot be silently re-homed,

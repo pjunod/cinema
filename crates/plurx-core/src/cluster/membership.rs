@@ -30,9 +30,12 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
-const JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
-const JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
-const JOIN_TOKEN_VERSION: u32 = 1;
+const VOTER_JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
+const VOTER_JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
+const VOTER_JOIN_TOKEN_VERSION: u32 = 1;
+const LEARNER_JOIN_TOKEN_PREFIX: &str = "plxjoin:v2";
+const LEARNER_JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v2";
+const LEARNER_JOIN_TOKEN_VERSION: u32 = 2;
 const MEMBERSHIP_SCHEMA_VERSION: i64 = 1;
 const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
 const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
@@ -81,6 +84,28 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          node_id TEXT, \
          created_at INTEGER NOT NULL, \
          redeemed_at INTEGER) STRICT",
+    // Role is additive rather than a new column on cluster_join_tokens so a
+    // rolling v1 voter continues writing its original seven-column row. The
+    // absence of a role row is exactly the legacy voter meaning; every v2
+    // learner token gets an immutable row in the same issuance transaction.
+    "CREATE TABLE IF NOT EXISTS cluster_join_token_roles (\
+         token_hash TEXT PRIMARY KEY, \
+         role TEXT NOT NULL CHECK (role = 'learner')) STRICT",
+    // An older coordinator knows only the v1 voter endpoint and would
+    // otherwise accept any digest in cluster_join_tokens. A replicated trigger
+    // makes that old UPDATE fail for learner credentials. The v2 coordinator
+    // creates and consumes this proof inside the same Raft transaction as its
+    // reservation, so no durable bypass window exists.
+    "CREATE TABLE IF NOT EXISTS cluster_learner_join_intents (\
+         token_hash TEXT PRIMARY KEY) STRICT",
+    "CREATE TRIGGER IF NOT EXISTS cluster_learner_join_v1_guard \
+         BEFORE UPDATE OF state ON cluster_join_tokens \
+         WHEN NEW.state = 'redeeming' AND OLD.state = 'issued' \
+           AND EXISTS (SELECT 1 FROM cluster_join_token_roles role \
+             WHERE role.token_hash = OLD.token_hash AND role.role = 'learner') \
+           AND NOT EXISTS (SELECT 1 FROM cluster_learner_join_intents intent \
+             WHERE intent.token_hash = OLD.token_hash) \
+         BEGIN SELECT RAISE(ABORT, 'learner token requires v2 admission'); END",
     "CREATE TABLE IF NOT EXISTS cluster_nodes (\
          node_id TEXT PRIMARY KEY, \
          raft_id INTEGER NOT NULL UNIQUE CHECK (raft_id > 0), \
@@ -341,6 +366,10 @@ pub struct LocalMembership {
     /// file from turning an otherwise healthy restart into a failed join.
     #[serde(default)]
     pub join_token_digest: Option<String>,
+    /// v1 files omit the role and mean voter. A v2 file must explicitly bind
+    /// learner so an older binary rejects its version before opening Raft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<NodeRole>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1022,6 +1051,10 @@ pub struct JoinSecrets {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinPayload {
     version: u32,
+    /// v1 payloads omit this field and mean voter. v2 payloads are valid only
+    /// when they explicitly name the learner role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<NodeRole>,
     pub cluster_id: String,
     pub raft_id: u64,
     pub expires_at: i64,
@@ -1031,6 +1064,18 @@ pub struct JoinPayload {
     pub activation_marker: ActivationMarker,
     pub schema_version: i64,
     pub protocol_version: i64,
+}
+
+impl JoinPayload {
+    #[must_use]
+    pub fn node_role(&self) -> NodeRole {
+        self.role.clone().unwrap_or(NodeRole::Voter)
+    }
+
+    #[must_use]
+    pub fn membership_version(&self) -> u32 {
+        self.version
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1185,6 +1230,22 @@ impl MembershipManager {
     }
 
     pub async fn issue_token(&self, ttl: Duration) -> Result<IssuedJoinToken, MembershipError> {
+        self.issue_token_for_role(ttl, NodeRole::Voter).await
+    }
+
+    /// Mint the wire-distinct v2 credential used only by a non-voting join.
+    pub async fn issue_learner_token(
+        &self,
+        ttl: Duration,
+    ) -> Result<IssuedJoinToken, MembershipError> {
+        self.issue_token_for_role(ttl, NodeRole::Learner).await
+    }
+
+    async fn issue_token_for_role(
+        &self,
+        ttl: Duration,
+        role: NodeRole,
+    ) -> Result<IssuedJoinToken, MembershipError> {
         let inner = self.replicated_inner()?;
         let now = unix_ms()?;
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
@@ -1225,7 +1286,11 @@ impl MembershipManager {
                 .unwrap_or(1)
                 .saturating_add(1) as u64;
             let payload = JoinPayload {
-                version: JOIN_TOKEN_VERSION,
+                version: match role {
+                    NodeRole::Voter => VOTER_JOIN_TOKEN_VERSION,
+                    NodeRole::Learner => LEARNER_JOIN_TOKEN_VERSION,
+                },
+                role: (role == NodeRole::Learner).then_some(NodeRole::Learner),
                 cluster_id: inner.identity.cluster_id.clone(),
                 raft_id,
                 expires_at,
@@ -1242,19 +1307,54 @@ impl MembershipManager {
             };
             let token = encode_join_token(&payload)?;
             let token_hash = join_token_digest(&token);
-            let inserted = inner
-                .client
-                .execute(
-                    "INSERT INTO cluster_join_tokens \
-                     (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at) \
-                     SELECT $1, $2, $3, 'issued', NULL, $4, NULL \
-                     WHERE NOT EXISTS (\
-                       SELECT 1 FROM cluster_join_tokens \
-                       WHERE raft_id = $2 AND state IN ('issued', 'redeeming') AND expires_at > $4\
-                     )",
-                    params!(token_hash, raft_id as i64, expires_at, now),
-                )
-                .await?;
+            let inserted = if role == NodeRole::Learner {
+                let results = inner
+                    .client
+                    .txn(vec![
+                        (
+                            "INSERT INTO cluster_join_tokens \
+                             (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at) \
+                             SELECT $1, $2, $3, 'issued', NULL, $4, NULL \
+                             WHERE NOT EXISTS (\
+                               SELECT 1 FROM cluster_join_tokens \
+                               WHERE raft_id = $2 AND state IN ('issued', 'redeeming') \
+                                 AND expires_at > $4\
+                             ) RETURNING token_hash"
+                                .to_owned(),
+                            params!(token_hash, raft_id as i64, expires_at, now),
+                        ),
+                        (
+                            "INSERT INTO cluster_join_token_roles (token_hash, role) \
+                             VALUES ($1, 'learner')"
+                                .to_owned(),
+                            vec![Param::StmtOutputNamed(0, "token_hash".into())],
+                        ),
+                    ])
+                    .await;
+                match results {
+                    Ok(results) => {
+                        results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                        1
+                    }
+                    Err(error) if error.to_string().contains("StmtIndex(") => 0,
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                inner
+                    .client
+                    .execute(
+                        "INSERT INTO cluster_join_tokens \
+                         (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at) \
+                         SELECT $1, $2, $3, 'issued', NULL, $4, NULL \
+                         WHERE NOT EXISTS (\
+                           SELECT 1 FROM cluster_join_tokens \
+                           WHERE raft_id = $2 AND state IN ('issued', 'redeeming') \
+                             AND expires_at > $4\
+                         )",
+                        params!(token_hash, raft_id as i64, expires_at, now),
+                    )
+                    .await?
+            };
             if inserted == 1 {
                 return Ok(IssuedJoinToken {
                     token,
@@ -1269,6 +1369,18 @@ impl MembershipManager {
     }
 
     pub async fn redeem(&self, request: &RedeemJoinRequest) -> Result<(), MembershipError> {
+        self.redeem_for_role(request, NodeRole::Voter).await
+    }
+
+    pub async fn redeem_learner(&self, request: &RedeemJoinRequest) -> Result<(), MembershipError> {
+        self.redeem_for_role(request, NodeRole::Learner).await
+    }
+
+    async fn redeem_for_role(
+        &self,
+        request: &RedeemJoinRequest,
+        expected_role: NodeRole,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         if request.schema_version != AUTH_SCHEMA_VERSION
             || request.protocol_version != AUTH_PROTOCOL_VERSION
@@ -1288,6 +1400,9 @@ impl MembershipManager {
         };
         let now = unix_ms()?;
         let record = self.token_record(&request.token_digest).await?;
+        if record.role() != expected_role {
+            return Err(MembershipError::InvalidToken);
+        }
         if record.raft_id != request.raft_id as i64 {
             return Err(MembershipError::InvalidToken);
         }
@@ -1317,6 +1432,11 @@ impl MembershipManager {
                     // The previous rolling version reserved the token before
                     // its node-publication transaction. Repair that crash
                     // shape below under the exact reservation.
+                    None if expected_role == NodeRole::Learner => {
+                        return Err(MembershipError::Internal(
+                            "learner token reservation has no staged node".to_owned(),
+                        ));
+                    }
                     None => true,
                 }
             }
@@ -1332,7 +1452,20 @@ impl MembershipManager {
         // origin or a lost token race therefore produces no dependency output
         // and Hiqlite rolls the entire transaction back.
         let mut statements = Vec::new();
+        if expected_role == NodeRole::Learner {
+            statements.push((
+                "INSERT INTO cluster_learner_join_intents (token_hash) \
+                 SELECT token.token_hash FROM cluster_join_tokens token \
+                 JOIN cluster_join_token_roles role ON role.token_hash = token.token_hash \
+                 WHERE token.token_hash = $1 AND token.raft_id = $2 \
+                   AND token.state = 'issued' AND token.expires_at > $3 \
+                   AND role.role = 'learner' RETURNING token_hash"
+                    .to_owned(),
+                params!(request.token_digest.as_str(), request.raft_id as i64, now),
+            ));
+        }
         let proof_statement_index = if let Some(http_base) = http_base.as_deref() {
+            let http_statement_index = statements.len();
             statements.push((
                 "INSERT INTO cluster_node_http (node_id, public_http_url) \
                  SELECT $1, $2 WHERE EXISTS (\
@@ -1362,8 +1495,9 @@ impl MembershipManager {
                 ),
             ));
             if resume_legacy_partial {
-                0
+                http_statement_index
             } else {
+                let reservation_statement_index = statements.len();
                 statements.push((
                     "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
@@ -1371,14 +1505,15 @@ impl MembershipManager {
                      RETURNING node_id"
                         .to_owned(),
                     vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::StmtOutputNamed(http_statement_index, "node_id".into()),
                         Param::Text(request.token_digest.clone()),
                         Param::Integer(now),
                     ],
                 ));
-                1
+                reservation_statement_index
             }
         } else if resume_legacy_partial {
+            let reservation_statement_index = statements.len();
             statements.push((
                 "UPDATE cluster_join_tokens SET node_id = node_id \
                  WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
@@ -1392,8 +1527,9 @@ impl MembershipManager {
                     request.raft_id as i64
                 ),
             ));
-            0
+            reservation_statement_index
         } else {
+            let reservation_statement_index = statements.len();
             statements.push((
                 "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                  WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
@@ -1402,7 +1538,7 @@ impl MembershipManager {
                     .to_owned(),
                 params!(request.node_id.as_str(), request.token_digest.as_str(), now),
             ));
-            0
+            reservation_statement_index
         };
         if let Some(http_base) = http_base.as_deref() {
             statements.push((
@@ -1469,6 +1605,12 @@ impl MembershipManager {
                 ],
             ),
         ]);
+        if expected_role == NodeRole::Learner {
+            statements.push((
+                "DELETE FROM cluster_learner_join_intents WHERE token_hash = $1".to_owned(),
+                params!(request.token_digest.as_str()),
+            ));
+        }
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
@@ -1531,11 +1673,29 @@ impl MembershipManager {
     }
 
     pub async fn finalize(&self, request: &FinalizeJoinRequest) -> Result<(), MembershipError> {
+        self.finalize_for_role(request, NodeRole::Voter).await
+    }
+
+    pub async fn finalize_learner(
+        &self,
+        request: &FinalizeJoinRequest,
+    ) -> Result<(), MembershipError> {
+        self.finalize_for_role(request, NodeRole::Learner).await
+    }
+
+    async fn finalize_for_role(
+        &self,
+        request: &FinalizeJoinRequest,
+        expected_role: NodeRole,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
         let record = self.token_record(&request.token_digest).await?;
+        if record.role() != expected_role {
+            return Err(MembershipError::InvalidToken);
+        }
         if record.node_id.as_deref() != Some(&request.node_id)
             || record.raft_id != request.raft_id as i64
         {
@@ -1545,14 +1705,26 @@ impl MembershipManager {
             return Ok(());
         }
         let metrics = inner.client.metrics_db().await?;
-        if !metrics
+        let is_member = metrics
+            .membership_config
+            .nodes()
+            .any(|(id, _)| *id == request.raft_id);
+        let is_voter = metrics
             .membership_config
             .voter_ids()
-            .any(|id| id == request.raft_id)
-        {
-            return Err(MembershipError::Internal(
-                "joining node has not committed voter membership".to_owned(),
-            ));
+            .any(|id| id == request.raft_id);
+        let committed_in_role = match expected_role {
+            NodeRole::Voter => is_voter,
+            NodeRole::Learner => is_member && !is_voter,
+        };
+        if !committed_in_role {
+            return Err(MembershipError::Internal(format!(
+                "joining node has not committed {} membership",
+                match expected_role {
+                    NodeRole::Voter => "voter",
+                    NodeRole::Learner => "learner",
+                }
+            )));
         }
         let now = unix_ms()?;
         let changed = inner
@@ -1574,8 +1746,10 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<JoinTokenRow, _>(
-                "SELECT raft_id, expires_at, state, node_id FROM cluster_join_tokens \
-                 WHERE token_hash = $1",
+                "SELECT token.raft_id, token.expires_at, token.state, token.node_id, role.role \
+                 FROM cluster_join_tokens token \
+                 LEFT JOIN cluster_join_token_roles role ON role.token_hash = token.token_hash \
+                 WHERE token.token_hash = $1",
                 params!(token_hash),
             )
             .await?;
@@ -3887,14 +4061,17 @@ pub fn source_is_readable(package: &OfflinePackage) -> bool {
 }
 
 pub fn decode_join_token(token: &str) -> Result<JoinPayload, MembershipError> {
-    let mut parts = token.split(':');
-    if parts.next() != Some("plxjoin") || parts.next() != Some("v1") || parts.clone().count() != 2 {
+    let parts = token.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "plxjoin" {
         return Err(MembershipError::InvalidToken);
     }
-    let key_bytes = hex::decode(parts.next().ok_or(MembershipError::InvalidToken)?)
-        .map_err(|_| MembershipError::InvalidToken)?;
-    let encrypted = hex::decode(parts.next().ok_or(MembershipError::InvalidToken)?)
-        .map_err(|_| MembershipError::InvalidToken)?;
+    let (version, aad) = match parts[1] {
+        "v1" => (VOTER_JOIN_TOKEN_VERSION, VOTER_JOIN_TOKEN_AAD),
+        "v2" => (LEARNER_JOIN_TOKEN_VERSION, LEARNER_JOIN_TOKEN_AAD),
+        _ => return Err(MembershipError::InvalidToken),
+    };
+    let key_bytes = hex::decode(parts[2]).map_err(|_| MembershipError::InvalidToken)?;
+    let encrypted = hex::decode(parts[3]).map_err(|_| MembershipError::InvalidToken)?;
     if key_bytes.len() != 32 || encrypted.len() <= 24 {
         return Err(MembershipError::InvalidToken);
     }
@@ -3904,19 +4081,31 @@ pub fn decode_join_token(token: &str) -> Result<JoinPayload, MembershipError> {
             XNonce::from_slice(&encrypted[..24]),
             chacha20poly1305::aead::Payload {
                 msg: &encrypted[24..],
-                aad: JOIN_TOKEN_AAD,
+                aad,
             },
         )
         .map_err(|_| MembershipError::InvalidToken)?;
     let payload: JoinPayload =
         serde_json::from_slice(&plaintext).map_err(|_| MembershipError::InvalidToken)?;
-    if payload.version != JOIN_TOKEN_VERSION || payload.cluster_id.trim().is_empty() {
+    let role_matches_version = match version {
+        VOTER_JOIN_TOKEN_VERSION => payload.role.is_none(),
+        LEARNER_JOIN_TOKEN_VERSION => payload.role == Some(NodeRole::Learner),
+        _ => false,
+    };
+    if payload.version != version || !role_matches_version || payload.cluster_id.trim().is_empty() {
         return Err(MembershipError::InvalidToken);
     }
     Ok(payload)
 }
 
 fn encode_join_token(payload: &JoinPayload) -> Result<String, MembershipError> {
+    let (prefix, aad) = match (payload.version, payload.role.as_ref()) {
+        (VOTER_JOIN_TOKEN_VERSION, None) => (VOTER_JOIN_TOKEN_PREFIX, VOTER_JOIN_TOKEN_AAD),
+        (LEARNER_JOIN_TOKEN_VERSION, Some(NodeRole::Learner)) => {
+            (LEARNER_JOIN_TOKEN_PREFIX, LEARNER_JOIN_TOKEN_AAD)
+        }
+        _ => return Err(MembershipError::InvalidToken),
+    };
     let mut key_bytes = [0_u8; 32];
     let mut nonce = [0_u8; 24];
     getrandom::getrandom(&mut key_bytes)
@@ -3931,14 +4120,14 @@ fn encode_join_token(payload: &JoinPayload) -> Result<String, MembershipError> {
             XNonce::from_slice(&nonce),
             chacha20poly1305::aead::Payload {
                 msg: &plaintext,
-                aad: JOIN_TOKEN_AAD,
+                aad,
             },
         )
         .map_err(|_| MembershipError::Internal("encrypting join token".to_owned()))?;
     let mut encrypted = nonce.to_vec();
     encrypted.extend(ciphertext);
     Ok(format!(
-        "{JOIN_TOKEN_PREFIX}:{}:{}",
+        "{prefix}:{}:{}",
         hex::encode(key_bytes),
         hex::encode(encrypted)
     ))
@@ -4151,6 +4340,16 @@ struct JoinTokenRow {
     expires_at: i64,
     state: String,
     node_id: Option<String>,
+    role: Option<String>,
+}
+
+impl JoinTokenRow {
+    fn role(&self) -> NodeRole {
+        match self.role.as_deref() {
+            Some("learner") => NodeRole::Learner,
+            _ => NodeRole::Voter,
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for JoinTokenRow {
@@ -4160,6 +4359,7 @@ impl From<&mut Row<'_>> for JoinTokenRow {
             expires_at: row.get("expires_at"),
             state: row.get("state"),
             node_id: row.get("node_id"),
+            role: row.get("role"),
         }
     }
 }
@@ -5426,7 +5626,8 @@ mod tests {
 
     fn payload() -> JoinPayload {
         JoinPayload {
-            version: JOIN_TOKEN_VERSION,
+            version: VOTER_JOIN_TOKEN_VERSION,
+            role: None,
             cluster_id: "cluster-a".to_owned(),
             raft_id: 2,
             expires_at: 123,
@@ -5463,10 +5664,85 @@ mod tests {
     fn join_token_round_trips_without_plaintext_payload() {
         let expected = payload();
         let token = encode_join_token(&expected).expect("encode token");
-        assert!(token.starts_with(JOIN_TOKEN_PREFIX));
+        assert!(token.starts_with(VOTER_JOIN_TOKEN_PREFIX));
         assert!(!token.contains("cluster-a"));
         assert!(!token.contains(&"r".repeat(64)));
         assert_eq!(decode_join_token(&token).expect("decode token"), expected);
+    }
+
+    #[test]
+    fn learner_token_uses_a_distinct_v2_envelope_and_bound_role() {
+        let mut expected = payload();
+        expected.version = LEARNER_JOIN_TOKEN_VERSION;
+        expected.role = Some(NodeRole::Learner);
+        let token = encode_join_token(&expected).expect("encode learner token");
+        assert!(token.starts_with(LEARNER_JOIN_TOKEN_PREFIX));
+        assert!(!token.starts_with(VOTER_JOIN_TOKEN_PREFIX));
+        assert_eq!(decode_join_token(&token).expect("decode learner"), expected);
+
+        let mut confused = expected;
+        confused.role = None;
+        assert_eq!(
+            encode_join_token(&confused)
+                .expect_err("v2 role omission must fail")
+                .code(),
+            "join_token_invalid"
+        );
+    }
+
+    #[test]
+    fn replicated_guard_stops_a_v1_coordinator_from_redeeming_a_learner_token() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("membership database");
+        for statement in MEMBERSHIP_SCHEMA.iter().take(5) {
+            connection
+                .execute_batch(statement)
+                .expect("install learner admission schema");
+        }
+        connection
+            .execute(
+                "INSERT INTO cluster_join_tokens VALUES \
+                 ('learner-digest', 4, 9999999999999, 'issued', NULL, 1, NULL)",
+                [],
+            )
+            .expect("insert learner token");
+        connection
+            .execute(
+                "INSERT INTO cluster_join_token_roles VALUES ('learner-digest', 'learner')",
+                [],
+            )
+            .expect("bind learner role");
+
+        let old_update = connection.execute(
+            "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'old-voter' \
+             WHERE token_hash = 'learner-digest'",
+            [],
+        );
+        assert!(old_update.is_err(), "v1 voter redemption crossed the guard");
+
+        let transaction = connection.transaction().expect("v2 transaction");
+        transaction
+            .execute(
+                "INSERT INTO cluster_learner_join_intents VALUES ('learner-digest')",
+                [],
+            )
+            .expect("publish v2 intent");
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'learner' \
+                     WHERE token_hash = 'learner-digest'",
+                    [],
+                )
+                .expect("v2 reservation"),
+            1
+        );
+        transaction
+            .execute(
+                "DELETE FROM cluster_learner_join_intents WHERE token_hash = 'learner-digest'",
+                [],
+            )
+            .expect("consume v2 intent");
+        transaction.commit().expect("commit v2 redemption");
     }
 
     #[test]

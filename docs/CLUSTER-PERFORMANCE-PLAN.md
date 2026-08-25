@@ -717,6 +717,14 @@ persists secrets or admits a voter. Effective role always comes from live
 committed membership: Hiqlite's `learner_only` startup hint is not a permanent
 leadership guard after promotion.
 
+**P6a delivered 2026-08-25.** The distinct issuance/redeem/finalize endpoints,
+v2 prefix/AAD/payload, replicated learner-role binding, v2 local membership,
+v1 compatibility, and three-voter-plus-learner real-process gate are on `main`.
+The explicit security choice retains Hiqlite's shared secrets and treats every
+admitted voter or learner as a trusted cluster principal. Later P6 slices must
+not reinterpret that trust choice as route or job eligibility: committed role
+enforcement and the eligibility matrix remain the next two boundaries.
+
 Publish one route/job eligibility matrix. Learners may run readiness-gated
 bounded catalogue reads and declared node-local media work, but never
 authority reads locally or any scheduler, migration, membership, provider, or

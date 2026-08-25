@@ -99,9 +99,14 @@ pub fn router(state: AppState) -> Router {
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
-        // Membership control is admin-only. The two join routes below are the
-        // exception: their single-use token is its own narrow credential.
+        // Membership control is admin-only. Role-specific redeem/finalize
+        // routes are the exception: their single-use digest is the narrow
+        // credential, and callers never supply the role.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
+        .route(
+            "/cluster/learner-join-tokens",
+            post(cluster::issue_learner_join_token),
+        )
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
@@ -113,6 +118,14 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
         .route("/cluster/join/finalize", post(cluster::finalize_join))
+        .route(
+            "/cluster/learner/join/redeem",
+            post(cluster::redeem_learner_join),
+        )
+        .route(
+            "/cluster/learner/join/finalize",
+            post(cluster::finalize_learner_join),
+        )
         // Node-to-node artwork materialization. The handler verifies a
         // filename-bound cluster HMAC and current live membership; it does
         // not accept an account bearer and never proxies another hop.
@@ -3013,6 +3026,28 @@ mod tests {
 
         let (status, _) = call(
             &app,
+            post(
+                "/api/v1/cluster/learner-join-tokens",
+                None,
+                json!({ "expires_in_seconds": 600 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/learner-join-tokens",
+                Some(&admin),
+                json!({ "expires_in_seconds": 600 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
             put(
                 "/api/v1/settings",
                 None,
@@ -3110,6 +3145,26 @@ mod tests {
         let (status, body) = call(
             &app,
             post("/api/v1/cluster/leave", Some(&admin), leave_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/learner/join/redeem",
+                None,
+                json!({
+                    "token_digest": "00".repeat(32),
+                    "raft_id": 2,
+                    "node_id": "joining-learner",
+                    "raft_address": "127.0.0.1:32411",
+                    "api_address": "127.0.0.1:32412",
+                    "schema_version": 6,
+                    "protocol_version": 4
+                }),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
