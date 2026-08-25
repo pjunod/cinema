@@ -5246,8 +5246,29 @@ function showSessionOpenFailure(error){
 // CSP can silently kill a blob worker; main-thread demux of one 720p stream
 // is nothing.
 // `startAt` is where to begin *inside* the playlist, and is non-zero only for a
-// cached (VOD) asset being resumed: a live session was built at the requested
+// VOD presentation being resumed: a live session was built at the requested
 // offset, so its own zero already is the right place.
+function vodClientContract(){
+  // P3 measured this exact vendored hls.js policy. Keep the fragment request's
+  // first-byte timer and the server declaration in one place: the server must
+  // answer two seconds before hls.js aborts, leaving room for the typed 503 to
+  // reach the retry controller. Seven error retries extend the measured
+  // 1/2/4/8/8… ladder past the producer's 30-second materialization watchdog.
+  const firstByteMs=10000;
+  const serverMarginMs=2000;
+  return {
+    session:{
+      presentation:"vod",
+      block_budget_secs:(firstByteMs-serverMarginMs)/1000
+    },
+    fragLoadPolicy:{default:{
+      maxTimeToFirstByteMs:firstByteMs,
+      maxLoadTimeMs:120000,
+      timeoutRetry:{maxNumRetry:4,retryDelayMs:0,maxRetryDelayMs:0},
+      errorRetry:{maxNumRetry:7,retryDelayMs:1000,maxRetryDelayMs:8000}
+    }}
+  };
+}
 function attachHls(video, playlistUrl, startAt){
   // Always tear the incumbent down first. Overwriting PLAYER.hls used to strand
   // the old instance: nothing else held a reference, but hls.js keeps polling a
@@ -5288,6 +5309,11 @@ function attachHls(video, playlistUrl, startAt){
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+      // The server gate may decline the VOD declaration and return the legacy
+      // live presentation. Keep that rollback byte-for-byte at the player
+      // policy layer too: the longer retry horizon belongs only to the typed
+      // VOD materialization contract.
+      ...(PLAYER&&PLAYER.vod?{fragLoadPolicy:vodClientContract().fragLoadPolicy}:{}),
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
       // on a 4K cache hit that is tens of megabytes and several seconds of
@@ -5381,6 +5407,7 @@ function attachHls(video, playlistUrl, startAt){
         const li=hls.currentLevel<0?0:hls.currentLevel;
         const lv=hls.levels&&hls.levels[li];
         if(!lv) return;
+        p._keeperFires=(p._keeperFires||0)+1;
         try{ hls.trigger(Hls.Events.LEVEL_LOADING,
           {url:lv.url,level:li,levelInfo:lv,id:0,deliveryDirectives:null}); }catch(e){}
       },1000);
@@ -5602,7 +5629,9 @@ function selectedAudioIndex(player){
   return track?track.index:0;
 }
 async function openSession(fileId, opts){
-  const body=Object.assign({playback_id:PLAYBACK_ID, request_id:newRequestId()}, opts||{});
+  const contract=vodClientContract();
+  const body=Object.assign({},opts||{},
+    {playback_id:PLAYBACK_ID,request_id:newRequestId()},contract.session);
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
@@ -8607,14 +8636,41 @@ function statsRateTone(rate,ahead,suspended,final){
   if(rate<1&&(ahead||0)<10) return "warn";
   return "good";
 }
+function vodServerState(health){
+  if(!health) return "VOD · Waiting for demand";
+  switch(health.producer_state){
+    case "running": return "VOD · Materializing";
+    case "held":
+      switch(health.producer_hold){
+        case "ahead": return "VOD · Holding ahead window";
+        case "working_set": return "VOD · Holding working set";
+        case "no_room": return "VOD · Holding · no room";
+        default: return "VOD · Holding";
+      }
+    case "complete": return "VOD · Complete";
+    case "failed": return "VOD · Producer failed";
+    default: return "VOD · Waiting for demand";
+  }
+}
+function vodHealthWord(health){
+  if(!health) return "VOD";
+  switch(health.producer_state){
+    case "running": return "Filling";
+    case "held": return "Held";
+    case "complete": return "Complete";
+    case "failed": return "Failed";
+    default: return "VOD";
+  }
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
   const v=document.getElementById("video");
   const s=PLAYER.source||{};
-  const method = PLAYER.method==='direct_play'?'Direct play'
-    : PLAYER.method==='transcode'?(PLAYER.vod?'Transcode · from cache'
-        :('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))) : 'Remux';
+  const baseMethod = PLAYER.method==='direct_play'?'Direct play'
+    : PLAYER.method==='transcode'?('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))
+    : 'Remux';
+  const method=PLAYER.vod?`${baseMethod} · VOD`:baseMethod;
   // source (from the server probe — the browser never sees these numbers)
   const srcVideo=[ (s.video_codec||'').toUpperCase(), s.bit_depth?`${s.bit_depth}-bit`:null, (s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)) ].filter(Boolean).join(" · ")||'—';
   const srcRes = s.width&&s.height? `${s.width}×${s.height}`:'—';
@@ -9057,7 +9113,7 @@ function updateStats(){
       ? fmtMbps(PLAYER.hls.bandwidthEstimate)
       : "Measuring";
   const health=PLAYER.health;
-  const serverState=PLAYER.vod?"Served from cache"
+  const serverState=PLAYER.vod?vodServerState(health)
     : health?(health.suspended?"Holding buffer":"Active")
     : "No server-side session";
   const serverRate=health&&((health.recent_speed!=null)?health.recent_speed:health.speed);
@@ -9077,7 +9133,8 @@ function updateStats(){
   const reason=(PLAYER.reasons&&PLAYER.reasons.length)?esc(PLAYER.reasons.join(" · ")):"";
   // The pill says in one word what the Server section's Status row says in
   // three or four — same `serverState`, so the two can never disagree.
-  const healthWord=PLAYER.vod?"Cached":health?(health.suspended?"Held":"Active"):"Direct";
+  const healthWord=PLAYER.vod?vodHealthWord(health)
+    :health?(health.suspended?"Held":"Active"):"Direct";
   const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
   const miniHtml=`<div class="statsmini">`
     +`<div class="smethod">${esc(method)}</div>`+miniDiv
@@ -9853,6 +9910,8 @@ function presetOpts(pairs, cur, label){
   return opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join("");
 }
 function playbackPanel(settings){
+  const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
+  const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   return `<div class="card"><h2 class="section" style="margin-top:0">Playback defaults</h2>
       <p class="muted" style="margin-top:0">Default audio and subtitle selection for every player. Anime dual-audio still prefers the original audio with subtitles.</p>
       <div class="row" style="align-items:end">
@@ -9867,6 +9926,15 @@ function playbackPanel(settings){
       <h2 class="section">Automatic quality</h2>
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
+      <h2 class="section">Film-addressed VOD</h2>
+      <p class="muted" style="margin-top:0">Present eligible remuxes as one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. Files without a current fragment index, subtitle burns, and transcode rungs keep the live presentation.</p>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Enable VOD presentation for new web sessions</label>
+      <div class="row" style="align-items:end">
+        <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+        <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
+        <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
+      </div>
+      <div class="hint">Indexing reads each eligible file once and is node-local. Turn on an interval before enabling VOD; a title falls back safely until its index exists. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets
@@ -10576,7 +10644,12 @@ async function savePlayback(){
       hls_readrate:document.getElementById("phr").value,
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
-      hls_typeless_sliding:document.getElementById("phs").checked}}));
+      hls_typeless_sliding:document.getElementById("phs").checked,
+      vod_presentation:document.getElementById("pvod").checked,
+      vod_index_mins:Number(document.getElementById("pvi").value),
+      vod_working_set_bytes:document.getElementById("pvws").value,
+      vod_block_budget_secs:"8",
+      vod_materialize_budget_secs:document.getElementById("pvmb").value}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Playback defaults saved");
   }catch(e){ err.textContent=e.message; }

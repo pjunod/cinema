@@ -429,18 +429,7 @@ pub async fn create(
         Some(h) => crate::transcode::snap_height(h),
     }
     .clamp(crate::transcode::MIN_HEIGHT, crate::transcode::MAX_HEIGHT);
-    let mut req = req;
     let native_subtitles = req.native_subtitles == Some(true);
-    if native_subtitles && req.presentation.as_deref() == Some("vod") {
-        // The multivariant playlist has no VOD arm yet (M4/M5 work beside
-        // the client flags); honoring both would hand the client a
-        // master.m3u8 URL that 404s on its first fetch.
-        tracing::info!(
-            file = id,
-            "vod presentation requested with native subtitles; keeping the live presentation"
-        );
-        req.presentation = None;
-    }
     let native_subtitle = req.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
         if let Some(index) = native_subtitle {
@@ -1339,13 +1328,13 @@ pub async fn status(
 async fn status_local(
     state: &AppState,
     session: &str,
-) -> Result<Json<crate::transcode::SessionInfo>, ApiError> {
+) -> Result<Json<crate::transcode::HlsSessionInfo>, ApiError> {
     state
         .transcode
-        .session_status(session)
+        .hls_session_status(session)
         .await
         .map(Json)
-        .ok_or(ApiError::NotFound("transcode session"))
+        .ok_or(ApiError::NotFound("hls session"))
 }
 
 #[derive(Default, Deserialize)]
@@ -1453,12 +1442,18 @@ async fn playlist_local(
     session: &str,
     query: PlaylistQuery,
 ) -> Result<Response, ApiError> {
-    // A VOD session has exactly one playlist artifact — the plan's immutable
-    // media playlist — whatever query arrived. VOD creates refuse native
-    // subtitles, so a `?native=1` here is a stale client habit, answered with
-    // the only playlist this session has rather than a 404.
+    // A VOD session's child media playlist is the plan's immutable artifact.
+    // The dedicated master path wraps it when native subtitles were requested;
+    // the legacy `?native=1` bridge still needs that same wrapper.
     if let Some(answer) = state.transcode.vod_playlist(session).await {
         let bytes = answer.map_err(|err| vod_error(session, err))?;
+        if query.native == Some(1) {
+            let (context, file) = session_file(state, session).await?;
+            let context = exact_hls_context(state, session, context).await;
+            return Ok(playlist_response(
+                master_playlist(&file, query.subtitle, &context).into_bytes(),
+            ));
+        }
         return Ok(playlist_response(bytes));
     }
     if query.native != Some(1) {
@@ -1635,11 +1630,14 @@ async fn subtitle_playlist_local(
         ));
     }
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-    let video = state
-        .transcode
-        .playlist(session)
-        .await
-        .map_err(|err| playlist_error(session, err))?;
+    let video = match state.transcode.vod_playlist(session).await {
+        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
+        None => state
+            .transcode
+            .playlist(session)
+            .await
+            .map_err(|err| playlist_error(session, err))?,
+    };
     Ok(playlist_response(
         subtitle_media_playlist(&video).into_bytes(),
     ))
@@ -1812,29 +1810,41 @@ async fn exact_hls_context(
     let Some(init_object) = state.transcode.session_init_object(session).await else {
         return context;
     };
-    let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
-        return context;
-    };
     // Initialization segments are a few KiB. Bound malformed input so a
-    // playlist request can never allocate without limit.
-    let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
-    // No response body exists here — this is the playlist generator reading
-    // `hvcC` for itself. Tag the tracker so its bytes stay out of the
-    // session's delivery meter and its events cannot be mistaken for a
-    // segment a player was waiting on, and hold it to the bound actually read
-    // so an init past the bound is not reported as a truncated response.
-    let mut delivery = opened.delivery.into_internal_probe();
-    delivery.expect_at_most(INIT_INSPECTION_LIMIT_BYTES);
-    let started = Instant::now();
-    let mut reader = opened.file.take(INIT_INSPECTION_LIMIT_BYTES);
-    match reader.read_to_end(&mut init).await {
-        Ok(bytes) => {
-            delivery.note_read(bytes as u64, started.elapsed());
-            delivery.finish();
+    // playlist request can never allocate without limit. VOD init bytes come
+    // through their own registry; live bytes retain the internal delivery
+    // tracker that keeps this probe out of player throughput telemetry.
+    let mut init = Vec::new();
+    match state.transcode.vod_segment(session, &init_object).await {
+        Some(Ok(Some(ready))) => {
+            init.reserve(ready.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
+            let mut reader = ready.file.take(INIT_INSPECTION_LIMIT_BYTES);
+            if reader.read_to_end(&mut init).await.is_err() {
+                return context;
+            }
         }
-        Err(error) => {
-            delivery.fail(&error);
-            return context;
+        Some(_) => return context,
+        None => {
+            let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
+                return context;
+            };
+            init.reserve(opened.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
+            // No response body exists here — this is the playlist generator
+            // reading `hvcC` for itself.
+            let mut delivery = opened.delivery.into_internal_probe();
+            delivery.expect_at_most(INIT_INSPECTION_LIMIT_BYTES);
+            let started = Instant::now();
+            let mut reader = opened.file.take(INIT_INSPECTION_LIMIT_BYTES);
+            match reader.read_to_end(&mut init).await {
+                Ok(bytes) => {
+                    delivery.note_read(bytes as u64, started.elapsed());
+                    delivery.finish();
+                }
+                Err(error) => {
+                    delivery.fail(&error);
+                    return context;
+                }
+            }
         }
     }
     let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
