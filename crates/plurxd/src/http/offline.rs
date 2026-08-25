@@ -1719,8 +1719,17 @@ mod tests {
             transcode: root.path().join("transcode"),
             cache: root.path().join("cache"),
             subs: root.path().join("subs"),
+            runtime_cache: root.path().join("runtime"),
+            renditions: root.path().join("renditions"),
         };
-        for dir in [&dirs.artwork, &dirs.transcode, &dirs.cache, &dirs.subs] {
+        for dir in [
+            &dirs.artwork,
+            &dirs.transcode,
+            &dirs.cache,
+            &dirs.subs,
+            &dirs.runtime_cache,
+            &dirs.renditions,
+        ] {
             std::fs::create_dir_all(dir).expect("state directory");
         }
         let state = AppState::new(

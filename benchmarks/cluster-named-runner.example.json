@@ -10,6 +10,7 @@
   "min_pairs": 3,
   "max_pairs": 7,
   "confidence_half_width_percent": 5.0,
+  "read_pool_size": 4,
   "voters": [
     {
       "node_id": 1,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://plurx.tv/schemas/cluster-topology-campaign-v1.json",
+  "$id": "https://plurx.tv/schemas/cluster-topology-campaign-v2.json",
   "title": "plurx named-runner topology campaign",
   "type": "object",
   "additionalProperties": false,
@@ -18,6 +18,7 @@
     "load_generator_host",
     "load_generator_isolation",
     "voter_labels",
+    "read_pool_size",
     "min_pairs",
     "max_pairs",
     "confidence_half_width_percent",
@@ -30,7 +31,7 @@
     "budgets"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "evidence_scope": { "const": "named_runner" },
     "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "runner_id": { "type": "string", "minLength": 1, "maxLength": 256 },
@@ -54,6 +55,7 @@
       "maxItems": 4,
       "items": { "type": "string", "minLength": 1, "maxLength": 256 }
     },
+    "read_pool_size": { "type": "integer", "minimum": 1, "maximum": 16 },
     "min_pairs": { "const": 3 },
     "max_pairs": { "const": 7 },
     "confidence_half_width_percent": { "const": 5.0 },
@@ -69,8 +71,8 @@
     },
     "metrics": {
       "type": "array",
-      "minItems": 4,
-      "maxItems": 4,
+      "minItems": 6,
+      "maxItems": 6,
       "items": { "$ref": "#/$defs/metric" }
     },
     "budgets": { "$ref": "#/$defs/budgets" }
@@ -114,6 +116,8 @@
         "metric": {
           "enum": [
             "acknowledged_write_p99",
+            "local_catalogue_read_p95",
+            "max_rss",
             "cpu",
             "storage_write",
             "network_transmit"
@@ -148,7 +152,9 @@
         "instrumentation_cpu_and_wall_overhead_percent",
         "auth_activity_entry_reduction_percent",
         "authority_catalogue_read_reduction_percent",
-        "browse_p99_regression_percent"
+        "browse_p99_regression_percent",
+        "read_pool_write_p99_regression_percent",
+        "read_pool_max_rss_regression_percent"
       ],
       "properties": {
         "additional_request_errors": { "const": 0 },
@@ -156,7 +162,9 @@
         "instrumentation_cpu_and_wall_overhead_percent": { "const": 2.0 },
         "auth_activity_entry_reduction_percent": { "const": 95.0 },
         "authority_catalogue_read_reduction_percent": { "const": 70.0 },
-        "browse_p99_regression_percent": { "const": 10.0 }
+        "browse_p99_regression_percent": { "const": 10.0 },
+        "read_pool_write_p99_regression_percent": { "const": 10.0 },
+        "read_pool_max_rss_regression_percent": { "const": 10.0 }
       }
     }
   }

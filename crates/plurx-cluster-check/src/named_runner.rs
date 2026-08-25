@@ -3,7 +3,7 @@
 //! The ordinary topology mode intentionally stays loopback-only semantic CI.
 //! This module is the explicit hardware boundary: four named Linux hosts run
 //! fresh containerized voters, while the controller remains an external load
-//! generator. Raw pair artifacts keep the topology-v1 contract; this module
+//! generator. Raw pair artifacts keep the topology-v2 contract; this module
 //! adds the pre-registered 3--7-pair stopping rule and an aggregate campaign.
 
 use std::io::{Read, Write};
@@ -27,7 +27,8 @@ use super::{
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
 };
 
-pub const NAMED_CAMPAIGN_SCHEMA_VERSION: u32 = 1;
+const NAMED_RUNNER_CONFIG_SCHEMA_VERSION: u32 = 1;
+pub const NAMED_CAMPAIGN_SCHEMA_VERSION: u32 = 2;
 const NAMED_SCOPE: &str = "named_runner";
 const LOCAL_IMAGE_REPOSITORY: &str = "plurx-cluster-check";
 const SSH_CONNECT_TIMEOUT_SECS: &str = "10";
@@ -106,6 +107,7 @@ pub struct NamedTopologyCampaign {
     pub load_generator_host: String,
     pub load_generator_isolation: String,
     pub voter_labels: Vec<String>,
+    pub read_pool_size: usize,
     pub min_pairs: u64,
     pub max_pairs: u64,
     pub confidence_half_width_percent: f64,
@@ -154,6 +156,8 @@ pub struct CampaignBudgets {
     pub auth_activity_entry_reduction_percent: f64,
     pub authority_catalogue_read_reduction_percent: f64,
     pub browse_p99_regression_percent: f64,
+    pub read_pool_write_p99_regression_percent: f64,
+    pub read_pool_max_rss_regression_percent: f64,
 }
 
 impl Default for CampaignBudgets {
@@ -165,6 +169,8 @@ impl Default for CampaignBudgets {
             auth_activity_entry_reduction_percent: 95.0,
             authority_catalogue_read_reduction_percent: 70.0,
             browse_p99_regression_percent: 10.0,
+            read_pool_write_p99_regression_percent: 10.0,
+            read_pool_max_rss_regression_percent: 10.0,
         }
     }
 }
@@ -289,6 +295,7 @@ pub async fn run_named_campaign(
             .iter()
             .map(|voter| voter.label.clone())
             .collect(),
+        read_pool_size: config.read_pool_size,
         min_pairs: config.min_pairs,
         max_pairs: config.max_pairs,
         confidence_half_width_percent: config.confidence_half_width_percent,
@@ -466,6 +473,7 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
             workload,
             workload_sha256,
             RunEvidence {
+                read_pool_size: config.read_pool_size,
                 controller_host: &config.controller_host,
                 load_generator_host: &config.load_generator_host,
                 load_generator_isolation: Some(&config.load_generator_isolation),
@@ -1214,7 +1222,7 @@ async fn ssh_command(host: &str, remote: &[&str]) -> Result<std::process::Output
 }
 
 fn validate_config(config: &NamedRunnerConfig) -> Result<()> {
-    if config.schema_version != NAMED_CAMPAIGN_SCHEMA_VERSION {
+    if config.schema_version != NAMED_RUNNER_CONFIG_SCHEMA_VERSION {
         bail!("unsupported named-runner config schema version");
     }
     if config.voters.len() != 4
@@ -1740,9 +1748,15 @@ fn summarize_metrics(
     artifacts: &[ClusterTopologyArtifact],
     target_half_width_percent: f64,
 ) -> Result<Vec<PairedMetric>> {
-    let extractors: [MetricSpec<'_>; 4] = [
+    let extractors: [MetricSpec<'_>; 6] = [
         ("acknowledged_write_p99", "microseconds", |run| {
             Ok(run.acknowledged_write_round_trip_p99_us)
+        }),
+        ("local_catalogue_read_p95", "microseconds", |run| {
+            Ok(run.local_catalogue_read_p95_us)
+        }),
+        ("max_rss", "bytes", |run| {
+            sum_resource(run, |sample| sample.max_rss_bytes.map(|value| value as f64))
         }),
         ("cpu", "seconds", |run| {
             sum_resource(run, |sample| sample.cpu_seconds)
@@ -1943,6 +1957,9 @@ pub fn validate_named_campaign(
     {
         bail!("named campaign must identify four distinct runner nodes");
     }
+    if !(1..=16).contains(&campaign.read_pool_size) {
+        bail!("named campaign read_pool_size must be between 1 and 16");
+    }
     if campaign.min_pairs != 3
         || campaign.max_pairs != 7
         || (campaign.confidence_half_width_percent - 5.0).abs() > f64::EPSILON
@@ -1984,7 +2001,8 @@ pub fn validate_named_campaign(
             }
             if artifact.runs.iter().any(|run| {
                 let voter_count = usize::try_from(run.voter_count).unwrap_or(usize::MAX);
-                run.controller_host != campaign.controller_host
+                run.read_pool_size != campaign.read_pool_size
+                    || run.controller_host != campaign.controller_host
                     || run.load_generator_host != campaign.load_generator_host
                     || run.load_generator_isolation.as_deref()
                         != Some(campaign.load_generator_isolation.as_str())
@@ -2013,6 +2031,8 @@ pub fn validate_named_campaign(
     }
     let expected_metrics = [
         ("acknowledged_write_p99", "microseconds"),
+        ("local_catalogue_read_p95", "microseconds"),
+        ("max_rss", "bytes"),
         ("cpu", "seconds"),
         ("storage_write", "bytes"),
         ("network_transmit", "bytes"),
@@ -2024,7 +2044,7 @@ pub fn validate_named_campaign(
             .zip(expected_metrics)
             .any(|(metric, expected)| (metric.metric.as_str(), metric.unit.as_str()) != expected)
     {
-        bail!("named campaign must report all four pre-registered estimands");
+        bail!("named campaign must report all six pre-registered estimands");
     }
     let metrics_well_formed = campaign.metrics.iter().all(|metric| {
         metric.three_voter_values.len() == campaign.raw_pairs.len()
@@ -2361,6 +2381,8 @@ mod tests {
         let samples4 = vec![110.0, 111.1, 108.9];
         let metrics = [
             ("acknowledged_write_p99", "microseconds"),
+            ("local_catalogue_read_p95", "microseconds"),
+            ("max_rss", "bytes"),
             ("cpu", "seconds"),
             ("storage_write", "bytes"),
             ("network_transmit", "bytes"),
@@ -2372,7 +2394,7 @@ mod tests {
         })
         .collect();
         let campaign = NamedTopologyCampaign {
-            schema_version: 1,
+            schema_version: NAMED_CAMPAIGN_SCHEMA_VERSION,
             evidence_scope: NAMED_SCOPE.to_owned(),
             build_sha: "a".repeat(40),
             runner_id: "runner-v1".to_owned(),
@@ -2385,6 +2407,7 @@ mod tests {
             load_generator_host: "controller-1".to_owned(),
             load_generator_isolation: "external and idle".to_owned(),
             voter_labels: (1..=4).map(|id| format!("runner-node-{id}")).collect(),
+            read_pool_size: 4,
             min_pairs: 3,
             max_pairs: 7,
             confidence_half_width_percent: 5.0,
@@ -2418,6 +2441,16 @@ mod tests {
         });
         assert!(validate_named_campaign(&malformed, None).is_err());
 
+        let mut unsupported_pool = campaign.clone();
+        unsupported_pool.read_pool_size = 17;
+        assert!(validate_named_campaign(&unsupported_pool, None).is_err());
+
+        let mut changed_guardrail = campaign.clone();
+        changed_guardrail
+            .budgets
+            .read_pool_max_rss_regression_percent = 11.0;
+        assert!(validate_named_campaign(&changed_guardrail, None).is_err());
+
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../benchmarks/cluster-topology-campaign.schema.json"
         ))
@@ -2425,5 +2458,12 @@ mod tests {
         let validator = jsonschema::validator_for(&schema).expect("campaign schema validator");
         let json = serde_json::to_value(campaign).expect("campaign JSON");
         assert!(validator.is_valid(&json));
+
+        let mut missing_pool = json.clone();
+        missing_pool
+            .as_object_mut()
+            .expect("campaign object")
+            .remove("read_pool_size");
+        assert!(!validator.is_valid(&missing_pool));
     }
 }

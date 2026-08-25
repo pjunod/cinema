@@ -628,16 +628,22 @@ in [OPERATIONS.md](OPERATIONS.md) rather than quietly counted as delivered.
 
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
-only persistent cache, artwork, subtitle, and offline bytes, while
+persistent artwork, transcode/offline, subtitle, and admitted-rendition bytes,
+plus regenerable ffmpeg runtime state, while
 `storage.transcode_dir` names disposable live-transcode scratch, which must sit
 outside `data_dir`; naming `<data_dir>/transcode` explicitly is refused, and
 omitting the key is the supported way to run the legacy layout. Omitting both
 new roots preserves every legacy path byte-for-byte, and setting `cache_dir` on
 an existing install migrates nothing: the daemon warns while the legacy trees
 still hold bytes and starts anyway, so OPERATIONS.md carries the old→new path
-table an operator has to apply by hand. Explicit roots are canonicalized and
-rejected when they overlap a protected durable identity, credential key,
-another configured root, or a Linux mount-source ancestor.
+table an operator has to apply by hand. Runtime is explicitly discarded during
+that move; renditions are copied with the other persistent children. Every
+managed child is derived from the configured cache root before canonicalization
+and passed explicitly to the transcode manager, so relocating only the legacy
+`cache/transcode` leaf cannot silently relocate its `subs`, `runtime`, or
+`renditions` siblings. Explicit roots are canonicalized and rejected when they
+overlap a protected durable identity, credential key, another configured root,
+or a Linux mount-source ancestor.
 
 Scratch cleanup begins only after the daemon lock is held and uses
 descriptor-relative traversal. Ownership is the discriminator: the root itself
@@ -677,14 +683,19 @@ CAP_SYS_ADMIN and is deliberately outside `check` and CI.
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the
 named-host runner's node configuration — before that the runner built its own
-config and a 4/8/16 sweep would have measured the default three times. The code
-and deterministic configuration/storage proofs are delivered, but the retained
-physical `4 · 8 · 16` named-host artifact is not: it remains grouped with
-P0c/P2f and requires operator authorization to transfer the private runner
-image to the four named machines. Until that artifact exists, production keeps
-`4`; this milestone does not claim that a larger pool improves the measured
-workload, and no earlier deferred artifact should be read as having measured
-one.
+config and a 4/8/16 sweep would have measured the default three times. The
+schema-v2 workload now seeds a fixed 32-row catalogue and measures 256 bounded
+follower reads at concurrency 32. Raw evidence records every latency,
+p50/p95/p99, local-versus-Authority call counts, and the configured pool;
+campaign evidence records read p95, write p99, aggregate peak RSS, and fixed
+10% write/RSS selection guardrails. The code and deterministic
+configuration/storage proofs are delivered, but the retained physical
+`4 · 8 · 16` named-host artifact is not: it remains grouped with P0c/P2f and
+requires operator authorization to transfer the private runner image to the
+four named machines. Until all three hash-bound campaigns exist, production
+keeps `4`; this milestone does not claim that a larger pool improves the
+measured workload, and no earlier deferred artifact should be read as having
+measured one.
 
 ### 6.7 P6 — make the fourth machine useful without adding a vote
 

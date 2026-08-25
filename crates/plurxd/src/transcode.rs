@@ -4803,17 +4803,38 @@ impl TranscodeManager {
         self.dv_strippable
     }
 
-    pub fn with_cache(mut self, cache_dir: PathBuf, ffmpeg_build: String, node_id: String) -> Self {
-        let cache_parent = cache_dir.parent().unwrap_or(cache_dir.as_path());
-        self.runtime_cache = cache_parent.join("runtime");
-        self.subtitle_cache = cache_parent.join("subs");
+    #[cfg(test)]
+    pub fn with_cache(self, cache_dir: PathBuf, ffmpeg_build: String, node_id: String) -> Self {
+        let cache_parent = cache_dir.parent().unwrap_or(cache_dir.as_path()).to_owned();
+        self.with_cache_layout(
+            cache_dir,
+            cache_parent.join("runtime"),
+            cache_parent.join("subs"),
+            cache_parent.join("renditions"),
+            ffmpeg_build,
+            node_id,
+        )
+    }
+
+    /// Configure every managed cache path explicitly. Startup canonicalizes
+    /// and validates these paths before scratch cleanup; deriving siblings
+    /// from a canonicalized `transcode` leaf would move them when only that
+    /// legacy child is a relocation symlink.
+    pub fn with_cache_layout(
+        mut self,
+        cache_dir: PathBuf,
+        runtime_cache: PathBuf,
+        subtitle_cache: PathBuf,
+        rendition_cache: PathBuf,
+        ffmpeg_build: String,
+        node_id: String,
+    ) -> Self {
+        self.runtime_cache = runtime_cache;
+        self.subtitle_cache = subtitle_cache;
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
-        self.vod = crate::vodserve::VodServe::new(
-            cache_parent.join("renditions"),
-            Arc::clone(&self.store),
-        );
+        self.vod = crate::vodserve::VodServe::new(rendition_cache, Arc::clone(&self.store));
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
                 path = %self.runtime_cache.display(),
@@ -12535,6 +12556,8 @@ impl HlsDeliveryFixture {
                 transcode: dir.join("transcode"),
                 cache: dir.join("cache"),
                 subs: dir.join("subs"),
+                runtime_cache: dir.join("runtime"),
+                renditions: dir.join("renditions"),
             },
             "test-node".into(),
             EncoderCaps::default(),

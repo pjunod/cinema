@@ -252,8 +252,9 @@ bump may break compatibility and a **patch** bump never does.
   module is wired to a request path yet.
 - **Durable state, persistent cache, and live-transcode scratch can now sit on
   three different devices.** `storage.cache_dir` (`PLURX_CACHE_DIR`) names a
-  persistent node-local root whose children are `artwork/`, `transcode/`, and
-  `subs/`; `storage.transcode_dir` (`PLURX_TRANSCODE_DIR`) names the disposable
+  node-local root whose persistent children are `artwork/`, `transcode/`,
+  `subs/`, and `renditions/`, with regenerable ffmpeg state under `runtime/`;
+  `storage.transcode_dir` (`PLURX_TRANSCODE_DIR`) names the disposable
   live-session scratch directory itself, which must sit outside `data_dir` and
   is emptied at every start; and `cluster.read_pool_size`
   (`PLURX_CLUSTER_READ_POOL_SIZE`) bounds the local replicated-read connection
@@ -267,11 +268,15 @@ bump may break compatibility and a **patch** bump never does.
   `0700` with a warning. Setting `cache_dir` on an existing install migrates
   nothing and warns while the legacy trees still hold bytes —
   [docs/OPERATIONS.md](docs/OPERATIONS.md) carries the old-to-new path table,
-  which matters because completed offline packages live in the transcode cache
-  and the obvious `cp -a` puts them where nothing reads them. `[storage]`
+  which matters because completed offline packages live in the transcode cache,
+  admitted VOD copy-cache entries live in `renditions/`, and the obvious
+  `cp -a` puts both where nothing reads them. `[storage]`
   rejects unknown fields, so both keys must be deleted from the config before
   an older binary is installed; `[cluster]` is deliberately lenient and
-  `read_pool_size` needs no such step.
+  `read_pool_size` needs no such step. The named-host topology campaign now
+  attests that setting while measuring a fixed concurrent local-catalogue
+  workload, retaining raw read p50/p95/p99 plus write-p99 and peak-RSS
+  guardrails so 4/8/16 results can be compared rather than merely configured.
 
 - **A file's segmentation is now computed once and kept, instead of being
   re-decided on every watch.** `plurx-core::segplan` builds a whole-title plan

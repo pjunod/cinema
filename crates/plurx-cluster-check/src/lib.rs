@@ -25,6 +25,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures_util::StreamExt;
 use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
@@ -5685,6 +5686,14 @@ pub enum Request {
         ordinal: u64,
         value: String,
     },
+    TopologySeedCatalogue {
+        rows: u64,
+    },
+    TopologyCatalogueReads {
+        item_ids: Vec<i64>,
+        operations: u64,
+        concurrency: u64,
+    },
     TopologyResources {
         hardware: String,
         storage_device: String,
@@ -5758,6 +5767,15 @@ pub enum Response {
     },
     TopologyResources {
         sample: ResourceSample,
+    },
+    TopologyCatalogueSeeded {
+        item_ids: Vec<i64>,
+    },
+    TopologyCatalogueReads {
+        raw_round_trip_us: Vec<u64>,
+        errors: u64,
+        consistent_query_calls: u64,
+        non_consistent_query_calls: u64,
     },
     Dump {
         digest: String,
@@ -8172,6 +8190,23 @@ async fn handle_request(
                 .await?;
             Ok(Response::Ok)
         }
+        Request::TopologySeedCatalogue { rows } => Ok(Response::TopologyCatalogueSeeded {
+            item_ids: seed_topology_catalogue(store_ref(store)?, rows).await?,
+        }),
+        Request::TopologyCatalogueReads {
+            item_ids,
+            operations,
+            concurrency,
+        } => {
+            run_topology_catalogue_reads(
+                catalogue_ref(catalogue)?.clone(),
+                store_ref(catalogue_store)?,
+                item_ids,
+                operations,
+                concurrency,
+            )
+            .await
+        }
         Request::TopologyResources {
             hardware,
             storage_device,
@@ -9020,6 +9055,87 @@ async fn seed_offline_work_during_removal(
         bail!("the download requested during the removal was not admitted");
     }
     Ok(())
+}
+
+async fn seed_topology_catalogue(store: &HiqliteAuthStore, rows: u64) -> Result<Vec<i64>> {
+    if rows == 0 || rows > 256 {
+        bail!("topology catalogue row count must be between 1 and 256");
+    }
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Topology Read Pool".to_owned(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/cluster/topology-read-pool")],
+            anime: false,
+        })
+        .await?;
+    let mut item_ids = Vec::with_capacity(usize::try_from(rows)?);
+    for ordinal in 0..rows {
+        item_ids.push(
+            store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("{} {ordinal:04}", topology::TOPOLOGY_CATALOGUE_TITLE_PREFIX),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await?,
+        );
+    }
+    Ok(item_ids)
+}
+
+async fn run_topology_catalogue_reads(
+    catalogue: CatalogueReader,
+    store: &HiqliteAuthStore,
+    item_ids: Vec<i64>,
+    operations: u64,
+    concurrency: u64,
+) -> Result<Response> {
+    if item_ids.is_empty() {
+        bail!("topology catalogue read workload has no corpus");
+    }
+    if operations == 0 || operations > 16_384 {
+        bail!("topology catalogue read operations must be between 1 and 16384");
+    }
+    if concurrency == 0 || concurrency > 256 || concurrency > operations {
+        bail!("topology catalogue read concurrency must be inside 1..=min(256, operations)");
+    }
+
+    store.validation_reset_operation_counts();
+    let item_count = u64::try_from(item_ids.len())?;
+    let read_ids = (0..operations)
+        .map(|ordinal| {
+            let index = usize::try_from(ordinal % item_count)?;
+            Ok(item_ids[index])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let samples = futures_util::stream::iter(read_ids)
+        .map(|item_id| {
+            let catalogue = catalogue.clone();
+            async move {
+                let started = Instant::now();
+                let result = catalogue.get_item(item_id).await;
+                let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                let failed = result
+                    .map(|item| item.is_none_or(|item| item.id != item_id))
+                    .unwrap_or(true);
+                (elapsed, failed)
+            }
+        })
+        .buffer_unordered(usize::try_from(concurrency)?)
+        .collect::<Vec<_>>()
+        .await;
+    let counts = store.validation_operation_counts();
+    Ok(Response::TopologyCatalogueReads {
+        raw_round_trip_us: samples.iter().map(|(elapsed, _)| *elapsed).collect(),
+        errors: u64::try_from(samples.iter().filter(|(_, failed)| *failed).count())?,
+        consistent_query_calls: counts.consistent_query_calls,
+        non_consistent_query_calls: counts.non_consistent_query_calls,
+    })
 }
 
 async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {

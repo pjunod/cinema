@@ -571,18 +571,22 @@ concurrent build, scan, backup, or benchmark work, and every `/var/tmp` root is
 the declared local durable device rather than tmpfs or a network mount.
 
 Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
-every raw `pair-NN.json`. After at least three pairs it computes the paired
-four-voter ÷ three-voter ratios for write p99, CPU seconds, storage-write bytes,
-and network-transmit bytes. Resource counters are captured concurrently on all
-voters at the stable pre-write barrier and again after convergence; the
-artifact retains monotone workload-window deltas, while Linux `VmHWM` is reset
-at the opening barrier. It may stop only when all two-sided 95% Student-t
-intervals have at most 5% multiplicative half-width, or after seven pairs with
-an `inconclusive` result. `campaign.json` records the medians, intervals,
-stopping verdict, isolated load-generator declaration, and reviewed budgets.
-Every raw run repeats the same isolation declaration and records the exact
-controller and voter fingerprint set used for that topology. Validate retained
-bytes and every cross-file hash with:
+every raw `pair-NN.json`. Each run seeds the same 32-row catalogue, then issues
+256 bounded reads at concurrency 32 against a caught-up follower. The raw
+artifact records every read latency, p50/p95/p99, whether any read fell back to
+Authority, and the configured `read_pool_size`; a fallback invalidates the
+run. After at least three pairs the campaign computes paired four-voter ÷
+three-voter ratios for write p99, local-catalogue read p95, aggregate peak RSS,
+CPU seconds, storage-write bytes, and network-transmit bytes. Resource counters
+are captured concurrently on all voters at the stable pre-workload barrier and
+again after convergence; the artifact retains monotone workload-window deltas,
+while Linux `VmHWM` is reset at the opening barrier. It may stop only when all
+two-sided 95% Student-t intervals have at most 5% multiplicative half-width, or
+after seven pairs with an `inconclusive` result. `campaign.json` records the
+pool size, medians, intervals, stopping verdict, isolated load-generator
+declaration, and reviewed budgets. Every raw run repeats the same isolation
+declaration and records the exact controller and voter fingerprint set used for
+that topology. Validate retained bytes and every cross-file hash with:
 
 ```bash
 cargo run --locked -p plurx-cluster-check -- \
@@ -629,7 +633,8 @@ read_pool_size = 4
 ```
 
 When omitted, both new paths preserve the exact legacy layout. With
-`cache_dir` set, persistent children are `artwork/`, `transcode/`, and `subs/`.
+`cache_dir` set, persistent children are `artwork/`, `transcode/`, `subs/`, and
+`renditions/`; regenerable ffmpeg state lives under `runtime/`.
 `transcode_dir` names the disposable live-session directory itself and must sit
 outside `data_dir`. Naming the legacy path explicitly — `transcode_dir =
 "<data_dir>/transcode"`, or any other scratch below `data_dir` — is refused at
@@ -687,7 +692,7 @@ below scratch.
 | Path | Durability | Placement |
 |---|---|---|
 | `storage.data_dir` and the authority set below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
-| `storage.cache_dir` or the legacy cache/artwork children | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | stable local persistent storage with capacity monitoring |
+| `storage.cache_dir` or the legacy cache/artwork children | persistent node-local bytes, including user-visible offline packages and admitted VOD renditions; only the `runtime/` child is disposable | stable local persistent storage with capacity monitoring |
 | `storage.transcode_dir` or `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or a tmpfs mounted `-o uid=<daemon-uid>,mode=0700`; emptied only at daemon startup |
 
 Create and mount every child before the first `plurxd` start; an empty fallback
@@ -729,16 +734,19 @@ are; the daemon logs a warning while they still hold bytes and starts anyway.
 Copy each tree to its own new name, because the children do not nest the same
 way on both sides:
 
-| Legacy path | With `cache_dir` set |
-|---|---|
-| `<data_dir>/artwork` | `<cache_dir>/artwork` |
-| `<data_dir>/cache/transcode` | `<cache_dir>/transcode` |
-| `<data_dir>/cache/subs` | `<cache_dir>/subs` |
+| Legacy path | With `cache_dir` set | Action and reason |
+|---|---|---|
+| `<data_dir>/artwork` | `<cache_dir>/artwork` | Copy; artwork is persistent node-local data. |
+| `<data_dir>/cache/transcode` | `<cache_dir>/transcode` | Copy; this includes completed offline packages visible to users. |
+| `<data_dir>/cache/subs` | `<cache_dir>/subs` | Copy; extracted subtitles survive restarts. |
+| `<data_dir>/cache/renditions` | `<cache_dir>/renditions` | Copy; admitted VOD copy-cache entries are persistent. |
+| `<data_dir>/cache/runtime` | `<cache_dir>/runtime` | Do not copy. Stop the daemon, delete the old tree, and let the next start regenerate it. |
 
 `cp -a <data_dir>/cache <cache_dir>` is the obvious move and the wrong one: it
-lands the finished transcodes at `<cache_dir>/cache/transcode`, where nothing
-reads them. Completed offline packages live in that same transcode tree and are
-user-visible, so losing it silently re-downloads every phone package.
+lands every child below `<cache_dir>/cache`, where nothing reads it. Completed
+offline packages live in the transcode tree and admitted VOD bytes live in the
+rendition tree; stranding either silently discards user-visible or already
+admitted work.
 
 Moving `storage.data_dir` needs one more step. The scratch marker names the
 durable root it was claimed for, so a daemon started with a new `data_dir` and
@@ -750,8 +758,9 @@ the daemon claim the empty root again. Never delete the marker under a running
 daemon.
 
 Rollback in reverse. Stop one non-leader, copy persistent bytes back to their
-legacy data-root children, remove both new strict `[storage]` keys, restart and
-prove readiness/catch-up, then continue. Do not install an older binary until
+legacy data-root children, discard the regenerable runtime tree, remove both
+new strict `[storage]` keys, restart and prove readiness/catch-up, then
+continue. Do not install an older binary until
 every voter has its bytes back and its config no longer contains the new keys:
 `[storage]` rejects unknown fields, so an older binary does not ignore
 `cache_dir`/`transcode_dir` — it fails to parse the file and the node does not
@@ -762,12 +771,20 @@ through a soak period.
 changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
 snapshot trigger, disaster-recovery log retention, heartbeat, and election
 timers remain unchanged. The setting now reaches the named-host runner's node
-configuration, so a 4/8/16 sweep measures three different pools; an earlier
-runner built its own configuration and would have measured the default three
-times, so no deferred artifact from before that change means anything. Compare
-4, 8, and 16 with the same named workload and retain the smallest value whose
-catalogue p95 improves without a write-p99 or memory-budget regression. Until
-that artifact exists for a voter, keep 4.
+configuration and is repeated in schema-versioned raw and campaign evidence,
+so a 4/8/16 sweep measures and attests three different pools; an earlier runner
+built its own configuration and would have measured the default three times,
+so no deferred artifact from before that change means anything.
+
+Run three campaigns from the same clean source/image, changing only
+`read_pool_size` and the new output directory. Validate all three directories,
+then compare the four-voter medians in their `campaign.json` files. Retain the
+smallest value whose local-catalogue p95 improves over pool 4 while neither
+write p99 nor aggregate peak RSS regresses by more than the recorded 10%
+guardrail. If no larger pool clears all three conditions, or any arm is
+inconclusive, keep 4. Preserve all raw pair files with the three campaign
+summaries; a summary without its hash-bound raw evidence is not a selection
+artifact.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
@@ -1206,7 +1223,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Human-visible server name |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Authoritative database, identity, secrets, migration markers, and compatibility root |
-| `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional persistent node-local artwork/cache/offline root; empty preserves the legacy layout under `data_dir`. Setting it on an existing install moves no bytes — copy the legacy trees yourself, per the path table above |
+| `PLURX_CACHE_DIR` | `storage.cache_dir` | empty | Optional node-local artwork, transcode, subtitle, rendition, and ffmpeg-runtime root; everything except `runtime/` is persistent. Empty preserves the legacy layout under `data_dir`. Setting it on an existing install moves no bytes — copy the persistent legacy trees and discard the old runtime tree, per the path table above |
 | `PLURX_TRANSCODE_DIR` | `storage.transcode_dir` | empty | Optional disposable live-session scratch directory, emptied on startup. Must be owned by the daemon uid and outside `data_dir`; naming `<data_dir>/transcode` or any other path below `data_dir` is refused |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |

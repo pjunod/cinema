@@ -116,14 +116,16 @@ for a database.
 
 Setting `PLURX_CACHE_DIR` on an existing install moves nothing — the daemon
 warns while the legacy trees still hold bytes and starts anyway. Copy
-`<data>/artwork`, `<data>/cache/transcode`, and `<data>/cache/subs` to
-`<cache>/artwork`, `<cache>/transcode`, and `<cache>/subs`; `cp -a <data>/cache
-<cache>` lands the finished transcodes and every completed offline package at
-`<cache>/cache/transcode`, where nothing reads them. Roll back by
-stopping one non-leader, copying persistent bytes to the legacy data-root
-children, removing these settings/mounts, and proving `/readyz` before moving
-the next voter. Delete the two keys before installing an older image: `[storage]`
-rejects unknown fields, so an older binary fails to parse the config rather than
+`<data>/artwork`, `<data>/cache/transcode`, `<data>/cache/subs`, and
+`<data>/cache/renditions` to the same child names below `<cache>`. Stop the
+daemon and delete `<data>/cache/runtime`; that ffmpeg state is regenerable and
+the next start creates `<cache>/runtime` as needed. `cp -a <data>/cache
+<cache>` is wrong: it nests every child below `<cache>/cache`, where nothing
+reads it. Roll back by stopping one non-leader, copying persistent bytes to the
+legacy data-root children, discarding the replacement runtime cache, removing
+these settings/mounts, and proving `/readyz` before moving the next voter.
+Delete the two keys before installing an older image: `[storage]` rejects
+unknown fields, so an older binary fails to parse the config rather than
 ignoring them.
 
 **Why a bind mount and not a named volume.** A named volume lives at a path
