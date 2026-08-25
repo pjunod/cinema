@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["8d499e0b", "acda02dc"]
+commits = ["8e74e664", "84247807"]
 points = ["persistence.upgrades", "cluster.membership", "cluster.auth", "cluster.media-observation", "server.api", "web.experience"]
 checks = ["rust-gate", "database-upgrades", "cluster-auth", "security-boundaries", "web-membership"]
 reason = "The complete P6 learner lifecycle and its one whole-change adversarial correction share one retained regression boundary. Promotion waits for target-local apply and periodic durable-storage proofs, reconciles indeterminate attempts across a new barrier, rewrites and fsyncs downgrade-readable voter boot records, and survives process restart before protocol rollback. Removal fences routing, jobs, and active media ownership before removing only the non-voter. The separate-process harness proves snapshot-only catch-up, removal, live and restarted promotion authority, and unchanged quorum arithmetic. Exact server route tests pin the bounded-read and node-local learner matrix while refusing replicated authority mutations; the cluster UI separates ready learner capacity from voter redundancy. The listed gates cover migration compatibility, membership and authorization, real-process failure behavior, the public route boundary, and operator-visible capacity."
