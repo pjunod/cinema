@@ -1344,6 +1344,22 @@ live read of server-side job state, not a client guess — if it's spinning,
 something is actually running; if a scan looks stuck, the pill (and the logs)
 will say where.
 
+On a cluster, the stream count includes direct play, progressive remux, HLS
+copy, and transcode deliveries from every voter that answered within the common
+two-second peer deadline. Open **Activity** to see the stable node id beside
+each row. A remote row has no **Stop** button: this surface is read-only across
+nodes, and stopping work on another voter requires a separately fenced control
+protocol.
+
+An incomplete cluster read leads with **Activity incomplete**. The page names
+each known voter that was unhealthy, unreachable, timed out, or returned an
+invalid response, and states that streams on those nodes may be missing. A peer
+directory failure is visible by the same rule. Do not read a short table below
+that warning as proof that the cluster is idle; restore the named voter or the
+cluster directory and wait for the next three-second refresh. Ordinary SQLite
+and never-joined installations perform no peer read and retain the historical
+payload and page behavior.
+
 ## Reading library scan status
 
 In Settings → Libraries, the Status column is the truth about each library:
