@@ -39,6 +39,10 @@ pub struct ServerInfo {
     /// True when an Android APK is published (so the web UI shows the download
     /// link on Android). See `web::android_apk_path`.
     pub android_app: bool,
+    /// Whether the web client's Auto controller may change rungs after the
+    /// server's initial playback decision. Public because every signed-in web
+    /// viewer needs the same node-wide playback policy.
+    pub playback_auto_abr: bool,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -51,6 +55,11 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     let instance_id = state.store.instance_id().await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
+    let playback_auto_abr = state
+        .store
+        .get_setting(keys::PLAYBACK_AUTO_ABR)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
         name: state.server_name.clone(),
         version: crate::version::SEMVER,
@@ -60,6 +69,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
+        playback_auto_abr,
     }))
 }
 
@@ -1185,6 +1195,9 @@ pub struct SettingsDto {
     /// Use coarse, node-local playback history to seed Auto quality.
     /// Explicit opt-in; missing is false.
     pub playback_network_priors: bool,
+    /// Let the web client's Auto controller change rungs after playback starts.
+    /// Explicit opt-in; missing is false.
+    pub playback_auto_abr: bool,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -1298,6 +1311,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         .max(0);
     let playback_network_priors =
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
+    let playback_auto_abr =
+        setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
     let offline_enabled = !matches!(
         setting(keys::OFFLINE_ENABLED).as_deref(),
         Some("0" | "false" | "off" | "no")
@@ -1369,6 +1384,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cache_used_bytes,
         telemetry_retain_days,
         playback_network_priors,
+        playback_auto_abr,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -1445,6 +1461,7 @@ pub struct UpdateSettings {
     pub cache_max_gb: Option<i64>,
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
+    pub playback_auto_abr: Option<bool>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -1847,6 +1864,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_NETWORK_PRIORS,
                 if enabled { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(enabled) = req.playback_auto_abr {
+        state
+            .store
+            .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
     for (key, label, value) in [
