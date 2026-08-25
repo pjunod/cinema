@@ -22,6 +22,10 @@ pub const DEFAULT_SCAN_PRUNE_PERCENT: u8 = 10;
 /// until an operator explicitly enables it cluster-wide.
 pub const DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 64;
 pub const MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 10_000;
+/// Default deadline for sending and installing one Raft snapshot segment.
+pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 120;
+pub const MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 10;
+pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 3_600;
 
 const DEFAULT_CONFIG_PATHS: &[&str] = &["plurx.toml", "/etc/plurx/plurx.toml"];
 
@@ -133,6 +137,9 @@ pub struct ClusterConfig {
     /// Local Hiqlite read-only connection pool. Four is the measured/default
     /// baseline; the bounded knob permits retained 4/8/16 comparison runs.
     pub read_pool_size: usize,
+    /// Deadline for sending and installing one Raft snapshot segment. Hiqlite's
+    /// zero non-final-segment timeout makes this the snapshot transfer deadline.
+    pub install_snapshot_timeout_secs: u64,
 }
 
 impl Default for ClusterConfig {
@@ -151,6 +158,7 @@ impl Default for ClusterConfig {
             bounded_replica_reads: false,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
             read_pool_size: 4,
+            install_snapshot_timeout_secs: DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
         }
     }
 }
@@ -228,6 +236,17 @@ impl Config {
                 message: "must be between 1 and 16".to_owned(),
             });
         }
+        if !(MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS..=MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS)
+            .contains(&config.cluster.install_snapshot_timeout_secs)
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.install_snapshot_timeout_secs".to_owned(),
+                message: format!(
+                    "must be between {MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS} and \
+                     {MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS} seconds"
+                ),
+            });
+        }
         Ok(config)
     }
 
@@ -295,8 +314,28 @@ impl Config {
                 message: format!("`{value}` is not an integer from 1 through 16"),
             })?;
         }
+        apply_install_snapshot_timeout_env(
+            &mut self.cluster,
+            env_var("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"),
+        )?;
         Ok(())
     }
+}
+
+fn apply_install_snapshot_timeout_env(
+    cluster: &mut ClusterConfig,
+    value: Option<String>,
+) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        cluster.install_snapshot_timeout_secs = value.parse().map_err(|_| ConfigError::Env {
+            var: "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS".to_owned(),
+            message: format!(
+                "`{value}` is not an integer from {MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS} through \
+                 {MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS}"
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 fn env_var(name: &str) -> Option<String> {
@@ -329,6 +368,10 @@ mod tests {
             DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES
         );
         assert_eq!(config.cluster.read_pool_size, 4);
+        assert_eq!(
+            config.cluster.install_snapshot_timeout_secs,
+            DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS
+        );
     }
 
     #[test]
@@ -477,5 +520,51 @@ mod tests {
                 Err(ConfigError::Value { key, .. }) if key == "cluster.read_pool_size"
             ));
         }
+    }
+
+    #[test]
+    fn snapshot_install_timeout_is_bounded_and_env_values_are_parsed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+
+        for seconds in [
+            MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS,
+            DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
+            MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS,
+        ] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\ninstall_snapshot_timeout_secs = {seconds}\n"),
+            )
+            .expect("write valid snapshot timeout");
+            let config = Config::load(Some(&path)).expect("load valid snapshot timeout");
+            assert_eq!(config.cluster.install_snapshot_timeout_secs, seconds);
+        }
+
+        for seconds in [
+            MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS - 1,
+            MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS + 1,
+        ] {
+            std::fs::write(
+                &path,
+                format!("[cluster]\ninstall_snapshot_timeout_secs = {seconds}\n"),
+            )
+            .expect("write invalid snapshot timeout");
+            assert!(matches!(
+                Config::load(Some(&path)),
+                Err(ConfigError::Value { key, .. })
+                    if key == "cluster.install_snapshot_timeout_secs"
+            ));
+        }
+
+        let mut cluster = ClusterConfig::default();
+        apply_install_snapshot_timeout_env(&mut cluster, Some("300".to_owned()))
+            .expect("parse environment override");
+        assert_eq!(cluster.install_snapshot_timeout_secs, 300);
+        assert!(matches!(
+            apply_install_snapshot_timeout_env(&mut cluster, Some("fast".to_owned())),
+            Err(ConfigError::Env { var, .. })
+                if var == "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"
+        ));
     }
 }

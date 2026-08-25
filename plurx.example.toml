@@ -51,3 +51,7 @@ scan_prune_percent = 10
 # Local replicated read-only connection pool; accepted range is 1 through 16.
 # Keep 4 unless a retained 4/8/16 workload comparison proves another value.
 # read_pool_size = 4
+# Snapshot transfer/install deadline in seconds; accepted range is 10 through
+# 3600. The 120-second default covers production-sized state snapshots on a
+# healthy LAN without retrying from zero at the former 10-second boundary.
+# install_snapshot_timeout_secs = 120
