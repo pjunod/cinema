@@ -1751,6 +1751,12 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   assert.equal(cases.length, 1);
   assert.equal(cases[0].operation, "shaped-cliff");
   assert.ok(cases[0].recovery.recovery_deadline_seconds > 0, "the criteria are in the manifest, not the code");
+  assert.ok(
+    cases[0].recovery.recovery_observe_seconds
+      >= cases[0].recovery.recovery_deadline_seconds
+        + cases[0].recovery.sustained_seconds + 15,
+    "the evidence window retains headroom for runner-dependent pre-cliff runway",
+  );
 
   // The shaping fixture must not widen the general matrix.
   const full = lab.expandCases(manifest, "full");
