@@ -322,6 +322,11 @@ pub mod keys {
     /// Server ceiling, in seconds, for one blocking VOD segment fetch. The
     /// per-request `block_budget_secs` is clamped to this.
     pub const VOD_BLOCK_BUDGET_SECS: &str = "playback.vod_block_budget_secs";
+    /// Hard producer deadline from the first blocked request for a planned
+    /// segment until bytes or a typed `producer_failed` answer. Distinct from
+    /// the shorter per-request block deadline so clients can retry 503s while
+    /// the same bounded production attempt continues.
+    pub const VOD_MATERIALIZE_BUDGET_SECS: &str = "playback.vod_materialize_budget_secs";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not

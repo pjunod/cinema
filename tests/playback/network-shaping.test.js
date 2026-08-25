@@ -1733,6 +1733,15 @@ test("two runs that differ only in run-local values normalize identically", () =
 
 // ------------------------------------------------------------------- CLI
 
+test("API parsing preserves opaque 64-bit ids for later routes", () => {
+  const parsed = lab.parseApiJson(
+    '{"id":8622887431169855001,"file_id":7,"nested":{"item_id":-9007199254740993}}',
+  );
+  assert.equal(parsed.id, "8622887431169855001");
+  assert.equal(parsed.file_id, 7, "safe ids keep the API's ordinary numeric shape");
+  assert.equal(parsed.nested.item_id, "-9007199254740993");
+});
+
 test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites["stall-recovery"];
@@ -1742,6 +1751,12 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
   assert.equal(cases.length, 1);
   assert.equal(cases[0].operation, "shaped-cliff");
   assert.ok(cases[0].recovery.recovery_deadline_seconds > 0, "the criteria are in the manifest, not the code");
+  assert.ok(
+    cases[0].recovery.recovery_observe_seconds
+      >= cases[0].recovery.recovery_deadline_seconds
+        + cases[0].recovery.sustained_seconds + 15,
+    "the evidence window retains headroom for runner-dependent pre-cliff runway",
+  );
 
   // The shaping fixture must not widen the general matrix.
   const full = lab.expandCases(manifest, "full");
@@ -1754,6 +1769,20 @@ test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => 
     "the general fixtures command does not pay for the 120-second opt-in source");
   const shapedCorpus = lab.fixturesForBuild(manifest, new Set(["shaping-mpeg4-mp3-720"]));
   assert.deepEqual(shapedCorpus.map((fixture) => fixture.id), ["shaping-mpeg4-mp3-720"]);
+});
+
+test("the VOD suite makes native seeking and resume invariants executable", () => {
+  const manifest = lab.loadManifest();
+  const suite = manifest.suites.vod;
+  assert.ok(suite, "the named VOD suite exists");
+  assert.equal(suite.requires_vod, true);
+  const cases = lab.expandCases(manifest, "vod");
+  assert.equal(cases.length, 3);
+  assert.ok(cases.every((testCase) => testCase.require_vod === true));
+  const storm = cases.find((testCase) => testCase.operation === "seek-storm");
+  assert.equal(storm.seeks, 20);
+  assert.equal(storm.maximum_session_creates, 1, "only the initial create is allowed");
+  assert.ok(cases.some((testCase) => testCase.operation === "suspend-resume"));
 });
 
 test("the run command retains JSON and JUnit when a bad profile exits nonzero", async () => {
@@ -1929,6 +1958,20 @@ test("the documented acceptance command is the one the harness accepts", () => {
   assert.match(help.stdout, /--network-profile/);
   assert.match(help.stdout, /8mbps-to-1\.5mbps/);
   assert.match(help.stdout, /stall-recovery/);
+});
+
+test("the raw Chromium driver is safe to launch in an unprivileged runner container", () => {
+  const args = lab.cdpBrowserArgs(
+    { headed: false },
+    "http://127.0.0.1:41001",
+    "/tmp/playback-lab-chrome-profile",
+  );
+  assert.ok(args.includes("--headless=new"));
+  assert.ok(args.includes("--no-sandbox"), "the Incus runner cannot create Chromium's namespace sandbox");
+  assert.ok(args.includes("--disable-dev-shm-usage"), "media playback must not depend on container /dev/shm size");
+  assert.ok(args.includes("--remote-debugging-port=0"));
+  assert.ok(args.includes("--user-data-dir=/tmp/playback-lab-chrome-profile"));
+  assert.equal(args.at(-1), "http://127.0.0.1:41001");
 });
 
 runAll().then(() => {

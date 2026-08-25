@@ -39,6 +39,9 @@ make playback-fixtures     # build + ffprobe the corpus; cached under target/
 make playback-smoke        # 11 risk-weighted Chrome cases, about 2–4 minutes
 make playback-full         # 44 Chrome cases: every fixture × quality + restarts
 
+# Film-addressed VOD: steady play, 20 seeks, and suspend/resume.
+scripts/playback-lab run --suite vod --json out/vod.json
+
 # Fault injection: drive a session through a bandwidth cliff (see below).
 scripts/playback-lab run --suite stall-recovery \
   --network-profile 8mbps-to-1.5mbps --json out/stall-recovery.json
@@ -79,7 +82,7 @@ source × quality product, then targeted operations where they are meaningful.
 | Container | MP4 · MKV · WebM · AVI |
 | Resolution | 720p · 1080p · 2160p |
 | Quality | Auto · Original · Original one-stream · 1080p · 720p · 480p |
-| Operation | cold play · seek/restart · audio switch · text-subtitle toggle |
+| Operation | cold play · seek/restart · 20 native VOD seeks · VOD suspend/resume · audio switch · text-subtitle toggle |
 | Browser state | reported codecs · HDR display · MSE · native HLS |
 
 Running every operation against every source adds minutes without adding a new
@@ -127,6 +130,64 @@ failure that once turned a 4K remux into a 720p transcode. TTFF, runway, dropped
 frames, `MediaCapabilities`, encoder, and server-ahead health are recorded but
 not all are hard gates yet; promote a number to a gate only after it is stable
 across the target hardware.
+
+## Film-addressed VOD — enable it and prove the client contract
+
+The web player always asks for the VOD presentation, but the server honors the
+request only while the operator opt-in is enabled. New installations therefore
+retain the legacy presentation until an administrator changes the setting.
+
+In the web app, open **Settings → Playback → Film-addressed VOD**:
+
+1. Set **Build indexes** to at least every 15 minutes, choose the working-set
+   budget, and save. A title safely keeps the live presentation until its
+   node-local fragment index exists.
+2. Enable **VOD presentation for new web sessions** and save again. The change
+   applies to sessions opened after the save; an existing player is untouched.
+3. To roll back, clear that checkbox. The client may continue to declare VOD,
+   but the server ignores the declaration while the gate is off.
+
+The equivalent administrative request is:
+
+```http
+PUT /api/v1/settings
+Authorization: Bearer ADMIN_TOKEN
+Content-Type: application/json
+
+{
+  "vod_index_mins": 15,
+  "vod_presentation": true,
+  "vod_working_set_bytes": "8589934592",
+  "vod_block_budget_secs": "8",
+  "vod_materialize_budget_secs": "30"
+}
+```
+
+Run the named browser contract after a change:
+
+```bash
+scripts/playback-lab run --suite vod --browser chrome \
+  --json out/vod.json
+```
+
+The harness starts an isolated server, turns on that same setting set, waits for
+its fragment-index pass, and then runs three cases against the shipped web
+player. A pass proves all of the following:
+
+- steady playback is genuinely VOD (`vod: true` at both ends);
+- twenty non-linear seeks land within 0.5 seconds on one player generation and
+  one server session;
+- the live playlist keeper fires zero times;
+- the server log contains exactly one VOD-session attach for each case; and
+- pausing the media element for eight seconds resumes on the same session.
+
+The last case is a deterministic browser suspension surrogate. It proves the
+player/session contract but does not claim that an operating system slept. The
+nynuc release protocol still closes the laptop or sleeps the browser host
+mid-film and checks the same session after wake. Transcode-rung VOD remains
+disabled until the open P2/D6 device measurement establishes that AVPlayer and
+Media3 tolerate the planned EXTINF timing; such a request deliberately keeps
+the live presentation.
 
 ## Network shaping — a bandwidth cliff you can reproduce and timestamp
 
