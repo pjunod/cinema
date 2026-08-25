@@ -156,6 +156,7 @@ test("Activity detail response keeps the shared header indicator current", () =>
   const harness = new Function(
     "document", "esc",
     `${shippedSource("paintActivity")};
+     ${shippedSource("activityNodeFailures")};
      ${shippedSource("detailActivitySummary")};
      return {paintActivity,detailActivitySummary};`,
   )(document, (value) => String(value));
@@ -174,6 +175,37 @@ test("Activity detail response keeps the shared header indicator current", () =>
   harness.paintActivity([]);
   assert.equal(working.at(-1), false);
   assert.equal(activity.style.display, "none");
+});
+
+test("Activity names missing cluster nodes and attributes delivered rows", () => {
+  const harness = new Function(
+    `${shippedSource("activityNodeFailures")};
+     ${shippedSource("activityNodeStatusText")};
+     ${shippedSource("activityNodeFailureText")};
+     ${shippedSource("detailActivitySummary")};
+     return {activityNodeFailures,activityNodeFailureText,detailActivitySummary};`,
+  )();
+  const detail = {
+    activity_nodes: [
+      { node_id: "node-a", status: "answered" },
+      { node_id: "node-b", status: "timed_out" },
+      { node_id: "node-c", status: "unhealthy" },
+    ],
+    scans: [], producing: null, offline: [], trakt: { syncing: false },
+  };
+  const missing = harness.activityNodeFailures(detail);
+  assert.deepEqual(missing.map((node) => node.node_id), ["node-b", "node-c"]);
+  assert.equal(harness.activityNodeFailureText(missing[0]), "Node node-b · timed out");
+  assert.deepEqual(harness.detailActivitySummary(detail, []), [{
+    label: "Activity incomplete",
+    detail: "2 cluster nodes did not answer",
+  }]);
+
+  const painter = shippedSource("paintActivityBody");
+  assert.match(painter, /role="status" aria-live="polite"/);
+  assert.match(painter, /de\.node_id/);
+  assert.match(painter, /<th>Node<\/th>/);
+  assert.match(painter, /Streams on those nodes may be missing/);
 });
 
 test("Activity detail request guard executes one current request and releases", async () => {
