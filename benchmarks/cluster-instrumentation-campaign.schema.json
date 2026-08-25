@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-instrumentation-campaign-v1.json",
+  "title": "plurx named-runner Store instrumentation campaign",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "evidence_scope", "build_sha", "runner_id", "image",
+    "image_digest", "native_architecture", "controller_machine_fingerprint",
+    "voter_machine_fingerprints", "controller_host", "load_generator_host",
+    "load_generator_isolation", "voter_labels", "read_pool_size", "min_pairs",
+    "max_pairs", "confidence_half_width_percent", "overhead_budget_percent",
+    "started_at_unix_ms", "finished_at_unix_ms", "stop_reason", "result",
+    "raw_pairs", "metrics"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "named_runner" },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "runner_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "image": { "type": "string", "pattern": "^plurx-cluster-check:[0-9a-f]{40}$" },
+    "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "native_architecture": { "enum": ["amd64", "arm64"] },
+    "controller_machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "voter_machine_fingerprints": {
+      "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "controller_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "load_generator_isolation": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "voter_labels": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "read_pool_size": { "type": "integer", "minimum": 1, "maximum": 16 },
+    "min_pairs": { "const": 3 },
+    "max_pairs": { "const": 7 },
+    "confidence_half_width_percent": { "const": 5.0 },
+    "overhead_budget_percent": { "const": 2.0 },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "stop_reason": { "enum": ["precision_reached", "max_pairs_reached"] },
+    "result": { "enum": ["accepted", "rejected", "inconclusive"] },
+    "raw_pairs": {
+      "type": "array", "minItems": 3, "maxItems": 7,
+      "items": { "$ref": "#/$defs/raw_pair" }
+    },
+    "metrics": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "prefixItems": [
+        { "$ref": "#/$defs/three_voter_cpu" },
+        { "$ref": "#/$defs/three_voter_wall" },
+        { "$ref": "#/$defs/four_voter_cpu" },
+        { "$ref": "#/$defs/four_voter_wall" }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "raw_pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pair_index", "state_order", "topology_order", "control_artifact_path",
+        "control_artifact_sha256", "instrumented_artifact_path",
+        "instrumented_artifact_sha256"
+      ],
+      "properties": {
+        "pair_index": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "state_order": {
+          "oneOf": [
+            { "const": ["control", "instrumented"] },
+            { "const": ["instrumented", "control"] }
+          ]
+        },
+        "topology_order": {
+          "oneOf": [ { "const": [3, 4] }, { "const": [4, 3] } ]
+        },
+        "control_artifact_path": { "type": "string", "pattern": "^pair-[0-9]{2}-control\\.json$" },
+        "control_artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "instrumented_artifact_path": { "type": "string", "pattern": "^pair-[0-9]{2}-instrumented\\.json$" },
+        "instrumented_artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "metric_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric", "unit", "control_values", "instrumented_values",
+        "instrumented_over_control_ratios", "median_control", "median_instrumented",
+        "median_ratio", "geometric_mean_ratio", "ci95_lower_ratio", "ci95_upper_ratio",
+        "ci95_half_width_percent", "precision_reached", "within_budget"
+      ],
+      "properties": {
+        "metric": { "type": "string" },
+        "unit": { "const": "seconds" },
+        "control_values": { "$ref": "#/$defs/positive_samples" },
+        "instrumented_values": { "$ref": "#/$defs/positive_samples" },
+        "instrumented_over_control_ratios": { "$ref": "#/$defs/positive_samples" },
+        "median_control": { "type": "number", "exclusiveMinimum": 0 },
+        "median_instrumented": { "type": "number", "exclusiveMinimum": 0 },
+        "median_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "geometric_mean_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_lower_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_upper_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "ci95_half_width_percent": { "type": "number", "minimum": 0 },
+        "precision_reached": { "type": "boolean" },
+        "within_budget": { "type": "boolean" }
+      }
+    },
+    "three_voter_cpu": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        { "properties": { "metric": { "const": "three_voter_cpu" } } }
+      ]
+    },
+    "three_voter_wall": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        { "properties": { "metric": { "const": "three_voter_wall" } } }
+      ]
+    },
+    "four_voter_cpu": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        { "properties": { "metric": { "const": "four_voter_cpu" } } }
+      ]
+    },
+    "four_voter_wall": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        { "properties": { "metric": { "const": "four_voter_wall" } } }
+      ]
+    },
+    "positive_samples": {
+      "type": "array", "minItems": 3, "maxItems": 7,
+      "items": { "type": "number", "exclusiveMinimum": 0 }
+    }
+  }
+}

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::path::Path;
+#[cfg(feature = "cluster-read-cost-validation")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -623,6 +625,26 @@ impl StoreOperationMetrics {
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
 
+// The named P2f runner needs a production-equivalent control arm without
+// maintaining or rebuilding a historical binary. This switch exists only in
+// the cluster validation build; shipped binaries compile the instrumented path
+// unconditionally and expose no runtime way to disable their metrics.
+#[cfg(feature = "cluster-read-cost-validation")]
+static STORE_OPERATION_INSTRUMENTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[doc(hidden)]
+pub fn validation_set_store_operation_instrumentation(enabled: bool) {
+    STORE_OPERATION_INSTRUMENTATION_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[doc(hidden)]
+#[must_use]
+pub fn validation_store_operation_instrumentation_enabled() -> bool {
+    STORE_OPERATION_INSTRUMENTATION_ENABLED.load(Ordering::Relaxed)
+}
+
 struct StoreOperationTimer {
     metrics: &'static StoreOperationMetrics,
     class: StoreOperationClass,
@@ -665,6 +687,10 @@ async fn time_store_operation<T>(
     operation: impl Future<Output = Result<T, StoreError>>,
     successful: impl FnOnce(&T) -> bool,
 ) -> Result<T, StoreError> {
+    #[cfg(feature = "cluster-read-cost-validation")]
+    if !validation_store_operation_instrumentation_enabled() {
+        return operation.await;
+    }
     let timer = StoreOperationTimer::start(metrics, class);
     let result = operation.await;
     timer.complete(match result.as_ref() {

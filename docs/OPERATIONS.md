@@ -948,6 +948,30 @@ cargo run --locked -p plurx-cluster-check -- \
   topology-campaign-validate path/to/campaign.json
 ```
 
+P2f uses the same image, hosts, workload, resource counters, output ownership,
+and cleanup authority. Its control arm disables only the Store operation timer
+through a validation-only hook compiled into `plurx-cluster-check`; production
+`plurxd` has no switch and always instruments Store calls. The runner
+counterbalances control/instrumented order independently from 3/4-voter order,
+retains one ordinary topology-v2 artifact for every arm, and compares aggregate
+CPU and wall time for both topologies against the registered 2% budget:
+
+```bash
+scripts/cluster-named-runner collect-instrumentation \
+  target/cluster-named-runner.json \
+  target/cluster-instrumentation-named
+
+cargo run --locked -p plurx-cluster-check -- \
+  instrumentation-campaign-validate \
+  target/cluster-instrumentation-named/instrumentation-campaign.json
+```
+
+The P2f result is `accepted` only after all four paired estimates reach the
+same registered precision rule and their geometric-mean instrumented/control
+ratios remain at or below 1.02. A precise over-budget campaign is `rejected`;
+seven pairs without precision are `inconclusive`. Retain the campaign file and
+all hash-bound control and instrumented artifacts together.
+
 The output directory must not exist. `collect` generates a per-invocation
 256-bit owner and must win one atomic directory claim before it arms its cleanup
 trap, reserves ports, or creates remote state. A losing controller never owns a

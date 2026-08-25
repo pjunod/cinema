@@ -29,6 +29,7 @@ use super::{
 
 const NAMED_RUNNER_CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const NAMED_CAMPAIGN_SCHEMA_VERSION: u32 = 2;
+pub const INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION: u32 = 1;
 const NAMED_SCOPE: &str = "named_runner";
 const LOCAL_IMAGE_REPOSITORY: &str = "plurx-cluster-check";
 const SSH_CONNECT_TIMEOUT_SECS: &str = "10";
@@ -118,6 +119,70 @@ pub struct NamedTopologyCampaign {
     pub raw_pairs: Vec<RawPairReference>,
     pub metrics: Vec<PairedMetric>,
     pub budgets: CampaignBudgets,
+}
+
+/// P2f compares the same exact validation binary with only the validation-only
+/// Store timer switch changed. Each arm is itself a complete, schema-validated
+/// 3-voter/4-voter topology artifact, so the overhead report cannot replace
+/// workload correctness with a synthetic timer microbenchmark.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedInstrumentationCampaign {
+    pub schema_version: u32,
+    pub evidence_scope: String,
+    pub build_sha: String,
+    pub runner_id: String,
+    pub image: String,
+    pub image_digest: String,
+    pub native_architecture: String,
+    pub controller_machine_fingerprint: String,
+    pub voter_machine_fingerprints: Vec<String>,
+    pub controller_host: String,
+    pub load_generator_host: String,
+    pub load_generator_isolation: String,
+    pub voter_labels: Vec<String>,
+    pub read_pool_size: usize,
+    pub min_pairs: u64,
+    pub max_pairs: u64,
+    pub confidence_half_width_percent: f64,
+    pub overhead_budget_percent: f64,
+    pub started_at_unix_ms: i64,
+    pub finished_at_unix_ms: i64,
+    pub stop_reason: String,
+    pub result: String,
+    pub raw_pairs: Vec<InstrumentationPairReference>,
+    pub metrics: Vec<InstrumentationMetric>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstrumentationPairReference {
+    pub pair_index: u64,
+    pub state_order: Vec<String>,
+    pub topology_order: Vec<u64>,
+    pub control_artifact_path: String,
+    pub control_artifact_sha256: String,
+    pub instrumented_artifact_path: String,
+    pub instrumented_artifact_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstrumentationMetric {
+    pub metric: String,
+    pub unit: String,
+    pub control_values: Vec<f64>,
+    pub instrumented_values: Vec<f64>,
+    pub instrumented_over_control_ratios: Vec<f64>,
+    pub median_control: f64,
+    pub median_instrumented: f64,
+    pub median_ratio: f64,
+    pub geometric_mean_ratio: f64,
+    pub ci95_lower_ratio: f64,
+    pub ci95_upper_ratio: f64,
+    pub ci95_half_width_percent: f64,
+    pub precision_reached: bool,
+    pub within_budget: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +288,7 @@ pub async fn run_named_campaign(
                     owner_nonce,
                     build_sha: &build_sha,
                     deployment: &deployment,
+                    instrument_store_operations: true,
                 })
                 .await?,
             );
@@ -328,6 +394,209 @@ pub async fn run_named_campaign(
     Ok(())
 }
 
+/// Run P2f on the same four named machines and exact image as P0c. The state
+/// order and the topology order are independently counterbalanced. A control
+/// and instrumented arm each retain an ordinary topology-v2 artifact, which
+/// keeps all workload, corpus, placement, and resource validation shared with
+/// P0c while this wrapper evaluates only the Store instrumentation delta.
+pub async fn run_named_instrumentation_campaign(
+    config_path: &Path,
+    output_dir: &Path,
+    source_root: &Path,
+    owner_nonce: &str,
+) -> Result<()> {
+    let config: NamedRunnerConfig = serde_json::from_slice(
+        &std::fs::read(config_path)
+            .with_context(|| format!("read named-runner config {}", config_path.display()))?,
+    )?;
+    validate_config(&config)?;
+    verify_output_claim(output_dir, owner_nonce)?;
+    let cleanup_manifest = output_dir.join(CLEANUP_MANIFEST_FILENAME);
+    let build_sha = verify_controller_source(source_root, None)?;
+    if !image_is_pinned_to_sha(&config.image, &build_sha) {
+        bail!(
+            "named-runner image {} is not pinned to build {}",
+            config.image,
+            build_sha
+        );
+    }
+    let deployment = verify_deployed_image(&config, &build_sha).await?;
+    let image_digest = deployment.image_digest.clone();
+    let workload = TopologyWorkload::semantic();
+    let workload_sha256 = workload.sha256()?;
+    let started_at_unix_ms = unix_ms()?;
+    let mut raw_pairs = Vec::new();
+    let mut controls = Vec::new();
+    let mut instrumented = Vec::new();
+    let mut metrics = Vec::new();
+    let mut precision_reached = false;
+
+    for pair_index in 1..=config.max_pairs {
+        let topology_order = if pair_index % 2 == 1 { [3, 4] } else { [4, 3] };
+        let state_order = if pair_index % 2 == 1 {
+            [false, true]
+        } else {
+            [true, false]
+        };
+        let mut control = None;
+        let mut measured = None;
+        for instrumentation_enabled in state_order {
+            let state = if instrumentation_enabled {
+                "instrumented"
+            } else {
+                "control"
+            };
+            let mut runs = Vec::with_capacity(2);
+            for voter_count in topology_order {
+                println!(
+                    "cluster-check: P2f pair {pair_index} {state} fresh {voter_count}-voter topology"
+                );
+                runs.push(
+                    run_remote_topology(RemoteTopologyRequest {
+                        config: &config,
+                        pair_index,
+                        voter_count,
+                        workload: &workload,
+                        workload_sha256: &workload_sha256,
+                        cleanup_manifest: &cleanup_manifest,
+                        image_digest: &image_digest,
+                        owner_nonce,
+                        build_sha: &build_sha,
+                        deployment: &deployment,
+                        instrument_store_operations: instrumentation_enabled,
+                    })
+                    .await?,
+                );
+            }
+            let artifact = ClusterTopologyArtifact {
+                schema_version: TOPOLOGY_ARTIFACT_SCHEMA_VERSION,
+                evidence_scope: NAMED_SCOPE.to_owned(),
+                build_sha: build_sha.clone(),
+                runner_image_digest: Some(image_digest.clone()),
+                workload: workload.clone(),
+                workload_sha256: workload_sha256.clone(),
+                topology_order: topology_order.to_vec(),
+                started_at_unix_ms: runs
+                    .iter()
+                    .map(|run| run.started_at_unix_ms)
+                    .min()
+                    .context("P2f arm had no run start")?,
+                finished_at_unix_ms: runs
+                    .iter()
+                    .map(|run| run.finished_at_unix_ms)
+                    .max()
+                    .context("P2f arm had no run finish")?,
+                runs,
+            };
+            validate_topology_artifact(&artifact)?;
+            let filename = format!("pair-{pair_index:02}-{state}.json");
+            let bytes = pretty_json(&artifact)?;
+            write_atomic(&output_dir.join(&filename), &bytes)?;
+            let hash = hex::encode(Sha256::digest(&bytes));
+            if instrumentation_enabled {
+                measured = Some((artifact, filename, hash));
+            } else {
+                control = Some((artifact, filename, hash));
+            }
+        }
+        let (control_artifact, control_path, control_hash) =
+            control.context("P2f pair omitted its control arm")?;
+        let (instrumented_artifact, instrumented_path, instrumented_hash) =
+            measured.context("P2f pair omitted its instrumented arm")?;
+        controls.push(control_artifact);
+        instrumented.push(instrumented_artifact);
+        raw_pairs.push(InstrumentationPairReference {
+            pair_index,
+            state_order: state_order
+                .into_iter()
+                .map(|enabled| {
+                    if enabled {
+                        "instrumented".to_owned()
+                    } else {
+                        "control".to_owned()
+                    }
+                })
+                .collect(),
+            topology_order: topology_order.to_vec(),
+            control_artifact_path: control_path,
+            control_artifact_sha256: control_hash,
+            instrumented_artifact_path: instrumented_path,
+            instrumented_artifact_sha256: instrumented_hash,
+        });
+        if campaign_metrics_ready(controls.len()) {
+            metrics = summarize_instrumentation_metrics(
+                &controls,
+                &instrumented,
+                config.confidence_half_width_percent,
+                CampaignBudgets::default().instrumentation_cpu_and_wall_overhead_percent,
+            )?;
+            precision_reached = pair_index >= config.min_pairs
+                && metrics.iter().all(|metric| metric.precision_reached);
+        }
+        if precision_reached {
+            break;
+        }
+    }
+
+    let final_deployment = verify_deployed_image(&config, &build_sha).await?;
+    if final_deployment != deployment {
+        bail!("named-runner machine or image provenance changed during P2f collection");
+    }
+    verify_controller_source(source_root, Some(&build_sha))?;
+    let within_budget = precision_reached && metrics.iter().all(|metric| metric.within_budget);
+    let campaign = NamedInstrumentationCampaign {
+        schema_version: INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION,
+        evidence_scope: NAMED_SCOPE.to_owned(),
+        build_sha,
+        runner_id: config.runner_id.clone(),
+        image: config.image.clone(),
+        image_digest,
+        native_architecture: deployment.native_architecture,
+        controller_machine_fingerprint: deployment.controller_machine_fingerprint,
+        voter_machine_fingerprints: deployment.voter_machine_fingerprints,
+        controller_host: config.controller_host.clone(),
+        load_generator_host: config.load_generator_host.clone(),
+        load_generator_isolation: config.load_generator_isolation.clone(),
+        voter_labels: config
+            .voters
+            .iter()
+            .map(|voter| voter.label.clone())
+            .collect(),
+        read_pool_size: config.read_pool_size,
+        min_pairs: config.min_pairs,
+        max_pairs: config.max_pairs,
+        confidence_half_width_percent: config.confidence_half_width_percent,
+        overhead_budget_percent: CampaignBudgets::default()
+            .instrumentation_cpu_and_wall_overhead_percent,
+        started_at_unix_ms,
+        finished_at_unix_ms: unix_ms()?,
+        stop_reason: if precision_reached {
+            "precision_reached".to_owned()
+        } else {
+            "max_pairs_reached".to_owned()
+        },
+        result: if within_budget {
+            "accepted".to_owned()
+        } else if precision_reached {
+            "rejected".to_owned()
+        } else {
+            "inconclusive".to_owned()
+        },
+        raw_pairs,
+        metrics,
+    };
+    validate_named_instrumentation_campaign(&campaign, Some(output_dir))?;
+    let campaign_path = output_dir.join("instrumentation-campaign.json");
+    write_atomic(&campaign_path, &pretty_json(&campaign)?)?;
+    release_output_claim(output_dir, owner_nonce)?;
+    println!(
+        "cluster-check: named instrumentation campaign {} ({})",
+        campaign_path.display(),
+        campaign.result
+    );
+    Ok(())
+}
+
 fn campaign_metrics_ready(completed_pairs: usize) -> bool {
     completed_pairs >= 2
 }
@@ -343,6 +612,7 @@ struct RemoteTopologyRequest<'a> {
     owner_nonce: &'a str,
     build_sha: &'a str,
     deployment: &'a DeploymentProof,
+    instrument_store_operations: bool,
 }
 
 async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<TopologyRun> {
@@ -357,6 +627,7 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
         owner_nonce,
         build_sha,
         deployment,
+        instrument_store_operations,
     } = request;
     let selected = &config.voters[..usize::try_from(voter_count)?];
     let placement = verify_run_machine_placement(selected, build_sha, deployment).await?;
@@ -417,6 +688,7 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
         let launch = NodeLaunch {
             listen_addr: "0.0.0.0".to_owned(),
             read_pool_size: config.read_pool_size,
+            instrument_store_operations,
             ..NodeLaunch::voter(voter.node_id, PathBuf::from("/data"), specs.clone())
         };
         match spawn_remote_node(
@@ -453,6 +725,18 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
     let result = async {
         for node_id in 1..=voter_count {
             cluster.node_mut(node_id)?.wait_ready().await?;
+        }
+        for node_id in 1..=voter_count {
+            match cluster
+                .request(node_id, super::Request::StoreInstrumentationStatus)
+                .await?
+            {
+                super::Response::StoreInstrumentationStatus { enabled }
+                    if enabled == instrument_store_operations => {}
+                response => bail!(
+                    "named voter {node_id} did not attest store instrumentation={instrument_store_operations}: {response:?}"
+                ),
+            }
         }
         let identities = selected
             .iter()
@@ -1804,6 +2088,111 @@ fn sum_resource(
     })
 }
 
+fn summarize_instrumentation_metrics(
+    control: &[ClusterTopologyArtifact],
+    instrumented: &[ClusterTopologyArtifact],
+    target_half_width_percent: f64,
+    overhead_budget_percent: f64,
+) -> Result<Vec<InstrumentationMetric>> {
+    if control.len() != instrumented.len() {
+        bail!("P2f control and instrumented campaign lengths differ");
+    }
+    let specs: [(u64, &str, &str, MetricExtractor); 4] = [
+        (3, "three_voter_cpu", "seconds", |run| {
+            sum_resource(run, |sample| sample.cpu_seconds)
+        }),
+        (3, "three_voter_wall", "seconds", |run| {
+            sum_resource(run, |sample| sample.wall_seconds)
+        }),
+        (4, "four_voter_cpu", "seconds", |run| {
+            sum_resource(run, |sample| sample.cpu_seconds)
+        }),
+        (4, "four_voter_wall", "seconds", |run| {
+            sum_resource(run, |sample| sample.wall_seconds)
+        }),
+    ];
+    specs
+        .into_iter()
+        .map(|(voter_count, metric, unit, extract)| {
+            let mut baseline = Vec::with_capacity(control.len());
+            let mut measured = Vec::with_capacity(instrumented.len());
+            for (control_artifact, instrumented_artifact) in control.iter().zip(instrumented) {
+                let control_run = control_artifact
+                    .runs
+                    .iter()
+                    .find(|run| run.voter_count == voter_count)
+                    .with_context(|| format!("P2f control omitted {voter_count}-voter run"))?;
+                let instrumented_run = instrumented_artifact
+                    .runs
+                    .iter()
+                    .find(|run| run.voter_count == voter_count)
+                    .with_context(|| {
+                        format!("P2f instrumented arm omitted {voter_count}-voter run")
+                    })?;
+                baseline.push(extract(control_run)?);
+                measured.push(extract(instrumented_run)?);
+            }
+            instrumentation_metric(
+                metric,
+                unit,
+                baseline,
+                measured,
+                target_half_width_percent,
+                overhead_budget_percent,
+            )
+        })
+        .collect()
+}
+
+fn instrumentation_metric(
+    metric: &str,
+    unit: &str,
+    control: Vec<f64>,
+    instrumented: Vec<f64>,
+    target_half_width_percent: f64,
+    overhead_budget_percent: f64,
+) -> Result<InstrumentationMetric> {
+    if control.len() != instrumented.len() || control.len() < 2 || control.len() > 7 {
+        bail!("P2f metric requires 2--7 complete pairs");
+    }
+    if control
+        .iter()
+        .chain(&instrumented)
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        bail!("P2f metric values must be finite and positive");
+    }
+    let ratios = instrumented
+        .iter()
+        .zip(&control)
+        .map(|(instrumented, control)| instrumented / control)
+        .collect::<Vec<_>>();
+    let logs = ratios.iter().map(|ratio| ratio.ln()).collect::<Vec<_>>();
+    let n = logs.len() as f64;
+    let mean = logs.iter().sum::<f64>() / n;
+    let variance = logs.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let critical = student_t_975(logs.len() - 1)?;
+    let half_width_log = critical * (variance / n).sqrt();
+    let half_width_percent = (half_width_log.exp() - 1.0) * 100.0;
+    let geometric_mean_ratio = mean.exp();
+    Ok(InstrumentationMetric {
+        metric: metric.to_owned(),
+        unit: unit.to_owned(),
+        control_values: control.clone(),
+        instrumented_values: instrumented.clone(),
+        instrumented_over_control_ratios: ratios.clone(),
+        median_control: percentile_f64_type7(&control, 0.5)?,
+        median_instrumented: percentile_f64_type7(&instrumented, 0.5)?,
+        median_ratio: percentile_f64_type7(&ratios, 0.5)?,
+        geometric_mean_ratio,
+        ci95_lower_ratio: (mean - half_width_log).exp(),
+        ci95_upper_ratio: (mean + half_width_log).exp(),
+        ci95_half_width_percent: half_width_percent,
+        precision_reached: half_width_percent <= target_half_width_percent,
+        within_budget: geometric_mean_ratio <= 1.0 + overhead_budget_percent / 100.0,
+    })
+}
+
 fn paired_metric(
     metric: &str,
     unit: &str,
@@ -1875,6 +2264,262 @@ fn student_t_975(degrees_of_freedom: usize) -> Result<f64> {
         6 => Ok(2.446_911_851),
         _ => bail!("named campaign only supports 2--7 pairs"),
     }
+}
+
+pub fn validate_named_instrumentation_campaign(
+    campaign: &NamedInstrumentationCampaign,
+    artifact_root: Option<&Path>,
+) -> Result<()> {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../benchmarks/cluster-instrumentation-campaign.schema.json"
+    ))?;
+    let validator = jsonschema::validator_for(&schema)?;
+    if let Err(error) = validator.validate(&serde_json::to_value(campaign)?) {
+        bail!("P2f campaign violates its JSON Schema: {error}");
+    }
+    if campaign.schema_version != INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION
+        || campaign.evidence_scope != NAMED_SCOPE
+    {
+        bail!("unsupported P2f campaign contract");
+    }
+    if !is_lower_hex(&campaign.build_sha, 40)
+        || !safe_image_reference(&campaign.image)
+        || !image_is_pinned_to_sha(&campaign.image, &campaign.build_sha)
+    {
+        bail!("P2f campaign image is not pinned to its complete build SHA");
+    }
+    validate_image_digest(&campaign.image_digest)?;
+    if !matches!(campaign.native_architecture.as_str(), "amd64" | "arm64")
+        || !is_lower_hex(&campaign.controller_machine_fingerprint, 64)
+        || campaign.voter_machine_fingerprints.len() != 4
+        || campaign
+            .voter_machine_fingerprints
+            .iter()
+            .any(|fingerprint| !is_lower_hex(fingerprint, 64))
+        || campaign
+            .voter_machine_fingerprints
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != 4
+        || campaign
+            .voter_machine_fingerprints
+            .contains(&campaign.controller_machine_fingerprint)
+    {
+        bail!("P2f machine-placement proof is invalid");
+    }
+    if campaign.started_at_unix_ms > campaign.finished_at_unix_ms
+        || campaign.controller_host != campaign.load_generator_host
+    {
+        bail!("P2f campaign time or external-controller placement is invalid");
+    }
+    for (field, value) in [
+        ("runner_id", campaign.runner_id.as_str()),
+        ("controller_host", campaign.controller_host.as_str()),
+        ("load_generator_host", campaign.load_generator_host.as_str()),
+        (
+            "load_generator_isolation",
+            campaign.load_generator_isolation.as_str(),
+        ),
+    ] {
+        validate_public_evidence(field, value, &[])?;
+    }
+    if campaign.voter_labels.len() != 4
+        || campaign
+            .voter_labels
+            .iter()
+            .any(|label| validate_public_evidence("voter label", label, &[]).is_err())
+        || campaign
+            .voter_labels
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != 4
+        || !(1..=16).contains(&campaign.read_pool_size)
+    {
+        bail!("P2f campaign public runner identity or read pool is invalid");
+    }
+    let budgets = CampaignBudgets::default();
+    if campaign.min_pairs != 3
+        || campaign.max_pairs != 7
+        || (campaign.confidence_half_width_percent - 5.0).abs() > f64::EPSILON
+        || (campaign.overhead_budget_percent
+            - budgets.instrumentation_cpu_and_wall_overhead_percent)
+            .abs()
+            > f64::EPSILON
+        || campaign.raw_pairs.len() < 3
+        || campaign.raw_pairs.len() > 7
+    {
+        bail!("P2f campaign changed its pre-registered pair, precision, or budget contract");
+    }
+
+    let mut controls = Vec::new();
+    let mut instrumented = Vec::new();
+    for (index, pair) in campaign.raw_pairs.iter().enumerate() {
+        let expected = u64::try_from(index)? + 1;
+        let expected_states = if expected % 2 == 1 {
+            ["control", "instrumented"]
+        } else {
+            ["instrumented", "control"]
+        };
+        let expected_topologies = if expected % 2 == 1 {
+            [3, 4].as_slice()
+        } else {
+            [4, 3].as_slice()
+        };
+        if pair.pair_index != expected
+            || pair
+                .state_order
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                != expected_states
+            || pair.topology_order != expected_topologies
+            || pair.control_artifact_path != format!("pair-{expected:02}-control.json")
+            || pair.instrumented_artifact_path != format!("pair-{expected:02}-instrumented.json")
+        {
+            bail!("P2f raw pairs are not independently counterbalanced");
+        }
+        if let Some(root) = artifact_root {
+            let mut pair_artifacts = Vec::new();
+            for (path, expected_hash) in [
+                (&pair.control_artifact_path, &pair.control_artifact_sha256),
+                (
+                    &pair.instrumented_artifact_path,
+                    &pair.instrumented_artifact_sha256,
+                ),
+            ] {
+                let bytes = std::fs::read(root.join(path))?;
+                if hex::encode(Sha256::digest(&bytes)) != *expected_hash {
+                    bail!("P2f raw artifact hash does not match retained bytes");
+                }
+                let artifact: ClusterTopologyArtifact = serde_json::from_slice(&bytes)?;
+                validate_topology_artifact(&artifact)?;
+                if artifact.evidence_scope != NAMED_SCOPE
+                    || artifact.build_sha != campaign.build_sha
+                    || artifact.runner_image_digest.as_deref()
+                        != Some(campaign.image_digest.as_str())
+                    || artifact.topology_order != pair.topology_order
+                    || artifact.started_at_unix_ms < campaign.started_at_unix_ms
+                    || artifact.finished_at_unix_ms > campaign.finished_at_unix_ms
+                    || artifact.runs.iter().any(|run| {
+                        let voter_count = usize::try_from(run.voter_count).unwrap_or(usize::MAX);
+                        run.read_pool_size != campaign.read_pool_size
+                            || run.controller_host != campaign.controller_host
+                            || run.load_generator_host != campaign.load_generator_host
+                            || run.load_generator_isolation.as_deref()
+                                != Some(campaign.load_generator_isolation.as_str())
+                            || run.controller_machine_fingerprint.as_deref()
+                                != Some(campaign.controller_machine_fingerprint.as_str())
+                            || campaign
+                                .voter_machine_fingerprints
+                                .get(..voter_count)
+                                .is_none_or(|expected| {
+                                    run.voter_machine_fingerprints.as_deref() != Some(expected)
+                                })
+                    })
+                {
+                    bail!("P2f raw artifact provenance contradicts its campaign");
+                }
+                pair_artifacts.push(artifact);
+            }
+            if pair_artifacts[0].workload != pair_artifacts[1].workload
+                || pair_artifacts[0].workload_sha256 != pair_artifacts[1].workload_sha256
+            {
+                bail!("P2f changed the workload between control and instrumented arms");
+            }
+            controls.push(pair_artifacts.remove(0));
+            instrumented.push(pair_artifacts.remove(0));
+        }
+    }
+
+    let expected_metrics = [
+        ("three_voter_cpu", "seconds"),
+        ("three_voter_wall", "seconds"),
+        ("four_voter_cpu", "seconds"),
+        ("four_voter_wall", "seconds"),
+    ];
+    if campaign.metrics.len() != expected_metrics.len()
+        || campaign
+            .metrics
+            .iter()
+            .zip(expected_metrics)
+            .any(|(metric, expected)| (metric.metric.as_str(), metric.unit.as_str()) != expected)
+    {
+        bail!("P2f campaign must report CPU and wall overhead for both topologies");
+    }
+    if campaign.metrics.iter().any(|metric| {
+        metric.control_values.len() != campaign.raw_pairs.len()
+            || metric.instrumented_values.len() != campaign.raw_pairs.len()
+            || metric.instrumented_over_control_ratios.len() != campaign.raw_pairs.len()
+    }) {
+        bail!("P2f metric sample shapes do not match its raw pairs");
+    }
+    let recomputed = campaign
+        .metrics
+        .iter()
+        .map(|metric| {
+            instrumentation_metric(
+                &metric.metric,
+                &metric.unit,
+                metric.control_values.clone(),
+                metric.instrumented_values.clone(),
+                campaign.confidence_half_width_percent,
+                campaign.overhead_budget_percent,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if recomputed != campaign.metrics {
+        bail!("P2f metric calculations do not match retained summary samples");
+    }
+    if artifact_root.is_some()
+        && summarize_instrumentation_metrics(
+            &controls,
+            &instrumented,
+            campaign.confidence_half_width_percent,
+            campaign.overhead_budget_percent,
+        )? != campaign.metrics
+    {
+        bail!("P2f metric summary does not match hash-bound raw topology artifacts");
+    }
+    let minimum = usize::try_from(campaign.min_pairs)?;
+    for prefix in minimum..campaign.raw_pairs.len() {
+        let earlier_precise = campaign.metrics.iter().try_fold(true, |precise, metric| {
+            Ok::<_, anyhow::Error>(
+                precise
+                    && instrumentation_metric(
+                        &metric.metric,
+                        &metric.unit,
+                        metric.control_values[..prefix].to_vec(),
+                        metric.instrumented_values[..prefix].to_vec(),
+                        campaign.confidence_half_width_percent,
+                        campaign.overhead_budget_percent,
+                    )?
+                    .precision_reached,
+            )
+        })?;
+        if earlier_precise {
+            bail!("P2f campaign continued after an earlier precise prefix");
+        }
+    }
+    let every_precise = campaign
+        .metrics
+        .iter()
+        .all(|metric| metric.precision_reached);
+    let every_within_budget = campaign.metrics.iter().all(|metric| metric.within_budget);
+    match (
+        campaign.result.as_str(),
+        campaign.stop_reason.as_str(),
+        every_precise,
+        every_within_budget,
+        campaign.raw_pairs.len(),
+    ) {
+        ("accepted", "precision_reached", true, true, count) if count >= 3 => {}
+        ("rejected", "precision_reached", true, false, count) if count >= 3 => {}
+        ("inconclusive", "max_pairs_reached", false, _, 7) => {}
+        _ => bail!("P2f result contradicts its precision, budget, or stopping rule"),
+    }
+    Ok(())
 }
 
 pub fn validate_named_campaign(
@@ -2461,5 +3106,99 @@ mod tests {
             .expect("campaign object")
             .remove("read_pool_size");
         assert!(!validator.is_valid(&missing_pool));
+    }
+
+    #[test]
+    fn instrumentation_campaign_schema_and_rust_validator_pin_the_control_contract() {
+        let control = vec![100.0, 101.0, 99.0];
+        let measured = control.iter().map(|value| value * 1.01).collect::<Vec<_>>();
+        let metrics = [
+            "three_voter_cpu",
+            "three_voter_wall",
+            "four_voter_cpu",
+            "four_voter_wall",
+        ]
+        .into_iter()
+        .map(|metric| {
+            instrumentation_metric(
+                metric,
+                "seconds",
+                control.clone(),
+                measured.clone(),
+                5.0,
+                2.0,
+            )
+            .expect("P2f metric")
+        })
+        .collect();
+        let campaign = NamedInstrumentationCampaign {
+            schema_version: INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION,
+            evidence_scope: NAMED_SCOPE.to_owned(),
+            build_sha: "a".repeat(40),
+            runner_id: "runner-v1".to_owned(),
+            image: format!("plurx-cluster-check:{}", "a".repeat(40)),
+            image_digest: format!("sha256:{}", "c".repeat(64)),
+            native_architecture: "amd64".to_owned(),
+            controller_machine_fingerprint: "d".repeat(64),
+            voter_machine_fingerprints: (1..=4).map(|id| format!("{id:064x}")).collect(),
+            controller_host: "controller-1".to_owned(),
+            load_generator_host: "controller-1".to_owned(),
+            load_generator_isolation: "external and idle".to_owned(),
+            voter_labels: (1..=4).map(|id| format!("runner-node-{id}")).collect(),
+            read_pool_size: 4,
+            min_pairs: 3,
+            max_pairs: 7,
+            confidence_half_width_percent: 5.0,
+            overhead_budget_percent: 2.0,
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            stop_reason: "precision_reached".to_owned(),
+            result: "accepted".to_owned(),
+            raw_pairs: (1..=3)
+                .map(|pair_index| InstrumentationPairReference {
+                    pair_index,
+                    state_order: if pair_index % 2 == 1 {
+                        vec!["control".to_owned(), "instrumented".to_owned()]
+                    } else {
+                        vec!["instrumented".to_owned(), "control".to_owned()]
+                    },
+                    topology_order: if pair_index % 2 == 1 {
+                        vec![3, 4]
+                    } else {
+                        vec![4, 3]
+                    },
+                    control_artifact_path: format!("pair-{pair_index:02}-control.json"),
+                    control_artifact_sha256: "b".repeat(64),
+                    instrumented_artifact_path: format!("pair-{pair_index:02}-instrumented.json"),
+                    instrumented_artifact_sha256: "e".repeat(64),
+                })
+                .collect(),
+            metrics,
+        };
+        validate_named_instrumentation_campaign(&campaign, None)
+            .expect("Rust P2f campaign validator");
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../benchmarks/cluster-instrumentation-campaign.schema.json"
+        ))
+        .expect("P2f schema JSON");
+        let validator = jsonschema::validator_for(&schema).expect("P2f schema validator");
+        assert!(validator.is_valid(&serde_json::to_value(&campaign).expect("P2f JSON")));
+
+        let mut changed_budget = campaign.clone();
+        changed_budget.overhead_budget_percent = 3.0;
+        assert!(validate_named_instrumentation_campaign(&changed_budget, None).is_err());
+
+        let mut swapped_state = campaign.clone();
+        swapped_state.raw_pairs[0].state_order.reverse();
+        assert!(validate_named_instrumentation_campaign(&swapped_state, None).is_err());
+
+        let mut invented_result = campaign.clone();
+        invented_result.result = "rejected".to_owned();
+        assert!(validate_named_instrumentation_campaign(&invented_result, None).is_err());
+
+        let mut changed_sample = campaign.clone();
+        changed_sample.metrics[0].instrumented_values[0] += 1.0;
+        assert!(validate_named_instrumentation_campaign(&changed_sample, None).is_err());
     }
 }
