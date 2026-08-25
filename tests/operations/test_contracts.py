@@ -405,6 +405,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
         self.assertIn("run: make cluster-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
+        self.assertIn("uses: ./.github/actions/ffmpeg", cluster)
+        self.assertIn('major: "6"', cluster)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
         self.assertIn("name: cluster-topology-semantic", cluster)
         self.assertIn(
@@ -531,10 +533,9 @@ class OperationsContractCase(unittest.TestCase):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "cluster_auth",
-                    "docker",
-                }:
+                elif path == ".github/workflows/ci.yml" and name == "cluster_auth":
+                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "docker":
                     expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
