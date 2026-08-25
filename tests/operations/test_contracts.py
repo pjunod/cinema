@@ -386,7 +386,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
 
         # The emulator restores a cached AVD snapshot and never saves over it.
-        self.assertIn("key: avd-35-google_apis-pixel_7_pro", workflow)
+        self.assertIn("key: avd-35-google_apis-tv_1080p", workflow)
+        self.assertEqual(workflow.count("profile: tv_1080p"), 2)
         self.assertIn("-no-snapshot-save", workflow)
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)

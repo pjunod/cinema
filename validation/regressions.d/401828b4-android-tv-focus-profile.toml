@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["401828b4"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract requires both Android instrumentation emulator phases and their snapshot cache key to use the Android TV 1080p profile, keeping the D-pad focus suite out of a touch-mode phone AVD that rejects focus requests."
