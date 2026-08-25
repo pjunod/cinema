@@ -3287,9 +3287,39 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
-        let (status, body) = call(&app, get("/api/v1/activity", Some(&admin))).await;
+        let (status, raw) = call_text(&app, get("/api/v1/activity", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(raw, "[]", "SQLite keeps the exact legacy summary payload");
+        let body: Value = serde_json::from_str(&raw).expect("activity JSON");
         assert!(body.as_array().expect("array").is_empty(), "idle = empty");
+
+        let (status, raw) = call_text(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        let detail: Value = serde_json::from_str(&raw).expect("activity detail JSON");
+        assert_eq!(
+            detail
+                .as_object()
+                .expect("activity detail object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "deliveries",
+                "offline",
+                "producing",
+                "scans",
+                "sessions",
+                "trakt",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "SQLite gains no clustered-only field"
+        );
+        assert!(
+            detail["sessions"].as_array().is_some_and(Vec::is_empty),
+            "native sessions retains its existing array shape"
+        );
     }
 
     // The gap this closes: a producer pass holds an encoder for up to six

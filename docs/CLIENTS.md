@@ -80,6 +80,16 @@ same track from a selection-aware `/decision` preflight, so it reads that flag
 and states the cost outright; a preflight that fails claims nothing and leaves
 the disclosure to the in-player path.
 
+**Clustered activity compatibility** — `GET /api/v1/activity/detail` keeps
+`sessions` as the exact node-local HLS array native clients already decode.
+Cross-node direct, remux, HLS-copy, and transcode rows live in the additive
+`deliveries` superset. In cluster responses each delivery adds the stable
+`node_id`, and the additive `activity_nodes` array records which voters
+answered or failed. Remote rows deliberately have no session capability and
+cannot be stopped through this read surface. SQLite and peerless responses omit
+the clustered-only fields, so existing native decoders retain their original
+wire shape and behavior.
+
 ## 2. Per-platform notes
 
 **Web** — MSE playback of direct/remuxed fMP4 + HLS; capability probing via `MediaCapabilities` API feeds the decision engine. HDR in browsers is inconsistent → the profile system, not wishful thinking, decides (tone-mapped stream when the browser can't attest HDR output).

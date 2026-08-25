@@ -2,6 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["f85a37a9"]
-points = ["core.media", "persistence.upgrades", "server.api"]
-checks = ["rust-gate", "database-upgrades", "cluster-auth", "api-wire", "resource-bounds"]
-reason = "The merged Darwin secure-path correction pins the production descriptor boundary through current Rust tests: directory faults rewind before the cross-platform errno assertion, canonical temporary roots preserve no-follow path semantics on macOS, child media producers inherit only the held output-directory authority, directory compaction resumes without skipping siblings, and daemon process-state fixtures use the platform's real process interface. The Rust gate directly exercises the secure filesystem, metadata, producer, HTTP, and activation paths; upgrade, cluster, wire, and resource gates retain the affected daemon startup and native API boundaries."
+points = ["core.media", "server.api", "playback.pipeline"]
+checks = ["rust-gate", "resource-bounds"]
+reason = "The retained Darwin regressions canonicalize the system temporary root before descriptor-secure traversal, exercise fresh readdir errors after descriptor replacement, and require anonymous snapshot handles to survive create, write, flush, seal-or-noop, rewind, and read. Cache cleanup retains its affected-cursor resume contract so deleting APFS siblings cannot skip an orphan. The macOS pre-transcode child proves descriptor-relative output through fchdir, process tests classify live children through ps when procfs is absent, and the deterministic real audio/video fixture keeps the combined-activity path executable. Restoring the pre-fix behavior rejects valid Darwin paths, silently skips cleanup work, or makes the production child and lifecycle regressions fail on macOS."
