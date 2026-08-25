@@ -24,7 +24,7 @@ jobs:
   # merge groups, pushes, and tags deliberately enable every surface.
   scope:
     name: validation scope
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -50,6 +50,14 @@ jobs:
         run: |
           python3 -m validation.ci_scope \
             --event "$EVENT_NAME" --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+      - name: Validate the configured runner mode
+        env:
+          CI_RUNNER_MODE: ${{ vars.CI_RUNNER_MODE || 'self-hosted' }}
+        run: |
+          case "$CI_RUNNER_MODE" in
+            self-hosted|github) ;;
+            *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
+          esac
 
   # A stale counter must fail the aggregate gate without hiding the native test
   # result. Run release hygiene beside preflight and the affected platform jobs
@@ -58,7 +66,7 @@ jobs:
     name: mobile release version
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +108,7 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -126,7 +134,7 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     # The fleet image is fixed by the runner playbook, and this job's playback
     # assertions also pin the ffmpeg major. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -159,12 +167,9 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Verify Playwright and install its pinned browser
-        run: |
-          requirement=playwright==1.62.0
-          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
-          test "$requirement" = "playwright==$actual"
-          python3 -m playwright install chromium
+      - uses: ./.github/actions/playwright
+        with:
+          version: "1.62.0"
       # Keep the portable baseline and focused Linux contracts in this job.
       # The large UI-golden sweep and Android JVM checks are selected by the
       # same impact graph, but delegated to parallel jobs below instead of
@@ -201,7 +206,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     # The first cold lab run reached the final three-voter proof but crossed
     # the old 25-minute guard while building the command-profile dependency
     # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
@@ -245,7 +250,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -263,12 +268,9 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Verify Playwright and install its pinned browser
-        run: |
-          requirement=playwright==1.62.0
-          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
-          test "$requirement" = "playwright==$actual"
-          python3 -m playwright install chromium
+      - uses: ./.github/actions/playwright
+        with:
+          version: "1.62.0"
       - name: Check every affected web layout
         run: make ui-check
 
@@ -276,7 +278,7 @@ jobs:
     name: film-addressed VOD browser acceptance
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -295,12 +297,9 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Verify Playwright and install its pinned browser
-        run: |
-          requirement=playwright==1.62.0
-          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
-          test "$requirement" = "playwright==$actual"
-          python3 -m playwright install chromium
+      - uses: ./.github/actions/playwright
+        with:
+          version: "1.62.0"
       - name: Build the exact server under test
         run: cargo build --locked -p plurxd
       - name: Run VOD and bandwidth-recovery browser acceptance
@@ -317,7 +316,7 @@ jobs:
     name: Android JVM tests and lint
     needs: [scope, preflight]
     if: needs.scope.outputs.android_jvm == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -360,12 +359,15 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["macos-26"]' || '["self-hosted","macOS","ARM64","lab","apple","xcode-26"]') }}
     timeout-minutes: 30
     env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install XcodeGen on the disposable GitHub runner
+        if: vars.CI_RUNNER_MODE == 'github'
+        run: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -424,15 +426,21 @@ jobs:
     name: Android instrumented UI tests
     needs: [scope, preflight]
     if: needs.scope.outputs.android_device == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Verify emulator acceleration
+      - name: Provision or verify emulator acceleration
         run: |
+          if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
           test -c /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
@@ -510,7 +518,7 @@ jobs:
     name: coverage
     # Same suite as `check`, so the same pinned ffmpeg. See
     # .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
     needs: check
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
@@ -564,7 +572,7 @@ jobs:
 
   build:
     name: release build (${{ matrix.target }})
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true'
     timeout-minutes: 30
@@ -587,10 +595,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Verify the provisioned aarch64 cross toolchain
+      - name: Provision or verify the aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         # Also provides the C cross-compiler for rusqlite's bundled SQLite.
         run: |
+          if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+            if [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ]; then
+              echo "::error::The aarch64 cross compiler must be provisioned on this runner"
+              exit 1
+            fi
+            sudo sed -i \
+              's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+              /etc/apt/sources.list.d/ubuntu.sources
+            sudo apt-get -o Acquire::Retries=3 update
+            sudo apt-get -o Acquire::Retries=3 install -y gcc-aarch64-linux-gnu
+          fi
           command -v aarch64-linux-gnu-gcc
           aarch64-linux-gnu-gcc --version
       - run: cargo build --release -p plurxd --target ${{ matrix.target }}
@@ -625,7 +644,7 @@ jobs:
   # PR / branch smoke test that the image both builds and runs, without publishing.
   docker:
     name: docker runtime smoke
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     needs: [scope, preflight]
     if: needs.scope.outputs.container == 'true' && !startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 30
@@ -668,7 +687,7 @@ jobs:
       - android_device
       - build
       - docker
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 2
     steps:
       - name: Require every selected job to pass
