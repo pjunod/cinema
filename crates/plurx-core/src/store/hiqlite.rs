@@ -701,7 +701,7 @@ async fn time_store_operation<T>(
 ) -> Result<T, StoreError> {
     #[cfg(feature = "cluster-read-cost-validation")]
     {
-        return time_store_operation_controlled(
+        time_store_operation_controlled(
             metrics,
             class,
             operation,
