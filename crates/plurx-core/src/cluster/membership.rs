@@ -551,6 +551,101 @@ pub struct MembershipStatus {
     pub replication: ReplicationStatus,
 }
 
+/// Fixed-cardinality, process-local projection for Prometheus scrapes.
+///
+/// The handle intentionally cannot reach the Hiqlite client or application
+/// store. A background membership sample populates it so `/metrics` never
+/// turns an observability request into a cluster read.
+#[derive(Clone, Default)]
+pub struct PassiveMembershipMetrics {
+    inner: Option<Arc<MembershipMetricsCache>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassiveMembershipMetricsView {
+    pub replicated: bool,
+    pub valid: bool,
+    pub age_seconds: Option<u64>,
+    pub errors: u64,
+    pub sample: Option<MembershipMetricsSample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MembershipMetricsSample {
+    pub voters: u64,
+    pub learners: u64,
+    pub heartbeat_fresh_voters: u64,
+    pub heartbeat_stale_voters: u64,
+    pub removals_pending: u64,
+    pub local_is_voter: bool,
+}
+
+#[derive(Default)]
+struct MembershipMetricsCache {
+    state: Mutex<MembershipMetricsCacheState>,
+}
+
+#[derive(Default)]
+struct MembershipMetricsCacheState {
+    sample: Option<(Instant, MembershipMetricsSample)>,
+    errors: u64,
+}
+
+impl PassiveMembershipMetrics {
+    fn replicated() -> Self {
+        Self {
+            inner: Some(Arc::new(MembershipMetricsCache::default())),
+        }
+    }
+
+    fn record(&self, sample: MembershipMetricsSample) {
+        if let Some(inner) = self.inner.as_deref() {
+            inner
+                .state
+                .lock()
+                .expect("membership metrics cache poisoned")
+                .sample = Some((Instant::now(), sample));
+        }
+    }
+
+    fn record_error(&self) {
+        if let Some(inner) = self.inner.as_deref() {
+            let mut state = inner
+                .state
+                .lock()
+                .expect("membership metrics cache poisoned");
+            state.errors = state.errors.saturating_add(1);
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> PassiveMembershipMetricsView {
+        let Some(inner) = self.inner.as_deref() else {
+            return PassiveMembershipMetricsView {
+                replicated: false,
+                valid: false,
+                age_seconds: None,
+                errors: 0,
+                sample: None,
+            };
+        };
+        let state = inner
+            .state
+            .lock()
+            .expect("membership metrics cache poisoned");
+        let age = state
+            .sample
+            .map(|(sampled_at, _)| sampled_at.elapsed().as_secs());
+        PassiveMembershipMetricsView {
+            replicated: true,
+            valid: age.is_some_and(|age| age <= NODE_REACHABLE_WINDOW_MS as u64 / 1_000),
+            age_seconds: age,
+            errors: state.errors,
+            sample: state.sample.map(|(_, sample)| sample),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
@@ -761,6 +856,7 @@ struct ReplicatedMembership {
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
+    membership_metrics: PassiveMembershipMetrics,
     heartbeat_writes: HeartbeatWriteGate,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
@@ -966,6 +1062,14 @@ impl MembershipManager {
         self.inner.is_some()
     }
 
+    #[must_use]
+    pub fn metrics_handle(&self) -> PassiveMembershipMetrics {
+        self.inner
+            .as_deref()
+            .map(|inner| inner.membership_metrics.clone())
+            .unwrap_or_default()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn replicated(
         client: Client,
@@ -983,6 +1087,7 @@ impl MembershipManager {
             system_short_hostname().as_deref().unwrap_or_default(),
             &local.api_address,
         );
+        let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
@@ -1014,6 +1119,7 @@ impl MembershipManager {
                 }),
                 activation_marker,
                 replication,
+                membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
@@ -1067,6 +1173,12 @@ impl MembershipManager {
         }
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
+        if let Err(error) = self.refresh_membership_metrics().await {
+            tracing::warn!(
+                code = error.code(),
+                "initial cluster membership metrics refresh failed"
+            );
+        }
         self.publish_activity_signing_key().await?;
         self.refresh_activity_public_keys().await?;
         self.publish_http_url().await
@@ -2708,6 +2820,65 @@ impl MembershipManager {
                 .any(|raft_id| raft_id == rows[0].raft_id))
     }
 
+    async fn refresh_membership_metrics(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let result = async {
+            let now = unix_ms()?;
+            let metrics = inner.client.metrics_db().await?;
+            let voters = metrics
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            let members = metrics
+                .membership_config
+                .nodes()
+                .map(|(raft_id, _)| *raft_id)
+                .collect::<BTreeSet<_>>();
+            let rows = inner
+                .client
+                .query_map::<MembershipMetricsRow, _>(
+                    "SELECT node.raft_id, node.last_seen_at, \
+                            EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                              WHERE removal.node_id = node.node_id) AS removal_pending \
+                     FROM cluster_nodes node WHERE node.removed_at IS NULL",
+                    params!(),
+                )
+                .await?;
+            let rows = rows
+                .into_iter()
+                .filter(|row| members.contains(&row.raft_id))
+                .map(|row| (row.raft_id, row))
+                .collect::<BTreeMap<_, _>>();
+            let heartbeat_fresh_voters = voters
+                .iter()
+                .filter(|raft_id| {
+                    rows.get(raft_id)
+                        .is_some_and(|row| node_is_reachable(now, row.last_seen_at))
+                })
+                .count() as u64;
+            Ok::<_, MembershipError>(MembershipMetricsSample {
+                voters: voters.len() as u64,
+                learners: members.difference(&voters).count() as u64,
+                heartbeat_fresh_voters,
+                heartbeat_stale_voters: (voters.len() as u64)
+                    .saturating_sub(heartbeat_fresh_voters),
+                removals_pending: rows.values().filter(|row| row.removal_pending).count() as u64,
+                local_is_voter: voters.contains(&inner.identity.raft_id),
+            })
+        }
+        .await;
+        match result {
+            Ok(sample) => {
+                inner.membership_metrics.record(sample);
+                Ok(())
+            }
+            Err(error) => {
+                inner.membership_metrics.record_error();
+                Err(error)
+            }
+        }
+    }
+
     pub async fn heartbeat_loop(self) {
         if self.inner.is_none() {
             return;
@@ -2716,9 +2887,18 @@ impl MembershipManager {
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             match self.heartbeat().await {
                 Err(error) => {
+                    if let Some(inner) = self.inner.as_deref() {
+                        inner.membership_metrics.record_error();
+                    }
                     tracing::warn!(code = error.code(), "cluster node heartbeat failed");
                 }
                 Ok(()) => {
+                    if let Err(error) = self.refresh_membership_metrics().await {
+                        tracing::warn!(
+                            code = error.code(),
+                            "cluster membership metrics refresh failed"
+                        );
+                    }
                     if let Err(error) = self.refresh_activity_public_keys().await {
                         tracing::warn!(
                             code = error.code(),
@@ -4017,6 +4197,12 @@ struct MembershipNodeRow {
     removal_pending: bool,
 }
 
+struct MembershipMetricsRow {
+    raft_id: u64,
+    last_seen_at: i64,
+    removal_pending: bool,
+}
+
 struct ActivityPeerRow {
     node_id: String,
     raft_id: u64,
@@ -4194,6 +4380,17 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             raft_id: row.get("raft_id"),
             api_address: row.get("api_address"),
             hostname: row.get("hostname"),
+            last_seen_at: row.get("last_seen_at"),
+            removal_pending: row.get("removal_pending"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for MembershipMetricsRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
             last_seen_at: row.get("last_seen_at"),
             removal_pending: row.get("removal_pending"),
         }
@@ -4415,6 +4612,34 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_membership_metrics_distinguish_unavailable_from_fresh_cluster_state() {
+        let unavailable = PassiveMembershipMetrics::default().snapshot();
+        assert!(!unavailable.replicated);
+        assert!(!unavailable.valid);
+        assert!(unavailable.sample.is_none());
+
+        let metrics = PassiveMembershipMetrics::replicated();
+        let sample = MembershipMetricsSample {
+            voters: 4,
+            learners: 0,
+            heartbeat_fresh_voters: 3,
+            heartbeat_stale_voters: 1,
+            removals_pending: 0,
+            local_is_voter: true,
+        };
+        metrics.record(sample);
+        let view = metrics.snapshot();
+        assert!(view.replicated);
+        assert!(view.valid);
+        assert_eq!(view.age_seconds, Some(0));
+        assert_eq!(view.sample, Some(sample));
+        assert_eq!(view.errors, 0);
+
+        metrics.record_error();
+        assert_eq!(metrics.snapshot().errors, 1);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn heartbeat_gate_pins_commit_window_and_retries_failures() {

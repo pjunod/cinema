@@ -270,6 +270,11 @@ Follow the cluster bootstrap and rolling-drain rules in
 
 ## Observability
 
-`GET /healthz` (liveness), `GET /readyz` (storage reachable), and
-`GET /metrics` (Prometheus text: uptime, active transcode sessions, library
-and user counts).
+`GET /healthz` is liveness. `GET /readyz` is serving readiness, and the image's
+Docker health check uses it so a voter without usable quorum is not marked
+healthy. `GET /metrics` includes process, playback, cached cluster membership,
+quorum, leader, commit, and apply-lag state without performing a Store read on
+scrape. The same image also contains the read-only `plurx-cluster-check
+inspect-wal` stopped-node tool; the safe preservation and interpretation
+runbook is in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#inspecting-a-stopped-voter-without-changing-it).

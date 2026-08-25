@@ -2394,6 +2394,7 @@ pub(crate) struct MetricsState {
     offline: Arc<crate::offline::OfflineMetrics>,
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
+    passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -2405,8 +2406,66 @@ impl FromRef<AppState> for MetricsState {
             offline: state.offline.metrics_handle(),
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
+            passive_membership: state.membership.metrics_handle(),
         }
     }
+}
+
+fn render_passive_membership_metrics(
+    view: plurx_core::cluster::membership::PassiveMembershipMetricsView,
+) -> String {
+    let mut out = format!(
+        "# HELP plurx_cluster_replicated Whether this process is configured as a replicated cluster node.\n\
+         # TYPE plurx_cluster_replicated gauge\n\
+         plurx_cluster_replicated {}\n\
+         # HELP plurx_cluster_membership_sample_valid Whether the cached membership and heartbeat sample is present and fresh.\n\
+         # TYPE plurx_cluster_membership_sample_valid gauge\n\
+         plurx_cluster_membership_sample_valid {}\n\
+         # HELP plurx_cluster_membership_sample_errors_total Failed membership sample or local heartbeat attempts.\n\
+         # TYPE plurx_cluster_membership_sample_errors_total counter\n\
+         plurx_cluster_membership_sample_errors_total {}\n",
+        u8::from(view.replicated),
+        u8::from(view.valid),
+        view.errors,
+    );
+    if let Some(age) = view.age_seconds {
+        out.push_str(&format!(
+            "# HELP plurx_cluster_membership_sample_age_seconds Age of the last complete membership sample.\n\
+             # TYPE plurx_cluster_membership_sample_age_seconds gauge\n\
+             plurx_cluster_membership_sample_age_seconds {age}\n"
+        ));
+    }
+    let Some(sample) = view.sample else {
+        return out;
+    };
+    let quorum_required = sample.voters / 2 + 1;
+    let heartbeat_quorum_available = sample.heartbeat_fresh_voters >= quorum_required;
+    out.push_str(&format!(
+        "# HELP plurx_cluster_nodes Committed cluster nodes by role and heartbeat freshness.\n\
+         # TYPE plurx_cluster_nodes gauge\n\
+         plurx_cluster_nodes{{role=\"voter\",heartbeat=\"fresh\"}} {}\n\
+         plurx_cluster_nodes{{role=\"voter\",heartbeat=\"stale\"}} {}\n\
+         plurx_cluster_nodes{{role=\"learner\",heartbeat=\"all\"}} {}\n\
+         # HELP plurx_cluster_quorum_required Voters required to form a Raft majority.\n\
+         # TYPE plurx_cluster_quorum_required gauge\n\
+         plurx_cluster_quorum_required {quorum_required}\n\
+         # HELP plurx_cluster_heartbeat_quorum_available Whether heartbeat-fresh voters currently meet the majority count.\n\
+         # TYPE plurx_cluster_heartbeat_quorum_available gauge\n\
+         plurx_cluster_heartbeat_quorum_available {}\n\
+         # HELP plurx_cluster_local_is_voter Whether this process is in the committed voter set.\n\
+         # TYPE plurx_cluster_local_is_voter gauge\n\
+         plurx_cluster_local_is_voter {}\n\
+         # HELP plurx_cluster_removals_pending Durable membership-removal fences awaiting resolution.\n\
+         # TYPE plurx_cluster_removals_pending gauge\n\
+         plurx_cluster_removals_pending {}\n",
+        sample.heartbeat_fresh_voters,
+        sample.heartbeat_stale_voters,
+        sample.learners,
+        u8::from(heartbeat_quorum_available),
+        u8::from(sample.local_is_voter),
+        sample.removals_pending,
+    ));
+    out
 }
 
 fn render_passive_raft_metrics(
@@ -2618,6 +2677,7 @@ pub(crate) async fn metrics(
     let (sessions, active_cache_entries) = state.transcode.snapshot();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
+    let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
@@ -2656,7 +2716,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
+         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -2752,6 +2812,40 @@ mod tests {
         assert!(stale.contains("plurx_store_metrics_sample_age_seconds 121"));
         assert!(stale.contains("plurx_libraries_total 3"));
         assert!(stale.contains("plurx_users_total 4"));
+    }
+
+    #[test]
+    fn membership_exposition_reports_quorum_without_node_identity_labels() {
+        use plurx_core::cluster::membership::{
+            MembershipMetricsSample, PassiveMembershipMetricsView,
+        };
+
+        let rendered = render_passive_membership_metrics(PassiveMembershipMetricsView {
+            replicated: true,
+            valid: true,
+            age_seconds: Some(3),
+            errors: 2,
+            sample: Some(MembershipMetricsSample {
+                voters: 4,
+                learners: 1,
+                heartbeat_fresh_voters: 3,
+                heartbeat_stale_voters: 1,
+                removals_pending: 1,
+                local_is_voter: true,
+            }),
+        });
+        assert!(rendered.contains("plurx_cluster_replicated 1"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_valid 1"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_age_seconds 3"));
+        assert!(rendered.contains("plurx_cluster_membership_sample_errors_total 2"));
+        assert!(rendered.contains("plurx_cluster_nodes{role=\"voter\",heartbeat=\"fresh\"} 3"));
+        assert!(rendered.contains("plurx_cluster_nodes{role=\"voter\",heartbeat=\"stale\"} 1"));
+        assert!(rendered.contains("plurx_cluster_quorum_required 3"));
+        assert!(rendered.contains("plurx_cluster_heartbeat_quorum_available 1"));
+        assert!(rendered.contains("plurx_cluster_local_is_voter 1"));
+        assert!(rendered.contains("plurx_cluster_removals_pending 1"));
+        assert!(!rendered.contains("node_id"));
+        assert!(!rendered.contains("hostname"));
     }
 
     #[test]

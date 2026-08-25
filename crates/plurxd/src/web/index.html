@@ -10189,9 +10189,9 @@ function clusterNodeRow(n,localNodeId){
   const role=voter
     ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
     : `<span class="pill" title="Admitted and catching up. A learner does not vote and is not counted toward quorum.">learner</span>`;
-  const reach=n.reachable
-    ? `<span style="color:var(--good)">reachable</span>`
-    : `<span style="color:var(--bad)">not reachable</span>`;
+  const heartbeat=n.reachable
+    ? `<span style="color:var(--good)">fresh</span>`
+    : `<span style="color:var(--bad)">stale</span>`;
   const seen=n.last_seen_at?esc(fmtAgo(Math.floor(n.last_seen_at/1000))):`<span class="muted">never</span>`;
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
@@ -10206,7 +10206,7 @@ function clusterNodeRow(n,localNodeId){
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
     <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
     <td data-label="Role">${role}</td>
-    <td data-label="Reachable">${reach}</td>
+    <td data-label="Heartbeat">${heartbeat}</td>
     <td data-label="Last seen" class="muted">${seen}</td>
     <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
 }
@@ -10225,12 +10225,14 @@ function clusterPanel(d){
   // the same renderer as Settings → System.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
   const roster=nodes.length
-    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Reachable</th><th>Last seen</th><th></th></tr></thead>
+    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
        <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
     <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
     ${roster}
+    <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
+      Leader, commit, and apply-lag readings below describe Raft replication health.</div>
     <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
       — the same reading as the Server card on the System tab.</div>
     ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}

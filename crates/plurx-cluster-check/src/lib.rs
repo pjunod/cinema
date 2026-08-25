@@ -28,6 +28,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use hiqlite::macros::params;
 use hiqlite::tls::ServerTlsConfig;
 use hiqlite::{Client, Node, NodeConfig, Row};
+use hiqlite_wal::inspection::{
+    inspect_logs_dir, InspectedLogId, MetadataInspection, WalFileInspection,
+};
 use hmac::{Hmac, Mac};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::cluster::membership::{
@@ -54,6 +57,7 @@ use plurx_core::store::{
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
     AUTH_SCHEMA_VERSION,
 };
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -237,6 +241,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("inspect-wal") => run_inspect_wal(&args[2..]),
         Some("topology") => {
             let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
                 PathBuf::from("target/validation/cluster-topology-semantic.json")
@@ -338,6 +343,284 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         }
         Some("media-child") => media_child().await,
         Some(other) => bail!("unknown cluster-check mode {other}"),
+    }
+}
+
+const WAL_INSPECTION_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, PartialEq, Eq)]
+struct InspectWalArgs {
+    hiqlite_dir: PathBuf,
+    output: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct HashedWalFileInspection {
+    #[serde(flatten)]
+    wal: WalFileInspection,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WalInspectionArtifact {
+    schema_version: u32,
+    metadata: MetadataInspection,
+    wal_files: Vec<HashedWalFileInspection>,
+    snapshot_current_pointer_present: bool,
+    snapshot_database_present: bool,
+    snapshot_last_log_id: Option<InspectedLogId>,
+    local_state_machine_present: bool,
+    local_state_machine_wal_present: bool,
+    local_applied_log_id: Option<InspectedLogId>,
+    invariant_verdicts: Vec<String>,
+    observations: Vec<String>,
+}
+
+fn parse_inspect_wal_args(args: &[String]) -> Result<InspectWalArgs> {
+    let mut hiqlite_dir = None;
+    let mut output = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .with_context(|| format!("{flag} requires a path"))?;
+        match flag.as_str() {
+            "--hiqlite-dir" if hiqlite_dir.is_none() => {
+                hiqlite_dir = Some(PathBuf::from(value));
+            }
+            "--output" if output.is_none() => {
+                output = Some(PathBuf::from(value));
+            }
+            "--hiqlite-dir" | "--output" => bail!("duplicate inspect-wal flag {flag}"),
+            _ => bail!("unknown inspect-wal flag {flag}"),
+        }
+        index += 2;
+    }
+    Ok(InspectWalArgs {
+        hiqlite_dir: hiqlite_dir.context("inspect-wal requires --hiqlite-dir PATH")?,
+        output: output.context("inspect-wal requires --output PATH")?,
+    })
+}
+
+fn run_inspect_wal(args: &[String]) -> Result<()> {
+    let args = parse_inspect_wal_args(args)?;
+    let logs_dir = args.hiqlite_dir.join("logs");
+    let report = inspect_logs_dir(&logs_dir).context("inspect stopped Hiqlite WAL")?;
+    let mut verdicts = report
+        .invariant_verdicts
+        .into_iter()
+        .filter(|verdict| verdict != "clean")
+        .collect::<Vec<_>>();
+
+    let mut wal_files = Vec::with_capacity(report.wal_files.len());
+    for wal in report.wal_files {
+        let sha256 = sha256_file(&logs_dir.join(&wal.file_name))?;
+        wal_files.push(HashedWalFileInspection { wal, sha256 });
+    }
+
+    let local_db = args
+        .hiqlite_dir
+        .join("state_machine")
+        .join("db")
+        .join("plurx.db");
+    let (local_state_machine_present, local_state_machine_wal_present, local_applied_log_id) =
+        read_local_state_machine_boundary(&local_db)?;
+    if !local_state_machine_present {
+        push_unique(&mut verdicts, "local_state_machine_missing");
+    }
+
+    let snapshots_dir = args.hiqlite_dir.join("state_machine").join("snapshots");
+    let pointer_path = snapshots_dir.join("current");
+    let snapshot_current_pointer_present =
+        regular_file_present(&pointer_path, "Hiqlite snapshot current pointer")?;
+    let mut snapshot_database_present = false;
+    let mut snapshot_last_log_id = None;
+    if snapshot_current_pointer_present {
+        let snapshot_id = std::fs::read_to_string(&pointer_path)
+            .context("read Hiqlite snapshot current pointer")?;
+        let snapshot_id = snapshot_id.trim();
+        if snapshot_id.is_empty()
+            || snapshot_id.contains('/')
+            || snapshot_id.contains('\\')
+            || snapshot_id == "."
+            || snapshot_id == ".."
+        {
+            bail!("Hiqlite snapshot current pointer is not a safe filename");
+        }
+        (snapshot_database_present, snapshot_last_log_id) =
+            read_immutable_state_machine_boundary(&snapshots_dir.join(snapshot_id))?;
+        if !snapshot_database_present {
+            push_unique(&mut verdicts, "snapshot_database_missing");
+        }
+    } else {
+        push_unique(&mut verdicts, "snapshot_pointer_missing");
+    }
+
+    if let Some(purged) = report.metadata.last_purged_log_id {
+        if snapshot_last_log_id.is_some_and(|snapshot| snapshot.index < purged.index) {
+            push_unique(&mut verdicts, "snapshot_behind_purge_boundary");
+        }
+        if local_applied_log_id.is_some_and(|applied| applied.index < purged.index) {
+            push_unique(&mut verdicts, "local_state_machine_behind_purge_boundary");
+        }
+    }
+    if let (Some(snapshot), Some(first_wal)) = (
+        snapshot_last_log_id,
+        wal_files
+            .iter()
+            .find_map(|file| file.wal.first_decodable_log_id),
+    ) {
+        if first_wal.index > snapshot.index.saturating_add(1) {
+            push_unique(&mut verdicts, "snapshot_wal_gap");
+        }
+    }
+    if verdicts.is_empty() {
+        verdicts.push("clean".to_owned());
+    }
+
+    let artifact = WalInspectionArtifact {
+        schema_version: WAL_INSPECTION_SCHEMA_VERSION,
+        metadata: report.metadata,
+        wal_files,
+        snapshot_current_pointer_present,
+        snapshot_database_present,
+        snapshot_last_log_id,
+        local_state_machine_present,
+        local_state_machine_wal_present,
+        local_applied_log_id,
+        invariant_verdicts: verdicts,
+        observations: report.observations,
+    };
+    let mut json = serde_json::to_vec_pretty(&artifact)?;
+    json.push(b'\n');
+    if args.output == Path::new("-") {
+        std::io::stdout().write_all(&json)?;
+    } else {
+        if let Some(parent) = args
+            .output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create WAL inspection output parent {}", parent.display())
+            })?;
+        }
+        std::fs::write(&args.output, json)
+            .with_context(|| format!("write WAL inspection artifact {}", args.output.display()))?;
+    }
+    Ok(())
+}
+
+fn read_local_state_machine_boundary(path: &Path) -> Result<(bool, bool, Option<InspectedLogId>)> {
+    if !regular_file_present(path, "Hiqlite local state machine")? {
+        return Ok((false, false, None));
+    }
+    let wal_path = sqlite_sidecar_path(path, "-wal");
+    let wal_present = regular_file_present(&wal_path, "Hiqlite state-machine WAL")?;
+    if !wal_present {
+        return Ok((true, false, read_sqlite_state_machine_boundary(path, true)?));
+    }
+    let scratch = tempfile::tempdir().context("create private state-machine inspection copy")?;
+    let copied = scratch.path().join("state-machine.db");
+    std::fs::copy(path, &copied).context("copy Hiqlite state machine for read-only inspection")?;
+    std::fs::copy(&wal_path, sqlite_sidecar_path(&copied, "-wal"))
+        .context("copy Hiqlite state-machine WAL for read-only inspection")?;
+    let last_applied = read_sqlite_state_machine_boundary(&copied, false)?;
+    Ok((true, wal_present, last_applied))
+}
+
+fn read_immutable_state_machine_boundary(path: &Path) -> Result<(bool, Option<InspectedLogId>)> {
+    if !regular_file_present(path, "Hiqlite snapshot database")? {
+        return Ok((false, None));
+    }
+    Ok((true, read_sqlite_state_machine_boundary(path, true)?))
+}
+
+fn read_sqlite_state_machine_boundary(
+    path: &Path,
+    immutable: bool,
+) -> Result<Option<InspectedLogId>> {
+    let (database, flags) = if immutable {
+        let path = path
+            .to_str()
+            .context("Hiqlite state-machine path is not valid UTF-8")?;
+        (
+            format!("file:{}?immutable=1", sqlite_uri_path(path)),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+    } else {
+        (
+            path.to_str()
+                .context("Hiqlite state-machine path is not valid UTF-8")?
+                .to_owned(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    };
+    let connection = Connection::open_with_flags(database, flags)
+        .context("open Hiqlite state machine read-only")?;
+    let bytes = connection
+        .query_row("SELECT data FROM _metadata WHERE key = 'meta'", [], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .optional()
+        .context("read Hiqlite state-machine metadata boundary")?;
+    let last_applied = bytes
+        .as_deref()
+        .map(hiqlite_wal::inspection::decode_state_machine_last_applied)
+        .transpose()
+        .context("decode Hiqlite state-machine applied boundary")?
+        .flatten();
+    Ok(last_applied)
+}
+
+fn regular_file_present(path: &Path, label: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => bail!("{label} is not a regular file: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {label}: {}", path.display())),
+    }
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn sqlite_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open WAL for hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_owned());
     }
 }
 
@@ -9894,6 +10177,68 @@ pub fn install_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_wal_arguments_are_explicit_and_order_independent() {
+        let parsed = parse_inspect_wal_args(&[
+            "--output".to_owned(),
+            "report.json".to_owned(),
+            "--hiqlite-dir".to_owned(),
+            "forensic/hiqlite".to_owned(),
+        ])
+        .expect("valid inspect-wal arguments");
+        assert_eq!(parsed.output, PathBuf::from("report.json"));
+        assert_eq!(parsed.hiqlite_dir, PathBuf::from("forensic/hiqlite"));
+        assert!(parse_inspect_wal_args(&["--output".to_owned()]).is_err());
+        assert!(parse_inspect_wal_args(&[
+            "--output".to_owned(),
+            "a".to_owned(),
+            "--output".to_owned(),
+            "b".to_owned(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn state_machine_inspection_includes_a_committed_sqlite_wal_sidecar() {
+        let root = tempfile::tempdir().expect("state-machine fixture");
+        let path = root.path().join("plurx.db");
+        let connection = Connection::open(&path).expect("open fixture database");
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL mode");
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .expect("retain committed WAL pages");
+        connection
+            .execute(
+                "CREATE TABLE _metadata (key TEXT PRIMARY KEY, data BLOB NOT NULL)",
+                [],
+            )
+            .expect("metadata table");
+        let expected = InspectedLogId {
+            term: 11,
+            node_id: 4,
+            index: 42,
+        };
+        let mut encoded = vec![1_u8];
+        encoded.extend_from_slice(&expected.term.to_le_bytes());
+        encoded.extend_from_slice(&expected.node_id.to_le_bytes());
+        encoded.extend_from_slice(&expected.index.to_le_bytes());
+        connection
+            .execute(
+                "INSERT INTO _metadata (key, data) VALUES ('meta', ?1)",
+                rusqlite::params![encoded],
+            )
+            .expect("committed metadata in WAL");
+        assert!(sqlite_sidecar_path(&path, "-wal").is_file());
+
+        let (present, wal_present, applied) =
+            read_local_state_machine_boundary(&path).expect("inspect source through private copy");
+        assert!(present);
+        assert!(wal_present);
+        assert_eq!(applied, Some(expected));
+    }
 
     fn test_media_child(admission_id: u64) -> MediaChild {
         let mut command = Command::new("sh");

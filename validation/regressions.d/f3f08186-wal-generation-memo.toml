@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f3f08186"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained reused-WAL-number unit regression reconstructs a full-purge generation whose file number matches an older LogReadMemo and proves the real first entry remains readable. The cluster gate then exercises snapshot compaction, WAL recovery, three-voter serving, and replicated Store contracts with the production vendored WAL implementation."
