@@ -294,33 +294,26 @@ class OperationsContractCase(unittest.TestCase):
             "cargo build --release -p plurxd --target ${{ matrix.target }}",
             workflow,
         )
-        # apt on a hosted image points at a mirror list that fails often enough
-        # to matter on a required gate, so every apt use rewrites it to the
-        # archive and retries. Counting invocations rather than asserting a
-        # fixed total keeps this true as jobs move: the ffmpeg lanes now satisfy
-        # it once inside ./.github/actions/ffmpeg instead of per job.
-        for name in (
-            ".github/workflows/ci.yml",
-            ".github/actions/ffmpeg/action.yml",
-        ):
-            with self.subTest(source=name):
-                source = read(name)
-                self.assertIn(
-                    "s|mirror+file:/etc/apt/apt-mirrors.txt"
-                    "|https://archive.ubuntu.com/ubuntu|g",
-                    source,
-                )
-                self.assertEqual(
-                    [],
-                    [
-                        line.strip()
-                        for line in source.splitlines()
-                        if "apt-get" in line
-                        and not line.lstrip().startswith("#")
-                        and "-o Acquire::Retries=3" not in line
-                    ],
-                    f"{name} runs apt-get without the retry policy",
-                )
+        # Root container lanes still install ffmpeg through apt. Keep that one
+        # package-manager boundary on the canonical archive with retries;
+        # persistent runner jobs consume dependencies provisioned by Ansible.
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn(
+            "s|mirror+file:/etc/apt/apt-mirrors.txt"
+            "|https://archive.ubuntu.com/ubuntu|g",
+            action,
+        )
+        self.assertEqual(
+            [],
+            [
+                line.strip()
+                for line in action.splitlines()
+                if "apt-get" in line
+                and not line.lstrip().startswith("#")
+                and "-o Acquire::Retries=3" not in line
+            ],
+            ".github/actions/ffmpeg/action.yml runs apt-get without retries",
+        )
         self.assertNotIn("sudo apt-get update", workflow)
         self.assertNotIn("sudo apt-get install", workflow)
         self.assertNotIn(

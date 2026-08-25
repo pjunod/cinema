@@ -148,18 +148,17 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
       # plurxd shells out to ffmpeg, and the transcode and stream tests drive
-      # that far enough to spawn it — they don't need it to succeed on the
-      # placeholder fixtures, they need a child process to exist so there is a
-      # session to make assertions about. The runner image doesn't ship ffmpeg,
-      # so without this those tests fail on `No such file or directory`, which
-      # is an absent dependency rather than anything wrong with the tree.
+      # that far enough to spawn it. The action verifies the build provisioned
+      # in the runner image instead of granting the job package-manager access.
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Install browser prerequisites
+      - name: Verify Playwright and install its pinned browser
         run: |
-          python3 -m pip install playwright==1.62.0
-          python3 -m playwright install --with-deps chromium
+          requirement=playwright==1.62.0
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
       # Keep the portable baseline and focused Linux contracts in this job.
       # The large UI-golden sweep and Android JVM checks are selected by the
       # same impact graph, but delegated to parallel jobs below instead of
@@ -252,10 +251,12 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Install browser prerequisites
+      - name: Verify Playwright and install its pinned browser
         run: |
-          python3 -m pip install playwright==1.62.0
-          python3 -m playwright install --with-deps chromium
+          requirement=playwright==1.62.0
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
       - name: Check every affected web layout
         run: make ui-check
 
@@ -362,12 +363,11 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Enable emulator acceleration
+      - name: Verify emulator acceleration
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
       - name: Reuse the pinned Android toolchain image from GHCR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -517,18 +517,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Install aarch64 cross toolchain
+      - name: Verify the provisioned aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         # Also provides the C cross-compiler for rusqlite's bundled SQLite.
         run: |
-          # ubuntu-latest can inherit an Azure mirror that accepts the runner
-          # but never serves the archive. Pin the canonical mirror so apt does
-          # not spend the entire job retrying a dead regional endpoint.
-          sudo sed -i \
-            's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-            /etc/apt/sources.list.d/ubuntu.sources
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y gcc-aarch64-linux-gnu
+          command -v aarch64-linux-gnu-gcc
+          aarch64-linux-gnu-gcc --version
       - run: cargo build --release -p plurxd --target ${{ matrix.target }}
         env:
           # Linker for the arm64 target (harmlessly unused on x86_64).
