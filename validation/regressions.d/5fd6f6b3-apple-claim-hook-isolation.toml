@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5fd6f6b3"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract", "history-regressions"]
+reason = "The operations contract runs the real Apple build-claim tool against a scratch Git repository while an explicit regression exports a foreign GIT_INDEX_FILE exactly as Git does for hooks. The tool clears repository-local Git variables before resolving the requested root, so an outer commit index cannot hide the scratch branch's changed note, rewrite historical notes, or make a valid claim look idempotent. The corrective-history audit pins this fix to that retained hook-isolation proof."
