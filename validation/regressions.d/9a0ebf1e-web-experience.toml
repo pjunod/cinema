@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9a0ebf1e"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The shipped-source behavioral suite pins Home preview concurrency and authorization cancellation, generation-fences Home, Activity, and Settings paints and timers, prevents overlapping Activity and Settings polls, and requires log refreshes to serialize one active request while retaining only the latest pending target; restoring unbounded fan-out, detached timers, or independent refresh callers makes those assertions observe excess requests or stale DOM writes."

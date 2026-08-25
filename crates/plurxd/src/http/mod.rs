@@ -14,15 +14,21 @@ mod dto;
 mod error;
 mod extract;
 mod hls;
-mod images;
+pub(crate) mod images;
+pub(crate) mod internal_activity;
+pub(crate) mod internal_media;
+pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
 mod network;
 mod offline;
+pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) mod publication;
+mod reading;
 mod scan;
 pub(crate) mod stream;
 pub(crate) mod system;
@@ -50,9 +56,11 @@ mod users;
 mod watch;
 mod web;
 
+use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{Request, StatusCode, Uri};
-use axum::response::IntoResponse;
+use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
@@ -95,9 +103,20 @@ pub fn router(state: AppState) -> Router {
         // exception: their single-use token is its own narrow credential.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/ingress", get(cluster::ingress))
+        .route("/cluster/media", get(internal_media::directory))
+        .route(
+            "/cluster/media/offers",
+            post(internal_media::diagnostic_offers),
+        )
+        .route("/cluster/leave", post(cluster::leave))
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
         .route("/cluster/join/finalize", post(cluster::finalize_join))
+        // Node-to-node artwork materialization. The handler verifies a
+        // filename-bound cluster HMAC and current live membership; it does
+        // not accept an account bearer and never proxies another hop.
+        .route("/cluster/artwork/{filename}", get(images::serve_peer))
         // What the libraries hold, in transcoder terms — the census PERF-PLAN
         // §5 needs to say whether the GPU tone-map reaches a real library.
         .route("/system/library-shape", get(system::library_shape))
@@ -147,12 +166,20 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/hubs", get(browse::hubs))
+        .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
         // Watch
         .route("/items/{id}/photo", get(photos::serve))
         .route("/items/{id}/progress", post(watch::progress))
         .route("/items/{id}/scrobble", post(watch::scrobble))
         .route("/items/{id}/unscrobble", post(watch::unscrobble))
+        .route(
+            "/items/{id}/reading-state",
+            get(reading::get_state)
+                .put(reading::put_state)
+                .delete(reading::delete_state)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         // Playback
         .route("/files/{id}/decision", get(stream::decision))
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
@@ -178,6 +205,12 @@ pub fn router(state: AppState) -> Router {
         .route("/offline/media/{token}/{segment}", get(offline::segment))
         .route("/files/{id}/direct", get(stream::direct))
         .route("/files/{id}/content", get(stream::book_content))
+        .route("/files/{id}/publication", post(publication::open))
+        .route("/publication/{session}", delete(publication::close))
+        .route(
+            "/publication/{session}/{*resource}",
+            get(publication::resource),
+        )
         .route("/files/{id}/stream.mp4", get(stream::stream_mp4))
         .route(
             "/files/{id}/subs/{index}/overlay.json",
@@ -220,7 +253,11 @@ pub fn router(state: AppState) -> Router {
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
         // Images
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     // Plex-compat Tier 1 façade at Plex's absolute paths (docs/CLIENTS.md §3).
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
@@ -241,7 +278,11 @@ pub fn router(state: AppState) -> Router {
         .route("/:/scrobble", get(plex::scrobble))
         .route("/:/unscrobble", get(plex::unscrobble))
         .route("/search", get(plex::search))
-        .route("/hubs/search", get(plex::search));
+        .route("/hubs/search", get(plex::search))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ));
 
     Router::new()
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
@@ -250,6 +291,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(root_dispatch))
         .route("/assets/hls.min.js", get(web::hls_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
+        .route("/assets/reader.js", get(web::reader_js))
+        .route("/assets/reader.css", get(web::reader_css))
         .route("/connect.svg", get(web::connect_qr))
         // PWA install assets + the sideloadable Android APK.
         .route("/manifest.webmanifest", get(web::manifest))
@@ -258,6 +301,40 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            crate::media_pool::SNAPSHOT_PATH,
+            get(internal_media::snapshot),
+        )
+        .route(
+            crate::media_pool::OFFERS_PATH,
+            post(internal_media::offers)
+                .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
+        .route(
+            crate::shared_cache::CANARY_PATH,
+            post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
+                crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::START_PATH,
+            post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ABORT_PATH,
+            post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::RELAY_PATH,
+            post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
         .nest("/api/v1", api)
         .merge(plex_routes)
         .fallback(web::fallback)
@@ -280,11 +357,12 @@ pub fn router(state: AppState) -> Router {
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
-    for marker in ["media", "hls"] {
+    for marker in ["media", "hls", "publication"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
                 "media" => index >= 2 && segments.get(index.wrapping_sub(1)) == Some(&"offline"),
                 "hls" => true,
+                "publication" => true,
                 _ => false,
             };
             if is_capability_route && index + 1 < segments.len() {
@@ -320,6 +398,20 @@ async fn healthz() -> &'static str {
 
 /// Readiness: this node can do work (storage answers).
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(policy) = state.serving.http_policy("/readyz") {
+        if policy.status != 200 {
+            return (
+                StatusCode::from_u16(policy.status).expect("serving policy status"),
+                policy.body,
+            );
+        }
+    }
+    // A fresh quorum watermark is already a recent replicated-store proof.
+    // Do not turn readiness into another multi-second Store request exactly
+    // when an isolated node needs to self-fence promptly.
+    if state.serving.is_quorum_managed() {
+        return (StatusCode::OK, "ready\n");
+    }
     match state.store.ping().await {
         Ok(()) => (StatusCode::OK, "ready\n"),
         Err(error) => {
@@ -329,8 +421,32 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn mutable_media_serving_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let Some(policy) = state.serving.http_policy(request.uri().path()) else {
+        return next.run(request).await;
+    };
+
+    let mut response = (
+        StatusCode::from_u16(policy.status).expect("serving policy status"),
+        [(header::CONTENT_TYPE, policy.content_type)],
+        policy.body,
+    )
+        .into_response();
+    if policy.retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -339,6 +455,8 @@ mod tests {
     use plurx_core::store::SqliteStore;
     use serde_json::{json, Value};
     use tower::ServiceExt;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
 
     use super::*;
 
@@ -364,6 +482,193 @@ mod tests {
             safe_trace_target(&hls),
             "/api/v1/hls/[REDACTED]/seg00001.ts"
         );
+
+        let publication: Uri = "/api/v1/publication/session-secret/OEBPS/chapter.xhtml"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&publication),
+            "/api/v1/publication/[REDACTED]/OEBPS/chapter.xhtml"
+        );
+    }
+
+    fn compact_handler(source: &str, start: &str, end: &str) -> String {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing handler boundary {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing handler boundary {end}"))
+            .0
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn assert_catalogue_methods(handler: &str, methods: &[&str]) {
+        for method in methods {
+            assert!(
+                handler.contains(&format!("state.catalogue.{method}")),
+                "eligible handler no longer routes {method} through CatalogueReader"
+            );
+            assert!(
+                !handler.contains(&format!("state.store.{method}")),
+                "eligible handler routes {method} directly through Authority"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
+        let browse = include_str!("browse.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn list_items",
+                "pub async fn item_detail",
+            ),
+            &[
+                "get_library",
+                "list_top_items_in_genre",
+                "item_max_heights",
+                "item_media_facts",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                browse,
+                "pub async fn item_detail",
+                "pub async fn home_previews",
+            ),
+            &[
+                "get_item",
+                "get_item_children",
+                "item_media_facts",
+                "files_for_item",
+                "get_file_probe_json",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn home_previews", "pub async fn hubs"),
+            &[
+                "list_libraries",
+                "home_preview_pages",
+                "item_max_heights",
+                "child_counts",
+            ],
+        );
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
+            &["recently_added", "child_counts", "item_max_heights"],
+        );
+        assert!(
+            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
+                .contains("state.store.search_items")
+        );
+
+        let libraries = include_str!("libraries.rs");
+        assert_catalogue_methods(
+            &compact_handler(libraries, "pub async fn list", "pub async fn create"),
+            &["list_libraries"],
+        );
+        for mutation in [
+            "state.store.create_library",
+            "state.store.update_library",
+            "state.store.set_library_schedule",
+            "state.store.delete_library",
+            "state.store.reset_library_root_fingerprint",
+        ] {
+            assert!(libraries
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .contains(mutation));
+        }
+
+        let plex = include_str!("plex.rs");
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn sections", "async fn views"),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn visible_item", "async fn element_for"),
+            &["get_item", "get_library"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "async fn element_for", "pub async fn section_all"),
+            &["files_for_item", "get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn section_all", "pub async fn metadata"),
+            &["get_library", "list_top_items_in_genre"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn children", "pub async fn part"),
+            &["get_item_children"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(plex, "pub async fn part", "pub async fn image"),
+            &["get_file"],
+        );
+        let image = compact_handler(plex, "pub async fn image", "pub async fn photo_transcode");
+        assert!(image.contains("visible_item(&state"));
+        assert!(!image.contains("state.store."));
+        assert_catalogue_methods(
+            &compact_handler(
+                plex,
+                "pub async fn photo_transcode",
+                "pub async fn timeline",
+            ),
+            &["get_item"],
+        );
+        let timeline = compact_handler(plex, "pub async fn timeline", "pub async fn scrobble");
+        assert!(timeline.contains("state.store.get_item"));
+        assert!(!timeline.contains("state.catalogue.get_item"));
+        assert!(timeline.contains("state.progress.put"));
+        let scrobble = compact_handler(plex, "pub async fn scrobble", "pub async fn unscrobble");
+        assert!(scrobble.contains("state.store.get_item"));
+        assert!(scrobble.contains("state.store.set_watched_tree"));
+        assert!(!scrobble.contains("state.catalogue.get_item"));
+        let unscrobble =
+            compact_handler(plex, "pub async fn unscrobble", "pub struct ScrobbleQuery");
+        assert!(unscrobble.contains("state.store.get_item"));
+        assert!(unscrobble.contains("state.store.set_watched_tree"));
+        assert!(!unscrobble.contains("state.catalogue.get_item"));
+        let plex_search = compact_handler(plex, "pub async fn search", "fn version");
+        assert!(plex_search.contains("state.store.search_items"));
+        assert!(!plex_search.contains("state.catalogue.search_items"));
+
+        let system = include_str!("system.rs");
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn system_info",
+                "pub async fn library_shape",
+            ),
+            &["list_libraries"],
+        );
+        assert_catalogue_methods(
+            &compact_handler(
+                system,
+                "pub async fn library_shape",
+                "pub async fn probe_storage",
+            ),
+            &["media_shape"],
+        );
+        let authority_only = [include_str!("auth.rs"), include_str!("watch.rs"), system]
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        for authority_call in [
+            "state.store.get_user_by_username",
+            "state.store.set_watched_tree",
+            "state.store.settings_snapshot",
+            "state.store.put_setting",
+        ] {
+            assert!(authority_only.contains(authority_call));
+        }
     }
 
     fn test_dirs(base: &std::path::Path) -> crate::state::Dirs {
@@ -382,7 +687,7 @@ mod tests {
     /// The same app, plus the state behind it — for tests that have to put the
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
-    fn test_app_with_state() -> (Router, AppState) {
+    pub(super) fn test_app_with_state() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = std::env::temp_dir().join(format!("plurx-test-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
@@ -425,6 +730,58 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(false);
+
+        let (status, body) = call_text(&app, get("/healthz", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ok\n");
+
+        let (status, body) = call_text(&app, get("/readyz", None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "quorum unavailable\n");
+
+        for path in [
+            "/api/v1/hls/probe/status",
+            "/api/v1/files/7/decision",
+            "/api/v1/files/7/offline-options",
+            "/api/v1/files/7/stream.mp4",
+            "/api/v1/files/7/direct",
+            "/api/v1/files/7/content",
+            "/api/v1/offline/media/capability/0.ts",
+            "/api/v1/publication/capability/chapter.xhtml",
+            "/api/v1/files/7/subs/0",
+            "/api/v1/images/poster.jpg",
+            "/api/v1/items/7/photo",
+            "/library/parts/7/0/movie.mkv",
+            "/library/metadata/7/thumb",
+            "/photo/:/transcode",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("fenced response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&HeaderValue::from_static("1")),
+                "{path}"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let body: Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], "serving_fenced", "{path}");
+            assert!(body.get("retry_nodes").is_none(), "{path}");
+        }
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -943,6 +1300,145 @@ mod tests {
         assert_eq!(rec["status"], "done");
         assert_eq!(rec["correlation_id"], "t-42-a3f9c1");
         assert_eq!(rec["source"], "monarr");
+    }
+
+    /// Curator announces book imports through the same targeted-scan seam as
+    /// video. The path identifies the local edition; explicit Curator keys are
+    /// the only evidence Cinema uses to relate text and audio editions.
+    #[tokio::test]
+    async fn a_curator_book_import_reaches_the_books_library() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger", "status:read"])).await;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let book = dir.path().join("Ursula K. Le Guin/The Dispossessed");
+        std::fs::create_dir_all(&book).expect("mkdir");
+        std::fs::write(book.join("The Dispossessed.epub"), b"epub fixture").expect("write");
+        call(
+            &app,
+            post(
+                "/api/v1/libraries",
+                Some(&admin),
+                json!({ "name": "Books", "kind": "books", "paths": [dir.path()] }),
+            ),
+        )
+        .await;
+
+        let body = scan_and_settle(
+            &app,
+            &key,
+            json!({
+                "path": book,
+                "hint": "book",
+                "book": {
+                    "title": "The Dispossessed",
+                    "author": "Ursula K. Le Guin",
+                    "medium": "ebook",
+                    "work_id": "curator:openlibrary:OL87320W",
+                    "edition_id": "curator:item:84:ebook"
+                },
+                "correlation_id": "t-84-books",
+                "source": "monarr"
+            }),
+        )
+        .await;
+        assert_eq!(body["correlation_id"], "t-84-books");
+        let item_id = body["items"][0]["item_id"].as_i64().expect("item id");
+        let (status, detail) =
+            call(&app, get(&format!("/api/v1/items/{item_id}"), Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["item"]["kind"], "book");
+        assert_eq!(detail["item"]["title"], "The Dispossessed");
+        assert_eq!(detail["item"]["author"], "Ursula K. Le Guin");
+        assert_eq!(
+            detail["item"]["book_work_id"],
+            "curator:openlibrary:OL87320W"
+        );
+        assert_eq!(detail["item"]["book_edition_id"], "curator:item:84:ebook");
+        assert_eq!(detail["item"]["book_metadata_source"], "curator");
+    }
+
+    #[tokio::test]
+    async fn curator_book_metadata_is_bounded_and_books_only() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+
+        let books = tempfile::tempdir().expect("books");
+        let book_path = books.path().join("Book");
+        std::fs::create_dir_all(&book_path).expect("book dir");
+        std::fs::write(book_path.join("Book.epub"), b"epub fixture").expect("book file");
+        call(
+            &app,
+            post(
+                "/api/v1/libraries",
+                Some(&admin),
+                json!({ "name": "Books", "kind": "books", "paths": [books.path()] }),
+            ),
+        )
+        .await;
+
+        let base = json!({
+            "path": book_path,
+            "hint": "book",
+            "book": {
+                "title": "Book",
+                "author": "Author",
+                "medium": "ebook",
+                "work_id": "curator:work:1",
+                "edition_id": "curator:edition:1"
+            }
+        });
+        let mut hostile_cover = base.clone();
+        hostile_cover["book"]["cover_url"] = json!("https://example.com/cover.jpg");
+        let (status, body) = call(&app, post("/api/v1/scan", Some(&key), hostile_cover)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Open Library"));
+
+        let mut wrong_medium = base;
+        wrong_medium["book"]["medium"] = json!("pdf");
+        let (status, body) = call(&app, post("/api/v1/scan", Some(&key), wrong_medium)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let movies = tempfile::tempdir().expect("movies");
+        std::fs::write(movies.path().join("Movie.mkv"), b"movie").expect("movie");
+        call(
+            &app,
+            post(
+                "/api/v1/libraries",
+                Some(&admin),
+                json!({ "name": "Movies", "kind": "movies", "paths": [movies.path()] }),
+            ),
+        )
+        .await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/scan",
+                Some(&key),
+                json!({
+                    "path": movies.path(),
+                    "hint": "book",
+                    "book": {
+                        "title": "Not a book",
+                        "author": "Author",
+                        "medium": "ebook",
+                        "work_id": "curator:work:2",
+                        "edition_id": "curator:edition:2"
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Books library"));
     }
 
     /// The rail is absent, not broken, when no monarr is paired — and a
@@ -1628,6 +2124,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn repeated_metrics_scrapes_do_not_record_store_operations() {
+        let (app, _) = test_state();
+        let before = plurx_core::store::prometheus_store_operations();
+        for _ in 0..3 {
+            let (status, body) = call_text(&app, get("/metrics", None)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        }
+        assert_eq!(plurx_core::store::prometheus_store_operations(), before);
+    }
+
     /// The seam between "another app told us the id" and "go and enrich it".
     ///
     /// These two features can each be right and still combine into an item
@@ -2171,6 +2679,7 @@ mod tests {
         // setup_required now false; a second setup is rejected.
         let (_, info) = call(&app, get("/api/v1/server", None)).await;
         assert_eq!(info["setup_required"], false);
+
         let (status, _) = call(
             &app,
             post(
@@ -2414,14 +2923,193 @@ mod tests {
         assert_eq!(body["users"], 1);
     }
 
+    /// The ingress list is the cluster's topology. It is not admin-only —
+    /// every household member's player needs it to retry a stream through
+    /// another node — but it is not public either, and it must never appear
+    /// on the credential-free identity endpoint the clients use to probe an
+    /// unknown candidate.
+    #[tokio::test]
+    async fn the_ingress_list_is_for_signed_in_viewers_and_nobody_else() {
+        let app = test_app();
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", None)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an anonymous prober may not enumerate the cluster"
+        );
+
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token").to_owned();
+
+        let (status, body) = call(&app, get("/api/v1/cluster/ingress", Some(&viewer))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an ordinary viewer's player needs this list: {body}"
+        );
+        assert!(body["node_urls"].is_array(), "{body}");
+
+        let (status, _) = call(&app, get("/api/v1/cluster/ingress", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // And it is not smuggled back onto the public identity endpoint,
+        // which both clients deliberately call without a credential.
+        let (_, info) = call(&app, get("/api/v1/server", None)).await;
+        assert!(
+            info.get("node_urls").is_none(),
+            "the identity probe must not carry the cluster's addresses: {info}"
+        );
+    }
+
     #[tokio::test]
     async fn cluster_membership_controls_are_admin_only_and_sqlite_is_explicit() {
         let app = test_app();
         let (status, _) = call(&app, get("/api/v1/cluster/nodes", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(&app, get("/api/v1/cluster/media", None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         let admin = setup_admin(&app).await;
+        let (status, media) = call(&app, get("/api/v1/cluster/media", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            media["protocol_version"],
+            crate::media_pool::PROTOCOL_VERSION
+        );
+        assert_eq!(media["remote_placement_enabled"], false);
+        assert_eq!(media["remote_placement_rollout_ready"], false);
+        assert_eq!(media["remote_placement_ready"], false);
+        assert_eq!(media["session_takeover_enabled"], false);
+        assert_eq!(media["session_takeover_ready"], false);
+        assert_eq!(media["local_active_sessions"], 0);
+        assert_eq!(media["nodes"].as_array().map(Vec::len), Some(1));
+        assert!(
+            !media.to_string().contains("path"),
+            "media directory diagnostics must not expose source paths: {media}"
+        );
         let (status, body) = call(&app, get("/api/v1/cluster/nodes", Some(&admin))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("every committed voter")),
+            "legacy settings errors retain their {{error}} response contract: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_media_pool_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_media_pool_enabled"], false);
+        assert_eq!(body["cluster_media_pool_ready"], false);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
+
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                None,
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("remote placement")),
+            "one endpoint answers refusals one way: settings keep {{error}}: {body}"
+        );
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "cluster_session_takeover_enabled": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cluster_session_takeover_enabled"], false);
+
+        let leave_body = json!({ "node_id": "test-node" });
+        let (status, _) = call(
+            &app,
+            post("/api/v1/cluster/leave", None, leave_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/leave",
+                Some(&admin),
+                json!({ "node_id": "another-node" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "leave_node_mismatch");
+        let (status, body) = call(
+            &app,
+            post("/api/v1/cluster/leave", Some(&admin), leave_body),
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
 
@@ -2448,7 +3136,7 @@ mod tests {
                     "node_id": "joining-node",
                     "raft_address": "127.0.0.1:32411",
                     "api_address": "127.0.0.1:32412",
-                    "schema_version": 5,
+                    "schema_version": 6,
                     "protocol_version": 4
                 }),
             ),
@@ -2562,7 +3250,7 @@ mod tests {
             .jobs
             .set_producing(Some(crate::state::ProducingNow {
                 title: "Willow".into(),
-                reason: crate::produce::REASON_IN_PROGRESS,
+                reason: crate::produce::REASON_IN_PROGRESS.to_owned(),
                 index: 2,
                 total: 12,
             }))
@@ -2631,7 +3319,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_endpoint_is_admin_only() {
-        let app = test_app();
+        let (app, state) = test_app_with_state();
         let (status, _) = call(&app, get("/api/v1/system/logs", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -2643,6 +3331,23 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.is_array());
+
+        state.cluster_logs.push(crate::logbuf::LogEntry {
+            ts_ms: 1,
+            level: "INFO".to_owned(),
+            target: "plurx_core::cluster::membership".to_owned(),
+            message: "cluster-only proof".to_owned(),
+        });
+        let (status, body) = call(
+            &app,
+            get(
+                "/api/v1/system/logs?scope=cluster&level=info&limit=50",
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["message"], "cluster-only proof");
     }
 
     #[tokio::test]
@@ -2782,10 +3487,16 @@ mod tests {
                 );
                 request
             };
+        let credential_generation_str = plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        )
+        .into_inner();
         let prior = || {
             state
                 .store
-                .network_prior(user.id, "safari", "198.51.100.0/24")
+                .network_prior(&credential_generation_str, "safari", "198.51.100.0/24")
         };
 
         let (status, _) = call(&app, report("ttff", 8_000, 1080, None)).await;
@@ -2826,6 +3537,120 @@ mod tests {
         let updated = updated.expect("second observation");
         assert_eq!(updated.sustained_kbps, Some(7_000));
         assert_eq!(updated.worst_rung_height, Some(720));
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_log_stays_bound_to_captured_credential_generation() {
+        let (app, state) = test_state();
+        let token = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("enable priors");
+        let original = state
+            .store
+            .get_user_by_username("paul")
+            .await
+            .expect("original lookup")
+            .expect("original user");
+        let original_generation = plurx_core::domain::CredentialGeneration::derive(
+            original.id,
+            original.created_at,
+            &original.password_hash,
+        );
+
+        const CAPTURE_MESSAGE: &str = "credential-generation-capture-race";
+        let (captured, release) = system::pause_next_client_log_after_capture(CAPTURE_MESSAGE);
+        let mut request = post(
+            "/api/v1/client-log",
+            Some(&token),
+            json!({
+                "event": "ttff",
+                "message": CAPTURE_MESSAGE,
+                "bandwidth": 9_000,
+                "height": 1080
+            }),
+        );
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("198.51.100.88"),
+        );
+        request.headers_mut().insert(
+            axum::http::header::USER_AGENT,
+            axum::http::HeaderValue::from_static(super::test_agents::SAFARI_MACOS_UA),
+        );
+        let request = tokio::spawn({
+            let app = app.clone();
+            async move { call(&app, request).await }
+        });
+        captured
+            .await
+            .expect("request reached post-auth capture point");
+
+        assert!(state
+            .store
+            .delete_user(original.id)
+            .await
+            .expect("delete user"));
+        let replacement_hash =
+            plurx_core::auth::hash_password("replacement-password").expect("replacement hash");
+        let replacement = state
+            .store
+            .create_user("paul", &replacement_hash, true)
+            .await
+            .expect("replacement user");
+        assert_eq!(replacement.id, original.id, "numeric id must be reused");
+        let same_second_replacement_generation = plurx_core::domain::CredentialGeneration::derive(
+            replacement.id,
+            original.created_at,
+            &replacement.password_hash,
+        );
+        assert_ne!(
+            same_second_replacement_generation, original_generation,
+            "the generation must distinguish replacement credentials even at the same second"
+        );
+        let replacement_generation = plurx_core::domain::CredentialGeneration::derive(
+            replacement.id,
+            replacement.created_at,
+            &replacement.password_hash,
+        );
+        assert_ne!(replacement_generation, original_generation);
+
+        release.send(()).expect("release captured request");
+        let (status, _) = request.await.expect("request task");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for _ in 0..100 {
+            if state
+                .store
+                .network_prior(original_generation.as_str(), "safari", "198.51.100.0/24")
+                .await
+                .expect("old-generation lookup")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            state
+                .store
+                .network_prior(original_generation.as_str(), "safari", "198.51.100.0/24",)
+                .await
+                .expect("old-generation lookup")
+                .is_some(),
+            "the in-flight event must remain under the authenticated generation"
+        );
+        assert!(
+            state
+                .store
+                .network_prior(replacement_generation.as_str(), "safari", "198.51.100.0/24",)
+                .await
+                .expect("replacement-generation lookup")
+                .is_none(),
+            "the in-flight event must not contaminate the replacement generation"
+        );
     }
 
     #[tokio::test]
@@ -2971,6 +3796,164 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn home_previews_are_authenticated_fixed_and_match_library_pages() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let seeded = seed_content(&state).await;
+        let home = seed_home(&state).await;
+        let empty = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Empty Preview Library".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![std::path::PathBuf::from("/empty-preview")],
+                anime: false,
+            })
+            .await
+            .expect("empty library");
+        let mut preview_movies = Vec::new();
+        for index in 0..30 {
+            let item = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: seeded.lib,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Preview Movie {index:02}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("preview movie");
+            preview_movies.push(item);
+        }
+        let watched_movie = *preview_movies.last().expect("preview movie id");
+        let (status, _) = call(
+            &app,
+            post(
+                &format!("/api/v1/items/{watched_movie}/progress"),
+                Some(&admin),
+                json!({ "position_ms": 1_000, "duration_ms": 10_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, admin_body) =
+            call(&app, get("/api/v1/home/previews?limit=1", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{admin_body}");
+        let libraries = admin_body["libraries"].as_array().expect("libraries");
+        let empty_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == empty.id)
+            .expect("empty library remains visible");
+        assert_eq!(empty_page["total"], 0);
+        assert_eq!(empty_page["items"], json!([]));
+
+        let movie_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("movie preview");
+        assert_eq!(movie_page["items"].as_array().map(Vec::len), Some(24));
+        assert_eq!(movie_page["total"], 32);
+        let (_, ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(movie_page["items"], ordinary["items"]);
+        assert_eq!(movie_page["total"], ordinary["total"]);
+        let admin_movie = movie_page["items"]
+            .as_array()
+            .expect("movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("seeded movie");
+        assert!(admin_movie.get("watch").is_some());
+
+        let home_page = libraries
+            .iter()
+            .find(|page| page["library"]["id"] == home.lib)
+            .expect("home-video preview");
+        let folder = home_page["items"]
+            .as_array()
+            .expect("home-video items")
+            .iter()
+            .find(|item| item["id"] == home.folder)
+            .expect("root folder");
+        assert_eq!(folder["child_count"], 2);
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "previewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token").to_owned();
+        let (status, viewer_body) = call(&app, get("/api/v1/home/previews", Some(&viewer))).await;
+        assert_eq!(status, StatusCode::OK);
+        let viewer_movie_page = viewer_body["libraries"]
+            .as_array()
+            .expect("viewer libraries")
+            .iter()
+            .find(|page| page["library"]["id"] == seeded.lib)
+            .expect("viewer movie preview");
+        let (_, viewer_ordinary) = call(
+            &app,
+            get(
+                &format!("/api/v1/libraries/{}/items?sort=added&limit=24", seeded.lib),
+                Some(&viewer),
+            ),
+        )
+        .await;
+        assert_eq!(viewer_movie_page["items"], viewer_ordinary["items"]);
+        let viewer_movie = viewer_movie_page["items"]
+            .as_array()
+            .expect("viewer movie items")
+            .iter()
+            .find(|item| item["id"] == watched_movie)
+            .expect("viewer seeded movie");
+        assert!(viewer_movie.get("watch").is_none());
+
+        assert_eq!(
+            call(&app, post("/api/v1/auth/logout", Some(&viewer), json!({})),)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/home/previews", Some(&viewer)),)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+            "token revocation must apply to the next preview request"
+        );
+    }
+
     // ---- seeded integration surface -----------------------------------------
     // A router plus the AppState behind it, so a test can seed items/files
     // straight through the store and then drive the real handlers end to end.
@@ -3003,6 +3986,535 @@ mod tests {
         );
         state.pgs_overlay_enabled = true;
         (router(state.clone()), state)
+    }
+
+    #[tokio::test]
+    async fn reading_state_api_is_authenticated_revision_bound_and_ordered() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Reading API Books".into(),
+                kind: LibraryKind::Books,
+                paths: vec![std::path::PathBuf::from("/reading-api")],
+                anime: false,
+            })
+            .await
+            .expect("books library");
+        let book = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Book,
+                parent_id: None,
+                title: "Reading API Contract".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("book");
+        let file = state
+            .store
+            .upsert_file(
+                book,
+                "/reading-api/contract.epub",
+                4_096,
+                100,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("book file");
+        let pdf = state
+            .store
+            .upsert_file(
+                book,
+                "/reading-api/contract.pdf",
+                8_192,
+                101,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("PDF file");
+
+        let uri = format!("/api/v1/items/{book}/reading-state?file_id={file}");
+        assert_eq!(
+            call(&app, get(&uri, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, empty) = call(&app, get(&uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{empty}");
+        assert!(empty["state"].is_null());
+        assert_eq!(empty["stale"], false);
+
+        let put_uri = format!("/api/v1/items/{book}/reading-state");
+        let (status, saved) = call(
+            &app,
+            put(
+                &put_uri,
+                Some(&admin),
+                json!({
+                    "file_id": file,
+                    "revision": { "size": 4096, "mtime": 100 },
+                    "locator": {
+                        "version": 1,
+                        "href": "Text/chapter-3.xhtml#paragraph-2",
+                        "locations": { "progression": 0.6, "totalProgression": 0.6 }
+                    },
+                    "progression": 0.6,
+                    "completed": false,
+                    "recorded_at": 200
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["file_id"], file);
+        assert_eq!(saved["revision"], json!({ "size": 4096, "mtime": 100 }));
+        assert_eq!(saved["progression"], 0.6);
+
+        // An older offline close event returns the durable winner; it cannot
+        // rewind the state saved by a newer device.
+        let (status, winner) = call(
+            &app,
+            put(
+                &put_uri,
+                Some(&admin),
+                json!({
+                    "file_id": file,
+                    "revision": { "size": 4096, "mtime": 100 },
+                    "locator": { "version": 1, "href": "Text/chapter-1.xhtml" },
+                    "progression": 0.1,
+                    "completed": false,
+                    "recorded_at": 100
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{winner}");
+        assert_eq!(winner["progression"], 0.6);
+        assert_eq!(
+            winner["locator"]["href"],
+            "Text/chapter-3.xhtml#paragraph-2"
+        );
+
+        let (status, detail) =
+            call(&app, get(&format!("/api/v1/items/{book}"), Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["reading"]["progression"], 0.6);
+        let pdf_dto = detail["files"]
+            .as_array()
+            .expect("book files")
+            .iter()
+            .find(|entry| entry["id"] == pdf)
+            .expect("PDF DTO");
+        assert_eq!(pdf_dto["reader"]["format"], "pdf");
+        assert_eq!(pdf_dto["reader"]["apple"]["online"], "read");
+        assert_eq!(pdf_dto["reader"]["apple"]["offline"], "unavailable");
+        assert_eq!(
+            pdf_dto["reader_revision"],
+            json!({ "size": 8192, "mtime": 101 })
+        );
+
+        let (status, conflict) = call(
+            &app,
+            put(
+                &put_uri,
+                Some(&admin),
+                json!({
+                    "file_id": file,
+                    "revision": { "size": 4097, "mtime": 100 },
+                    "locator": { "version": 1, "href": "chapter.xhtml" },
+                    "progression": 0.7,
+                    "completed": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+
+        let same_file = state
+            .store
+            .upsert_file(
+                book,
+                "/reading-api/contract.epub",
+                4_100,
+                101,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("replace revision");
+        assert_eq!(same_file, file);
+        let (status, stale) = call(&app, get(&uri, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{stale}");
+        assert_eq!(stale["stale"], true);
+        assert!(stale["state"].is_null(), "{stale}");
+        let (_, detail) = call(&app, get(&format!("/api/v1/items/{book}"), Some(&admin))).await;
+        assert!(detail["reading"].is_null(), "{detail}");
+
+        let (status, current) = call(
+            &app,
+            put(
+                &put_uri,
+                Some(&admin),
+                json!({
+                    "file_id": file,
+                    "revision": { "size": 4100, "mtime": 101 },
+                    "locator": { "version": 1, "href": "Text/chapter-4.xhtml" },
+                    "progression": 1.0,
+                    "completed": true,
+                    "recorded_at": 50
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        assert_eq!(current["completed"], true);
+        assert_eq!(current["updated_at"], 50);
+
+        assert_eq!(
+            call(&app, delete(&uri, Some(&admin))).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&app, delete(&uri, Some(&admin))).await.0,
+            StatusCode::NO_CONTENT,
+            "deletion is idempotent"
+        );
+        assert!(call(&app, get(&uri, Some(&admin))).await.1["state"].is_null());
+    }
+
+    #[tokio::test]
+    async fn reading_state_api_rejects_non_books_invalid_locators_and_large_bodies() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Reading Validation Books".into(),
+                kind: LibraryKind::Books,
+                paths: vec![std::path::PathBuf::from("/reading-validation")],
+                anime: false,
+            })
+            .await
+            .expect("books library");
+        let mut items = Vec::new();
+        for (kind, name, extension) in [
+            (ItemKind::Book, "Text", "epub"),
+            (ItemKind::Audiobook, "Audio", "m4b"),
+        ] {
+            let item = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind,
+                    parent_id: None,
+                    title: name.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let file = state
+                .store
+                .upsert_file(
+                    item,
+                    &format!("/reading-validation/{name}.{extension}"),
+                    100,
+                    10,
+                    &ProbeResult::default(),
+                )
+                .await
+                .expect("file");
+            items.push((item, file));
+        }
+        let (book, book_file) = items[0];
+        let (audio, audio_file) = items[1];
+        let payload = |locator: Value, progression: f64| {
+            json!({
+                "file_id": book_file,
+                "revision": { "size": 100, "mtime": 10 },
+                "locator": locator,
+                "progression": progression,
+                "completed": false
+            })
+        };
+
+        for locator in [
+            json!({ "version": 2, "href": "chapter.xhtml" }),
+            json!({ "version": 1, "href": "../secret" }),
+            json!({ "version": 1, "href": "https://example.com/chapter" }),
+            json!({
+                "version": 1,
+                "href": "chapter.xhtml",
+                "locations": { "progression": 1.1 }
+            }),
+        ] {
+            let (status, body) = call(
+                &app,
+                put(
+                    &format!("/api/v1/items/{book}/reading-state"),
+                    Some(&admin),
+                    payload(locator, 0.5),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    &format!("/api/v1/items/{book}/reading-state"),
+                    Some(&admin),
+                    payload(json!({ "version": 1, "href": "chapter.xhtml" }), 1.1),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let (status, body) = call(
+            &app,
+            put(
+                &format!("/api/v1/items/{audio}/reading-state"),
+                Some(&admin),
+                json!({
+                    "file_id": audio_file,
+                    "revision": { "size": 100, "mtime": 10 },
+                    "locator": { "version": 1, "href": "chapter.xhtml" },
+                    "progression": 0.5,
+                    "completed": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let oversized = "x".repeat(70 * 1024);
+        let (status, _) = call(
+            &app,
+            put(
+                &format!("/api/v1/items/{book}/reading-state"),
+                Some(&admin),
+                payload(json!({ "version": 1, "href": oversized }), 0.5),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    fn write_epub_fixture(path: &std::path::Path) {
+        let file = std::fs::File::create(path).expect("EPUB fixture file");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, body) in [
+            ("mimetype", "application/epub+zip"),
+            (
+                "META-INF/container.xml",
+                r#"<container><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>"#,
+            ),
+            (
+                "OEBPS/book.opf",
+                r#"<package><metadata><title>HTTP Proof</title></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="chapter" href="Text/chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
+            ),
+            (
+                "OEBPS/nav.xhtml",
+                r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="Text/chapter.xhtml">Chapter</a></li></ol></nav></body></html>"#,
+            ),
+            (
+                "OEBPS/Text/chapter.xhtml",
+                r#"<html><body><script>fetch('https://example.com/leak')</script><h1>Chapter</h1></body></html>"#,
+            ),
+        ] {
+            writer
+                .start_file(name, options)
+                .expect("EPUB fixture entry");
+            writer
+                .write_all(body.as_bytes())
+                .expect("EPUB fixture bytes");
+        }
+        writer.finish().expect("finish EPUB fixture");
+    }
+
+    #[tokio::test]
+    async fn publication_api_is_authenticated_scoped_and_script_network_closed() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+
+        let directory = tempfile::tempdir().expect("publication directory");
+        let path = directory.path().join("proof.epub");
+        write_epub_fixture(&path);
+        let metadata = std::fs::metadata(&path).expect("EPUB metadata");
+        let size = i64::try_from(metadata.len()).expect("fixture size");
+        let mtime = metadata
+            .modified()
+            .expect("fixture mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture after epoch")
+            .as_secs() as i64;
+
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Publication API Books".into(),
+                kind: LibraryKind::Books,
+                paths: vec![directory.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("books library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Book,
+                parent_id: None,
+                title: "HTTP Proof".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("book");
+        let file = state
+            .store
+            .upsert_file(
+                item,
+                &path.to_string_lossy(),
+                size,
+                mtime,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("book file");
+        let open_uri = format!("/api/v1/files/{file}/publication");
+        assert_eq!(
+            call(&app, post(&open_uri, None, json!({}))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, opened) = call(&app, post(&open_uri, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{opened}");
+        assert_eq!(opened["publication"]["metadata"]["title"], "HTTP Proof");
+        assert_eq!(opened["publication"]["toc"][0]["title"], "Chapter");
+        assert_eq!(opened["limits"]["entries"], 20_000);
+        assert_eq!(opened["limits"]["concurrent_resource_reads"], 8);
+        assert_eq!(opened["limits"]["resource_chunk_bytes"], 65_536);
+
+        let resource_uri = format!(
+            "{}OEBPS/Text/chapter.xhtml",
+            opened["resource_base"].as_str().expect("resource base")
+        );
+        let response = app
+            .clone()
+            .oneshot(get(&resource_uri, None))
+            .await
+            .expect("publication resource");
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .expect("resource CSP");
+        assert!(csp.contains("script-src 'none'"), "{csp}");
+        assert!(csp.contains("connect-src 'none'"), "{csp}");
+        assert!(csp.contains("img-src 'self' data:"), "{csp}");
+        assert!(response.headers().get("content-length").is_some());
+        assert!(response.headers().get("referrer-policy").is_some());
+        let resource_body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("streamed publication body")
+            .to_bytes();
+        assert!(
+            resource_body
+                .windows(b"<h1>Chapter</h1>".len())
+                .any(|window| window == b"<h1>Chapter</h1>"),
+            "the decompressed resource must reach the HTTP body"
+        );
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "reader", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "reader", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let reader = login["token"].as_str().expect("reader token").to_owned();
+        let session = opened["session_id"].as_str().expect("session id");
+        assert_eq!(
+            call(
+                &app,
+                delete_req(&format!("/api/v1/publication/{session}"), Some(&reader),),
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND,
+            "a different user must not discover or revoke the capability"
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(get(&resource_uri, None))
+                .await
+                .expect("publication resource after foreign close")
+                .status(),
+            StatusCode::OK
+        );
+
+        // A capability is bound to the exact bytes that were parsed. Even a
+        // still-valid session must not blend a new ZIP revision with the old
+        // manifest.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("reopen EPUB")
+            .write_all(b"changed")
+            .expect("replace EPUB revision");
+        assert_eq!(
+            app.clone()
+                .oneshot(get(&resource_uri, None))
+                .await
+                .expect("changed resource")
+                .status(),
+            StatusCode::CONFLICT
+        );
+
+        assert_eq!(
+            call(
+                &app,
+                delete_req(&format!("/api/v1/publication/{session}"), Some(&admin)),
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            app.oneshot(get(&resource_uri, None))
+                .await
+                .expect("closed resource")
+                .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -3218,11 +4730,20 @@ mod tests {
                 row["kind"] == "offline_prepare" && row["label"] == "Preparing offline · Flight"
             })));
 
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (status_code, metrics) = call_text(&app, get("/metrics", None)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert!(metrics.contains("plurx_offline_packages{state=\"queued\"} 1"));
         assert!(metrics.contains("plurx_offline_requests_total{height=\"720\"} 2"));
         assert!(metrics.contains("plurx_cache_protected_entries{reason=\"active_playback\"} 0"));
+        assert!(metrics.contains("# TYPE plurx_store_operation_seconds histogram"));
+        assert!(metrics
+            .contains("plurx_store_operations_total{class=\"authority_read\",outcome=\"ok\"}"));
+        assert!(metrics.contains("plurx_raft_metric_sample_valid{source=\"local\"} 0"));
+        assert!(!metrics.contains("plurx_raft_commit_index"));
         assert!(
             !metrics.contains("Flight"),
             "titles must never become labels"
@@ -3363,6 +4884,10 @@ mod tests {
             .await
             .expect("package lookup")
             .is_none());
+        state
+            .refresh_store_metrics()
+            .await
+            .expect("refresh Store-backed metrics snapshot");
         let (_, metrics) = call_text(&app, get("/metrics", None)).await;
         assert!(metrics.contains("plurx_offline_packages{state=\"ready\"} 0"));
         assert!(metrics.contains("plurx_offline_cancellations_total 1"));
@@ -5060,10 +6585,15 @@ mod tests {
             .await
             .expect("admin lookup")
             .expect("admin user");
+        let credential_generation = plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        );
         state
             .store
             .observe_network_prior(&NetworkPriorObservation {
-                user_id: user.id,
+                credential_generation: credential_generation.clone(),
                 client_class: "apple".to_owned(),
                 network_fingerprint: "192.0.2.0/24".to_owned(),
                 throughput_kbps: Some(20_000),
@@ -5146,6 +6676,8 @@ mod tests {
             "/icons/apple-touch-icon.png",
             "/assets/hls.min.js",
             "/assets/playback-policy.js",
+            "/assets/reader.js",
+            "/assets/reader.css",
             "/healthz",
             "/readyz",
             "/metrics",
@@ -5785,6 +7317,7 @@ mod tests {
                 "/files/0/probed",
                 "/children",
                 "/ancestors",
+                "/reading",
             ],
         );
 
@@ -6319,7 +7852,7 @@ mod tests {
         // it is guessable by construction — ownership is what protects it.
         let (_stream, _guard) = state
             .streams
-            .register("pb-1-s1", 9999, "someone-else", 42, 4.0);
+            .register("pb-1-s1", 9999, "someone-else", 42, 5, 4.0);
         assert_eq!(
             call(&app, get("/api/v1/stream/pb-1-s1/status", Some(&admin)))
                 .await
@@ -7444,7 +8977,7 @@ mod tests {
     /// that missing context as permission to turn a known HDR source into
     /// H.264 SDR. The refusal happens before playback accounting or ffmpeg.
     #[tokio::test]
-    async fn hls_create_refuses_hdr_subtitle_burns_at_the_server_boundary() {
+    async fn hls_create_refuses_hdr_downgrades_but_accepts_an_existing_sdr_plan() {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
@@ -7491,6 +9024,57 @@ mod tests {
         assert_eq!(
             body["error"],
             "That subtitle requires an SDR burn-in. HDR playback was kept unchanged."
+        );
+
+        // TCL 9445X / Bad Boys for Life's route: the display advertises
+        // `hdr=0`, so the source is already tone-mapped before its forced PGS
+        // track is considered. `/decision` and session creation must agree
+        // that drawing into this already-SDR output is not an HDR downgrade.
+        let (status, sdr_preflight) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{file}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0&subtitle=2"
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sdr_preflight}");
+        assert_eq!(sdr_preflight["method"], "transcode", "{sdr_preflight}");
+        assert_eq!(
+            sdr_preflight["delivered_dynamic_range"], "sdr",
+            "{sdr_preflight}"
+        );
+        assert_eq!(
+            sdr_preflight["selection"]["subtitle_burn_in_blocked_by_hdr"], false,
+            "{sdr_preflight}"
+        );
+
+        let (status, accepted) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "tcl-existing-sdr-burn",
+                    "height": 64,
+                    "subtitle_burn": 2,
+                    "subtitle_burn_sdr": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["delivered_dynamic_range"], "sdr", "{accepted}");
+        let session = accepted["session_id"].as_str().expect("session id");
+        assert_eq!(
+            status_of(
+                &app,
+                delete(&format!("/api/v1/hls/{session}"), Some(&admin))
+            )
+            .await,
+            StatusCode::NO_CONTENT
         );
     }
 

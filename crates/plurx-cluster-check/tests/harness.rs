@@ -373,6 +373,9 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
             raft: format!("127.0.0.1:{}", free_port().expect("raft port")),
             api: format!("127.0.0.1:{}", free_port().expect("api port")),
         }],
+        listen_addr: "127.0.0.1".to_owned(),
+        emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
 
     let mut node = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
@@ -695,10 +698,13 @@ fn the_request_and_response_encoding_is_stable() {
     assert_eq!(
         serde_json::to_string(&Response::Metrics {
             leader: Some(1),
+            current_term: 7,
             voters: vec![1, 2, 3],
+            applied_index: None,
+            quorum_acknowledged: true,
         })
         .expect("encode"),
-        r#"{"Metrics":{"leader":1,"voters":[1,2,3]}}"#
+        r#"{"Metrics":{"leader":1,"current_term":7,"voters":[1,2,3],"applied_index":null,"quorum_acknowledged":true}}"#
     );
 
     let decoded: Request =
@@ -775,10 +781,9 @@ const STORE_VERDICTS: [&str; 4] = [
 /// Start one voter with `held` already bound by somebody else and return how
 /// its startup failed.
 ///
-/// Expect a hiqlite bind panic on stderr while this runs. That panic is the
-/// defect's mechanism, not a test failure: the voter's listener task is what
-/// dies, and the whole point of the assertion below is that the parent now
-/// hears about it.
+/// Hiqlite must return the occupied-listener error before this voter can
+/// announce readiness. The parent classifies that exact startup result and can
+/// safely allocate a new complete port set.
 async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
     let root = tempfile::tempdir().expect("port collision test root");
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
@@ -797,6 +802,9 @@ async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
             raft: format!("127.0.0.1:{raft}"),
             api: format!("127.0.0.1:{api}"),
         }],
+        listen_addr: "127.0.0.1".to_owned(),
+        emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     let mut voter = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
     let error = voter
@@ -831,13 +839,11 @@ enum Occupied {
 /// never as a durable-state fault.
 ///
 /// `free_port` can only observe a port free and then release it, so the voter
-/// binds a port another process may already have claimed. hiqlite serves both
-/// listeners from detached tasks that `.unwrap()` the serve future, so that
-/// bind failure used to panic a background task and nothing else: `start_node`
-/// returned `Ok`, the local-database health probe passed, and the voter
-/// announced `Ready` with a dead listener. The collision then reached the gate
-/// as whatever the crippled voter failed at next — for a raft-port collision,
-/// `no such table: cluster_meta`, which reads as an un-migrated store.
+/// binds a port another process may already have claimed. Hiqlite used to bind
+/// both listeners inside detached tasks, letting `start_node` return `Ok` even
+/// when one bind failed. It now pre-binds both exact sockets synchronously, so
+/// either collision is the voter's startup verdict and no durable-state query
+/// can run through a crippled node.
 ///
 /// Both listeners are asserted because they fail differently: a raft collision
 /// used to bootstrap "successfully" and misreport much later, while an API
@@ -972,6 +978,9 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         node_id: 2,
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(3).expect("allocate voters").into_specs(),
+        listen_addr: "127.0.0.1".to_owned(),
+        emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
 
     let config = node_config(&launch).expect("build the voter config");
@@ -1039,6 +1048,9 @@ async fn a_malformed_request_is_answered_and_the_voter_keeps_serving() {
         node_id: 1,
         root: root.path().to_path_buf(),
         nodes: allocate_nodes(1).expect("allocate one voter").into_specs(),
+        listen_addr: "127.0.0.1".to_owned(),
+        emulate_old_watermark_handler: false,
+        emulate_p3a_watermark_handler: false,
     };
     // Driven as a raw child rather than through `NodeProcess`, which can only
     // send a well-formed `Request`.

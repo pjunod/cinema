@@ -1,15 +1,20 @@
 //! App-managed offline package API and scoped HLS capability routes.
 
-use std::path::{Component, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::Stream;
 use plurx_core::domain::{
-    NewOfflinePackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    CachedTranscode, NewOfflinePackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
 };
 use plurx_core::store::keys;
 use plurx_core::tracks::{
@@ -17,6 +22,7 @@ use plurx_core::tracks::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
@@ -24,6 +30,8 @@ use crate::offline::OfflineQuota;
 use crate::state::AppState;
 
 const PACKAGE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const TRANSFER_STREAM_BUFFER: usize = 256 * 1024;
+const TRANSFER_METRIC_FLUSH_BYTES: usize = 1024 * 1024;
 pub(crate) const DEFAULT_GLOBAL_GB: i64 = 25;
 pub(crate) const DEFAULT_USER_GB: i64 = 15;
 pub(crate) const DEFAULT_USER_ROWS: i64 = 50;
@@ -473,6 +481,11 @@ pub async fn create(
                 format!("The server has reserved {used} of {limit} offline bytes."),
             ))
         }
+        OfflineCreateOutcome::NodeIsTombstone => Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "node_removed",
+            "This node has been removed from the cluster and can no longer create offline downloads. Point your client at a surviving node.",
+        ))
     }
 }
 
@@ -653,17 +666,386 @@ async fn authorized_package(state: &AppState, token: &str) -> Result<OfflinePack
         })
 }
 
+struct PackageLocation {
+    dir: PathBuf,
+    cache_root: PathBuf,
+    location_node_id: String,
+    _cache_reader: Option<crate::cachekeep::CacheReadGuard>,
+    cached: CachedTranscode,
+    manifest: Option<std::sync::Arc<plurx_core::transcode::manifest::GenerationManifest>>,
+}
+
+#[derive(Clone)]
+struct OfflineGenerationSnapshot {
+    cached: CachedTranscode,
+    manifest: Option<std::sync::Arc<plurx_core::transcode::manifest::GenerationManifest>>,
+    manifest_decoded_bytes: usize,
+    validated_at: Instant,
+}
+
+const OFFLINE_GENERATION_CACHE_ENTRIES: usize = 32;
+const OFFLINE_GENERATION_CACHE_DECODED_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct OfflineGenerationCache {
+    entries: VecDeque<(String, OfflineGenerationSnapshot)>,
+    decoded_bytes: usize,
+}
+
+impl OfflineGenerationCache {
+    fn get(&mut self, key: &str) -> Option<OfflineGenerationSnapshot> {
+        let position = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == key)?;
+        let entry = self.entries.remove(position)?;
+        if entry.1.validated_at.elapsed() > Duration::from_secs(60) {
+            self.decoded_bytes = self
+                .decoded_bytes
+                .saturating_sub(entry.1.manifest_decoded_bytes);
+            return None;
+        }
+        let snapshot = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(snapshot)
+    }
+
+    fn remember(&mut self, key: String, snapshot: OfflineGenerationSnapshot) {
+        self.remember_with_limits(
+            key,
+            snapshot,
+            OFFLINE_GENERATION_CACHE_ENTRIES,
+            OFFLINE_GENERATION_CACHE_DECODED_BYTES,
+        );
+    }
+
+    fn remember_with_limits(
+        &mut self,
+        key: String,
+        snapshot: OfflineGenerationSnapshot,
+        max_entries: usize,
+        max_decoded_bytes: usize,
+    ) {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|(candidate, _)| candidate == &key)
+        {
+            if let Some(removed) = self.entries.remove(position) {
+                self.decoded_bytes = self
+                    .decoded_bytes
+                    .saturating_sub(removed.1.manifest_decoded_bytes);
+            }
+        }
+        if snapshot.manifest_decoded_bytes > max_decoded_bytes {
+            return;
+        }
+        self.decoded_bytes = self
+            .decoded_bytes
+            .saturating_add(snapshot.manifest_decoded_bytes);
+        self.entries.push_back((key, snapshot));
+        while self.entries.len() > max_entries || self.decoded_bytes > max_decoded_bytes {
+            let Some(evicted) = self.entries.pop_front() else {
+                break;
+            };
+            self.decoded_bytes = self
+                .decoded_bytes
+                .saturating_sub(evicted.1.manifest_decoded_bytes);
+        }
+    }
+}
+
+fn offline_generation_cache() -> &'static StdMutex<OfflineGenerationCache> {
+    static CACHE: OnceLock<StdMutex<OfflineGenerationCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(OfflineGenerationCache::default()))
+}
+
+fn offline_generation_key(
+    cache_root: &Path,
+    location_node_id: &str,
+    package: &OfflinePackage,
+    recipe: &str,
+) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        cache_root.display(),
+        location_node_id,
+        package.id,
+        recipe
+    )
+}
+
+fn cached_offline_generation(key: &str) -> Option<OfflineGenerationSnapshot> {
+    let mut cache = offline_generation_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.get(key)
+}
+
+fn remember_offline_generation(key: String, snapshot: OfflineGenerationSnapshot) {
+    let mut cache = offline_generation_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.remember(key, snapshot);
+}
+
+fn forget_offline_generation(cache_root: &Path, node_id: &str, cached: &CachedTranscode) {
+    let root = cache_root.display().to_string();
+    let mut cache = offline_generation_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.entries.retain(|(key, snapshot)| {
+        !(key.starts_with(&format!("{root}\0{node_id}\0"))
+            && snapshot.cached.recipe_hash == cached.recipe_hash
+            && snapshot.cached.storage_class == cached.storage_class
+            && snapshot.cached.relative_dir == cached.relative_dir
+            && snapshot.cached.manifest_digest == cached.manifest_digest)
+    });
+    cache.decoded_bytes = cache
+        .entries
+        .iter()
+        .map(|(_, snapshot)| snapshot.manifest_decoded_bytes)
+        .fold(0usize, usize::saturating_add);
+}
+
+async fn invalidate_package_location(
+    state: &AppState,
+    package: &OfflinePackage,
+    cache_root: &Path,
+    location_node_id: &str,
+    cached: &CachedTranscode,
+    reason: &'static str,
+) {
+    forget_offline_generation(cache_root, location_node_id, cached);
+    let recipe = package.recipe_hash.as_deref().unwrap_or_default();
+    if cached.storage_class == "shared" {
+        // This request can prove only that this node's admitted mount stopped
+        // serving the named bytes. Retiring the replicated generation here
+        // would incorrectly evict healthy peers and discard their live pins.
+        state.shared_cache.report_io_failure(reason).await;
+        tracing::warn!(
+            package = %package.id,
+            recipe,
+            storage = location_node_id,
+            reason,
+            "shared offline read failed; disabled this member without retiring the generation"
+        );
+        return;
+    }
+    let invalidated = state
+        .store
+        .invalidate_cache_entry(
+            recipe,
+            location_node_id,
+            &cached.storage_class,
+            &cached.relative_dir,
+            cached.manifest_digest.as_deref(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(
+                package = %package.id,
+                recipe,
+                %error,
+                reason,
+                "offline integrity failure could not invalidate its cache location"
+            );
+            false
+        });
+    // Exact location invalidation atomically settles every ready offline
+    // package bound to that generation. A failed CAS means a newer location
+    // won the race and no replacement-backed package was touched.
+    let package_failed = invalidated;
+    tracing::warn!(
+        package = %package.id,
+        recipe,
+        invalidated,
+        package_failed,
+        reason,
+        "offline package failed generation integrity"
+    );
+}
+
+struct OfflineLocationCandidate {
+    cache_root: PathBuf,
+    location_node_id: String,
+    cached: CachedTranscode,
+}
+
+async fn validate_package_candidate(
+    state: &AppState,
+    package: &OfflinePackage,
+    recipe: &str,
+    candidate: OfflineLocationCandidate,
+    cache_reader: Option<crate::cachekeep::CacheReadGuard>,
+) -> Result<PackageLocation, ApiError> {
+    let generation_key = offline_generation_key(
+        &candidate.cache_root,
+        &candidate.location_node_id,
+        package,
+        recipe,
+    );
+    if let Some(snapshot) = cached_offline_generation(&generation_key) {
+        if let Some(dir) = crate::cachekeep::validated_entry_dir(
+            &candidate.cache_root,
+            &snapshot.cached.relative_dir,
+        )
+        .await
+        {
+            return Ok(PackageLocation {
+                dir,
+                cache_root: candidate.cache_root,
+                location_node_id: candidate.location_node_id,
+                _cache_reader: cache_reader,
+                cached: snapshot.cached,
+                manifest: snapshot.manifest,
+            });
+        }
+        forget_offline_generation(
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &snapshot.cached,
+        );
+    }
+    let Some(dir) = crate::cachekeep::validated_entry_dir(
+        &candidate.cache_root,
+        &candidate.cached.relative_dir,
+    )
+    .await
+    else {
+        invalidate_package_location(
+            state,
+            package,
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &candidate.cached,
+            "unsafe_relative_path",
+        )
+        .await;
+        return Err(corrupt_package());
+    };
+    let manifest = if let Some(expected) = candidate.cached.manifest_digest.as_deref() {
+        let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+        if tokio::fs::metadata(&manifest_path).await.is_err() {
+            invalidate_package_location(
+                state,
+                package,
+                &candidate.cache_root,
+                &candidate.location_node_id,
+                &candidate.cached,
+                "manifest_missing",
+            )
+            .await;
+            return Err(corrupt_package());
+        }
+        let loaded = crate::manifest_cache::load(
+            crate::manifest_cache::GenerationKey {
+                cache_root: candidate.cache_root.clone(),
+                node_id: candidate.location_node_id.clone(),
+                recipe_hash: recipe.to_owned(),
+                storage_class: candidate.cached.storage_class.clone(),
+                relative_dir: candidate.cached.relative_dir.clone(),
+                manifest_digest: expected.to_owned(),
+            },
+            &dir,
+        )
+        .await;
+        match loaded {
+            Ok(manifest) => Some(manifest),
+            Err(_) => {
+                invalidate_package_location(
+                    state,
+                    package,
+                    &candidate.cache_root,
+                    &candidate.location_node_id,
+                    &candidate.cached,
+                    "manifest_invalid",
+                )
+                .await;
+                return Err(corrupt_package());
+            }
+        }
+    } else if candidate.cached.storage_class == "shared" {
+        invalidate_package_location(
+            state,
+            package,
+            &candidate.cache_root,
+            &candidate.location_node_id,
+            &candidate.cached,
+            "manifest_unfenced",
+        )
+        .await;
+        return Err(corrupt_package());
+    } else {
+        // A legacy local row has no fenced digest. Ignore even a file named
+        // like a manifest: a timed-out adoption may have left it behind.
+        None
+    };
+    remember_offline_generation(
+        generation_key,
+        OfflineGenerationSnapshot {
+            cached: candidate.cached.clone(),
+            manifest: manifest.clone(),
+            manifest_decoded_bytes: manifest
+                .as_deref()
+                .map_or(0, crate::manifest_cache::decoded_weight),
+            validated_at: Instant::now(),
+        },
+    );
+    Ok(PackageLocation {
+        dir,
+        cache_root: candidate.cache_root,
+        location_node_id: candidate.location_node_id,
+        _cache_reader: cache_reader,
+        cached: candidate.cached,
+        manifest,
+    })
+}
+
+async fn validate_shared_package_candidate(
+    state: &AppState,
+    package: &OfflinePackage,
+    recipe: &str,
+    candidate: OfflineLocationCandidate,
+) -> Result<PackageLocation, ApiError> {
+    let coordinator = Arc::clone(&state.shared_cache);
+    let task_state = state.clone();
+    let task_package = package.clone();
+    let task_recipe = recipe.to_owned();
+    match coordinator
+        .run_mount_io("offline_generation_read_timeout", async move {
+            Ok(validate_package_candidate(
+                &task_state,
+                &task_package,
+                &task_recipe,
+                candidate,
+                None,
+            )
+            .await)
+        })
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared_cache_unavailable",
+            "The shared offline package became unavailable; retry another server node.",
+        )),
+    }
+}
+
+fn corrupt_package() -> ApiError {
+    typed(
+        StatusCode::GONE,
+        "package_corrupt",
+        "The prepared media failed an integrity check and must be prepared again.",
+    )
+}
+
 async fn package_dir(
     state: &AppState,
     package: &OfflinePackage,
-) -> Result<(PathBuf, crate::cachekeep::CacheReadGuard), ApiError> {
-    if package.node_id != state.node_id {
-        return Err(typed(
-            StatusCode::NOT_FOUND,
-            "package_unavailable",
-            "This package belongs to another server node.",
-        ));
-    }
+) -> Result<PackageLocation, ApiError> {
     let recipe = package.recipe_hash.as_deref().ok_or_else(|| {
         typed(
             StatusCode::CONFLICT,
@@ -671,43 +1053,113 @@ async fn package_dir(
             "The offline package has not been published.",
         )
     })?;
-    // Claim the recipe before either the row lookup or the filesystem read,
-    // exactly as cached playback does. Offline leases pin ordinary LRU
-    // eviction, but they cannot prevent a source-file cascade from removing
-    // the row and exposing the directory to the orphan pass.
-    let cache_reader = state
-        .transcode
-        .cache_readers()
-        .begin_read(recipe)
-        .ok_or_else(|| {
-            typed(
-                StatusCode::GONE,
-                "package_evicted",
-                "The prepared package is being removed from the server.",
-            )
-        })?;
-    let cached = state
-        .store
-        .cache_hit(recipe, &state.node_id)
-        .await?
-        .ok_or_else(|| {
-            typed(
-                StatusCode::GONE,
-                "package_evicted",
-                "The prepared package is no longer available on the server.",
-            )
-        })?;
-    let relative = PathBuf::from(cached.relative_dir);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err(ApiError::Internal(
-            "offline cache row contains an unsafe relative directory".to_owned(),
+    let mut shared_failed = false;
+    let shared_root = state.shared_cache.root().await;
+    let shared_storage = state.shared_cache.storage_id().map(str::to_owned);
+    if let (Some(cache_root), Some(storage_id)) = (shared_root, shared_storage) {
+        if let Some(shared) = state.store.shared_cache_hit(recipe, &storage_id).await? {
+            let generation_id = shared.generation_id.clone();
+            let candidate = OfflineLocationCandidate {
+                cache_root,
+                location_node_id: storage_id.clone(),
+                cached: CachedTranscode {
+                    recipe_hash: shared.recipe_hash,
+                    file_id: shared.file_id,
+                    storage_class: "shared".to_owned(),
+                    relative_dir: shared.relative_dir,
+                    bytes: shared.bytes,
+                    complete: true,
+                    manifest_digest: shared.manifest_digest,
+                    scrub_object_index: 0,
+                    last_used_at: shared.last_used_at,
+                },
+            };
+            match validate_shared_package_candidate(state, package, recipe, candidate).await {
+                Ok(location) => {
+                    let _ = state
+                        .store
+                        .touch_shared_cache_entry(
+                            recipe,
+                            &storage_id,
+                            &generation_id,
+                            now_unix().saturating_mul(1_000),
+                        )
+                        .await;
+                    return Ok(location);
+                }
+                Err(_) => shared_failed = true,
+            }
+        }
+    }
+
+    if package.node_id == state.node_id {
+        // Local cache retirement still uses the in-process read guard. Shared
+        // generations use the distributed download pin renewed above instead.
+        let cache_reader = state
+            .transcode
+            .cache_readers()
+            .begin_read(recipe)
+            .ok_or_else(|| {
+                typed(
+                    StatusCode::GONE,
+                    "package_evicted",
+                    "The prepared package is being removed from the server.",
+                )
+            })?;
+        let cached = match state.store.cache_hit(recipe, &state.node_id).await? {
+            Some(cached) => cached,
+            None => {
+                if let Err(error) = state
+                    .store
+                    .invalidate_ready_offline_package(
+                        &package.id,
+                        &state.node_id,
+                        recipe,
+                        "cache_integrity",
+                        "Prepared media is no longer available on this server.",
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        package = %package.id,
+                        recipe,
+                        %error,
+                        "missing offline cache location could not settle its ready package"
+                    );
+                }
+                return Err(typed(
+                    StatusCode::GONE,
+                    "package_evicted",
+                    "The prepared package is no longer available on the server.",
+                ));
+            }
+        };
+        return validate_package_candidate(
+            state,
+            package,
+            recipe,
+            OfflineLocationCandidate {
+                cache_root: state.cache_dir.clone(),
+                location_node_id: state.node_id.clone(),
+                cached,
+            },
+            Some(cache_reader),
+        )
+        .await;
+    }
+
+    if shared_failed {
+        return Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared_cache_unavailable",
+            "The shared offline package became unavailable; retry another server node.",
         ));
     }
-    Ok((state.cache_dir.join(relative), cache_reader))
+    Err(typed(
+        StatusCode::NOT_FOUND,
+        "package_unavailable",
+        "This package belongs to another server node.",
+    ))
 }
 
 fn hls_response(
@@ -728,6 +1180,88 @@ fn hls_response(
     response
 }
 
+fn hls_stream_response(
+    state: &AppState,
+    package: &OfflinePackage,
+    file: tokio::fs::File,
+    bytes: u64,
+    snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
+    content_type: &'static str,
+) -> Response {
+    let stream = MeteredOfflineStream {
+        inner: tokio_util::io::ReaderStream::with_capacity(
+            file.take(bytes),
+            TRANSFER_STREAM_BUFFER,
+        ),
+        offline: std::sync::Arc::clone(&state.offline),
+        package_id: package.id.clone(),
+        pending_bytes: 0,
+        _snapshot_lease: snapshot_lease,
+    };
+    let mut response = Body::from_stream(stream).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&bytes.to_string()).expect("bounded object length is a valid header"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=604800, immutable"),
+    );
+    response
+}
+
+struct MeteredOfflineStream {
+    inner: tokio_util::io::ReaderStream<tokio::io::Take<tokio::fs::File>>,
+    offline: std::sync::Arc<crate::offline::OfflineManager>,
+    package_id: String,
+    pending_bytes: usize,
+    _snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
+}
+
+impl MeteredOfflineStream {
+    fn flush(&mut self) {
+        if self.pending_bytes > 0 {
+            self.offline
+                .record_transfer(&self.package_id, self.pending_bytes);
+            self.pending_bytes = 0;
+        }
+    }
+}
+
+impl Stream for MeteredOfflineStream {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.pending_bytes = self.pending_bytes.saturating_add(bytes.len());
+                if self.pending_bytes >= TRANSFER_METRIC_FLUSH_BYTES {
+                    self.flush();
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.flush();
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.flush();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for MeteredOfflineStream {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 pub async fn master(
     State(state): State<AppState>,
     AxPath(token): AxPath<String>,
@@ -736,7 +1270,7 @@ pub async fn master(
     // The synthetic master is only valid while the immutable child recipe is
     // still present. Fail the root request coherently instead of letting the
     // downloader discover eviction one child request later.
-    let (_dir, _cache_reader) = package_dir(&state, &package).await?;
+    let _location = package_dir(&state, &package).await?;
     let playlist = crate::offline::master_playlist(&package);
     Ok(hls_response(
         &state,
@@ -751,14 +1285,71 @@ pub async fn playlist(
     AxPath(token): AxPath<String>,
 ) -> Result<Response, ApiError> {
     let package = authorized_package(&state, &token).await?;
-    let (dir, _cache_reader) = package_dir(&state, &package).await?;
-    let bytes = tokio::fs::read(dir.join("index.m3u8"))
-        .await
-        .map_err(|_| typed(StatusCode::GONE, "package_evicted", "Playlist is missing."))?;
-    if !String::from_utf8_lossy(&bytes).contains("#EXT-X-ENDLIST") {
-        return Err(ApiError::Internal(
-            "ready offline package does not contain a VOD playlist".to_owned(),
-        ));
+    let location = package_dir(&state, &package).await?;
+    let bytes = match &location.manifest {
+        Some(manifest) if location.cached.storage_class == "shared" => {
+            let manifest = Arc::clone(manifest);
+            let directory = location.dir.clone();
+            match state
+                .shared_cache
+                .run_mount_io("offline_playlist_read_timeout", async move {
+                    manifest
+                        .read_verified_playlist(&directory, "index.m3u8")
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Err(typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "shared_cache_unavailable",
+                        "The shared offline package became unavailable; retry another server node.",
+                    ));
+                }
+            }
+        }
+        Some(manifest) => manifest
+            .read_verified_playlist(&location.dir, "index.m3u8")
+            .await
+            .ok()
+            .flatten(),
+        None => plurx_core::transcode::manifest::read_bounded_playlist(&location.dir, "index.m3u8")
+            .await
+            .ok()
+            .flatten(),
+    };
+    let bytes = match bytes {
+        Some(bytes) => bytes,
+        None => {
+            invalidate_package_location(
+                &state,
+                &package,
+                &location.cache_root,
+                &location.location_node_id,
+                &location.cached,
+                "playlist_missing",
+            )
+            .await;
+            return Err(corrupt_package());
+        }
+    };
+    let valid_vod = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(crate::transcode::validated_vod_part)
+        .is_some();
+    if !valid_vod {
+        invalidate_package_location(
+            &state,
+            &package,
+            &location.cache_root,
+            &location.location_node_id,
+            &location.cached,
+            "playlist_not_vod",
+        )
+        .await;
+        return Err(corrupt_package());
     }
     Ok(hls_response(
         &state,
@@ -783,11 +1374,85 @@ pub async fn segment(
         return Err(ApiError::NotFound("offline segment"));
     }
     let package = authorized_package(&state, &token).await?;
-    let (dir, _cache_reader) = package_dir(&state, &package).await?;
-    let bytes = tokio::fs::read(dir.join(segment))
-        .await
-        .map_err(|_| ApiError::NotFound("offline segment"))?;
-    Ok(hls_response(&state, &package, bytes, "video/mp2t"))
+    let location = package_dir(&state, &package).await?;
+    if location
+        .manifest
+        .as_ref()
+        .is_some_and(|manifest| !manifest.contains_object(&segment))
+    {
+        return Err(ApiError::NotFound("offline segment"));
+    }
+    let opened = match &location.manifest {
+        Some(manifest) => {
+            let verified_object = if location.cached.storage_class == "shared" {
+                let manifest = Arc::clone(manifest);
+                let directory = location.dir.clone();
+                let object_name = segment.clone();
+                match state
+                    .shared_cache
+                    .run_mount_io("offline_segment_read_timeout", async move {
+                        Ok(manifest
+                            .open_verified_object(&directory, &object_name)
+                            .await)
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(typed(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "shared_cache_unavailable",
+                            "The shared offline package became unavailable; retry another server node.",
+                        ));
+                    }
+                }
+            } else {
+                manifest.open_verified_object(&location.dir, &segment).await
+            };
+            match verified_object {
+                Ok(Some(opened)) => Some((opened.file, opened.bytes, Some(opened.lease))),
+                Err(error) if error.is_capacity() => {
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "response_snapshot_capacity",
+                        "authenticated media response capacity is full; retry shortly",
+                    ));
+                }
+                Ok(None) | Err(_) => None,
+            }
+        }
+        None => {
+            plurx_core::transcode::manifest::open_bounded_regular_object(&location.dir, &segment)
+                .await
+                .ok()
+                .flatten()
+                .map(|(file, bytes)| (file, bytes, None))
+        }
+    };
+    let (file, bytes, snapshot_lease) = match opened {
+        Some(opened) => opened,
+        None if location.manifest.is_some() => {
+            invalidate_package_location(
+                &state,
+                &package,
+                &location.cache_root,
+                &location.location_node_id,
+                &location.cached,
+                "segment_missing",
+            )
+            .await;
+            return Err(corrupt_package());
+        }
+        None => return Err(ApiError::NotFound("offline segment")),
+    };
+    Ok(hls_stream_response(
+        &state,
+        &package,
+        file,
+        bytes,
+        snapshot_lease,
+        "video/mp2t",
+    ))
 }
 
 pub async fn subtitle(
@@ -820,62 +1485,69 @@ pub async fn subtitle(
         package.source_size,
         package.source_mtime,
     );
-    let bytes = match tokio::fs::read(&sidecar).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Subtitle cache retention is independent from the offline pin.
-            // Recreate a pruned sidecar only when the file row still names the
-            // exact bytes snapshotted by this package.
-            let file = state
-                .store
-                .get_file(package.file_id)
-                .await?
-                .ok_or_else(|| {
-                    typed(
+    const MAX_OFFLINE_VTT_BYTES: u64 = 8 * 1024 * 1024;
+    let bytes =
+        match plurx_core::fs_secure::read_bounded_regular(&sidecar, MAX_OFFLINE_VTT_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(initial_error) => {
+                let _ = initial_error;
+                // `ensure_vtt` securely revalidates the cache entry while holding
+                // its per-key flight registry. Invalid files are replaced by the
+                // single extraction owner, so concurrent repairs never unlink a
+                // valid generation another request has just published.
+                // Subtitle cache retention is independent from the offline pin.
+                // Recreate a pruned sidecar only when the file row still names the
+                // exact bytes snapshotted by this package.
+                let file = state
+                    .store
+                    .get_file(package.file_id)
+                    .await?
+                    .ok_or_else(|| {
+                        typed(
+                            StatusCode::GONE,
+                            "source_changed",
+                            "The source for this offline subtitle is no longer available.",
+                        )
+                    })?;
+                let source_matches = file.path.to_string_lossy() == package.source_path
+                    && file.size == package.source_size
+                    && file.mtime == package.source_mtime
+                    && file.subtitle_streams.iter().any(|stream| {
+                        stream.index == index && is_native_text_subtitle(&stream.codec)
+                    });
+                if !source_matches {
+                    return Err(typed(
                         StatusCode::GONE,
                         "source_changed",
-                        "The source for this offline subtitle is no longer available.",
-                    )
-                })?;
-            let source_matches = file.path.to_string_lossy() == package.source_path
-                && file.size == package.source_size
-                && file.mtime == package.source_mtime
-                && file
-                    .subtitle_streams
-                    .iter()
-                    .any(|stream| stream.index == index && is_native_text_subtitle(&stream.codec));
-            if !source_matches {
-                return Err(typed(
-                    StatusCode::GONE,
-                    "source_changed",
-                    "The source for this offline subtitle has changed.",
-                ));
+                        "The source for this offline subtitle has changed.",
+                    ));
+                }
+                let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
+                    .await
+                    .map_err(|message| {
+                        tracing::warn!(
+                            package_id = %package.id,
+                            subtitle_index = index,
+                            error = %message,
+                            "offline subtitle recovery failed"
+                        );
+                        typed(
+                            StatusCode::GONE,
+                            "subtitle_unavailable",
+                            "The offline subtitle could not be restored.",
+                        )
+                    })?;
+                plurx_core::fs_secure::read_bounded_regular(&recovered, MAX_OFFLINE_VTT_BYTES)
+                    .await
+                    .map_err(|_| {
+                        typed(
+                            StatusCode::GONE,
+                            "subtitle_unavailable",
+                            "The offline subtitle could not be restored.",
+                        )
+                    })?
             }
-            let recovered = crate::subtitles::ensure_vtt(&state.subs_dir, &file, index)
-                .await
-                .map_err(|message| {
-                    tracing::warn!(
-                        package_id = %package.id,
-                        subtitle_index = index,
-                        error = %message,
-                        "offline subtitle recovery failed"
-                    );
-                    typed(
-                        StatusCode::GONE,
-                        "subtitle_unavailable",
-                        "The offline subtitle could not be restored.",
-                    )
-                })?;
-            tokio::fs::read(recovered).await.map_err(|_| {
-                typed(
-                    StatusCode::GONE,
-                    "subtitle_unavailable",
-                    "The offline subtitle could not be restored.",
-                )
-            })?
-        }
-        Err(error) => return Err(ApiError::Internal(error.to_string())),
-    };
+        };
     Ok(hls_response(
         &state,
         &package,
@@ -890,13 +1562,69 @@ mod tests {
 
     use http_body_util::BodyExt;
     use plurx_core::domain::{
-        AudioStream, ItemKind, LibraryKind, NewItem, NewLibrary, OfflineCreateOutcome, ProbeResult,
-        SubtitleStream, User,
+        AudioStream, ItemKind, LibraryKind, NewItem, NewLibrary, NewPretranscodeJob,
+        OfflineCreateOutcome, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+        ProbeResult, SubtitleStream, User,
     };
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::EffectiveRateControl;
     use serde_json::Value;
     use std::sync::Arc;
+
+    #[test]
+    fn offline_generation_cache_bounds_many_large_decoded_manifests() {
+        let mut cache = OfflineGenerationCache::default();
+        let mut one_manifest_weight = 0usize;
+        for generation in 0..64 {
+            let objects = (0..128)
+                .map(|object| plurx_core::transcode::manifest::GenerationObject {
+                    name: format!(
+                        "generation-{generation:03}-object-{object:05}-{}.ts",
+                        "x".repeat(1024)
+                    ),
+                    bytes: 1,
+                    sha256: "a".repeat(64),
+                })
+                .collect::<Vec<_>>();
+            let manifest = Arc::new(plurx_core::transcode::manifest::GenerationManifest {
+                format_version: 1,
+                generation_id: format!("generation-{generation}"),
+                object_count: objects.len(),
+                objects,
+                manifest_digest: "b".repeat(64),
+            });
+            let weight = crate::manifest_cache::decoded_weight(&manifest);
+            one_manifest_weight = weight;
+            cache.remember_with_limits(
+                format!("generation-{generation}"),
+                OfflineGenerationSnapshot {
+                    cached: CachedTranscode {
+                        recipe_hash: format!("recipe-{generation}"),
+                        file_id: generation,
+                        storage_class: "local".to_owned(),
+                        relative_dir: format!("generation-{generation}"),
+                        bytes: 1,
+                        complete: true,
+                        manifest_digest: Some("b".repeat(64)),
+                        scrub_object_index: 0,
+                        last_used_at: 0,
+                    },
+                    manifest: Some(manifest),
+                    manifest_decoded_bytes: weight,
+                    validated_at: Instant::now(),
+                },
+                64,
+                weight.saturating_mul(4),
+            );
+        }
+
+        assert_eq!(cache.entries.len(), 4);
+        assert!(cache.decoded_bytes <= one_manifest_weight.saturating_mul(4));
+        assert_eq!(
+            cache.entries.front().map(|(key, _)| key.as_str()),
+            Some("generation-60")
+        );
+    }
 
     struct Fixture {
         state: AppState,
@@ -1221,6 +1949,116 @@ mod tests {
             .await
             .expect("ready lookup")
             .expect("ready package")
+    }
+
+    async fn fence_ready_package_manifest(
+        fixture: &Fixture,
+        package: &OfflinePackage,
+    ) -> plurx_core::transcode::manifest::GenerationManifest {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time")
+            .as_millis() as i64;
+        let recipe = package.recipe_hash.as_deref().expect("ready recipe");
+        let relative = format!("ready/{}", package.id);
+        let directory = fixture.state.cache_dir.join(&relative);
+        let manifest = plurx_core::transcode::manifest::publish(
+            &directory,
+            &format!("offline-reuse:{}", package.id),
+            &["index.m3u8".to_owned(), "seg00000.ts".to_owned()],
+        )
+        .await
+        .expect("publish generation manifest");
+        let lease = match fixture
+            .state
+            .store
+            .acquire_lease(
+                &format!("offline-manifest-adoption:{}", package.id),
+                "scheduler",
+                now_ms,
+                now_ms + 120_000,
+            )
+            .await
+            .expect("candidate lease")
+        {
+            plurx_core::cluster::coordination::LeaseClaim::Acquired(lease) => lease,
+            other => panic!("candidate lease held: {other:?}"),
+        };
+        let requirements = serde_json::to_string(&PretranscodeRequirements {
+            version: PretranscodeRequirements::VERSION,
+            decoder: "hevc".to_owned(),
+            acceptable_encoder_families: vec!["software".to_owned()],
+            output_contract: "hls-mpegts-v1".to_owned(),
+            tone_map: false,
+            output_grade: "sdr".to_owned(),
+            scratch_bytes: 1,
+        })
+        .expect("requirements");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        assert!(fixture
+            .state
+            .store
+            .enqueue_pretranscode_job(
+                &NewPretranscodeJob {
+                    id: job_id.clone(),
+                    dedupe_key: format!("offline-manifest-adoption:{}", package.id),
+                    file_id: package.file_id,
+                    source_size: package.source_size,
+                    source_mtime: package.source_mtime,
+                    target_height: package.target_height,
+                    policy_generation: "offline-reuse-v1".to_owned(),
+                    requirements_json: requirements,
+                    reason: "recent".to_owned(),
+                    priority: 100,
+                    not_before_ms: now_ms + 10,
+                    created_at_ms: now_ms + 10,
+                },
+                &lease,
+                &lease
+                    .publication_successor()
+                    .expect("publication successor"),
+            )
+            .await
+            .expect("enqueue manifest adoption"));
+        let claimed = fixture
+            .state
+            .store
+            .claim_pretranscode_job(
+                "test-node",
+                &PretranscodeWorkerCapabilities {
+                    version: PretranscodeRequirements::VERSION,
+                    decoders: vec!["hevc".to_owned()],
+                    encoder_families: vec!["software".to_owned()],
+                    max_target_height: 2_160,
+                    output_contracts: vec!["hls-mpegts-v1".to_owned()],
+                    tone_map: false,
+                    output_grades: vec!["sdr".to_owned()],
+                    scratch_bytes: 2,
+                },
+                &[],
+                now_ms + 20,
+                now_ms + 60_000,
+            )
+            .await
+            .expect("claim manifest adoption")
+            .expect("manifest adoption job");
+        assert_eq!(claimed.id, job_id);
+        assert!(fixture
+            .state
+            .store
+            .complete_pretranscode_job(
+                &claimed,
+                recipe,
+                7,
+                &relative,
+                100,
+                None,
+                &manifest.manifest_digest,
+                now_ms + 30,
+            )
+            .await
+            .expect("adopt fenced manifest"));
+        manifest
     }
 
     async fn lease(fixture: &Fixture, package_id: &str, token: &str) -> (StatusCode, Value) {
@@ -1837,6 +2675,13 @@ mod tests {
         .await
         .expect("segment");
         assert_eq!(media_segment.headers()[header::CONTENT_TYPE], "video/mp2t");
+        let media_segment = media_segment
+            .into_body()
+            .collect()
+            .await
+            .expect("read streamed segment")
+            .to_bytes();
+        assert_eq!(media_segment.as_ref(), b"portable-video");
         let expected_transfer_bytes = crate::offline::master_playlist(&package).len()
             + b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:90,\nseg00000.ts\n#EXT-X-ENDLIST\n"
                 .len()
@@ -1907,8 +2752,159 @@ mod tests {
                 .expect_err("unfinished playlist"),
         )
         .await;
-        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body["error"], "internal server error");
+        assert_eq!(code, StatusCode::GONE);
+        assert_eq!(body["code"], "package_corrupt");
+    }
+
+    #[tokio::test]
+    async fn nonowner_serves_verified_shared_media_and_mount_loss_falls_back_to_owner_local() {
+        let mut fixture = fixture().await;
+        let recipe = "a".repeat(64);
+        let package = ready_package(&fixture, &recipe, "none", None).await;
+        let manifest = fence_ready_package_manifest(&fixture, &package).await;
+        let local_generation = fixture.state.cache_dir.join(format!("ready/{recipe}"));
+        let shared_root = fixture._root.path().join("shared");
+        tokio::fs::create_dir_all(&shared_root)
+            .await
+            .expect("shared root");
+        let shared = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_root.clone(),
+            "media-a".to_owned(),
+            "test-cluster",
+            "reader-node".to_owned(),
+            plurx_core::cluster::membership::MembershipManager::unavailable(),
+            Arc::clone(&fixture.state.store),
+        );
+        shared
+            .admit_local_for_test()
+            .await
+            .expect("verified shared mount");
+        assert!(shared
+            .publish_generation(&recipe, package.file_id, 7, &local_generation, &manifest,)
+            .await
+            .expect("shared publication"));
+        fixture.state.shared_cache = Arc::clone(&shared);
+
+        let token = "b".repeat(64);
+        assert_eq!(
+            lease(&fixture, &package.id, &token).await.0,
+            StatusCode::CREATED
+        );
+
+        // A non-owner has no usable local location. The successful response
+        // therefore came directly from the verified shared generation.
+        let parked_local = fixture._root.path().join("parked-local-generation");
+        tokio::fs::rename(&local_generation, &parked_local)
+            .await
+            .expect("hide owner-local generation");
+        fixture.state.node_id = "reader-node".to_owned();
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath((token.clone(), "seg00000.ts".to_owned())),
+        )
+        .await
+        .expect("non-owner shared segment");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("shared response body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"portable-video");
+
+        // Simulate loss of the admitted mount. The exact shared location is
+        // retired and classification is revoked, but the owning node can
+        // still serve its independently validated local generation.
+        tokio::fs::rename(&parked_local, &local_generation)
+            .await
+            .expect("restore owner-local generation");
+        fixture.state.node_id = "test-node".to_owned();
+        tokio::fs::rename(&shared_root, fixture._root.path().join("detached-shared"))
+            .await
+            .expect("detach shared mount");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath((token, "seg00000.ts".to_owned())),
+        )
+        .await
+        .expect("owner-local fallback");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("local fallback body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"portable-video");
+        assert!(!shared.is_verified());
+        assert!(shared.root().await.is_none());
+        assert!(fixture
+            .state
+            .store
+            .shared_cache_hit(&recipe, shared.storage_id().expect("shared storage id"))
+            .await
+            .expect("shared pointer after member mount loss")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn offline_reuse_rejects_corrupt_fenced_bytes_and_settles_the_ready_package() {
+        let fixture = fixture().await;
+        let package = ready_package(&fixture, "fenced-corrupt", "none", None).await;
+        fence_ready_package_manifest(&fixture, &package).await;
+        let token = "f".repeat(64);
+        assert_eq!(
+            lease(&fixture, &package.id, &token).await.0,
+            StatusCode::CREATED
+        );
+        tokio::fs::write(
+            fixture
+                .state
+                .cache_dir
+                .join(format!("ready/{}/seg00000.ts", package.id)),
+            b"corrupt portable video",
+        )
+        .await
+        .expect("corrupt fenced segment");
+
+        let (status, body) = error_response(
+            segment(
+                State(fixture.state.clone()),
+                AxPath((token.clone(), "seg00000.ts".to_owned())),
+            )
+            .await
+            .expect_err("corrupt fenced segment"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["code"], "package_corrupt");
+        assert!(fixture
+            .state
+            .store
+            .cache_hit(&package.id, "test-node")
+            .await
+            .expect("invalidated cache lookup")
+            .is_none());
+        let failed = fixture
+            .state
+            .store
+            .offline_package_for_user(&package.id, fixture.user.id)
+            .await
+            .expect("failed package lookup")
+            .expect("failed package");
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.phase, "integrity");
+        assert_eq!(failed.error_code.as_deref(), Some("cache_integrity"));
+        assert!(fixture
+            .state
+            .store
+            .offline_package_for_lease(
+                &token_hash(&token).expect("token hash"),
+                now_unix(),
+                i64::MAX,
+            )
+            .await
+            .expect("failed lease lookup")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1985,7 +2981,7 @@ mod tests {
             )
             .await
             .0,
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::GONE
         );
     }
 

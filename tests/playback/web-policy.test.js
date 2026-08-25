@@ -83,6 +83,72 @@ function test(name, run) {
   }
 }
 
+test("playback info exposes and remembers the shared three-mode contract", () => {
+  for (const mode of ["mini", "standard", "debug"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`data-stats-mode=["']${mode}["']`),
+      `${mode} must remain selectable in the shipped player`,
+    );
+  }
+  assert.match(SHIPPED_UI, /localStorage\.setItem\("plurx_stats_mode",mode\)/);
+  assert.match(SHIPPED_UI, /STATS_MODE==="debug"\?debugHtml:standardHtml/);
+  for (const tone of ["good", "warn", "bad", "muted"]) {
+    assert.match(
+      SHIPPED_UI,
+      new RegExp(`\\.statsov \\.stat-${tone}`),
+      `${tone} playback diagnostics must have a visible text treatment`,
+    );
+  }
+  assert.match(SHIPPED_UI, /function statsRunwayTone\(seconds,suspended\)/);
+  assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
+});
+
+test("estimated skip markers are hedged without rebuilding each tick", () => {
+  let writes = 0;
+  const skip = {
+    dataset: {},
+    value: "",
+    get innerHTML() {
+      return this.value;
+    },
+    set innerHTML(value) {
+      writes += 1;
+      this.value = value;
+    },
+  };
+  const renderSkip = new Function(
+    "document",
+    "esc",
+    `${shippedSource("renderSkip")}
+return renderSkip;`,
+  )(
+    { getElementById: (id) => (id === "pskip" ? skip : null) },
+    (value) => value,
+  );
+  const exact = {
+    kind: "credits",
+    start_ms: 6_000,
+    chapter: true,
+  };
+  renderSkip(exact);
+  assert.equal(
+    skip.innerHTML,
+    '<button onclick="skipCurrent()">Skip Credits ›</button>',
+  );
+  renderSkip(exact);
+  assert.equal(writes, 1, "the exact marker should not rebuild on timeupdate");
+
+  const estimated = { ...exact, chapter: false };
+  renderSkip(estimated);
+  assert.equal(
+    skip.innerHTML,
+    '<button onclick="skipCurrent()">Skip Credits · Estimated ›</button>',
+  );
+  renderSkip(estimated);
+  assert.equal(writes, 2, "the estimated marker should not rebuild on timeupdate");
+});
+
 test("every server verdict reaches exactly one initial web transport", () => {
   const rows = [
     [{ method: "direct_play" }, "direct"],
@@ -1484,7 +1550,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "newRequestId",
     "logout",
     [
-      'const API="/api/v1"; let TOKEN="token";',
+      'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
       'const PLAYBACK_ID="playback-1"; let STREAM_FAILURE=null;',
       shippedSource("api"),
       shippedSource("openSession"),
@@ -1631,6 +1697,36 @@ function detailHarness({ decisions = {} } = {}) {
   return { ...shipped, requested };
 }
 
+function bookMetadataHarness() {
+  const build = new Function(
+    "grid",
+    [
+      shippedSource("esc"),
+      shippedSource("bookByline"),
+      shippedSource("bookEditionSection"),
+      "return {bookByline, bookEditionSection};",
+    ].join("\n"),
+  );
+  return build((items) => `<div data-editions="${items.length}"></div>`);
+}
+
+test("book bylines escape provider text and edition rows use only server relations", () => {
+  const shipped = bookMetadataHarness();
+  const byline = shipped.bookByline({
+    kind: "book",
+    author: 'A. Reader <script src="https://example.com/x.js"></script>',
+  });
+  assert.match(byline, /^<div class="muted"[^>]*>By A\. Reader /);
+  assert.doesNotMatch(byline, /<script/);
+  assert.match(byline, /&lt;script/);
+  assert.equal(shipped.bookByline({ kind: "movie", author: "Wrong" }), "");
+  assert.equal(shipped.bookEditionSection({ editions: [] }), "");
+  assert.match(
+    shipped.bookEditionSection({ editions: [{ id: 2, kind: "audiobook" }] }),
+    /Other editions[\s\S]+data-editions="1"/,
+  );
+});
+
 const MOVIE_FILE = {
   id: 42,
   filename: "Arrival.2016.mkv",
@@ -1691,7 +1787,9 @@ test("the detail screen names every subtitle track, its format and its markers",
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {
   const html = detailHarness().specBlock(MOVIE_FILE);
-  const disclosure = html.match(/<details class="trkfold">([\s\S]+?)<\/details>/)?.[1];
+  const disclosure = html.match(
+    /<dt>Subtitles<\/dt><dd><details class="trkfold">([\s\S]+?)<\/details>/,
+  )?.[1];
   assert.ok(disclosure, "multiple subtitle tracks use a native disclosure");
   assert.doesNotMatch(html, /<details class="trkfold" open>/);
   assert.match(
@@ -1714,8 +1812,34 @@ test("one subtitle track needs no expand control", () => {
       },
     },
   });
-  assert.equal(html.includes('class="trkfold"'), false);
-  assert.match(html, /English · SRT · forced · Heptapod/);
+  const subtitleRow = html.match(/<dt>Subtitles<\/dt><dd>([\s\S]+?)<\/dd>/)?.[1];
+  assert.ok(subtitleRow);
+  assert.equal(subtitleRow.includes('class="trkfold"'), false);
+  assert.match(subtitleRow, /English · SRT · forced · Heptapod/);
+});
+
+test("the detail screen keeps only the selected audio track visible until expanded", () => {
+  const html = detailHarness().specBlock(MOVIE_FILE);
+  const disclosure = html.match(
+    /<dt>Audio<\/dt><dd><details class="trkfold">([\s\S]+?)<\/details>/,
+  )?.[1];
+  assert.ok(disclosure, "multiple audio tracks use a native disclosure");
+  assert.match(
+    disclosure,
+    /^<summary><span class="trk on">English · TRUEHD · 7\.1 · <span class="tdef">plays by default<\/span><\/span><span class="trkmore">1 more<\/span><\/summary>/,
+  );
+  assert.match(disclosure, /French · AC3 · 5\.1/);
+});
+
+test("one audio track needs no expand control", () => {
+  const html = detailHarness().specBlock({
+    ...MOVIE_FILE,
+    audio_streams: [MOVIE_FILE.audio_streams[0]],
+  });
+  const audioRow = html.match(/<dt>Audio<\/dt><dd>([\s\S]+?)<\/dd>/)?.[1];
+  assert.ok(audioRow);
+  assert.equal(audioRow.includes('class="trkfold"'), false);
+  assert.match(audioRow, /English · TRUEHD · 7\.1/);
 });
 
 test("a file with no subtitle tracks says so instead of showing an empty row", () => {
@@ -2366,6 +2490,48 @@ test("a session that lands on a different range repaints the badge", () => {
     delivered_dynamic_range: "sdr",
   }, 0);
   assert.equal(repaints, settled, "a stale generation never paints the live player");
+});
+
+test("every web transcode reopen preserves the decision's HDR10 request", () => {
+  const build = new Function(
+    "PLAYER",
+    "transcodeHeight",
+    "qualityForce",
+    "sessionHeight",
+    [shippedSource("transcodeOpts"), "return {transcodeOpts};"].join("\n"),
+  );
+  const player = {
+    requestHdr10: true,
+    deliveredRange: "hdr10",
+    autoHeight: 2160,
+    burnedSub: null,
+    aoffset: 0,
+  };
+  const { transcodeOpts } = build(player, () => null, () => "auto", () => null);
+
+  assert.deepEqual(transcodeOpts(12, 3), {
+    height: 2160,
+    start: 12,
+    audio: 3,
+    hdr10: true,
+  });
+
+  // attachSession replaces deliveredRange with what the session actually
+  // produced. That mutable display truth must never erase the immutable
+  // decision request when a seek/audio switch opens the next session.
+  player.deliveredRange = "sdr";
+  assert.equal(transcodeOpts(30, 3).hdr10, true);
+
+  player.requestHdr10 = false;
+  assert.equal("hdr10" in transcodeOpts(30, 3), false);
+});
+
+test("HDR10 Auto leaves the cold-start height to the grade-aware server", () => {
+  assert.match(
+    SHIPPED_UI,
+    /const autoStartHeight=[\s\S]{0,520}decision\.delivered_dynamic_range!==['"]hdr10['"]/,
+    "a persisted 720p SDR rung must not override the server's proved HDR10 ceiling",
+  );
 });
 
 test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {

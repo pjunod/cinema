@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4073f6fc"]
+points = ["cluster.auth", "core.media", "persistence.upgrades", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained Rust regressions require stale item and inherited-folder artwork repair to restore the reread catalogue generation while the old request loses; reject an outer timeout around TimedClient; pin live atomic publication leases, SQLite v24, and the complete twenty-table v14 import surface; consume authenticated offline segments before exact transfer accounting; and bound resumable manifest yield probes, including zero-length objects, while preserving final fingerprint authority."

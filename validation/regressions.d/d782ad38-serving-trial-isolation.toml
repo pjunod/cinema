@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d782ad38"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained serving-partition controller may discard at most three fresh trials only when quorum authority becomes unstable before the first media child is admitted. Every retry shuts down the serving process, cancels and joins all raw partition proxies, and shuts down the fresh voter cluster; cleanup failures and every two-cycle partition, fencing, child-reaping, convergence, or recovery failure after admission remain fatal, and only a complete stable trial emits the serving evidence marker."

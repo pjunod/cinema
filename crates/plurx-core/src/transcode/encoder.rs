@@ -33,7 +33,7 @@ pub enum Encoder {
 /// there is no place to spell the two halves separately: a caller picks a
 /// grade and gets both. [`crate::transcode::assert_no_pq_at_8_bit`] is the
 /// belt to this braces, for chains assembled as text elsewhere.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
     /// BT.709 8-bit, the only grade that existed before M5.
@@ -175,6 +175,17 @@ impl EffectiveRateControl {
 }
 
 impl Encoder {
+    /// Stable queue/capability family name.
+    pub fn family_name(self) -> &'static str {
+        match self {
+            Encoder::Software => "software",
+            Encoder::Nvenc => "nvenc",
+            Encoder::Qsv => "qsv",
+            Encoder::Vaapi => "vaapi",
+            Encoder::VideoToolbox => "videotoolbox",
+        }
+    }
+
     /// Family defaults. QSV 22 is the highest passing value from the
     /// 2026-08-14 nynuc D5 sweep; the other families remain candidates until
     /// the same corpus runs on hardware that can select them. Explicit
@@ -218,24 +229,13 @@ impl Encoder {
     /// here that nobody has run means a viewer's first press of play is the
     /// experiment.
     ///
-    /// **`hevc_qsv` is deliberately absent.** It is compiled into the
-    /// production build (`jellyfin-ffmpeg7 7.1.4-3`) and it is *unmeasured*:
-    /// the spike box has no `/dev/dri` and no GPU, so nothing about its rate,
-    /// its Main10 output tagging, or — more importantly — whether the Dolby
-    /// Vision RPU survives a full-hardware QSV decode into the filter graph
-    /// could be observed. Wiring it on structural reasoning would be exactly
-    /// the unmeasured claim this codebase refuses.
-    ///
-    /// TODO(measure-on-node): before adding a `hevc_qsv` arm, measure on a
-    /// node with real Intel graphics: (1) `hevc_qsv` Main10 encode rate at
-    /// 1080p and 2160p against the software 11.0 fps / 2-core baseline;
-    /// (2) that the output ffprobes as `profile=Main 10`,
-    /// `color_transfer=smpte2084`, `color_primaries=bt2020`; (3) that a
-    /// Profile 5 source decoded by `hevc_qsv` still delivers DOVI frame side
-    /// data to `tonemapx` — software `hevc` decode does (measured), and the
-    /// QSV decoder does its own bitstream handling, so this is the one that
-    /// is most likely to come back negative and is the reason the whole rung
-    /// currently pins [`Encoder::Software`].
+    /// `hevc_qsv` is admitted from a real-node measurement, not merely because
+    /// the binary lists it: Profile 5 software decode → tonemapx passthrough →
+    /// QSV Main10 ran at 1.52× realtime at 1080p and 1.26× at 2160p on nynuc
+    /// (2026-08-22). The 4K output probed as Main 10, yuv420p10le, PQ,
+    /// BT.2020/BT.2020NC, limited range. Boot still exercises the exact device
+    /// init, upload and encode graph before a session may select it; a driver
+    /// that cannot reproduce the measurement falls back.
     pub fn video_codec_for(self, grade: OutputGrade) -> Option<&'static str> {
         match grade {
             OutputGrade::Sdr => Some(self.video_codec()),
@@ -244,7 +244,8 @@ impl Encoder {
             // veryfast at 11.0 fps, against 20.3 fps for today's SDR chain.
             OutputGrade::Hdr10 => match self {
                 Encoder::Software => Some("libx265"),
-                Encoder::Nvenc | Encoder::Qsv | Encoder::Vaapi | Encoder::VideoToolbox => None,
+                Encoder::Qsv => Some("hevc_qsv"),
+                Encoder::Nvenc | Encoder::Vaapi | Encoder::VideoToolbox => None,
             },
         }
     }
@@ -282,6 +283,18 @@ impl Encoder {
             Encoder::Vaapi => Some("format=nv12,hwupload"),
             Encoder::Qsv => Some("hwupload=extra_hw_frames=64,format=qsv"),
             _ => None,
+        }
+    }
+
+    /// [`Self::filter_suffix`] with the upload pixel format required by the
+    /// output grade. QSV's Main10 encoder accepts P010 hardware surfaces, not
+    /// the planar yuv420p10le frames produced by the software Dolby filter.
+    pub fn filter_suffix_for(self, grade: OutputGrade) -> Option<&'static str> {
+        match (self, grade) {
+            (Encoder::Qsv, OutputGrade::Hdr10) => {
+                Some("format=p010le,hwupload=extra_hw_frames=64,format=qsv")
+            }
+            _ => self.filter_suffix(),
         }
     }
 
@@ -360,8 +373,7 @@ impl Encoder {
     /// not move, because every existing cache entry and every SDR client
     /// depends on it.
     ///
-    /// [`OutputGrade::Hdr10`] is software-only (see
-    /// [`Encoder::video_codec_for`]) and always bitrate-bounded VBR. Quality
+    /// [`OutputGrade::Hdr10`] is always bitrate-bounded VBR. Quality
     /// mode is deliberately not passed through: `-crf 23` means one thing to
     /// x264 and a different one to x265, the node sweep that produced the
     /// per-family defaults was run against H.264 only, and a quality number
@@ -486,11 +498,9 @@ impl Encoder {
     /// tone-mapping headroom. Deriving one would mean inventing numbers.
     ///
     /// A family with no measured HEVC Main10 encoder (see
-    /// [`Encoder::video_codec_for`]) still gets `libx265` from here. That is
-    /// the fail-safe direction: the alternative is emitting an H.264
-    /// argument list while every badge and every HLS attribute says HDR10.
-    /// Selection never reaches it — `Pipeline::DoviPassthrough` pairs only
-    /// with [`Encoder::Software`].
+    /// [`Encoder::video_codec_for`]) still gets `libx265` from here. Selection
+    /// does not admit such a pairing; the fallback merely prevents an H.264
+    /// argument list while every badge and HLS attribute says HDR10.
     fn hdr10_encode_args(
         self,
         bitrate_kbps: u32,
@@ -504,10 +514,15 @@ impl Encoder {
             .into_iter()
             .map(str::to_owned)
             .collect();
-        args.extend([
-            "-x265-params".to_owned(),
-            "hdr10=1:repeat-headers=1".to_owned(),
-        ]);
+        match self {
+            Encoder::Qsv => {
+                args.extend(["-profile:v".to_owned(), "main10".to_owned()]);
+            }
+            _ => args.extend([
+                "-x265-params".to_owned(),
+                "hdr10=1:repeat-headers=1".to_owned(),
+            ]),
+        }
         args.extend([
             "-b:v".to_owned(),
             format!("{bitrate_kbps}k"),
@@ -515,12 +530,22 @@ impl Encoder {
             format!("{}k", bitrate_kbps * 3 / 2),
             "-bufsize".to_owned(),
             format!("{}k", bitrate_kbps * 2),
+            "-color_primaries".to_owned(),
+            "bt2020".to_owned(),
+            "-color_trc".to_owned(),
+            "smpte2084".to_owned(),
+            "-colorspace".to_owned(),
+            "bt2020nc".to_owned(),
+            "-color_range".to_owned(),
+            "tv".to_owned(),
         ]);
         if let Some(flag) = force_idr.then(|| self.forced_idr_flag()).flatten() {
             args.extend([flag.to_owned(), "1".to_owned()]);
         }
-        if let Some(threads) = software_threads {
-            args.extend(["-threads".to_owned(), threads.to_string()]);
+        if self == Encoder::Software {
+            if let Some(threads) = software_threads {
+                args.extend(["-threads".to_owned(), threads.to_string()]);
+            }
         }
         args
     }
@@ -674,6 +699,51 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         // that is what `validate` measures.
         forced_idr: ForcedIdr::default(),
         quality_rc: QualityRc::default(),
+    }
+}
+
+/// Decoder names Plurx may place on a distributed pre-transcode row.
+///
+/// The list is intentionally small and canonical: queue requirements come
+/// from ffprobe's `codec_name`, and advertising every alias or hardware-only
+/// decoder would let an unproved path claim work. Presence here means this
+/// exact ffmpeg build exposes the portable decoder Plurx will invoke.
+pub fn parse_video_decoder_list(output: &str) -> Vec<String> {
+    const CODECS: &[&str] = &["h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video"];
+    let available = output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let flags = fields.next()?;
+            let name = fields.next()?;
+            flags.starts_with('V').then_some(name)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    CODECS
+        .iter()
+        .filter(|codec| available.contains(**codec))
+        .map(|codec| (*codec).to_owned())
+        .collect()
+}
+
+/// Snapshot the portable video decoders exposed by this boot's ffmpeg.
+pub async fn detect_video_decoders(ffmpeg_bin: &str) -> Vec<String> {
+    match tokio::process::Command::new(ffmpeg_bin)
+        .args(["-hide_banner", "-decoders"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            parse_video_decoder_list(&String::from_utf8_lossy(&output.stdout))
+        }
+        Ok(output) => {
+            tracing::warn!(status = %output.status, "ffmpeg decoder inventory failed; speculative worker disabled");
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not inventory ffmpeg decoders; speculative worker disabled");
+            Vec::new()
+        }
     }
 }
 
@@ -1127,6 +1197,15 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 mod tests {
     use super::*;
 
+    #[test]
+    fn decoder_inventory_advertises_only_canonical_portable_video_decoders() {
+        let output = "Decoders:\n VFS..D h264 H.264\n VFS..D hevc HEVC\n V..... vp9 VP9\n A....D aac AAC\n V..... h264_videotoolbox H.264 hardware\n";
+        assert_eq!(
+            parse_video_decoder_list(output),
+            vec!["h264".to_owned(), "hevc".to_owned(), "vp9".to_owned()]
+        );
+    }
+
     // Keep executable fakes in the checkout rather than creating and
     // immediately executing them in /tmp. Under Linux process churn that
     // write-close-exec sequence can transiently fail with ETXTBSY, which says
@@ -1256,27 +1335,20 @@ mod tests {
         }
     }
 
-    /// The HDR10 grade is software-only, and the absence of a hardware arm is
-    /// the point rather than an omission.
-    ///
-    /// `hevc_qsv` is compiled into the production ffmpeg. It is not here
-    /// because nothing about it has been measured: the spike box has no
-    /// `/dev/dri`, so its rate, its Main10 output tagging, and above all
-    /// whether a Dolby Vision RPU survives a full-hardware QSV decode into
-    /// the filter graph are all unknown. `Encoder::video_codec_for` carries
-    /// the list of measurements a node has to produce before an arm is added.
+    /// Only the software and QSV HDR10 encoders have completed the real-node
+    /// output and throughput measurements. Absence remains a refusal, not an
+    /// invitation to infer support from `ffmpeg -encoders`.
     #[test]
-    fn only_the_software_family_has_a_measured_hevc_main10_encoder() {
+    fn software_and_qsv_have_measured_hevc_main10_encoders() {
         assert_eq!(
             Encoder::Software.video_codec_for(OutputGrade::Hdr10),
             Some("libx265")
         );
-        for encoder in [
-            Encoder::Nvenc,
-            Encoder::Qsv,
-            Encoder::Vaapi,
-            Encoder::VideoToolbox,
-        ] {
+        assert_eq!(
+            Encoder::Qsv.video_codec_for(OutputGrade::Hdr10),
+            Some("hevc_qsv")
+        );
+        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
             assert_eq!(
                 encoder.video_codec_for(OutputGrade::Hdr10),
                 None,
@@ -1338,10 +1410,33 @@ mod tests {
                 "12000k",
                 "-bufsize",
                 "16000k",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "tv",
                 "-threads",
                 "4",
             ]
         );
+        let qsv = Encoder::Qsv.encode_args_for(
+            OutputGrade::Hdr10,
+            20_000,
+            EffectiveRateControl::Vbr,
+            true,
+            None,
+        );
+        assert_eq!(qsv.first().map(String::as_str), Some("-c:v"));
+        assert_eq!(qsv.get(1).map(String::as_str), Some("hevc_qsv"));
+        assert!(qsv.windows(2).any(|w| w == ["-profile:v", "main10"]));
+        assert!(qsv.windows(2).any(|w| w == ["-color_trc", "smpte2084"]));
+        assert!(qsv.windows(2).any(|w| w == ["-color_primaries", "bt2020"]));
+        assert!(qsv.windows(2).any(|w| w == ["-colorspace", "bt2020nc"]));
+        assert!(qsv.windows(2).any(|w| w == ["-forced_idr", "1"]));
+        assert!(!qsv.iter().any(|arg| arg == "-x265-params"));
         // Quality mode is an H.264 measurement; asking for it on this grade
         // yields the bounded VBR rather than an x265 CRF nobody swept.
         assert_eq!(
@@ -1420,6 +1515,10 @@ mod tests {
         assert_eq!(
             Encoder::Qsv.filter_suffix(),
             Some("hwupload=extra_hw_frames=64,format=qsv")
+        );
+        assert_eq!(
+            Encoder::Qsv.filter_suffix_for(OutputGrade::Hdr10),
+            Some("format=p010le,hwupload=extra_hw_frames=64,format=qsv")
         );
         for e in [Encoder::Software, Encoder::Nvenc, Encoder::VideoToolbox] {
             assert_eq!(e.filter_suffix(), None);

@@ -1,11 +1,11 @@
 # Clustering transition — from one plurxd node to Phase 4
 
-**Status:** executing — M0 through M3a are complete; Hiqlite now activates,
-grows, and safely removes a follower, while the remaining M3 discovery,
-offline-work resolution, activity aggregation, and singleton fencing are next
+**Status:** executing — M0 through M3 are complete; M4's production fences,
+real-process singleton pause/takeover proof, and distinct serving-process
+partition proof are staged, while the later client failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
-2026-08-15
+2026-08-22
 
 Companion to [PHASE3-SPIKE.md](PHASE3-SPIKE.md), which chose hiqlite and
 proved restart-at-boundary media behavior; [PERF-PLAN.md](PERF-PLAN.md) §7,
@@ -63,8 +63,8 @@ node-local FTS, and bounded root-aware reconciliation; and M1d completes the
 content-addressed source backup, fresh-target import with per-table parity,
 fsynced completion marker, and atomic one-voter activation; after that verified
 import, the daemon selects Hiqlite instead of SQLite. Membership/join,
-lease-fenced publication, replicated session ownership, serving self-fencing,
-and client failover remain open.
+lease-fenced publication and serving self-fencing are implemented. Replicated
+session takeover and client failover remain open.
 
 ## 3. Contracts — safety lives in signatures and transactions
 
@@ -122,6 +122,7 @@ raft_bind = "0.0.0.0:32401"      # raft replication, adjacent to public 32400
 api_bind = "0.0.0.0:32402"       # authenticated node-to-node requests
 advertise_host = ""              # empty keeps a never-joined voter on loopback
 join_url = ""                    # empty derives the public API URL above
+artwork_url = ""                 # empty derives a node-specific artwork URL
 join_token_file = ""             # absent bootstraps/reopens one voter
 trusted_network = ""             # required if transport is not TLS
 ```
@@ -220,6 +221,7 @@ pub struct Lease {
     pub resource: String,
     pub owner_node_id: String,
     pub fence: u64,
+    pub revision: u64,
     pub expires_at_unix_ms: i64,
 }
 
@@ -245,12 +247,27 @@ pub trait ClusterCoordinator: Send + Sync + 'static {
 }
 ```
 
-`job_leases(resource PRIMARY KEY, owner_node, fence, expires_at)` is replicated.
-Every acquisition increments `fence`. Publishing methods such as scan-batch
-upsert, cursor advance, cache completion, and queue completion take `&Lease`.
-The same replicated transaction first validates `resource`, `owner_node`, and
-`fence`; zero matching rows aborts the entire write. A pre-write check is not a
-fence. Clock skew may delay takeover, but it cannot let an old owner commit.
+`job_leases(resource PRIMARY KEY, owner_node, fence, revision, expires_at)` is
+replicated. Every ownership takeover increments `fence`; every takeover,
+renewal, and release advances the dedicated monotone `revision`. Renew and
+release exact-CAS `resource`, `owner_node`, `fence`, `revision`, and the
+previous expiry, so delayed same-fence operations and recurring expiry values
+cannot resurrect old authority. Publishing methods such as scan-batch upsert,
+cursor advance, cache completion, and queue completion take `&Lease`. The same
+replicated transaction first validates `resource`, `owner_node`, and `fence`;
+zero matching rows aborts the entire write. A pre-write check is not a fence.
+Clock skew may delay takeover, but it cannot let an old owner commit.
+
+Membership removal composes with this lease contract. The transaction that
+publishes a pending-removal fence also invalidates every current job token for
+that node and stores a permanent owner tombstone. Invalidation rewrites the
+lease-row owner, so it remains effective even if the revision counter is
+exhausted or a delayed command carries an observation from before expiry.
+Replicated insert/update triggers enforce the tombstone for rolling-upgrade
+clients whose lease SQL predates this check; current acquire and renew calls
+also fail explicitly. Startup and idempotent removal backfill tombstones made
+by earlier binaries. Rolling back a definitively rejected membership change
+removes the owner tombstone but leaves the old tokens stale.
 
 `claim_session` is compare-and-set. Two survivors reading epoch 5 cannot both
 write epoch 6: one commits the higher lease fence and the other receives
@@ -338,11 +355,16 @@ silently renumbers every remaining discontinuity.
 
 ### 3.6 Quorum, discovery, and local bytes have explicit failure behavior
 
-On quorum loss or lease-renewal failure, a node fails `/readyz`, stops serving
-playlists and segments with `503` plus healthy node addresses, and terminates
-session children. It may serve immutable direct bytes only if the request does
-not mutate progress and the client already has the node list; the default is
-self-fence, because stale serving hides failed writes.
+On quorum loss or lease-renewal failure, a node fails `/readyz`, terminates
+session children, and self-fences every media byte path—including native and
+Plex direct play. M4 deliberately returns a topology-free `503` with
+`Retry-After: 1`: it has quorum proof but not yet the M5 discovery contract,
+so exposing cached peer addresses would turn stale topology into an API.
+
+M5 adds healthy node addresses to that response. Only then may an immutable
+direct-byte request remain available when it cannot mutate progress and the
+client already has the current node list; self-fence remains the default,
+because stale serving hides failed writes.
 
 Each node advertises a hostname derived from `node.id`, not `instance.id`.
 mDNS and GDM include the logical server id, node id, protocol version, and
@@ -354,8 +376,22 @@ collision.
 Replicated state never implies local bytes exist. Segment and artwork requests
 proxy to a known holder when local bytes are absent. Artwork repair is per-node
 materialization from replicated facts, not a singleton. If no holder exists,
-the request queues local repair and returns the existing bounded error. This
-keeps provider-fetched art offline-safe while avoiding raft byte storage.
+the current leader arbitrates one provider repair under a term fence; an
+elected successor waits a full local monotonic lease before replacing an older
+term. Provider-origin and catalogue writes compare that replicated
+owner/term/generation and the exact `provider:artwork` singleton lease inside
+the mutation, so a timed-out command submitted by an old owner, job lease, or
+attempt becomes a no-op even if Raft applies it later. Finishing or timing out
+conditionally advances that generation before the scheduler continues. Home
+and Books nodes recreate already-published bytes only from media they can read
+locally and never republish catalogue fields from that path. The request queues
+local repair and returns the existing bounded error. This keeps
+provider-fetched art offline-safe while avoiding raft byte storage or
+cross-host wall-clock arbitration.
+Each voter scans its local artwork cache for orphan generations every six
+hours. It deletes only exact Plurx-managed names older than 24 hours, after a
+consistent per-filename catalogue recheck under the publication reservation;
+user-managed files are outside that cleanup contract.
 
 ## 4. Data migration — quiesced, staged, verified, and reversible
 
@@ -597,25 +633,34 @@ tables in foreign-key order and byte-measured Raft transactions, preserving
 explicit ids, timestamps, nullable text, and integer values. Both chunk
 producers — offset paging and the parent-first item-id path — feed rows through
 one transaction builder that accumulates their serialized size and submits
-before the next row would cross a byte budget: a quarter of the 2,097,118-byte
-payload capacity that the production `wal_size: 2 * 1024 * 1024` leaves after
-the segment header. A quarter rather than the whole because the WAL is not the
-only bound on a submission — a transaction near the cap must also replicate to
-every voter inside the store's three-second timeout, which half the payload
-failed to do on a loaded host. A row count cannot bound this. One transaction
-becomes one Raft entry, `files.probe_json` holds whole ffprobe documents, and
-`hiqlite` panics its WAL writer on an entry past that capacity: 64 rows of a
-real library serialized to 3,137,236 bytes, and a 16-row bound still overflowed
-whenever 16 adjacent rows averaged more than ~131 KB — which is how node `m6`
-exited mid-import and restarted into unreplicated SQLite while reporting healthy.
+before the next row would cross a byte budget derived from
+`HIQLITE_WAL_SIZE_BYTES`: one quarter of the usable per-entry payload, capped
+at the measured replication ceiling. The production segment is 16 MiB, whose
+exact usable payload is 16,777,182 bytes. Routine import transactions therefore
+remain at 512 KiB rather than scaling to 4 MiB with the larger WAL; the extra
+capacity exists for an indivisible large row, not to spend the store's
+three-second timeout. OpenRaft's
+`max_payload_entries = 128` limits entries per append request rather than bytes
+inside one entry, and Hiqlite transports append requests in WebSocket binary
+frames without a smaller configured byte cap. The cap remains because a
+transaction must still replicate to every voter inside the store's three-second
+timeout, and about 1 MiB failed to do so on a loaded host while about 512 KiB
+completed. A row count cannot bound this. One transaction becomes one Raft
+entry, `files.probe_json` holds whole ffprobe documents, and `hiqlite` panics its
+WAL writer on an entry past the usable capacity: 64 rows of a real library
+serialized to 3,137,236 bytes, and a 16-row bound overflowed the former 2 MiB
+segment whenever 16 adjacent rows averaged more than ~131 KB — which is how
+node `m6` exited mid-import and restarted into unreplicated SQLite while
+reporting healthy.
 `IMPORT_CHUNK_ROWS` survives as a secondary bound only: it is the source read
 page and a ceiling on rows per transaction, no longer the safety property. A
 single row too large for any transaction is refused before submission, naming
 the table, an identifier that is never imported payload, the measured size, and
 the limit — an operator-actionable refusal beats a crash into a silently
-unreplicated backend. The WAL tuning itself still lives in `start_local_voter`
-and is mirrored, not shared, by the importer and the store contract; #304
-retires that duplication and raises the WAL. Items compute their parent-first
+unreplicated backend. The WAL tuning, importer budget, and three-voter contract
+now derive from the single exported `HIQLITE_WAL_SIZE_BYTES` production
+constant, so a retune moves the runtime and its regression together. Items
+compute their parent-first
 id order in one recursive source pass, then load each bounded page through
 indexed point reads; numeric id order cannot violate their self-reference, and
 large catalogues do not re-run and re-sort the full tree for every page. A
@@ -720,10 +765,12 @@ reconfiguration state, never supported HA.
 
 **M3a delivered 2026-08-15.** A running voter can issue a bounded, single-use
 join token; a fresh daemon consumes it to join as a real voter without changing
-the replicated `instance.id`. The admin-only membership API exposes
-privacy-safe node id, Raft id, voter/learner role, reachability, and last-seen,
-then embeds the existing §6.6/#233 replication projection as its only lag
-answer. Both remote cluster listeners use automatic TLS, and the listener
+the replicated `instance.id`. The admin-only membership API exposes the actual
+short machine hostname, the advertised host without its listener port
+(`localhost` for loopback), stable node id, current-leader marker, Raft id,
+voter/learner role, reachability, and last-seen, then embeds the existing
+§6.6/#233 replication projection as its only lag answer. Both remote cluster
+listeners use automatic TLS, and the listener
 policy refuses a public cleartext bind. A never-joined installation remains on
 loopback until the operator sets `advertise_host`; a sole voter then rebuilds
 only its one-node Raft metadata from a verified Hiqlite snapshot so the
@@ -770,10 +817,22 @@ the seven-day expiry — the exact stranded state this section calls an
 activation blocker. So the removal re-reads the node's work after applying a
 plan and resolves again, for a bounded number of rounds; a node admitting new
 downloads faster than they can be resolved gets a refusal naming that reason
-rather than an unbounded wait. Anything created inside the last narrow window,
-between the final re-read and the committed change, is failed `node_removed`
-once the node is out of the roster: it was never probed, re-homing it would
-guess at a mount, and the membership change can no longer be refused.
+rather than an unbounded wait.
+
+The durable INSERT in `create_offline_package` now includes an explicit
+`AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $node AND
+removed_at IS NOT NULL)` clause, so a removed-but-running node that keeps
+receiving download requests is refused at the write path before any admission
+or quota step. The response is `OfflineCreateOutcome::NodeIsTombstone`, which
+maps to HTTP 503 Service Unavailable with the stable `node_removed` code — the same code
+packages from a clean removal use. A package never enters the queue or holds a
+reservation against a tombstone. The single-node SQLite path has no
+`cluster_nodes` table and never returns this variant.
+
+Anything created inside the last narrow window, between the final re-read and
+the committed change, is still failed `node_removed` once the node is out of
+the roster: it was never probed, re-homing it would guess at a mount, and the
+membership change can no longer be refused.
 
 The refusal survives, narrowed to what the policy genuinely cannot resolve: a
 download in flight from that node right now. Cutting it off is neither allowed
@@ -807,6 +866,19 @@ to the operator. The activity page aggregates
 direct-play and session rows from all healthy nodes instead of exposing only
 the process that answered the request.
 
+**M3e transport delivered.** Membership retains each node's explicitly
+configured plurxd URL in a cluster-internal table while the public status shape
+continues to omit every address. A narrow read-only activity snapshot route is
+authorized by a short-lived sender/target-bound Ed25519 signature from a
+durable per-node private key plus a current-voter check, never by a forwarded
+household bearer or the cluster-wide API secret. The pre-wired client races at
+most 64 bounded peer reads under one two-second deadline, refuses redirects,
+caps each response at an exact 256 KiB serialized budget, and returns
+answered, unhealthy, unreachable, invalid, or timed-out. The aggregation above
+can therefore degrade visibly without guessing ports or silently dropping
+nodes. SQLite and never-joined one-node paths construct no peer work. Snapshot
+rows deliberately omit HLS session capability ids.
+
 ### 6.8 M4 — transactional fences and materialization ownership
 
 Put scans, metadata refresh, genre backfill, scheduled cache production, and
@@ -819,6 +891,33 @@ queue repair.
 prove its resumed write is rejected inside the transaction. Kill a scan owner
 and observe one successor restart. Partition a serving node and prove it fails
 readiness, kills children, and stops capability-URL serving.
+
+The retained singleton slice uses three real voter processes and the exact
+daemon lease-heartbeat source. A follower begins a blocked provider request,
+both peers are refused without making another physical call, and the follower
+is stopped past the expiry read from the authoritative lease row. One surviving
+peer takes over with the next fence, publishes a distinct response, and the
+resumed production task self-fences. Replaying the pre-takeover token is
+rejected by the atomic successor-generation transaction independently of its
+former wall-clock TTL. Both live peers contest takeover, exactly
+one observes acquisition while the other observes its new fence, and the proof
+allows exactly two provider calls and at most eight post-baseline Raft entries.
+The retained serving slice starts a distinct process with a remote Hiqlite
+client behind raw TCP cut-points, while all three voter processes remain
+directly reachable. Its production quorum watermark drives `/readyz`, the
+mutable-media and direct-play gates, progressive-remux cancellation, and HLS
+child retirement without a Store request on the loss path. Cutting every
+serving connection must leave `/healthz` at 200, move readiness and the
+capability to 503 with `Retry-After`, expose no cluster address, and reap the
+live child. The controller then commits a setting and reads it from every
+voter's local replica through the intact majority, restores the serving links,
+and requires readiness and capability recovery.
+
+That remote serving monitor is intentionally quorum-authority-only. It does
+not poll a voter-management metrics endpoint, claim a local replica, or emit an
+apply-lag value. The short proof can gate media readiness, but cannot authorize
+a bounded local catalogue read; that later optimization requires a fresh local
+term, leader, epoch, and applied-index binding on an embedded replica.
 
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
@@ -895,10 +994,14 @@ offline-work resolution, and singleton fencing.
 ```bash
 make check                    # M0 and every milestone: repository baseline
 make validate-staged          # changed behavior contracts
-make cluster-check            # M1b-M3a state, membership, import, and loss gate
+make cluster-check            # M1b-M4 state, membership, singleton, and loss gate
 make cluster-growth           # 10,000-beat compacted growth + raw control
 cargo run --locked -p plurx-cluster-check -- membership
                               # focused real-process 1 -> 3 -> 2 lifecycle
+cargo run --locked -p plurx-cluster-check -- singleton
+                              # focused SIGSTOP/TTL/takeover/stale-token proof
+cargo run --locked -p plurx-cluster-check -- serving-partition
+                              # focused serving-only cut, child reap, majority-write, recovery proof
 cargo test -p plurx-core store::sqlite::tests:: -- --nocapture
                               # explicit local M2 database-upgrade gate
 ```

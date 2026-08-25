@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-topology-v1.json",
+  "title": "plurx three-versus-four-voter topology evidence",
+  "$comment": "Draft 2020-12 validates the complete shape, topology cardinality, and evidence-scope resource contract. Cross-field hashes, percentile recomputation, timestamps, applied lag, and stable leader/term semantics require validate_topology_artifact in plurx-cluster-check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "workload",
+    "workload_sha256",
+    "topology_order",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "runs"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "enum": ["semantic_ci", "named_runner"] },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "runner_image_digest": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      ]
+    },
+    "workload": { "$ref": "#/$defs/workload" },
+    "workload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "topology_order": {
+      "oneOf": [
+        { "const": [3, 4] },
+        { "const": [4, 3] }
+      ]
+    },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "runs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/run" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "evidence_scope": { "const": "semantic_ci" } },
+        "required": ["evidence_scope"]
+      },
+      "then": {
+        "properties": {
+          "runner_image_digest": { "type": "null" },
+          "runs": {
+            "items": {
+              "properties": {
+                "load_generator_isolation": { "type": "null" },
+                "controller_machine_fingerprint": { "type": "null" },
+                "voter_machine_fingerprints": { "type": "null" },
+                "resources": {
+                  "items": {
+                    "properties": {
+                      "cpu_seconds": { "type": "null" },
+                      "wall_seconds": { "type": "null" },
+                      "max_rss_bytes": { "type": "null" },
+                      "storage_read_bytes": { "type": "null" },
+                      "storage_write_bytes": { "type": "null" },
+                      "network_receive_bytes": { "type": "null" },
+                      "network_transmit_bytes": { "type": "null" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "evidence_scope": { "const": "named_runner" } },
+        "required": ["evidence_scope"]
+      },
+      "then": {
+        "required": ["runner_image_digest"],
+        "properties": {
+          "runner_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "runs": {
+            "items": {
+              "required": [
+                "load_generator_isolation",
+                "controller_machine_fingerprint",
+                "voter_machine_fingerprints"
+              ],
+              "properties": {
+                "resources": {
+                  "items": {
+                    "properties": {
+                      "cpu_seconds": { "type": "number", "minimum": 0 },
+                      "wall_seconds": { "type": "number", "minimum": 0 },
+                      "max_rss_bytes": { "type": "integer", "minimum": 0 },
+                      "storage_read_bytes": { "type": "integer", "minimum": 0 },
+                      "storage_write_bytes": { "type": "integer", "minimum": 0 },
+                      "network_receive_bytes": { "type": "integer", "minimum": 0 },
+                      "network_transmit_bytes": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "operation",
+        "operations",
+        "concurrency",
+        "value_bytes",
+        "value_pattern",
+        "latency_unit",
+        "index_unit"
+      ],
+      "properties": {
+        "id": { "const": "settings-put-v1" },
+        "operation": { "const": "quorum_acknowledged_put_setting" },
+        "operations": { "const": 64 },
+        "concurrency": { "const": 1 },
+        "value_bytes": { "const": 64 },
+        "value_pattern": { "const": "ordinal_hex_then_x_padding" },
+        "latency_unit": { "const": "microseconds" },
+        "index_unit": { "const": "raft_entries" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "voter_count",
+        "quorum",
+        "leader",
+        "leader_term",
+        "request_target",
+        "workload_sha256",
+        "started_at_unix_ms",
+        "finished_at_unix_ms",
+        "errors",
+        "applied_index_before",
+        "applied_index_after",
+        "physical_commit_entries",
+        "acknowledged_write_round_trip_p50_us",
+        "acknowledged_write_round_trip_p95_us",
+        "acknowledged_write_round_trip_p99_us",
+        "raw_acknowledged_write_round_trip_us",
+        "dataset_rows",
+        "dataset_payload_bytes",
+        "expected_corpus_sha256",
+        "corpus_observations",
+        "applied_indexes",
+        "max_apply_lag_entries",
+        "controller_host",
+        "load_generator_host",
+        "resources"
+      ],
+      "properties": {
+        "voter_count": { "enum": [3, 4] },
+        "quorum": { "type": "integer", "minimum": 2, "maximum": 3 },
+        "leader": { "type": "integer", "minimum": 1 },
+        "leader_term": { "type": "integer", "minimum": 1 },
+        "request_target": { "const": "leader" },
+        "workload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "errors": { "const": 0 },
+        "applied_index_before": { "type": "integer", "minimum": 0 },
+        "applied_index_after": { "type": "integer", "minimum": 0 },
+        "physical_commit_entries": { "const": 64 },
+        "acknowledged_write_round_trip_p50_us": { "type": "number", "minimum": 0 },
+        "acknowledged_write_round_trip_p95_us": { "type": "number", "minimum": 0 },
+        "acknowledged_write_round_trip_p99_us": { "type": "number", "minimum": 0 },
+        "raw_acknowledged_write_round_trip_us": {
+          "type": "array",
+          "minItems": 64,
+          "maxItems": 64,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "dataset_rows": { "const": 64 },
+        "dataset_payload_bytes": { "const": 4096 },
+        "expected_corpus_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "corpus_observations": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/corpus_observation" }
+        },
+        "applied_indexes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/applied_index" }
+        },
+        "max_apply_lag_entries": { "type": "integer", "minimum": 0 },
+        "controller_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "load_generator_host": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "load_generator_isolation": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "controller_machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "voter_machine_fingerprints": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/resource" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "voter_count": { "const": 3 } },
+            "required": ["voter_count"]
+          },
+          "then": {
+            "properties": {
+              "quorum": { "const": 2 },
+              "leader": { "maximum": 3 },
+              "applied_indexes": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              },
+              "corpus_observations": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              },
+              "resources": {
+                "minItems": 3,
+                "maxItems": 3,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "voter_count": { "const": 4 } },
+            "required": ["voter_count"]
+          },
+          "then": {
+            "properties": {
+              "quorum": { "const": 3 },
+              "leader": { "maximum": 4 },
+              "applied_indexes": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              },
+              "corpus_observations": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              },
+              "resources": {
+                "minItems": 4,
+                "maxItems": 4,
+                "prefixItems": [
+                  { "properties": { "node_id": { "const": 1 } } },
+                  { "properties": { "node_id": { "const": 2 } } },
+                  { "properties": { "node_id": { "const": 3 } } },
+                  { "properties": { "node_id": { "const": 4 } } }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "applied_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "applied_index"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1 },
+        "applied_index": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "corpus_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "rows", "payload_bytes", "corpus_sha256"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1 },
+        "rows": { "const": 64 },
+        "payload_bytes": { "const": 4096 },
+        "corpus_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "hardware",
+        "storage_device",
+        "network_path",
+        "cpu_seconds",
+        "wall_seconds",
+        "max_rss_bytes",
+        "storage_read_bytes",
+        "storage_write_bytes",
+        "network_receive_bytes",
+        "network_transmit_bytes"
+      ],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1 },
+        "hardware": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "storage_device": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "network_path": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "cpu_seconds": { "$ref": "#/$defs/nullable_number" },
+        "wall_seconds": { "$ref": "#/$defs/nullable_number" },
+        "max_rss_bytes": { "$ref": "#/$defs/nullable_integer" },
+        "storage_read_bytes": { "$ref": "#/$defs/nullable_integer" },
+        "storage_write_bytes": { "$ref": "#/$defs/nullable_integer" },
+        "network_receive_bytes": { "$ref": "#/$defs/nullable_integer" },
+        "network_transmit_bytes": { "$ref": "#/$defs/nullable_integer" }
+      }
+    },
+    "nullable_number": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "nullable_integer": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    }
+  }
+}

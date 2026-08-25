@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cb38fb2b"]
+points = ["cluster.auth", "cluster.membership", "server.api"]
+checks = ["cluster-auth", "rust-gate", "security-boundaries"]
+reason = "The retained cluster lifecycle recreates the old shared-HMAC activity impersonation exploit and requires the per-node verifier to reject it. An independently constructed golden proof requires the established v4 artwork HMAC wire to remain accepted during rolling upgrades, and the paused-time ninth-peer fixture requires the entire bounded fanout to share one deadline. Reverting the correction restores the impersonation flaw, breaks mixed-version artwork requests, or grants queued peers fresh timeout windows."

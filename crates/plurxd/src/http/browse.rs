@@ -11,7 +11,9 @@ use plurx_core::domain::{Item, ItemKind, ItemSort, WatchState};
 use plurx_core::mediafacts::MediaFacts;
 use serde::{Deserialize, Serialize};
 
-use super::dto::{chapters_from_probe_json, in_progress_dto, recent_dto, FileDto, ItemDto};
+use super::dto::{
+    chapters_from_probe_json, in_progress_dto, recent_dto, FileDto, ItemDto, LibraryDto, ReadingDto,
+};
 use super::error::ApiError;
 use super::extract::AuthUser;
 use crate::state::AppState;
@@ -140,7 +142,7 @@ pub async fn list_items(
     Path(library_id): Path<i64>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ItemListResponse>, ApiError> {
-    if state.store.get_library(library_id).await?.is_none() {
+    if state.catalogue.get_library(library_id).await?.is_none() {
         return Err(ApiError::NotFound("library"));
     }
     let sort = q
@@ -155,7 +157,7 @@ pub async fn list_items(
     // thing as omitting it, rather than "the genre whose name is one space".
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());
     let page = state
-        .store
+        .catalogue
         .list_top_items_in_genre(library_id, sort, offset, limit, genre)
         .await?;
     let watch = watch_lookup(&state, user.id, &page.items).await?;
@@ -168,7 +170,7 @@ pub async fn list_items(
         .filter(|i| matches!(i.kind, ItemKind::Movie | ItemKind::Video))
         .map(|i| i.id)
         .collect();
-    let heights = state.store.item_max_heights(&badged).await?;
+    let heights = state.catalogue.item_max_heights(&badged).await?;
     // Codec/HDR/audio/size for the same set of items, and only when asked.
     // One query for the page, never one per item: `badged` is already the
     // page's playable ids, so this is a second constant-cost lookup, not a
@@ -186,7 +188,7 @@ pub async fn list_items(
         .map(|i| i.id)
         .collect();
     let mut facts = if q.facts == Some(1) {
-        state.store.item_media_facts(&file_backed).await?
+        state.catalogue.item_media_facts(&file_backed).await?
     } else {
         HashMap::new()
     };
@@ -197,7 +199,7 @@ pub async fn list_items(
         .filter(|i| i.kind == ItemKind::Folder)
         .map(|i| i.id)
         .collect();
-    let counts = state.store.child_counts(&folder_ids).await?;
+    let counts = state.catalogue.child_counts(&folder_ids).await?;
     // Containers carry no watch row of their own, so a grid filtering by
     // "Watched"/"In progress" has nothing to filter a show on — the state
     // lives on its episodes, which aren't in this response. One batched
@@ -244,6 +246,12 @@ pub struct ItemDetail {
     pub ancestors: Vec<ItemDto>,
     pub children: Vec<ItemDto>,
     pub files: Vec<FileDto>,
+    /// Other text/audio editions sharing a proven work id. Empty when no
+    /// explicit relation exists; title + author never populate this list.
+    pub editions: Vec<ItemDto>,
+    /// Current revision-bound locator for text books. `None` means unread or
+    /// that the saved locator belongs to a replaced file revision.
+    pub reading: Option<ReadingDto>,
 }
 
 /// GET /api/v1/items/:id — item plus its ancestors (for breadcrumbs),
@@ -254,7 +262,7 @@ pub async fn item_detail(
     Path(id): Path<i64>,
 ) -> Result<Json<ItemDetail>, ApiError> {
     let item = state
-        .store
+        .catalogue
         .get_item(id)
         .await?
         .ok_or(ApiError::NotFound("item"))?;
@@ -265,7 +273,7 @@ pub async fn item_detail(
     let mut ancestors = Vec::new();
     let mut cursor = item.parent_id;
     while let Some(parent_id) = cursor {
-        match state.store.get_item(parent_id).await? {
+        match state.catalogue.get_item(parent_id).await? {
             Some(parent) => {
                 cursor = parent.parent_id;
                 ancestors.push(parent);
@@ -278,9 +286,9 @@ pub async fn item_detail(
     }
     ancestors.reverse();
 
-    let children = state.store.get_item_children(id).await?;
+    let children = state.catalogue.get_item_children(id).await?;
     let child_counts = state
-        .store
+        .catalogue
         .child_counts(
             &children
                 .iter()
@@ -301,7 +309,7 @@ pub async fn item_detail(
             .filter(|child| child.kind == ItemKind::Episode)
             .map(|child| child.id)
             .collect();
-        state.store.item_media_facts(&episode_ids).await?
+        state.catalogue.item_media_facts(&episode_ids).await?
     } else {
         HashMap::new()
     };
@@ -313,7 +321,7 @@ pub async fn item_detail(
         | ItemKind::Book
         | ItemKind::Audiobook
         | ItemKind::Video
-        | ItemKind::Photo => state.store.files_for_item(id).await?,
+        | ItemKind::Photo => state.catalogue.files_for_item(id).await?,
         _ => Vec::new(),
     };
     if item.kind == ItemKind::Audiobook {
@@ -339,7 +347,7 @@ pub async fn item_detail(
     for f in files {
         let path = f.path.clone();
         let available = tokio::fs::metadata(&path).await.is_ok();
-        let raw_probe = state.store.get_file_probe_json(f.id).await?;
+        let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.available = available;
@@ -369,6 +377,24 @@ pub async fn item_detail(
         _ => None,
     };
 
+    let reading = if item.kind == ItemKind::Book {
+        state
+            .store
+            .current_reading_state(user.id, id)
+            .await?
+            .map(ReadingDto::try_from)
+            .transpose()?
+    } else {
+        None
+    };
+    let editions = if matches!(item.kind, ItemKind::Book | ItemKind::Audiobook) {
+        match item.book_work_id.as_deref() {
+            Some(work_id) => state.store.related_book_editions(item.id, work_id).await?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     let item_dto = ItemDto::from(item)
         .with_watch(watch.get(&id).copied())
         .with_rollup(rollup);
@@ -377,6 +403,8 @@ pub async fn item_detail(
         ancestors: ancestors.into_iter().map(Into::into).collect(),
         children: annotate_with_counts(children, &watch, &child_counts, &mut child_media),
         files: file_dtos,
+        editions: editions.into_iter().map(Into::into).collect(),
+        reading,
     }))
 }
 
@@ -392,30 +420,142 @@ pub struct Hubs {
     pub recently_added: Vec<ItemDto>,
 }
 
+#[derive(Serialize)]
+pub struct HomePreviews {
+    pub libraries: Vec<HomeLibraryPreview>,
+}
+
+#[derive(Serialize)]
+pub struct HomeLibraryPreview {
+    pub library: LibraryDto,
+    pub items: Vec<ItemDto>,
+    pub total: i64,
+}
+
+/// GET /api/v1/home/previews — every library's recent preview in one bounded
+/// catalog read, followed by page-wide annotations whose call count does not
+/// grow with the number of libraries.
+pub async fn home_previews(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<HomePreviews>, ApiError> {
+    // Home has one card budget. Keeping it server-owned prevents a caller
+    // from widening the replicated read while preserving a parameter surface
+    // the browser does not need.
+    const HOME_PREVIEW_LIMIT: i64 = 24;
+    let (libraries, pages) = tokio::try_join!(
+        state.catalogue.list_libraries(),
+        state.catalogue.home_preview_pages(HOME_PREVIEW_LIMIT),
+    )?;
+
+    let all_items: Vec<&Item> = pages.iter().flat_map(|page| page.items.iter()).collect();
+    let item_ids: Vec<i64> = all_items.iter().map(|item| item.id).collect();
+    let badged: Vec<i64> = all_items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::Movie | ItemKind::Video))
+        .map(|item| item.id)
+        .collect();
+    let folder_ids: Vec<i64> = all_items
+        .iter()
+        .filter(|item| item.kind == ItemKind::Folder)
+        .map(|item| item.id)
+        .collect();
+    let container_ids: Vec<i64> = all_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::Show | ItemKind::Season | ItemKind::Folder
+            )
+        })
+        .map(|item| item.id)
+        .collect();
+    let (watch, heights, counts, rollups) = tokio::try_join!(
+        state.store.watch_map(user.id, &item_ids),
+        state.catalogue.item_max_heights(&badged),
+        state.catalogue.child_counts(&folder_ids),
+        state.store.watch_rollups(user.id, &container_ids),
+    )?;
+    let watch: HashMap<i64, WatchState> = watch.into_iter().collect();
+    let mut pages: HashMap<_, _> = pages
+        .into_iter()
+        .map(|page| (page.library_id, page))
+        .collect();
+
+    let libraries = libraries
+        .into_iter()
+        .map(|library| {
+            let page = pages.remove(&library.id);
+            let total = page.as_ref().map_or(0, |page| page.total);
+            let items = page
+                .map(|page| {
+                    page.items
+                        .into_iter()
+                        .map(|item| {
+                            let id = item.id;
+                            ItemDto::from(item)
+                                .with_watch(watch.get(&id).copied())
+                                .with_resolution(heights.get(&id).copied())
+                                .with_child_count(counts.get(&id).copied())
+                                .with_rollup(rollups.get(&id).copied())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            HomeLibraryPreview {
+                library: library.into(),
+                items,
+                total,
+            }
+        })
+        .collect();
+
+    Ok(Json(HomePreviews { libraries }))
+}
+
 /// GET /api/v1/hubs — the home screen rows.
 pub async fn hubs(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Query(q): Query<HubsQuery>,
 ) -> Result<Json<Hubs>, ApiError> {
-    let in_progress = state.store.continue_watching(user.id, 20).await?;
+    // Recently-added is independent of playback progress, so it can overlap
+    // the two progress-derived rails. Continue-watching and next-up both
+    // interpret the same progress state and retain their established ordering;
+    // the store does not expose a combined snapshot for those two queries.
+    let progress_rows = async {
+        let in_progress = state.store.continue_watching(user.id, 20).await?;
+        let next = state.store.next_up(user.id, 20).await?;
+        Ok::<_, ApiError>((in_progress, next))
+    };
+    let recent_rows = async {
+        state
+            .catalogue
+            .recently_added(q.library_id, 20)
+            .await
+            .map_err(ApiError::from)
+    };
+    let ((in_progress, next), recent) = tokio::try_join!(progress_rows, recent_rows)?;
     let mut continue_watching: Vec<ItemDto> =
         in_progress.into_iter().map(in_progress_dto).collect();
 
     // Next-up episodes (unwatched tracks per show); no per-item watch state.
-    let next = state.store.next_up(user.id, 20).await?;
     let mut next_up: Vec<ItemDto> = next.into_iter().map(|r| recent_dto(r, None)).collect();
 
-    let recent = state.store.recently_added(q.library_id, 20).await?;
     let recent_items: Vec<Item> = recent.iter().map(|r| r.item.clone()).collect();
-    let watch = watch_lookup(&state, user.id, &recent_items).await?;
     // Folder cards say "12 items" here too, not just on the library grid.
     let folder_ids: Vec<i64> = recent_items
         .iter()
         .filter(|i| i.kind == ItemKind::Folder)
         .map(|i| i.id)
         .collect();
-    let counts = state.store.child_counts(&folder_ids).await?;
+    let (watch, counts) = tokio::try_join!(watch_lookup(&state, user.id, &recent_items), async {
+        state
+            .catalogue
+            .child_counts(&folder_ids)
+            .await
+            .map_err(ApiError::from)
+    },)?;
     let mut recently_added: Vec<ItemDto> = recent
         .into_iter()
         .map(|r| {
@@ -436,7 +576,7 @@ pub async fn hubs(
         .map(|d| d.id)
         .collect();
     if !badged.is_empty() {
-        let heights = state.store.item_max_heights(&badged).await?;
+        let heights = state.catalogue.item_max_heights(&badged).await?;
         for d in continue_watching
             .iter_mut()
             .chain(next_up.iter_mut())

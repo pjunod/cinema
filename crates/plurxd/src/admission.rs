@@ -470,6 +470,11 @@ impl Admissions {
             .copied()
     }
 
+    /// Latest smoothed throughput for one exact workload/encoder class.
+    pub fn recent_speed(&self, class: &str) -> Option<f64> {
+        self.measured(class)
+    }
+
     /// Decide what a live start that wanted hardware actually gets.
     pub fn admit(&self, max: usize, work: Workload<'_>) -> Admission {
         if let Some(slot) = self.try_acquire(max, Priority::Live) {

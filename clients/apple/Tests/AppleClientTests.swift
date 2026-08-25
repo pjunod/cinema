@@ -1,10 +1,37 @@
 import AVFoundation
 import Darwin
 import Foundation
+#if os(iOS)
+import PDFKit
+#endif
 import SwiftUI
 import UIKit
 import XCTest
 @testable import plurx
+
+#if os(iOS)
+private final class PDFReaderURLProtocol: URLProtocol {
+    static var body = Data()
+    static var statusCode = 200
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: Self.statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/pdf"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+#endif
 
 private struct LayoutWidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -119,6 +146,250 @@ private struct DetailNavigationTestHost<Content: View>: View {
 #endif
 
 final class AppleClientTests: XCTestCase {
+    func testClusterMediaFailoverUsesEachValidatedNodeWithoutMovingAccountOrigin() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            [
+                "http://primary.local:32400",
+                "http://node-b.local:32400/",
+                "ftp://bad.local:32400",
+                "http://user:pass@bad.local:32400",
+                "http://node-b.local:32400",
+                "https://node-c.local:443",
+            ],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/api/v1/hls/cap/index.m3u8"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/api/v1/files/7/content", authenticated: true)?.query,
+            "token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(session.origin, "http://primary.local:32400")
+    }
+
+    /// A candidate becomes a request authority the moment it is used, and a
+    /// direct-play failover carries the account token in its query string.
+    /// These rules must match the Android client's `Session.canonicalOrigin`
+    /// case for case; there is no shared implementation to lean on.
+    func testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate() {
+        XCTAssertEqual(Session.canonicalOrigin("HTTP://H.Local:32400"), "http://h.local:32400")
+        XCTAssertEqual(Session.canonicalOrigin("http://h.local:80"), "http://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("https://h.local:443/"), "https://h.local")
+        XCTAssertEqual(Session.canonicalOrigin("http://[::1]:32400"), "http://[::1]:32400")
+
+        for refused in [
+            "ftp://h.local:32400",
+            "http://user:pass@h.local:32400",
+            "http://h.local:32400/api",
+            "http://h.local:32400/?a=b",
+            "http://h.local:32400#f",
+            "//h.local:32400",
+            "",
+        ] {
+            XCTAssertNil(Session.canonicalOrigin(refused), "must refuse \(refused)")
+        }
+    }
+
+    /// The path is concatenated onto another origin verbatim. An absolute URL
+    /// or the scheme-relative `//host/x` form would silently retarget the
+    /// request, so neither may produce a candidate.
+    func testOnlyAServerRelativePathIsRebound() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(["http://node-b.local:32400"], primary: session.origin)
+
+        XCTAssertNil(session.nextMediaFailoverURL("//evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("http://evil.example/x", authenticated: false))
+        XCTAssertNil(session.nextMediaFailoverURL("api/v1/hls/cap/index.m3u8", authenticated: false))
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+    }
+
+    /// An `https` household must not be moved onto an `http` sibling: a
+    /// direct-play failover puts the account token in the query string, and a
+    /// downgraded candidate would put it on the wire in cleartext.
+    func testAnHTTPSSessionRefusesToFailOverToACleartextNode() {
+        let session = Session()
+        session.origin = "https://primary.local"
+        session.token = "bearer"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "https://node-c.local"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: true)?.absoluteString,
+            "https://node-c.local/x?token=bearer"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: true))
+    }
+
+    /// A fresh stream starts at the head of the node list. Without the reset
+    /// one film's failover leaves the index advanced for every film after it
+    /// in the same process, and the next one has no node left to try.
+    func testAFreshStreamStartsAtTheHeadOfTheNodeList() {
+        let session = Session()
+        session.origin = "http://primary.local:32400"
+        session.configureNodeOrigins(
+            ["http://node-b.local:32400", "http://node-c.local:32400"],
+            primary: session.origin
+        )
+
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        session.resetMediaFailover()
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-b.local:32400/x"
+        )
+        XCTAssertEqual(
+            session.nextMediaFailoverURL("/x", authenticated: false)?.absoluteString,
+            "http://node-c.local:32400/x"
+        )
+        XCTAssertNil(session.nextMediaFailoverURL("/x", authenticated: false))
+    }
+
+    /// Only a transport failure can be answered by another node. A terminal
+    /// answer — an ended session's 404, a refused credential — is the same on
+    /// every ingress.
+    @MainActor
+    func testOnlyATransportFailureMovesToAnotherNode() {
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        // An access-log event names `CoreMediaErrorDomain` and carries the
+        // transfer's HTTP status. Asserting the domain the media stack really
+        // reports is what makes this fixture constrain the field: keyed on
+        // `NSURLErrorDomain`, the branch passed here and was dead everywhere
+        // else.
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: 503
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: 404
+        ))
+        // A decoder verdict reaches the same parameter as a negative CoreMedia
+        // code, and must not be read as a node fault worth another ingress.
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: "CoreMediaErrorDomain",
+            eventStatus: -12909
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorUserCancelledAuthentication),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        XCTAssertFalse(PlayerController.isTransportPlaybackFailure(
+            error: nil,
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+        // AVFoundation reports a lost transfer as `-11800` with the real cause
+        // underneath it. The predicate walks `NSUnderlyingErrorKey`, and this
+        // is the shape that reaches it in the field — a bare `NSURLErrorDomain`
+        // error at the top level is the exception, not the rule.
+        XCTAssertTrue(PlayerController.isTransportPlaybackFailure(
+            error: NSError(
+                domain: AVFoundationErrorDomain,
+                code: AVError.unknown.rawValue,
+                userInfo: [
+                    NSUnderlyingErrorKey: NSError(
+                        domain: NSURLErrorDomain,
+                        code: NSURLErrorTimedOut
+                    ),
+                ]
+            ),
+            eventDomain: nil,
+            eventStatus: nil
+        ))
+    }
+
+    /// `handleItemFailure` chooses between two recoveries with
+    /// `!isCompatibilityFailure && isTransportFailure`. That gate is only
+    /// meaningful while the two predicates are disjoint: a failure classified
+    /// as both would take whichever branch the expression happens to order
+    /// first, and the ladder and the node list would each be spent on a
+    /// failure the other one owns. Neither predicate mentions the other, so
+    /// nothing but this fixture keeps them apart — and both have been widened
+    /// since they were written.
+    @MainActor
+    func testNoFailureIsBothAMediaVerdictAndANodeFault() {
+        let probes: [(String, NSError?, String?, Int?, String?)] = [
+            (
+                "a timeout wrapped in an opaque AVError",
+                NSError(
+                    domain: AVFoundationErrorDomain,
+                    code: AVError.unknown.rawValue,
+                    userInfo: [
+                        NSUnderlyingErrorKey: NSError(
+                            domain: NSURLErrorDomain,
+                            code: NSURLErrorTimedOut
+                        ),
+                    ]
+                ),
+                NSURLErrorDomain, NSURLErrorTimedOut, "segment request timed out"
+            ),
+            ("a 5xx on a segment", nil, "CoreMediaErrorDomain", 503, nil),
+            ("an ended session's 404", nil, "CoreMediaErrorDomain", 404, nil),
+            (
+                "a Dolby Vision Profile 5 rejection",
+                NSError(domain: "CoreMediaErrorDomain", code: -12927),
+                nil, nil, nil
+            ),
+            (
+                "a decoder malfunction",
+                NSError(domain: "CoreMediaErrorDomain", code: -12911),
+                nil, nil, nil
+            ),
+            (
+                "an unreachable host",
+                NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost),
+                nil, nil, nil
+            ),
+            (
+                "a refused credential",
+                NSError(domain: "CoreMediaErrorDomain", code: -12660),
+                "CoreMediaErrorDomain", -12660, "HTTP 403"
+            ),
+        ]
+
+        for (label, error, eventDomain, eventStatus, eventComment) in probes {
+            let isMediaVerdict = PlayerController.isCompatibilityPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus,
+                eventComment: eventComment
+            )
+            let isNodeFault = PlayerController.isTransportPlaybackFailure(
+                error: error,
+                eventDomain: eventDomain,
+                eventStatus: eventStatus
+            )
+            XCTAssertFalse(
+                isMediaVerdict && isNodeFault,
+                "\(label) was classified as both a media verdict and a node fault"
+            )
+        }
+    }
+
     func testSameDeliveryRecoveryKeepsOfflinePlaybackOnTheLocalAsset() {
         XCTAssertEqual(
             PlayerController.recoveryTransport(hasOfflineAsset: true),
@@ -337,12 +608,403 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(fixture.server.name, "Contract server")
         XCTAssertEqual(fixture.itemDetail.item.title, "The Contract")
         XCTAssertTrue(fixture.audiobookDetail.item.isAudiobook)
+        XCTAssertEqual(fixture.audiobookDetail.item.author, "A. Contract")
+        XCTAssertEqual(fixture.audiobookDetail.item.bookWorkId, "curator:work:contract")
+        XCTAssertEqual(fixture.audiobookDetail.editions?.first?.bookEditionId, "curator:edition:ebook")
         XCTAssertEqual(fixture.audiobookDetail.files?.map(\.partOffsetMs), [0, 60_000, 180_000])
         XCTAssertEqual(fixture.audiobookDetail.files?.first?.chapters?.first?.title, "Opening")
+        XCTAssertNil(fixture.itemDetail.reading)
         XCTAssertEqual(fixture.page.items?.first?.rollup?.leaves, 20)
         XCTAssertEqual(fixture.decision.delivery?.mode, "remux")
         XCTAssertEqual(fixture.decision.deliveredDynamicRange, "dolby_vision")
     }
+
+    func testReadingStateDecodesItsRevisionAndRendererNeutralLocator() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let detail = try decoder.decode(ItemDetail.self, from: Data(#"""
+        {
+          "item": {"id": 9, "kind": "book", "title": "Contract Book"},
+          "reading": {
+            "file_id": 90,
+            "revision": {"size": 4096, "mtime": 100},
+            "locator": {
+              "version": 1,
+              "href": "Text/chapter-3.xhtml",
+              "locations": {"progression": 0.6, "totalProgression": 0.55}
+            },
+            "progression": 0.55,
+            "completed": false,
+            "updated_at": 200
+          }
+        }
+        """#.utf8))
+
+        XCTAssertEqual(detail.reading?.fileId, 90)
+        XCTAssertEqual(detail.reading?.revision.size, 4096)
+        XCTAssertEqual(detail.reading?.locator.href, "Text/chapter-3.xhtml")
+        XCTAssertEqual(detail.reading?.locator.locations?.totalProgression, 0.55)
+    }
+
+    func testBookReaderPolicyAcceptsOnlyAvailablePhoneAndTabletEpubs() {
+        let epub = MediaFile(id: 90, filename: "Contract.EPUB", available: true)
+        let pdf = MediaFile(id: 91, filename: "Contract.pdf", available: true)
+        let missing = MediaFile(id: 92, filename: "Missing.epub", available: false)
+        let serverHandoff = ReaderCapability(
+            format: "pdf",
+            web: .init(online: .openIn, offline: .unavailable),
+            apple: .init(online: .openIn, offline: .unavailable),
+            android: .init(online: .openIn, offline: .unavailable),
+            television: .init(online: .unavailable, offline: .unavailable)
+        )
+        let disguised = MediaFile(
+            id: 93,
+            filename: "LooksLike.epub",
+            available: true,
+            reader: serverHandoff
+        )
+        let pdfRead = ReaderCapability(
+            format: "pdf",
+            web: .init(online: .openIn, offline: .unavailable),
+            apple: .init(online: .read, offline: .unavailable),
+            android: .init(online: .openIn, offline: .unavailable),
+            television: .init(online: .unavailable, offline: .unavailable)
+        )
+        let nativePDF = MediaFile(
+            id: 94,
+            filename: "Readable.pdf",
+            available: true,
+            reader: pdfRead,
+            readerRevision: ReadingRevision(size: 4_096, mtime: 100)
+        )
+        let unverifiablePDF = MediaFile(
+            id: 95,
+            filename: "No-revision.pdf",
+            available: true,
+            reader: pdfRead
+        )
+
+        XCTAssertTrue(BookReaderPolicy.canRead(epub, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canDownload(epub, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canRead(epub, onTelevision: true))
+        XCTAssertFalse(BookReaderPolicy.canRead(pdf, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canRead(missing, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canRead(disguised, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canDownload(disguised, onTelevision: false))
+        XCTAssertTrue(BookReaderPolicy.canRead(nativePDF, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canDownload(nativePDF, onTelevision: false))
+        XCTAssertFalse(BookReaderPolicy.canRead(nativePDF, onTelevision: true))
+        XCTAssertFalse(BookReaderPolicy.canRead(unverifiablePDF, onTelevision: false))
+    }
+
+    #if os(iOS)
+    func testPDFPageLocatorIsNormalizedBoundedAndRendererNeutral() throws {
+        let locator = PDFPageLocator.locator(pageIndex: 4, pageCount: 10)
+        XCTAssertEqual(locator.href, "pdf/pages/5")
+        XCTAssertEqual(locator.type, "application/pdf")
+        XCTAssertEqual(locator.locations?.position, 5)
+        XCTAssertEqual(locator.locations?.progression ?? -1, 4.0 / 9.0, accuracy: 0.000_001)
+        XCTAssertEqual(PDFPageLocator.pageIndex(from: locator, pageCount: 10), 4)
+        XCTAssertNil(PDFPageLocator.pageIndex(
+            from: ReadingLocator(version: 1, href: "pdf/pages/0"),
+            pageCount: 10
+        ))
+        XCTAssertNil(PDFPageLocator.pageIndex(
+            from: ReadingLocator(version: 1, href: "https://attacker.invalid/book.pdf"),
+            pageCount: 10
+        ))
+        XCTAssertEqual(PDFPageLocator.progression(pageIndex: 0, pageCount: 1), 0)
+    }
+
+    func testPDFTransportRejectsCrossOriginAndSchemeChangingRedirects() throws {
+        let origin = try XCTUnwrap(URL(string: "https://cinema.example:9443"))
+        XCTAssertTrue(PDFReaderTransport.permitsRedirect(
+            from: origin,
+            to: URL(string: "https://cinema.example:9443/api/v1/files/9/content")!
+        ))
+        XCTAssertFalse(PDFReaderTransport.permitsRedirect(
+            from: origin,
+            to: URL(string: "https://attacker.invalid/book.pdf")!
+        ))
+        XCTAssertFalse(PDFReaderTransport.permitsRedirect(
+            from: origin,
+            to: URL(string: "http://cinema.example:9443/book.pdf")!
+        ))
+        XCTAssertNil(PDFReaderTransport.session(origin: "file:///tmp/book.pdf"))
+    }
+
+    func testPDFLoaderUsesExactTemporaryBytesAndProducesSearchablePages() async throws {
+        let bounds = CGRect(x: 0, y: 0, width: 300, height: 400)
+        let data = UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
+            context.beginPage()
+            NSString(string: "Cinema PDF reader contract").draw(
+                at: CGPoint(x: 24, y: 24),
+                withAttributes: [.font: UIFont.systemFont(ofSize: 18)]
+            )
+        }
+        PDFReaderURLProtocol.body = data
+        PDFReaderURLProtocol.statusCode = 200
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PDFReaderURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let payload = try await PDFReaderLoader.download(
+            request: URLRequest(url: URL(string: "https://cinema.example/api/v1/files/9/content")!),
+            revision: ReadingRevision(size: data.count, mtime: 100),
+            session: session
+        )
+        XCTAssertEqual(payload.document.pageCount, 1)
+        XCTAssertEqual(
+            payload.document.findString("reader contract", withOptions: .caseInsensitive).count,
+            1
+        )
+        let directory = payload.directory
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        payload.remove()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testPDFLoaderRejectsAnEditionSizeMismatch() async throws {
+        PDFReaderURLProtocol.body = Data("not the advertised edition".utf8)
+        PDFReaderURLProtocol.statusCode = 200
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PDFReaderURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        do {
+            _ = try await PDFReaderLoader.download(
+                request: URLRequest(url: URL(string: "https://cinema.example/api/v1/files/9/content")!),
+                revision: ReadingRevision(size: PDFReaderURLProtocol.body.count + 1, mtime: 100),
+                session: session
+            )
+            XCTFail("a truncated edition must not reach PDFKit")
+        } catch PDFReaderError.incompleteDownload {
+            // Expected.
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript() throws {
+        let shell = try XCTUnwrap(NativeReaderHandoff.shellURL(origin: "https://cinema.example:9443"))
+        XCTAssertEqual(shell.absoluteString, "https://cinema.example:9443/?native-reader=1")
+        XCTAssertFalse(shell.absoluteString.contains("bearer"))
+
+        let script = try XCTUnwrap(NativeReaderHandoff.startScript(
+            token: "bearer\"\\line",
+            itemId: 9,
+            fileId: 90
+        ))
+        XCTAssertEqual(script, #"window.startNativeReader("bearer\"\\line","9","90");"#)
+        XCTAssertEqual(
+            NativeReaderHandoff.startScript(token: "bearer", itemId: Int.max, fileId: Int.max),
+            "window.startNativeReader(\"bearer\",\"\(Int.max)\",\"\(Int.max)\");"
+        )
+        XCTAssertNil(NativeReaderHandoff.startScript(token: "", itemId: 9, fileId: 90))
+        XCTAssertNil(NativeReaderHandoff.shellURL(origin: "file:///tmp/cinema"))
+        XCTAssertTrue(NativeReaderHandoff.permitsNavigation(
+            URL(string: "https://cinema.example:9443/api/v1/publication/cap/Text/chapter.xhtml")!,
+            from: shell
+        ))
+        XCTAssertFalse(NativeReaderHandoff.permitsNavigation(
+            URL(string: "https://attacker.invalid/chapter.xhtml")!,
+            from: shell
+        ))
+        XCTAssertFalse(NativeReaderHandoff.permitsNavigation(
+            URL(string: "https://cinema.example:9443/api/v1/items/9")!,
+            from: shell
+        ))
+    }
+
+    func testOfflineBookPathsStayInsideThePublicationAndPrivateScheme() throws {
+        XCTAssertEqual(
+            OfflineBookManager.safePublicationPath("OPS/Text/chapter%201.xhtml#part"),
+            "OPS/Text/chapter 1.xhtml"
+        )
+        XCTAssertEqual(
+            OfflineBookManager.safePublicationPath("OPS/Styles/../Text/chapter.xhtml"),
+            "OPS/Text/chapter.xhtml"
+        )
+        XCTAssertNil(OfflineBookManager.safePublicationPath("../../outside"))
+        XCTAssertNil(OfflineBookManager.safePublicationPath("OPS/C:\\secret"))
+
+        let local = URL(string: "cinema-book://offline/publication/OPS/Text/chapter.xhtml")!
+        XCTAssertEqual(
+            OfflineBookResourceResolver.publicationPath(for: local),
+            "OPS/Text/chapter.xhtml"
+        )
+        XCTAssertNil(OfflineBookResourceResolver.publicationPath(
+            for: URL(string: "https://attacker.invalid/publication/OPS/Text/chapter.xhtml")!
+        ))
+        XCTAssertNil(OfflineBookResourceResolver.publicationPath(
+            for: URL(string: "cinema-book://offline/publication/../../offline-reader.js")!
+        ))
+        XCTAssertTrue(OfflineBookNetworkPolicy.contentRuleList.contains("^https?://"))
+        XCTAssertTrue(OfflineBookNetworkPolicy.contentRuleList.contains("\"type\":\"block\""))
+    }
+
+    func testOfflineBookCatalogIsProfileScopedAndKeepsNewestPendingLocator() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-books-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let catalog = OfflineBookCatalog(directory: directory)
+
+        func book(
+            id: String,
+            server: String,
+            user: Int,
+            item: Int,
+            fileId: Int = 90,
+            revision: ReadingRevision = ReadingRevision(size: 4096, mtime: 100),
+            recordedAt: Int
+        ) -> OfflineBook {
+            OfflineBook(
+                id: id,
+                serverInstanceId: server,
+                userId: user,
+                itemId: item,
+                fileId: fileId,
+                revision: revision,
+                title: "Contract Book",
+                author: "A. Reader",
+                originalFilename: "contract.epub",
+                coverRelativePath: nil,
+                publication: PublicationManifest(
+                    metadata: PublicationMetadata(title: "Contract Book", author: "A. Reader"),
+                    readingOrder: [PublicationLink(
+                        href: "Text/chapter.xhtml", type: "application/xhtml+xml"
+                    )],
+                    resources: [],
+                    toc: []
+                ),
+                limits: PublicationLimits(
+                    entries: 1,
+                    totalUncompressedBytes: 8192,
+                    resourceBytes: 4096,
+                    markupBytes: 4096,
+                    compressionRatio: 100,
+                    concurrentResourceReads: 2,
+                    resourceChunkBytes: 1024
+                ),
+                state: .downloaded,
+                phase: "ready",
+                bytesDownloaded: 8192,
+                bytesTotal: 8192,
+                localPublicationRelativePath: "Library/Application Support/OfflineBooks/\(id)",
+                locator: ReadingLocator(
+                    version: 1,
+                    href: "Text/chapter.xhtml",
+                    locations: ReadingLocations(totalProgression: Double(recordedAt) / 100)
+                ),
+                progression: Double(recordedAt) / 100,
+                completed: false,
+                recordedAt: recordedAt,
+                pendingProgress: true,
+                preferences: OfflineBookPreferences(),
+                errorMessage: nil,
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(recordedAt))
+            )
+        }
+
+        try await catalog.upsert(book(id: "old", server: "server-a", user: 7, item: 11, recordedAt: 40))
+        try await catalog.upsert(book(id: "new", server: "server-a", user: 7, item: 11, recordedAt: 70))
+        try await catalog.upsert(book(
+            id: "other-edition",
+            server: "server-a",
+            user: 7,
+            item: 11,
+            fileId: 91,
+            revision: ReadingRevision(size: 8192, mtime: 200),
+            recordedAt: 60
+        ))
+        try await catalog.upsert(book(id: "other", server: "server-b", user: 7, item: 11, recordedAt: 90))
+
+        var recovering = book(
+            id: "recovered",
+            server: "server-a",
+            user: 7,
+            item: 12,
+            recordedAt: 50
+        )
+        recovering.state = .downloading
+        recovering.localPublicationRelativePath = nil
+        recovering.pendingProgress = false
+        let recoveredRoot = directory.appendingPathComponent("recovered", isDirectory: true)
+        let resourceRoot = recoveredRoot.appendingPathComponent("publication", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: resourceRoot.appendingPathComponent("Text", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data(repeating: 0x45, count: 4096).write(
+            to: recoveredRoot.appendingPathComponent("book.epub")
+        )
+        try JSONEncoder().encode(try XCTUnwrap(recovering.publication)).write(
+            to: recoveredRoot.appendingPathComponent("publication.json")
+        )
+        try Data("<html><body>Recovered</body></html>".utf8).write(
+            to: resourceRoot.appendingPathComponent("Text/chapter.xhtml")
+        )
+        try await catalog.upsert(recovering)
+
+        let current = await catalog.currentProfile(serverInstanceId: "server-a", userId: 7)
+        XCTAssertEqual(
+            Set(current.map(\.id)),
+            Set(["old", "new", "other-edition", "recovered"])
+        )
+        let pending = await catalog.newestPending(serverInstanceId: "server-a", userId: 7)
+        XCTAssertEqual(pending.map(\.id), ["other-edition", "new"])
+        let others = await catalog.otherProfiles(serverInstanceId: "server-a", userId: 7)
+        XCTAssertEqual(others.first?.items, 1)
+
+        let restored = OfflineBookCatalog(directory: directory)
+        let restoredCurrent = await restored.currentProfile(serverInstanceId: "server-a", userId: 7)
+        XCTAssertEqual(
+            Set(restoredCurrent.map(\.id)),
+            Set(["old", "new", "other-edition", "recovered"])
+        )
+        try await restored.reconcileLocalPublications()
+        let reconciled = await restored.book(id: "new")
+        XCTAssertEqual(reconciled?.state, .missing)
+        let recovered = await restored.book(id: "recovered")
+        XCTAssertEqual(recovered?.state, .downloaded)
+        XCTAssertNotNil(recovered?.localPublicationRelativePath)
+        XCTAssertGreaterThan(recovered?.bytesDownloaded ?? 0, 0)
+    }
+
+    func testNativeBookActionLabelsResumeAndExplicitCompletion() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let detail = try decoder.decode(ItemDetail.self, from: Data(#"""
+        {
+          "item":{"id":9,"kind":"book","title":"Contract Book"},
+          "files":[{"id":90,"filename":"contract.epub","available":true}],
+          "reading":{
+            "file_id":90,"revision":{"size":4096,"mtime":100},
+            "locator":{"version":1,"href":"Text/chapter.xhtml"},
+            "progression":0.42,"completed":false,"updated_at":200
+          }
+        }
+        """#.utf8))
+        let file = try XCTUnwrap(detail.files?.first)
+        XCTAssertEqual(DetailView.bookReadingLabel(detail, file: file), "Resume reading · 42%")
+
+        let finished = ItemDetail(
+            item: detail.item,
+            files: detail.files,
+            reading: ReadingState(
+                fileId: 90,
+                revision: ReadingRevision(size: 4096, mtime: 100),
+                locator: ReadingLocator(version: 1, href: "Text/chapter.xhtml"),
+                progression: 1,
+                completed: true,
+                updatedAt: 201
+            )
+        )
+        XCTAssertEqual(DetailView.bookReadingLabel(finished, file: file), "Read again")
+    }
+    #endif
 
     func testAppVersionLabelIncludesThePackageBuild() {
         XCTAssertEqual(
@@ -3791,6 +4453,31 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(json["copy"] as? Bool, true)
     }
 
+    func testSubtitleBurnAcknowledgesOnlyAnAlreadySDRPlan() throws {
+        XCTAssertEqual(
+            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "sdr"),
+            true
+        )
+        XCTAssertNil(
+            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "hdr10")
+        )
+        XCTAssertNil(
+            PlayerController.subtitleBurnSDRAcknowledgement(nil, deliveredRange: "sdr")
+        )
+
+        let request = CreateSessionRequest(
+            playbackId: "player-sdr-burn",
+            subtitleBurn: 2,
+            subtitleBurnSDR: true
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any]
+        )
+        XCTAssertEqual(json["subtitle_burn_sdr"] as? Bool, true)
+    }
+
     func testAppleCapsKeepGenericHDRSeparateFromDolbyVision() {
         func dictionary(_ query: [URLQueryItem]) -> [String: String] {
             Dictionary(uniqueKeysWithValues: query.compactMap { item in
@@ -5133,6 +5820,7 @@ final class AppleClientTests: XCTestCase {
             HomeLayoutPolicy.topLevelTabs,
             ["Home", "Libraries", "Search", "Downloads", "Settings"]
         )
+        XCTAssertEqual(HomeLayoutPolicy.offlineLaunchTab, .downloads)
         XCTAssertEqual(OfflineQuality.standard.maximumHeight, 720)
         XCTAssertEqual(OfflineQuality.high.maximumHeight, 1_080)
         XCTAssertEqual(OfflineNetworkPolicy.wifiOnly.label, "Wi-Fi only")
@@ -5650,6 +6338,53 @@ final class AppleClientTests: XCTestCase {
         XCTAssertGreaterThan(
             TVPlayerProgressFocusRing.fadeStrokeWidth,
             TVPlayerProgressFocusRing.accentStrokeWidth
+        )
+    }
+
+    func testTVPlaybackInfoFitsTheSafeCanvasAtCompactTenFootScale() {
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.panelMaxWidth,
+            1_480,
+            "the standard panel must not reserve unused television width"
+        )
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 28)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.titleFontSize, 34)
+        XCTAssertGreaterThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 18)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.valueFontSize, 20)
+        XCTAssertLessThanOrEqual(TVPlaybackInfoPresentation.cardMinimumHeight, 250)
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxWidth
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_920
+        )
+        XCTAssertLessThanOrEqual(
+            TVPlaybackInfoPresentation.debugPanelMaxHeight
+                + (TVPlaybackInfoPresentation.debugEdgeInset * 2),
+            1_080,
+            "debug diagnostics must remain inside the tvOS canvas"
+        )
+        XCTAssertEqual(
+            TVPlaybackInfoPresentation.healthLabel(stalls: nil),
+            "Measuring"
+        )
+        XCTAssertEqual(
+            TVPlaybackInfoPresentation.healthLabel(stalls: 0),
+            "No stalls"
+        )
+        XCTAssertEqual(
+            TVPlaybackInfoPresentation.healthLabel(stalls: 1),
+            "1 stall"
+        )
+        XCTAssertEqual(
+            TVPlaybackInfoPresentation.healthLabel(stalls: 3),
+            "3 stalls"
+        )
+    }
+
+    func testPlaybackInfoUsesTheSharedThreeModeContract() {
+        XCTAssertEqual(
+            PlaybackStatsMode.allCases.map(\.label),
+            ["Mini", "Standard", "Debug"]
         )
     }
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cf313b3b"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The warnings-as-errors compiler gate retains the owned Hiqlite SQL, SQLite statement lifetime, and transaction count type corrections."

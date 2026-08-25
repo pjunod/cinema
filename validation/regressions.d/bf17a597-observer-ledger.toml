@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["bf17a597"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This metadata-only change aligns the observer follow-up with the exact runtime and validation ownership resolved by the history audit."

@@ -10,6 +10,7 @@ import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
 import retrofit2.http.QueryMap
+import retrofit2.http.Streaming
 
 /**
  * plurx native API (`/api/v1`). Base URL is `<origin>/api/v1/`, so paths are
@@ -18,6 +19,10 @@ import retrofit2.http.QueryMap
 interface PlurxApi {
     @GET("server")
     suspend fun server(): Server
+
+    /** Signed-in only: the other ingresses a stream may be retried through. */
+    @GET("cluster/ingress")
+    suspend fun clusterIngress(): ClusterIngress
 
     @POST("auth/login")
     suspend fun login(@Body body: LoginReq): LoginResp
@@ -42,6 +47,34 @@ interface PlurxApi {
     @GET("items/{id}")
     suspend fun item(@Path("id") id: Long): ItemDetail
 
+    @GET("items/{id}/reading-state")
+    suspend fun readingState(
+        @Path("id") id: Long,
+        @Query("file_id") fileId: Long,
+    ): ReadingStateResponse
+
+    @PUT("items/{id}/reading-state")
+    suspend fun putReadingState(
+        @Path("id") id: Long,
+        @Body body: PutReadingStateRequest,
+    ): ReadingState
+
+    @DELETE("items/{id}/reading-state")
+    suspend fun deleteReadingState(
+        @Path("id") id: Long,
+        @Query("file_id") fileId: Long,
+    )
+
+    @POST("files/{id}/publication")
+    suspend fun openPublication(@Path("id") id: Long): OpenPublicationResponse
+
+    @DELETE("publication/{session}")
+    suspend fun closePublication(@Path("session") session: String)
+
+    @Streaming
+    @GET("files/{id}/content")
+    suspend fun bookContent(@Path("id") id: Long): Response<ResponseBody>
+
     @GET("search")
     suspend fun search(@Query("q") query: String, @Query("limit") limit: Int = 200): SearchResponse
 
@@ -51,7 +84,7 @@ interface PlurxApi {
     @POST("items/{id}/unscrobble")
     suspend fun markUnwatched(@Path("id") id: Long): MutationResult
 
-    /** The runtime caps map (vcodec/acodec/container/hdr/force) rides as query params. */
+    /** Runtime caps (vcodec/vmaxheight/acodec/container/HDR/force) ride as query params. */
     @GET("files/{id}/decision")
     suspend fun decision(
         @Path("id") id: Long,
@@ -88,6 +121,9 @@ interface PlurxApi {
      */
     @POST("files/{id}/hls/sessions")
     suspend fun createHlsSession(@Path("id") id: Long, @Body body: CreateSessionReq): HlsStart
+
+    @GET("hls/{session}/status")
+    suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus
 
     /**
      * Release a session the moment playback ends, instead of leaving its

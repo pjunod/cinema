@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d8cd25b4"]
+points = ["core.media", "cluster.auth", "cluster.page-reads"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The replicated Store contracts retain repeatable fresh shared-cache bootstrap by making every additive index, trigger, and table creation idempotent."

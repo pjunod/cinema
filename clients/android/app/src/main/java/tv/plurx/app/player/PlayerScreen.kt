@@ -7,6 +7,7 @@ import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.Build
+import android.util.Log
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -23,14 +24,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -52,6 +57,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -74,14 +80,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -106,11 +118,13 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.roundToInt
+import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.Marker
 import tv.plurx.app.data.MediaFileDto
+import tv.plurx.app.data.PlaybackSessionStatus
 import tv.plurx.app.data.Rung
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.SubTrack
@@ -170,68 +184,77 @@ private data class Plan(
     val progressDurationMs: Long get() = itemDurationMs ?: durationMs
 }
 
+internal class PlanLoadException(
+    val stage: String,
+    cause: Throwable,
+) : Exception(cause)
+
+private suspend fun <T> planLoadStage(stage: String, block: suspend () -> T): T = try {
+    block()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Exception) {
+    throw PlanLoadException(stage, error)
+}
+
 private suspend fun loadPlan(
     vm: AppViewModel,
     itemId: Long,
     fileId: Long,
     tracks: PreplayTracks,
-): Plan? = try {
-    val detail = vm.itemDetail(itemId)
+): Plan {
+    val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
     // back already carries it. Starting on the policy default and switching
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
-    val decision: Decision = vm.decision(fileId, tracks)
+    val decision: Decision = planLoadStage("decision") { vm.decision(fileId, tracks) }
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
     val mode = decision.delivery?.mode ?: when (decision.method) {
         "direct_play" -> "direct"
         "remux" -> "remux"
         else -> "transcode"
     }
-    Plan(
-        title = detail.item.title,
-        subtitle = playerSubtitle(detail.item),
-        releaseDate = playerDateLabel(detail.item.air_date, detail.item.year),
-        overview = detail.item.overview,
-        durationMs = file?.duration_ms ?: detail.item.runtime_ms ?: 0L,
-        videoCodec = decision.source?.video_codec ?: file?.video_codec,
-        fileId = fileId,
-        playUrl = Session.url(decision.delivery?.url ?: decision.play_url),
-        mode = mode,
-        // The decision's own reading of the source: the number every height
-        // promise is made of. The item's file row is the fallback for a
-        // server too old to send `source`.
-        sourceHeight = (decision.source?.height ?: file?.height)?.toInt(),
-        aac = decision.delivery?.aac ?: decision.transcode_audio,
-        // Direct delivery has no remux-specific field, but the flattened
-        // decision still says whether these exact source bytes are DV. Keep
-        // that fact so a decoder failure can try a DV-preserving MP4 remux
-        // before the final SDR compatibility transcode.
-        preserveDolbyVision = decision.delivery?.preserve_dolby_vision
-            ?: decision.preserve_dolby_vision,
-        deliveredDynamicRange = decision.delivered_dynamic_range,
-        deliveryAudio = decision.delivery?.audio,
-        markers = decision.markers,
-        reasons = decision.reasons,
-        videoWidth = file?.width?.toInt(),
-        videoHeight = file?.height?.toInt(),
-        source = file,
-        audio = decision.audio,
-        subtitles = decision.subtitles,
-        ladder = decision.ladder,
-        declaredOffsetMs = decision.declared_offset_ms,
-        progressOffsetMs = if (detail.item.isAudiobook) file?.part_offset_ms ?: 0L else 0L,
-        itemDurationMs = if (detail.item.isAudiobook) detail.item.runtime_ms else null,
-        nextAudiobookPartId = if (detail.item.isAudiobook) {
-            nextAudiobookPartId(detail.files, fileId)
-        } else null,
-    )
-} catch (cancelled: CancellationException) {
-    // A superseded load (Retry, or a new file) unwinding. Returning null here
-    // would report "Couldn't start playback" for the attempt that replaced it.
-    throw cancelled
-} catch (_: Exception) {
-    null
+    return planLoadStage("plan") {
+        Plan(
+            title = detail.item.title,
+            subtitle = playerSubtitle(detail.item),
+            releaseDate = playerDateLabel(detail.item.air_date, detail.item.year),
+            overview = detail.item.overview,
+            durationMs = file?.duration_ms ?: detail.item.runtime_ms ?: 0L,
+            videoCodec = decision.source?.video_codec ?: file?.video_codec,
+            fileId = fileId,
+            playUrl = Session.url(decision.delivery?.url ?: decision.play_url),
+            mode = mode,
+            // The decision's own reading of the source: the number every height
+            // promise is made of. The item's file row is the fallback for a
+            // server too old to send `source`.
+            sourceHeight = (decision.source?.height ?: file?.height)?.toInt(),
+            aac = decision.delivery?.aac ?: decision.transcode_audio,
+            // Direct delivery has no remux-specific field, but the flattened
+            // decision still says whether these exact source bytes are DV. Keep
+            // that fact so a decoder failure can try a DV-preserving MP4 remux
+            // before the final SDR compatibility transcode.
+            preserveDolbyVision = decision.delivery?.preserve_dolby_vision
+                ?: decision.preserve_dolby_vision,
+            deliveredDynamicRange = decision.delivered_dynamic_range,
+            deliveryAudio = decision.delivery?.audio,
+            markers = decision.markers,
+            reasons = decision.reasons,
+            videoWidth = file?.width?.toInt(),
+            videoHeight = file?.height?.toInt(),
+            source = file,
+            audio = decision.audio,
+            subtitles = decision.subtitles,
+            ladder = decision.ladder,
+            declaredOffsetMs = decision.declared_offset_ms,
+            progressOffsetMs = if (detail.item.isAudiobook) file?.part_offset_ms ?: 0L else 0L,
+            itemDurationMs = if (detail.item.isAudiobook) detail.item.runtime_ms else null,
+            nextAudiobookPartId = if (detail.item.isAudiobook) {
+                nextAudiobookPartId(detail.files, fileId)
+            } else null,
+        )
+    }
 }
 
 internal fun audiobookGlobalPosition(localPositionMs: Long, partOffsetMs: Long): Long =
@@ -272,6 +295,20 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 }
 
 private enum class PlayerPanel { Tracks, Settings, Info }
+
+internal enum class PlaybackStatsMode(val label: String) {
+    Mini("Mini"),
+    Standard("Standard"),
+    Debug("Debug"),
+}
+
+private enum class PlaybackStatTone(val color: Color) {
+    Neutral(Color(0xFFEEEEF2)),
+    Muted(Color(0xFF9697A2)),
+    Good(Color(0xFF6DDB98)),
+    Warning(Color(0xFFFFBD4A)),
+    Critical(Color(0xFFFF6268)),
+}
 
 internal enum class PlayerBackAction { ClosePanel, HideControls, ExitPlayback }
 
@@ -415,13 +452,30 @@ fun PlayerScreen(
         // Android equivalent of the web click timestamp, not merely decoder
         // preparation latency.
         attemptOpenedAtMs = monotonicNowMs()
-        val loaded = loadPlan(
-            vm,
-            itemId,
-            fileId,
-            PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
-        )
-        if (loaded == null) failed = true else plan = loaded
+        try {
+            plan = loadPlan(
+                vm,
+                itemId,
+                fileId,
+                PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            val failure = error as? PlanLoadException
+            val cause = failure?.cause ?: error
+            val stage = failure?.stage ?: "unknown"
+            postPlaybackClientLog(
+                this,
+                planLoadFailureEvent(fileId, startReason, stage, cause),
+            )
+            Log.w(
+                "plurx-playback",
+                "file=$fileId playback plan failed stage=$stage type=${cause.javaClass.simpleName}",
+                cause,
+            )
+            failed = true
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -599,7 +653,14 @@ private fun PlayerContent(
     var isPlaying by remember { mutableStateOf(true) }
     var buffering by remember { mutableStateOf(true) }
     var controlsVisible by remember { mutableStateOf(true) }
+    // Height of the bottom control block as it was last laid out. The info
+    // panel has to clear that block, but the block is a title, chips, a context
+    // line, an overview and a transport row — its height is content, not a
+    // constant — and it is only on screen while `controlsVisible`. Measuring it
+    // is the only way to reserve the right amount, and zero the rest of the time.
+    var transportHeightPx by remember { mutableIntStateOf(0) }
     var panel by remember { mutableStateOf<PlayerPanel?>(null) }
+    var statsMode by remember { mutableStateOf(PlaybackStatsMode.Standard) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var isInPip by remember(activity) {
         mutableStateOf(
@@ -943,7 +1004,7 @@ private fun PlayerContent(
             TvButton(
                 onClick = { controller.seekTo(activeMarker.end_ms); poke() },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 28.dp, bottom = 112.dp),
-            ) { Text(activeMarker.label, fontWeight = FontWeight.SemiBold) }
+            ) { Text(activeMarker.displayLabel, fontWeight = FontWeight.SemiBold) }
         }
 
         if (!isInPip && controlsVisible) {
@@ -969,6 +1030,7 @@ private fun PlayerContent(
                         hdrTypes = displayHdrTypes,
                     ),
                 ),
+                onTransportHeight = { transportHeightPx = it },
                 onBack = onExit,
                 onPlayPause = { controller.playPause(); poke() },
                 onSeekBack = { controller.seekTo(controller.realPosition() - 10_000); poke() },
@@ -1030,6 +1092,9 @@ private fun PlayerContent(
                 controller = controller,
                 positionMs = positionMs,
                 displayHdrTypes = displayHdrTypes,
+                transportReserve = playbackTransportReserve(controlsVisible, transportHeightPx),
+                mode = statsMode,
+                onMode = { statsMode = it },
                 onDismiss = { panel = null; poke() },
             )
             null -> Unit
@@ -1118,6 +1183,7 @@ internal fun Controls(
     onSettings: () -> Unit,
     onInfo: () -> Unit,
     onPip: (() -> Unit)?,
+    onTransportHeight: (Int) -> Unit = {},
 ) {
     val playFocusRequester = remember { FocusRequester() }
     RequestInitialFocus(playFocusRequester, enabled = requestInitialFocus)
@@ -1150,6 +1216,9 @@ internal fun Controls(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                // Reported so the playback info panel can reserve exactly this
+                // block's height instead of guessing at it.
+                .onSizeChanged { onTransportHeight(it.height) }
                 .background(
                     Brush.verticalGradient(
                         listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f)),
@@ -1413,6 +1482,9 @@ private fun PlayerInfo(
     controller: Controller,
     positionMs: Long,
     displayHdrTypes: Set<Int>,
+    transportReserve: Dp,
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val player = controller.player
@@ -1454,10 +1526,35 @@ private fun PlayerInfo(
             subtitles = selectedSubtitle,
             encoder = controller.encoder,
             audioSync = controller.audioOffsetMs.takeIf { it != 0L }?.let(::offsetLabel),
+            build = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            transport = if (controller.currentSessionId != null) {
+                "Segmented HLS · Android Media3"
+            } else {
+                "Continuous file · range requests · Android Media3"
+            },
+            sessionId = controller.currentSessionId,
+            sessionStatus = controller.sessionStatus,
+            playerState = playerStateLabel(player),
         ),
         reasons = plan.reasons,
+        mode = mode,
+        onMode = onMode,
         onDismiss = onDismiss,
+        transportReserve = transportReserve,
     )
+}
+
+/**
+ * How much of the bottom of the screen the transport block is occupying right
+ * now. Zero when the controls are not composed — the common case, since opening
+ * the info panel hides them — the measured height once they have been laid out,
+ * and only a floor in the window between the two.
+ */
+@Composable
+private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int): Dp = when {
+    !controlsVisible -> 0.dp
+    measuredPx > 0 -> with(LocalDensity.current) { measuredPx.toDp() }
+    else -> PlaybackTransportReserveFallback
 }
 
 internal data class PlaybackInfoDetails(
@@ -1476,16 +1573,24 @@ internal data class PlaybackInfoDetails(
     val subtitles: String = "Off",
     val encoder: String? = null,
     val audioSync: String? = null,
+    val build: String = "development",
+    val transport: String = "Android Media3",
+    val sessionId: String? = null,
+    val sessionStatus: PlaybackSessionStatus? = null,
+    val playerState: String = "Unknown",
 )
 
-/** Floating playback details that preserve the video as their background. */
+/** Floating playback details with the same Mini/Standard/Debug contract as Apple and web. */
 @Composable
 internal fun PlaybackInfoOverlay(
     details: PlaybackInfoDetails,
     reasons: List<String>,
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
     onDismiss: () -> Unit,
+    /** Height of the transport block currently on screen; zero when it is not. */
+    transportReserve: Dp = 0.dp,
 ) {
-    val shape = MaterialTheme.shapes.large
     val closeFocusRequester = remember { FocusRequester() }
     RequestInitialFocus(closeFocusRequester)
     Box(
@@ -1495,101 +1600,405 @@ internal fun PlaybackInfoOverlay(
             onClick = onDismiss,
         ),
     ) {
-        Column(
+        // One corner for all three modes: the block grows downward from a fixed
+        // point instead of re-centring itself when the mode changes, and the
+        // reserve at the bottom keeps it clear of the transport controls — but
+        // only while those controls are actually composed. Opening this panel
+        // hides them, so the reserve is normally zero and the panel gets the
+        // whole height.
+        BoxWithConstraints(
             Modifier
-                .align(Alignment.Center)
-                .padding(horizontal = 20.dp, vertical = 28.dp)
-                .widthIn(max = 680.dp)
-                .fillMaxWidth()
-                .heightIn(max = 640.dp)
-                .clip(shape)
-                .background(Color(0xD917181E))
-                .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
-                .focusProperties { canFocus = false }
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {},
-                )
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(PlaybackOverlayInset),
         ) {
-            Row(verticalAlignment = Alignment.Top) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Playback info",
-                            color = Color.White,
-                            style = MaterialTheme.typography.titleLarge,
-                        )
-                        Text(
-                            details.position,
-                            color = Accent,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(start = 16.dp),
-                            maxLines = 1,
-                        )
-                    }
-                    Text(
-                        details.title,
-                        color = Color.White.copy(alpha = 0.72f),
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                TvIconButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.focusRequester(closeFocusRequester),
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close playback info", tint = Color.White)
-                }
-            }
-
-            HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
-
-            PlaybackInfoRow(
-                label = "Delivery",
-                value = details.delivery,
+            val available = maxHeight
+            val panelHeight = (available - transportReserve).coerceAtLeast(
+                minOf(available, PlaybackPanelMinHeight),
             )
-            PlaybackInfoRow("Buffer", details.buffer)
-            details.videoHealth?.let { PlaybackInfoRow("Frames", it) }
-
-            PlaybackInfoSection("SOURCE MEDIA")
-            details.sourceFile?.let { PlaybackInfoRow("File", it) }
-            details.sourceVideo?.let { PlaybackInfoRow("Video", it) }
-            details.sourceAudio?.let { PlaybackInfoRow("Audio", it) }
-
-            PlaybackInfoSection("NOW PLAYING")
-            details.playingVideo?.let { PlaybackInfoRow("Video", it) }
-            details.dynamicRange?.let { PlaybackInfoRow("Dynamic range", it) }
-            details.playingAudio?.let { PlaybackInfoRow("Audio", it) }
-            PlaybackInfoRow("Subtitles", details.subtitles)
-            details.encoder?.let { PlaybackInfoRow("Encoder", it) }
-            details.audioSync?.let { PlaybackInfoRow("Audio sync", it) }
-            PlaybackInfoRow("File ID", "#${details.fileId}")
-
-            if (reasons.isNotEmpty()) {
-                PlaybackInfoSection("PLAYBACK DECISION")
-                reasons.forEach { reason ->
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Text("•", color = Accent, fontWeight = FontWeight.Bold)
-                        Text(
-                            reason,
-                            color = Color.White.copy(alpha = 0.86f),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
+            val miniWidth = minOf(maxWidth, 820.dp)
+            Box(Modifier.align(Alignment.TopEnd)) {
+                when (mode) {
+                    PlaybackStatsMode.Mini -> PlaybackInfoMini(
+                        details = details,
+                        mode = mode,
+                        onMode = onMode,
+                        onDismiss = onDismiss,
+                        closeFocusRequester = closeFocusRequester,
+                        maxPanelWidth = miniWidth,
+                    )
+                    PlaybackStatsMode.Standard -> PlaybackInfoLedgerPanel(
+                        title = "Playback info",
+                        subtitle = "${details.delivery} · ${details.position}",
+                        sections = playbackStandardSections(details, reasons),
+                        surface = Color(0xE617181E),
+                        maxPanelWidth = 1040.dp,
+                        maxPanelHeight = minOf(panelHeight, 620.dp),
+                        mode = mode,
+                        onMode = onMode,
+                        onDismiss = onDismiss,
+                        closeFocusRequester = closeFocusRequester,
+                    )
+                    PlaybackStatsMode.Debug -> PlaybackInfoLedgerPanel(
+                        title = "Playback debug",
+                        subtitle = "Player · network · server",
+                        sections = playbackDebugSections(details, reasons),
+                        surface = Color(0xF017181E),
+                        maxPanelWidth = 1180.dp,
+                        maxPanelHeight = minOf(panelHeight, 760.dp),
+                        mode = mode,
+                        onMode = onMode,
+                        onDismiss = onDismiss,
+                        closeFocusRequester = closeFocusRequester,
+                    )
                 }
             }
         }
+    }
+}
+
+/** Mini is a single shrink-wrapped line: the same facts, none of the stacking. */
+@Composable
+private fun PlaybackInfoMini(
+    details: PlaybackInfoDetails,
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
+    onDismiss: () -> Unit,
+    closeFocusRequester: FocusRequester,
+    maxPanelWidth: Dp,
+) {
+    val shape = MaterialTheme.shapes.large
+    Row(
+        Modifier
+            .widthIn(max = maxPanelWidth)
+            .clip(shape)
+            .background(Color(0xE617181E))
+            .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            )
+            .padding(horizontal = 13.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            details.delivery,
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        PlaybackMiniDivider()
+        PlaybackMiniValue(details.position)
+        PlaybackMiniDivider()
+        PlaybackMiniValue(
+            details.playingVideo ?: "Waiting",
+            playbackTone(details),
+            Modifier.weight(1f, fill = false),
+        )
+        PlaybackMiniDivider()
+        PlaybackMiniValue(
+            details.buffer,
+            bufferTone(details.sessionStatus?.ahead_seconds),
+            Modifier.weight(1f, fill = false),
+        )
+        PlaybackMiniDivider()
+        PlaybackMiniValue(
+            details.sessionStatus?.delivered_bps?.let(::formatBitrate) ?: "Measuring",
+            networkTone(details),
+            Modifier.weight(1f, fill = false),
+        )
+        PlaybackMiniDivider()
+        PlaybackHealthPill(details)
+        PlaybackStatsModeSelector(mode, onMode)
+        TvIconButton(
+            onClick = onDismiss,
+            modifier = Modifier.size(40.dp).focusRequester(closeFocusRequester),
+        ) {
+            Icon(Icons.Filled.Close, contentDescription = "Close playback info", tint = Color.White)
+        }
+    }
+}
+
+@Composable
+private fun PlaybackMiniDivider() {
+    VerticalDivider(
+        modifier = Modifier.height(16.dp),
+        color = Color.White.copy(alpha = 0.14f),
+    )
+}
+
+@Composable
+private fun PlaybackMiniValue(
+    value: String,
+    tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        value,
+        color = tone.color,
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
+/**
+ * The pill says in one word what the SERVER card's Status row says in three or
+ * four — same session status, so the two can never disagree, and the same word
+ * the web client's pill shows for the same condition. It deliberately reports
+ * the *server's* state, not the player's: "Buffering" is a fact about this
+ * device, and the pill is about the line feeding it. Android has no cached-VOD
+ * delivery, so the web's fourth word ("Cached") has no counterpart here.
+ */
+private fun serverHealthWord(details: PlaybackInfoDetails): String {
+    val status = details.sessionStatus ?: return "Direct"
+    return if (status.suspended == true) "Held" else "Active"
+}
+
+private fun serverHealthTone(details: PlaybackInfoDetails): PlaybackStatTone =
+    if (details.sessionStatus == null) PlaybackStatTone.Muted else PlaybackStatTone.Good
+
+/** Dot plus one word of the server's state — the line's health at a glance. */
+@Composable
+private fun PlaybackHealthPill(details: PlaybackInfoDetails) {
+    val tone = serverHealthTone(details)
+    Row(
+        Modifier
+            .background(Color.White.copy(alpha = 0.07f), MaterialTheme.shapes.extraLarge)
+            .padding(horizontal = 9.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(7.dp).background(tone.color, MaterialTheme.shapes.extraLarge))
+        Text(
+            serverHealthWord(details),
+            color = tone.color,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** Standard and Debug are the same ledger; only the field set and the caps differ. */
+@Composable
+private fun PlaybackInfoLedgerPanel(
+    title: String,
+    subtitle: String,
+    sections: List<PlaybackStatSection>,
+    surface: Color,
+    maxPanelWidth: Dp,
+    maxPanelHeight: Dp,
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
+    onDismiss: () -> Unit,
+    closeFocusRequester: FocusRequester,
+) {
+    val shape = MaterialTheme.shapes.large
+    Column(
+        Modifier
+            .widthIn(max = maxPanelWidth)
+            .fillMaxWidth()
+            .heightIn(max = maxPanelHeight)
+            .clip(shape)
+            .background(surface)
+            .border(1.dp, Color.White.copy(alpha = 0.14f), shape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        PlaybackInfoHeader(
+            title = title,
+            subtitle = subtitle,
+            mode = mode,
+            onMode = onMode,
+            onDismiss = onDismiss,
+            closeFocusRequester = closeFocusRequester,
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val dense = maxWidth >= PlaybackDenseWidth
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                PlaybackStatLedger(sections, dense)
+            }
+        }
+    }
+}
+
+/**
+ * Two columns with a fixed section→column assignment, then one full-width strip
+ * for the values that are sentences. Nothing here measures a section to decide
+ * where it goes: the same section is always on the same side.
+ */
+@Composable
+private fun PlaybackStatLedger(sections: List<PlaybackStatSection>, dense: Boolean) {
+    val visible = sections.filter { it.stats.isNotEmpty() }
+    val left = PlaybackLedgerLeft.mapNotNull { title -> visible.firstOrNull { it.title == title } }
+    val right = PlaybackLedgerRight.mapNotNull { title -> visible.firstOrNull { it.title == title } }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            left.forEach { PlaybackStatCard(it, dense) }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            right.forEach { PlaybackStatCard(it, dense) }
+        }
+    }
+    val notes = (left + right).filter { it.notes.isNotEmpty() }
+    if (notes.isNotEmpty()) {
+        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            PlaybackInfoSection("NOTES")
+            notes.forEach { section ->
+                if (notes.size > 1) {
+                    // Says which card these lines came from, so it must not
+                    // look like a card heading: headings are Accent and bold,
+                    // this is dimmer than a row label, unbolded and tracked
+                    // out, and it sits tight against the rows it introduces.
+                    Text(
+                        section.title,
+                        color = Color.White.copy(alpha = 0.38f),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Normal,
+                        letterSpacing = 1.2.sp,
+                        modifier = Modifier
+                            .padding(top = 3.dp)
+                            .testTag(PlaybackNotesGroupTag),
+                    )
+                }
+                section.notes.forEach { stat ->
+                    PlaybackInfoRow(
+                        label = stat.label,
+                        value = stat.value,
+                        tone = stat.tone,
+                        maxLines = Int.MAX_VALUE,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A section is aligned as a unit: mostly-numeric sections get their values
+ * right-aligned on tabular figures, everything else stays start-aligned. A long
+ * dense section splits into two sub-columns where the width can carry it.
+ */
+@Composable
+private fun PlaybackStatCard(section: PlaybackStatSection, dense: Boolean) {
+    val rows = section.grid
+    if (rows.isEmpty()) return
+    val numeric = rows.count { isNumericStat(it.value) }
+    val alignEnd = numeric * 10 >= rows.size * 7
+    val twoUp = dense && rows.size >= 10 && rows.all { it.value.length <= 12 }
+    PlaybackDebugCard(section.title) {
+        if (twoUp) {
+            val split = (rows.size + 1) / 2
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    rows.take(split).forEach {
+                        PlaybackInfoRow(it.label, it.value, it.tone, PlaybackDenseLabelWidth, alignEnd)
+                    }
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    rows.drop(split).forEach {
+                        PlaybackInfoRow(it.label, it.value, it.tone, PlaybackDenseLabelWidth, alignEnd)
+                    }
+                }
+            }
+        } else {
+            rows.forEach { PlaybackInfoRow(it.label, it.value, it.tone, alignEnd = alignEnd) }
+        }
+    }
+}
+
+@Composable
+private fun PlaybackInfoHeader(
+    title: String,
+    subtitle: String,
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
+    onDismiss: () -> Unit,
+    closeFocusRequester: FocusRequester,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium)
+            Text(
+                subtitle,
+                color = Color.White.copy(alpha = 0.62f),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        PlaybackStatsModeSelector(mode, onMode)
+        TvIconButton(
+            onClick = onDismiss,
+            modifier = Modifier.size(40.dp).focusRequester(closeFocusRequester),
+        ) {
+            Icon(Icons.Filled.Close, contentDescription = "Close playback info", tint = Color.White)
+        }
+    }
+}
+
+@Composable
+private fun PlaybackStatsModeSelector(
+    mode: PlaybackStatsMode,
+    onMode: (PlaybackStatsMode) -> Unit,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.padding(horizontal = 7.dp)) {
+        PlaybackStatsMode.entries.forEach { candidate ->
+            Text(
+                candidate.label,
+                color = if (candidate == mode) Color.White else Color.White.copy(alpha = 0.62f),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.extraLarge)
+                    .background(if (candidate == mode) Accent else Color.White.copy(alpha = 0.07f))
+                    .tvFocusRing(MaterialTheme.shapes.extraLarge)
+                    .clickable { onMode(candidate) }
+                    .focusable()
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlaybackDebugCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.045f), MaterialTheme.shapes.medium)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), MaterialTheme.shapes.medium)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        PlaybackInfoSection(title)
+        content()
     }
 }
 
@@ -1597,37 +2006,376 @@ internal fun PlaybackInfoOverlay(
 private fun PlaybackInfoSection(title: String) {
     Text(
         title,
-        color = Color.White.copy(alpha = 0.58f),
-        style = MaterialTheme.typography.labelMedium,
+        color = Accent,
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 4.dp),
+        modifier = Modifier.padding(bottom = 2.dp).testTag(PlaybackSectionHeadTag),
     )
 }
 
 @Composable
-private fun PlaybackInfoRow(label: String, value: String) {
+private fun PlaybackInfoRow(
+    label: String,
+    value: String,
+    tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+    labelWidth: Dp = PlaybackLabelWidth,
+    alignEnd: Boolean = false,
+    maxLines: Int = 1,
+) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.07f), MaterialTheme.shapes.medium)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.Top,
     ) {
         Text(
             label,
-            color = Color.White.copy(alpha = 0.62f),
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.width(112.dp),
+            color = Color.White.copy(alpha = 0.48f),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.width(labelWidth),
         )
         Text(
             value,
-            color = Color.White,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
+            color = tone.color,
+            style = if (alignEnd) {
+                MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum")
+            } else {
+                MaterialTheme.typography.bodySmall
+            },
+            fontWeight = FontWeight.Medium,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = if (alignEnd) TextAlign.End else TextAlign.Start,
             modifier = Modifier.weight(1f),
         )
     }
+}
+
+/**
+ * The two roles a section title can play in the ledger: heading its own card,
+ * and naming the group its prose lines were collected into. Tagged so tests can
+ * tell the two apart by role instead of counting how many times the text occurs.
+ */
+internal const val PlaybackSectionHeadTag = "playback-section-head"
+internal const val PlaybackNotesGroupTag = "playback-notes-group"
+
+private val PlaybackOverlayInset = 12.dp
+
+/**
+ * Only used for the frame or two between the controls appearing and their first
+ * layout pass; after that the real measurement replaces it. Derived from the
+ * fixed chrome of the bottom control block in [Controls]: 72.dp top padding +
+ * one headlineSmall title line (~32.dp) + 6.dp spacing + the 56.dp transport
+ * row + 22.dp bottom padding = 188.dp, rounded up. That is the block's floor;
+ * with chips, a context line and a three-line overview it is closer to 318.dp,
+ * which is exactly why this is a fallback and not the reserve.
+ */
+private val PlaybackTransportReserveFallback = 192.dp
+private val PlaybackPanelMinHeight = 180.dp
+private val PlaybackLabelWidth = 86.dp
+private val PlaybackDenseLabelWidth = 62.dp
+private val PlaybackDenseWidth = 760.dp
+
+private val PlaybackLedgerLeft = listOf("PLAYBACK", "SOURCE", "NOW DECODING")
+private val PlaybackLedgerRight = listOf("NETWORK", "SERVER")
+
+/** One row of the ledger. `note` sends it to the full-width strip instead of the grid. */
+private data class PlaybackStat(
+    val label: String,
+    val value: String,
+    val tone: PlaybackStatTone = PlaybackStatTone.Neutral,
+    val note: Boolean = false,
+)
+
+private class PlaybackStatSection(val title: String, val stats: List<PlaybackStat>) {
+    val grid: List<PlaybackStat> = stats.filter { !it.note }
+    val notes: List<PlaybackStat> = stats.filter { it.note }
+}
+
+/**
+ * A source value is a run of separator-joined facts, sometimes with a clause
+ * hung off the end ("+250 ms — audio plays later"). The leading facts are a
+ * datum and belong in the grid; the clause, or a tail longer than the eye can
+ * scan in a single line, is prose and belongs in the notes strip. Returns the
+ * head and, when there is one, the tail — between them they still spell out
+ * every fact in the original value.
+ */
+private fun splitLedgerValue(value: String, facts: Int = 3): Pair<String, String?> {
+    val clause = value.indexOf(" — ")
+    if (clause >= 0) return value.take(clause) to value.substring(clause + 3)
+    val parts = value.split(" · ")
+    if (parts.size <= facts) return value to null
+    return parts.take(facts).joinToString(" · ") to parts.drop(facts).joinToString(" · ")
+}
+
+/** The grid row, plus the note carrying whatever did not fit on it. */
+private fun ledgerSplitStats(label: String, value: String): List<PlaybackStat> {
+    val (head, tail) = splitLedgerValue(value)
+    return listOfNotNull(
+        PlaybackStat(label, head),
+        tail?.let { PlaybackStat(label, it, note = true) },
+    )
+}
+
+private fun isNumericStat(value: String): Boolean {
+    val trimmed = value.trimStart()
+    val head = trimmed.firstOrNull() ?: return false
+    if (head.isDigit()) return true
+    return (head == '#' || head == '+' || head == '-') && trimmed.getOrNull(1)?.isDigit() == true
+}
+
+private fun playbackStandardSections(
+    details: PlaybackInfoDetails,
+    reasons: List<String>,
+): List<PlaybackStatSection> {
+    val status = details.sessionStatus
+    return listOf(
+        PlaybackStatSection(
+            "PLAYBACK",
+            listOfNotNull(
+                reasons.takeIf { it.isNotEmpty() }?.let {
+                    PlaybackStat("Reason", it.joinToString(" · "), PlaybackStatTone.Muted, note = true)
+                },
+            ),
+        ),
+        // The codec/resolution head of each line is a datum and carries the
+        // card; only the filename and the trailing facts are prose enough to
+        // go to the notes strip. Left as all-notes this card never rendered.
+        PlaybackStatSection(
+            "SOURCE",
+            buildList {
+                details.sourceFile?.let { add(PlaybackStat("File", it, note = true)) }
+                addAll(ledgerSplitStats("Video", details.sourceVideo ?: "Unknown"))
+                details.sourceAudio?.let { addAll(ledgerSplitStats("Audio", it)) }
+            },
+        ),
+        PlaybackStatSection(
+            "NOW DECODING",
+            listOfNotNull(
+                PlaybackStat("Video", details.playingVideo ?: "Waiting", note = true),
+                details.dynamicRange?.let { PlaybackStat("Range", it, note = true) },
+                details.playingAudio?.let { PlaybackStat("Audio", it, note = true) },
+                PlaybackStat("Subtitles", details.subtitles),
+                PlaybackStat("Buffer", details.buffer, bufferTone(status?.ahead_seconds)),
+                details.videoHealth?.let {
+                    PlaybackStat("Frames", it, videoHealthTone(it), note = true)
+                },
+            ),
+        ),
+        PlaybackStatSection(
+            "SERVER",
+            listOfNotNull(
+                PlaybackStat(
+                    "Status",
+                    when {
+                        status == null -> "No server-side session"
+                        status.suspended == true -> "Holding buffer"
+                        else -> "Active"
+                    },
+                    if (status == null) PlaybackStatTone.Muted else PlaybackStatTone.Good,
+                ),
+                (status?.encoder ?: details.encoder)?.let { PlaybackStat("Encoder", it) },
+                (status?.recent_speed ?: status?.speed)?.let {
+                    PlaybackStat("Encode", String.format(Locale.US, "%.2f×", it), encodeTone(it, status))
+                },
+                status?.ahead_seconds?.let {
+                    PlaybackStat(
+                        "Ahead",
+                        "${it.coerceAtLeast(0)} s",
+                        bufferTone(it, status.suspended == true),
+                    )
+                },
+                status?.delivered_bps?.let {
+                    PlaybackStat("Delivery", formatBitrate(it), networkTone(details))
+                },
+            ),
+        ),
+    )
+}
+
+private fun playbackDebugSections(
+    details: PlaybackInfoDetails,
+    reasons: List<String>,
+): List<PlaybackStatSection> {
+    val status = details.sessionStatus
+    return listOf(
+        PlaybackStatSection(
+            "PLAYBACK",
+            listOfNotNull(
+                PlaybackStat("Build", details.build),
+                PlaybackStat("Method", details.delivery),
+                PlaybackStat("Transport", details.transport, note = true),
+                PlaybackStat("Position", details.position),
+                PlaybackStat("Player state", details.playerState, playerStateTone(details.playerState)),
+                PlaybackStat("File ID", "#${details.fileId}"),
+                details.sessionId?.let { PlaybackStat("Session", it, note = true) },
+                reasons.takeIf { it.isNotEmpty() }?.let {
+                    PlaybackStat("Reason", it.joinToString("; "), PlaybackStatTone.Muted, note = true)
+                },
+            ),
+        ),
+        // Same split as Standard: datum head in the grid, prose tail in notes.
+        // "AV offset" is "+250 ms — audio plays later"; the measurement is the
+        // datum, the explanation of it is the clause.
+        PlaybackStatSection(
+            "SOURCE",
+            buildList {
+                details.sourceFile?.let { add(PlaybackStat("File", it, note = true)) }
+                details.sourceVideo?.let { addAll(ledgerSplitStats("Video", it)) }
+                details.sourceAudio?.let { addAll(ledgerSplitStats("Audio", it)) }
+                details.audioSync?.let { addAll(ledgerSplitStats("AV offset", it)) }
+            },
+        ),
+        PlaybackStatSection(
+            "NOW DECODING",
+            listOfNotNull(
+                details.playingVideo?.let { PlaybackStat("Video", it, note = true) },
+                details.dynamicRange?.let { PlaybackStat("Range", it, note = true) },
+                details.playingAudio?.let { PlaybackStat("Audio", it, note = true) },
+                PlaybackStat("Subtitles", details.subtitles),
+                PlaybackStat("Buffer", details.buffer, bufferTone(status?.ahead_seconds)),
+                details.videoHealth?.let {
+                    PlaybackStat("Frames", it, videoHealthTone(it), note = true)
+                },
+            ),
+        ),
+        PlaybackStatSection(
+            "NETWORK",
+            listOfNotNull(
+                status?.delivered_bps?.let {
+                    PlaybackStat("Delivery", formatBitrate(it), networkTone(details))
+                },
+                status?.delivered_bytes?.let { PlaybackStat("Transferred", formatBytes(it)) },
+                status?.delivered_idle_ms?.let {
+                    PlaybackStat("Delivery idle", "$it ms", idleTone(it, status.suspended == true))
+                },
+            ),
+        ),
+        PlaybackStatSection("SERVER", playbackDebugServerStats(details)),
+    )
+}
+
+private fun playbackDebugServerStats(details: PlaybackInfoDetails): List<PlaybackStat> {
+    val status = details.sessionStatus
+        ?: return listOf(PlaybackStat("Status", "No server session", PlaybackStatTone.Muted))
+    val speed = status.recent_speed ?: status.speed
+    return listOfNotNull(
+        PlaybackStat(
+            "Status",
+            if (status.suspended == true) "Holding" else "Active",
+            PlaybackStatTone.Good,
+        ),
+        PlaybackStat("Encoder", status.encoder ?: details.encoder ?: "—"),
+        PlaybackStat(
+            "Encode speed",
+            speed?.let { String.format(Locale.US, "%.2f×", it) } ?: "—",
+            speed?.let { encodeTone(it, status) } ?: PlaybackStatTone.Muted,
+        ),
+        status.ahead_seconds?.let {
+            PlaybackStat(
+                "Server ahead",
+                "${it.coerceAtLeast(0)} s",
+                bufferTone(it, status.suspended == true),
+            )
+        },
+        status.ahead_bytes?.let { PlaybackStat("Ahead bytes", formatBytes(it)) },
+        status.out_time_ms?.let { PlaybackStat("Produced", formatTime(it)) },
+        status.progress_idle_ms?.let {
+            PlaybackStat("Progress idle", "$it ms", idleTone(it, status.suspended == true))
+        },
+        PlaybackStat(
+            "Held",
+            if (status.suspended == true) "Yes" else "No",
+            if (status.suspended == true) PlaybackStatTone.Good else PlaybackStatTone.Neutral,
+        ),
+        status.hold_reason?.let { PlaybackStat("Hold reason", it, PlaybackStatTone.Good) },
+        status.suspend_count?.let {
+            PlaybackStat(
+                "Suspend count",
+                it.toString(),
+                if (it > 8) PlaybackStatTone.Warning else PlaybackStatTone.Neutral,
+            )
+        },
+        status.readrate?.let { PlaybackStat("Pacing", String.format(Locale.US, "%.2f×", it)) },
+        status.playlist_shape?.let { PlaybackStat("Playlist", it) },
+        status.last_request?.let { PlaybackStat("Last request", it) },
+        status.idle_seconds?.let {
+            PlaybackStat("Request idle", "$it s", requestIdleTone(it, status.suspended == true))
+        },
+        status.published_end_ms?.let { PlaybackStat("Published end", "$it ms") },
+        status.fetched_end_ms?.let { PlaybackStat("Fetched end", "$it ms") },
+        status.fetched_segment?.let { PlaybackStat("Fetched segment", it.toString()) },
+        status.first_retained_segment?.let { PlaybackStat("First retained", it.toString()) },
+    )
+}
+
+private fun playbackTone(details: PlaybackInfoDetails): PlaybackStatTone =
+    videoHealthTone(details.videoHealth)
+
+private fun videoHealthTone(summary: String?): PlaybackStatTone = when {
+    summary == null -> PlaybackStatTone.Muted
+    summary.contains(" 0 dropped") -> PlaybackStatTone.Good
+    summary.contains(" max streak 1") -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Critical
+}
+
+private fun bufferTone(
+    seconds: Long?,
+    suspended: Boolean = false,
+): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    seconds == null -> PlaybackStatTone.Muted
+    seconds < 2 -> PlaybackStatTone.Critical
+    seconds < 5 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Good
+}
+
+private fun networkTone(details: PlaybackInfoDetails): PlaybackStatTone {
+    val status = details.sessionStatus ?: return PlaybackStatTone.Muted
+    return idleTone(status.delivered_idle_ms, status.suspended == true).let {
+        if (it == PlaybackStatTone.Neutral && (status.delivered_bps ?: 0) > 0) {
+            PlaybackStatTone.Good
+        } else {
+            it
+        }
+    }
+}
+
+private fun encodeTone(
+    speed: Double,
+    status: PlaybackSessionStatus?,
+): PlaybackStatTone {
+    if (status?.suspended == true) return PlaybackStatTone.Good
+    val ahead = status?.ahead_seconds ?: 0
+    return when {
+        speed < 0.65 && ahead < 2 -> PlaybackStatTone.Critical
+        speed < 1.0 && ahead < 10 -> PlaybackStatTone.Warning
+        else -> PlaybackStatTone.Good
+    }
+}
+
+private fun playerStateTone(state: String): PlaybackStatTone {
+    val normalized = state.lowercase()
+    return when {
+        "error" in normalized || "fail" in normalized -> PlaybackStatTone.Critical
+        "buffer" in normalized || "wait" in normalized -> PlaybackStatTone.Warning
+        "ready" in normalized || "play" in normalized -> PlaybackStatTone.Good
+        else -> PlaybackStatTone.Neutral
+    }
+}
+
+private fun idleTone(milliseconds: Long?, suspended: Boolean): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    milliseconds == null -> PlaybackStatTone.Muted
+    milliseconds > 20_000 -> PlaybackStatTone.Critical
+    milliseconds > 8_000 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Neutral
+}
+
+private fun requestIdleTone(seconds: Long, suspended: Boolean): PlaybackStatTone = when {
+    suspended -> PlaybackStatTone.Good
+    seconds > 20 -> PlaybackStatTone.Critical
+    seconds > 8 -> PlaybackStatTone.Warning
+    else -> PlaybackStatTone.Neutral
 }
 
 internal fun deliveryLabel(mode: String): String = when (mode) {
@@ -1733,6 +2481,24 @@ private fun formatBitrate(bitsPerSecond: Long): String = if (bitsPerSecond >= 1_
     "%.1f Mbps".format(bitsPerSecond / 1_000_000.0)
 } else {
     "${bitsPerSecond / 1_000} kbps"
+}
+
+private fun formatBytes(bytes: Long): String {
+    val value = bytes.coerceAtLeast(0)
+    return when {
+        value >= 1_000_000_000 -> String.format(Locale.US, "%.2f GB", value / 1_000_000_000.0)
+        value >= 1_000_000 -> String.format(Locale.US, "%.1f MB", value / 1_000_000.0)
+        value >= 1_000 -> String.format(Locale.US, "%.1f KB", value / 1_000.0)
+        else -> "$value B"
+    }
+}
+
+private fun playerStateLabel(player: Player): String = when (player.playbackState) {
+    Player.STATE_IDLE -> "Idle"
+    Player.STATE_BUFFERING -> "Buffering"
+    Player.STATE_READY -> if (player.isPlaying) "Playing" else "Ready / paused"
+    Player.STATE_ENDED -> "Ended"
+    else -> "Unknown"
 }
 
 private fun videoHealthSummary(player: ExoPlayer): String? {

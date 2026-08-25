@@ -41,10 +41,13 @@ jobs:
       # cargo-audit intentionally skips path-sourced packages. Re-scan a
       # synthesized lockfile so future advisories against either vendored
       # upstream release remain visible.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: target/vendor-audit
+      # The action above installs the pinned cargo-audit binary. Invoke it
+      # directly for the synthesized lockfile: a second copy of the action in
+      # one job cannot update its check annotation when an informational
+      # advisory is present. cargo-audit still exits non-zero for actual
+      # vulnerabilities while reporting informational notices in the log.
+      - name: Audit synthesized vendor lockfile
+        run: cargo audit --file target/vendor-audit/Cargo.lock
 
   fuzz:
     name: RustSec fuzz advisory scan

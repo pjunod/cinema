@@ -15,46 +15,119 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+mod fragindex;
+mod renditionplan;
 mod sqlite;
 mod telemetry;
+
+mod publication;
 
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_coordination;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_durable;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_pretranscode;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_publication;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_reading;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sessions;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_shared_cache;
 
 pub mod replicated;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+#[cfg(feature = "cluster-read-cost-validation")]
+pub use self::hiqlite::HiqliteOperationCounts;
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
-    ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+    prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
+pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
 
 use async_trait::async_trait;
 
+use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
-    CachedTranscode, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort, Library,
-    MediaFile, MediaShape, MetadataPatch, NetworkPrior, NetworkPriorObservation, NewItem,
-    NewLibrary, NewOfflinePackage, OfflineActivityPackage, OfflineCreateOutcome,
-    OfflineLeaseOutcome, OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry,
-    OfflineRemovalReport, PlaybackEvent, PlaybackEventQuery, ProbeResult, RecentItem, TraktAuth,
-    User, WatchRollup, WatchState,
+    BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
+    CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
+    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
+    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
+    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
+    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
 use crate::mediafacts::MediaFacts;
 use crate::secrets::SealedSecret;
+
+/// Narrow catalogue projection used to reconcile node-local artwork bytes.
+/// Large overview and metadata fields never cross the local database boundary
+/// for a pass that needs only ownership and filenames.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtworkInventoryItem {
+    pub id: i64,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+}
+
+/// One bounded aggregate read for Store-backed Prometheus gauges.
+///
+/// Keeping this as one Store primitive lets a replicated backend pay for one
+/// authority read per background sample instead of one read per metric family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrometheusStoreSnapshot {
+    pub libraries: i64,
+    pub users: i64,
+    pub offline: OfflinePackageStats,
+    pub watched_outbox: (i64, i64, i64),
+}
+
+#[async_trait]
+pub trait MetricsStore: Send + Sync + 'static {
+    async fn prometheus_store_snapshot(
+        &self,
+        node_id: &str,
+        now: i64,
+    ) -> Result<PrometheusStoreSnapshot, StoreError>;
+}
+
+/// Replicated owner/term/generation proof attached to every provider artwork
+/// mutation.
+/// A timeout may drop a submitted client future without cancelling its Raft
+/// command, so the database mutation itself must reject an obsolete claim.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtworkRepairFence {
+    pub item_id: i64,
+    pub owner_node_id: String,
+    pub leader_term: i64,
+    /// Monotonic per-item attempt generation. This distinguishes sequential
+    /// repairs by the same leader, so a timed-out command from an earlier
+    /// attempt cannot become valid during a later retry in the same term.
+    pub generation: i64,
+}
 
 /// The text a backend may write into a durable Trakt bearer column.
 ///
@@ -75,6 +148,13 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Opt in to remote media-session placement only after every committed
+    /// voter is publishing the current media protocol. Absent is deliberately
+    /// off so rolling upgrades keep all starts local.
+    pub const CLUSTER_MEDIA_POOL_ENABLED: &str = "cluster.media_pool_enabled";
+    /// Opt in to automatic expired-session takeover after the web/proxy
+    /// interruption corpus passes. Kept separate from new-session placement.
+    pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -224,6 +304,27 @@ pub mod keys {
     /// response instead of changing from EVENT only after retention begins.
     /// Off by default until the physical-iPad control run is conclusive.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
+    /// How often, in minutes, to build fragment indexes for files that have
+    /// none. `0` is off, and off is the default until M0-P1's nynuc numbers
+    /// say what a full read of a library costs over NFS — the whole point of
+    /// that probe is to size this job, and turning it on before the numbers
+    /// return would be guessing with the operator's disks.
+    ///
+    /// Nothing reads an index yet; a file without one keeps today's
+    /// presentation, so this job is invisible to every client either way.
+    pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
+    /// default: even a client that sends `presentation:"vod"` keeps today's
+    /// live presentation until an operator turns this on.
+    pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
+    /// Node-wide byte budget for un-admitted VOD rendition working sets.
+    /// Absent takes the built-in default. A parsed zero is refused at the
+    /// settings surface: "no working set" and "not configured" are opposite
+    /// answers and only the caller knows which one was meant (M3 handoff §6).
+    pub const VOD_WORKING_SET_BYTES: &str = "playback.vod_working_set_bytes";
+    /// Server ceiling, in seconds, for one blocking VOD segment fetch. The
+    /// per-request `block_budget_secs` is clamped to this.
+    pub const VOD_BLOCK_BUDGET_SECS: &str = "playback.vod_block_budget_secs";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not
@@ -246,6 +347,9 @@ pub mod keys {
     /// made the trade backwards. Eviction is LRU, so what survives is what
     /// people actually come back to.
     pub const CACHE_MAX_GB: &str = "cache.max_gb";
+    /// Last user id inspected by the bounded speculative-candidate fan-out.
+    /// The singleton lease makes advancing this replicated cursor race-free.
+    pub const CACHE_PRETRANSCODE_USER_CURSOR: &str = "cache.pretranscode_user_cursor";
     /// Master kill switch for app-managed offline packages. Missing means on;
     /// an operator can stop new admission without invalidating local copies.
     pub const OFFLINE_ENABLED: &str = "offline.enabled";
@@ -262,6 +366,9 @@ pub mod keys {
     /// upgraded server must not start encoding overnight on its own.
     pub const JOB_CACHE_PRODUCE_MINS: &str = "jobs.cache_produce_mins";
     pub const JOB_LAST_CACHE_PRODUCE: &str = "jobs.last_cache_produce";
+    /// Node-local, like the transcode-cleanup stamp: an index lives on the
+    /// node that built it, so when it last ran is a fact about that node.
+    pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
 }
 
 #[async_trait]
@@ -275,7 +382,32 @@ pub trait SettingsStore: Send + Sync + 'static {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError>;
+    /// Read the complete settings table from one database snapshot.
+    ///
+    /// Administrative views render many independent settings at once. A
+    /// single snapshot keeps those values mutually consistent and, on a
+    /// replicated backend, avoids paying one linearizable read per field.
+    async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError>;
+    /// Insert an immutable setting value. Returns false when the key already
+    /// exists and leaves the first committed value unchanged.
+    async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError>;
+    /// Insert an immutable setting only while the named provider-repair claim
+    /// is still current in the same replicated transaction.
+    async fn put_setting_if_absent_if_artwork_repair_current(
+        &self,
+        key: &str,
+        value: &str,
+        expected_item_id: i64,
+        fence: &ArtworkRepairFence,
+    ) -> Result<bool, StoreError>;
+    /// Remove immutable Curator origin records for one artwork generation,
+    /// but only when no catalogue row references that filename in the same
+    /// transaction. This bounds replicated history after orphan collection.
+    async fn prune_unreferenced_book_cover_origins(
+        &self,
+        filename: &str,
+    ) -> Result<usize, StoreError>;
     /// Atomically publish a related group of settings.
     ///
     /// Callers use this when one key activates the meaning of another. A
@@ -298,6 +430,10 @@ pub trait UserStore: Send + Sync + 'static {
     async fn get_user(&self, id: i64) -> Result<Option<User>, StoreError>;
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError>;
     async fn list_users(&self) -> Result<Vec<User>, StoreError>;
+    /// Deterministic bounded page for background fan-out. Interactive admin
+    /// lists keep using `list_users`; schedulers must not allocate every user
+    /// merely to inspect a small prediction rail.
+    async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError>;
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError>;
     async fn count_admins(&self) -> Result<i64, StoreError>;
     /// Replace a user's password hash. Callers should also revoke the user's
@@ -409,7 +545,32 @@ pub trait MediaStore: Send + Sync + 'static {
 
     // --- browse ---
     async fn get_item(&self, id: i64) -> Result<Option<Item>, StoreError>;
+    /// Titles for a bounded set of item ids in one storage operation.
+    /// Activity snapshots use this instead of issuing one authority read per
+    /// viewer while building a response with a shorter transport deadline.
+    async fn item_titles(&self, ids: &[i64]) -> Result<BTreeMap<i64, String>, StoreError>;
     async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError>;
+    /// Every item that names at least one materialized artwork file.
+    ///
+    /// Cluster voters use this as a reconciliation inventory: item rows are
+    /// replicated, while the bytes named by `poster_path` and `backdrop_path`
+    /// remain node-local. This intentionally returns a narrow local projection
+    /// so a periodic node-local pass does not rendezvous at the leader or move
+    /// complete catalogue rows.
+    async fn items_with_artwork(&self) -> Result<Vec<ArtworkInventoryItem>, StoreError>;
+    /// One deterministic, bounded reconciliation page after an item id.
+    async fn items_with_artwork_page(
+        &self,
+        after_item_id: i64,
+        limit: i64,
+    ) -> Result<Vec<Item>, StoreError>;
+    /// Exact authority check immediately before orphan quarantine/removal.
+    async fn artwork_filename_is_referenced(&self, filename: &str) -> Result<bool, StoreError>;
+    /// Bounded batch authority snapshot for orphan prefiltering.
+    async fn referenced_artwork_filenames(
+        &self,
+        filenames: &[String],
+    ) -> Result<Vec<String>, StoreError>;
     /// One page of a library's grid, optionally narrowed to a single genre.
     ///
     /// The genre is matched against the item's stored list (migration v13),
@@ -439,6 +600,15 @@ pub trait MediaStore: Send + Sync + 'static {
         self.list_top_items_in_genre(library_id, sort, offset, limit, None)
             .await
     }
+    /// A recent-items preview for every library in one catalog query.
+    ///
+    /// This is the Store half of Home's constant-cardinality contract: the
+    /// number of replicated authority reads must not grow with the library
+    /// roster. Empty libraries are omitted and joined back in by the caller.
+    async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError>;
     async fn recently_added(
         &self,
         library_id: Option<i64>,
@@ -448,6 +618,48 @@ pub trait MediaStore: Send + Sync + 'static {
 
     // --- metadata enrichment ---
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError>;
+    /// Apply provider metadata only while the replicated
+    /// owner/term/generation fence is still current. A stale submitted command
+    /// succeeds as a no-op.
+    async fn apply_metadata_if_artwork_repair_current(
+        &self,
+        item_id: i64,
+        patch: &MetadataPatch,
+        fence: &ArtworkRepairFence,
+    ) -> Result<bool, StoreError>;
+    /// Apply first-class facts for one book with source precedence enforced by
+    /// the backend. A Curator handoff outranks EPUB package metadata; title +
+    /// author alone never creates a work relation.
+    async fn apply_book_metadata(
+        &self,
+        item_id: i64,
+        patch: &BookMetadataPatch,
+    ) -> Result<(), StoreError>;
+    /// Apply Curator facts only while every book field this operation may
+    /// overwrite is still the item snapshot the caller acted on. This is the
+    /// store-level fence between slow provider work and a concurrent re-pair
+    /// or edit on another voter.
+    async fn apply_book_metadata_if_current(
+        &self,
+        expected: &Item,
+        patch: &BookMetadataPatch,
+        repair_fence: Option<&ArtworkRepairFence>,
+    ) -> Result<bool, StoreError>;
+    /// Book rows in one library, optionally narrowed to the exact ids a
+    /// targeted scan placed. `Some(&[])` means no rows.
+    async fn book_items(
+        &self,
+        library_id: i64,
+        only: Option<&[i64]>,
+    ) -> Result<Vec<Item>, StoreError>;
+    /// Other text/audio editions carrying the same proven work id. The
+    /// current row is excluded, and a missing work id is represented by the
+    /// caller not asking at all—not by fuzzy title/author matching.
+    async fn related_book_editions(
+        &self,
+        item_id: i64,
+        work_id: &str,
+    ) -> Result<Vec<Item>, StoreError>;
     /// Movies and shows to enrich: normally those no provider has answered
     /// for yet, which is *not* the same as "those with no TMDB id" — an item
     /// can arrive carrying an id from another application (a monarr scan
@@ -626,6 +838,14 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError>;
 }
 
+/// Exactly the items displayed by a top-level library grid.
+///
+/// Shared by ordinary library pages and the catalog-wide Home preview so the
+/// two surfaces cannot silently acquire different membership rules.
+pub(crate) const TOP_LEVEL_ITEM_PREDICATE: &str =
+    "(kind IN ('movie','show','book','audiobook') OR \
+     (kind IN ('folder','video','photo') AND parent_id IS NULL))";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootFingerprintStatus {
     Established,
@@ -647,6 +867,21 @@ pub enum ReconcileOutcome {
         requested: u64,
         limit: u64,
     },
+}
+
+/// Hard ceiling for one atomic library-reconcile payload. At 4,096 signed
+/// decimal i64 values, the JSON carried by the replicated backend stays below
+/// 90 KiB even at worst-case width.
+pub(crate) const MAX_RECONCILE_FILE_IDS: usize = 4_096;
+
+pub(crate) fn reconcile_payload_refusal(
+    gone_file_ids: &[i64],
+    prune_limit: u64,
+) -> Option<ReconcileOutcome> {
+    (gone_file_ids.len() > MAX_RECONCILE_FILE_IDS).then(|| ReconcileOutcome::RefusedPrune {
+        requested: gone_file_ids.len() as u64,
+        limit: prune_limit.min(MAX_RECONCILE_FILE_IDS as u64),
+    })
 }
 
 #[async_trait]
@@ -766,6 +1001,46 @@ pub trait WatchStore: Send + Sync + 'static {
         position_ms: i64,
         duration_ms: Option<i64>,
         updated_at: i64,
+    ) -> Result<(), StoreError>;
+}
+
+/// Per-user text-publication state. It is separate from [`WatchStore`]
+/// because a reflowable locator is not timed playback and completion is an
+/// explicit reader action rather than a 95% threshold.
+#[async_trait]
+pub trait ReadingStore: Send + Sync + 'static {
+    /// Read the row for one edition, including a stale revision retained for
+    /// diagnosis. The HTTP boundary compares its revision to the current
+    /// file before offering a resume action.
+    async fn reading_state(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        file_id: i64,
+    ) -> Result<Option<ReadingState>, StoreError>;
+    /// Newest state whose snapshotted revision still matches the current file.
+    /// Item detail uses this one query instead of looking up every edition.
+    async fn current_reading_state(
+        &self,
+        user_id: i64,
+        item_id: i64,
+    ) -> Result<Option<ReadingState>, StoreError>;
+    /// Persist a locator. A dated offline write older than the durable row
+    /// returns the winner without rewinding it; an undated online write uses
+    /// the server clock and is authoritative now. A different file revision
+    /// begins a fresh ordering epoch because the previous locator is stale.
+    async fn put_reading_state(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        state: &ReadingStateWrite,
+    ) -> Result<ReadingState, StoreError>;
+    /// Clear one edition's progress. Idempotent so Start over can be retried.
+    async fn delete_reading_state(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        file_id: i64,
     ) -> Result<(), StoreError>;
 }
 
@@ -933,6 +1208,24 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<CachedTranscode>, StoreError>;
 
+    /// Bounded set of manifest-fenced local generations for background
+    /// integrity scrubbing. Unlike the eviction view this includes pinned
+    /// offline locations: pinning protects valid bytes from LRU, not corrupt
+    /// bytes from invalidation.
+    async fn cache_manifest_candidates(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// Advance the scrub cursor only if the checked immutable publication is
+    /// still current. Reusing `last_seen_at` rotates a bounded oldest-first
+    /// scan without changing the playback LRU clock.
+    async fn mark_cache_manifests_checked(
+        &self,
+        checks: &[CacheManifestCheck],
+    ) -> Result<usize, StoreError>;
+
     /// Claims older than `older_than_unix` that never completed — a producer
     /// that died. Their directories are garbage and their rows are lies.
     async fn stale_cache_claims(
@@ -945,6 +1238,38 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     /// The filesystem orphan pass needs storage ownership facts; filtered LRU
     /// and stale-candidate queries are deliberately the wrong truth for it.
     async fn all_cache_rows(&self, node_id: &str) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// At most 10,000 local ownership rows plus an explicit completeness bit.
+    /// Orphan cleanup may delete only when this view is complete, including a
+    /// successful complete view containing zero rows.
+    async fn cache_ownership_inventory(
+        &self,
+        node_id: &str,
+    ) -> Result<crate::domain::CacheOwnershipInventory, StoreError>;
+
+    /// Exact ownership for one bounded orphan-deletion batch. This remains
+    /// complete even when a node has more rows than the broad inventory's
+    /// housekeeping ceiling, so a large healthy cache cannot permanently
+    /// disable reclamation.
+    async fn cache_candidate_owners(
+        &self,
+        node_id: &str,
+        relative_dirs: &[String],
+        incomplete_recipes: &[String],
+    ) -> Result<Vec<CachedTranscode>, StoreError>;
+
+    /// Remove only the location whose immutable publication identity still
+    /// matches a failed integrity check and atomically fail ready offline
+    /// packages bound to it. A stale reader can neither erase a newer
+    /// replacement nor retire packages backed by that replacement.
+    async fn invalidate_cache_entry(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        storage_class: &str,
+        relative_dir: &str,
+        manifest_digest: Option<&str>,
+    ) -> Result<bool, StoreError>;
 
     /// Forget one storage copy. The recipe row goes too when its last copy
     /// does: a recipe nobody has is not a fact worth keeping on a single node,
@@ -960,6 +1285,256 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
     /// Offline-pinned recipes have their own admission budget and are excluded
     /// so a flight queue cannot evict the playback cache to make room.
     async fn cache_bytes(&self, node_id: &str) -> Result<i64, StoreError>;
+}
+
+/// Storage-keyed cache generations and their distributed reader pins.
+///
+/// The legacy TranscodeCacheStore remains the rolling-upgrade interface for
+/// node-local roots. Shared roots use this boundary exclusively: callers must
+/// name the immutable generation they validated, and GC must present the exact
+/// live lease that authorized retirement.
+#[async_trait]
+pub trait SharedCacheStore: Send + Sync + 'static {
+    async fn put_cache_storage_member(&self, member: &CacheStorageMember)
+        -> Result<(), StoreError>;
+
+    async fn cache_storage_member(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+    ) -> Result<Option<CacheStorageMember>, StoreError>;
+
+    async fn mark_cache_storage_suspect(
+        &self,
+        storage_id: &str,
+        node_id: &str,
+        observed_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn shared_cache_hit(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+    ) -> Result<Option<SharedCacheGeneration>, StoreError>;
+
+    async fn touch_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        file_id: i64,
+        recipe_version: i64,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        bytes: i64,
+        manifest_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Fence only the exact still-incomplete publication claim into durable
+    /// cleanup state. A stale or commit-uncertain publisher must never delete
+    /// a completed replacement.
+    async fn abandon_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Forget an exact abandoned claim only after its derived staging/final
+    /// paths have been removed. A crash before this call remains discoverable.
+    async fn finalize_abandoned_shared_cache_entry(
+        &self,
+        recipe_hash: &str,
+        storage_id: &str,
+        generation_id: &str,
+        relative_dir: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Return a bounded oldest-first inventory of incomplete publication
+    /// claims whose owner has exceeded the publication recovery window.
+    async fn stale_shared_cache_claims(
+        &self,
+        storage_id: &str,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
+    /// Insert or renew a pin only while the exact complete generation remains
+    /// current. Validation and mutation are one database statement/transaction.
+    async fn acquire_cache_consumer_pin(
+        &self,
+        pin: &CacheConsumerPin,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Renew matching epochs in one bounded owner-liveness transaction.
+    async fn renew_cache_consumer_pins(
+        &self,
+        pins: &[CacheConsumerPin],
+        now_ms: i64,
+    ) -> Result<usize, StoreError>;
+
+    async fn release_cache_consumer_pin(
+        &self,
+        storage_id: &str,
+        recipe_hash: &str,
+        generation_id: &str,
+        consumer_kind: CacheConsumerKind,
+        consumer_id: &str,
+        consumer_epoch: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Delete at most `limit` expired durable pins for one storage root,
+    /// oldest first. Lookup-pin release is best effort, so crash recovery must
+    /// not depend on the process that acquired a short-lived bridge pin
+    /// surviving its expiry. The storage scope keeps each GC lease's database
+    /// work bounded by the matching `(storage_id, expires_at_ms)` index.
+    async fn prune_expired_cache_consumer_pins(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<usize, StoreError>;
+
+    async fn shared_cache_gc_candidates(
+        &self,
+        storage_id: &str,
+        now_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<SharedCacheGeneration>, StoreError>;
+
+    /// Retire the exact generation only when the supplied GC lease is still
+    /// current and no live typed consumer pin exists. Filesystem deletion may
+    /// happen only after this returns a fresh successor lease and the caller
+    /// confirms that successor is still live.
+    async fn retire_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<Option<Lease>, StoreError>;
+
+    /// Remove an exact GC tombstone only after its deterministic final and
+    /// quarantine paths have been removed under the same live GC lease.
+    async fn finalize_retired_shared_cache_generation(
+        &self,
+        generation: &SharedCacheGeneration,
+        now_ms: i64,
+        lease: &Lease,
+    ) -> Result<Option<Lease>, StoreError>;
+}
+
+/// Durable distributed work for speculative whole-title transcodes.
+///
+/// Candidate generation is a singleton, but execution is deliberately not:
+/// every compatible node competes for rows through this boundary. Ownership
+/// is a queue-row fence rather than a generic scheduler lease so a worker can
+/// renew, yield, and settle independently of the next candidate pass.
+#[async_trait]
+pub trait PretranscodeJobStore: Send + Sync + 'static {
+    /// Read one row for bounded diagnostics and lifecycle verification.
+    async fn pretranscode_job(&self, id: &str) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Insert one active generation unless an equivalent active/terminal job
+    /// or still-verifiable ready location already satisfies it. A ready row
+    /// whose last location was evicted is deliberately eligible again.
+    async fn enqueue_pretranscode_job(
+        &self,
+        job: &NewPretranscodeJob,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+
+    /// Claim the highest-priority compatible due row. Expired running rows are
+    /// eligible for takeover and advance their monotone fence.
+    async fn claim_pretranscode_job(
+        &self,
+        node_id: &str,
+        capabilities: &PretranscodeWorkerCapabilities,
+        // Bounded process-local refusals (for example, sources this node
+        // cannot mount). Other nodes remain eligible immediately.
+        excluded_job_ids: &[String],
+        now_unix_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Active queue rows whose resumable part directories belong to this
+    /// node. Housekeeping uses the ids as a fail-closed keep-list without
+    /// publishing an incomplete cache location.
+    async fn pretranscode_staging_jobs(&self, node_id: &str) -> Result<Vec<String>, StoreError>;
+
+    /// Complete bounded active-id universe for pruning node-local source
+    /// refusals. The queue schema caps active rows at 4,096.
+    async fn active_pretranscode_job_ids(&self) -> Result<Vec<String>, StoreError>;
+
+    async fn renew_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        now_unix_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<PretranscodeJob>, StoreError>;
+
+    /// Capacity/preemption is not a failed encode. Return the row to the due
+    /// queue without incrementing attempts.
+    async fn yield_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Record one stable failure code. The fifth failure is terminal; earlier
+    /// failures return to the queue at the caller's bounded backoff deadline.
+    async fn fail_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        error_code: &str,
+        now_unix_ms: i64,
+        not_before_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Permanently cancel a claimed source generation that no longer exists
+    /// or no longer matches its snapshotted bytes.
+    async fn cancel_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        error_code: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Publish the node-local cache location and ready job state in one fenced
+    /// transaction after the filesystem generation has been renamed.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_pretranscode_job(
+        &self,
+        job: &PretranscodeJob,
+        recipe_hash: &str,
+        recipe_version: i64,
+        relative_dir: &str,
+        bytes: i64,
+        expected_previous_bytes: Option<i64>,
+        manifest_digest: &str,
+        now_unix_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 
 /// Durable app-managed offline packages and their one renewable capability.
@@ -1057,6 +1632,18 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         package_id: &str,
         node_id: &str,
         phase: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Mark only the still-ready package bound to this corrupt recipe as
+    /// failed. Request-time integrity checks use a separate exact transition
+    /// so a late producer error cannot demote an unrelated ready package.
+    async fn invalidate_ready_offline_package(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        recipe_hash: &str,
         code: &str,
         message: &str,
     ) -> Result<bool, StoreError>;
@@ -1222,27 +1809,388 @@ pub trait NetworkPriorStore: Send + Sync + 'static {
     ) -> Result<NetworkPrior, StoreError>;
     async fn network_prior(
         &self,
-        user_id: i64,
+        credential_generation: &str,
         client_class: &str,
         network_fingerprint: &str,
     ) -> Result<Option<NetworkPrior>, StoreError>;
     async fn prune_network_priors(&self, before_ms: i64, limit: i64) -> Result<u64, StoreError>;
 }
 
+/// Monotone, backend-neutral ownership leases for cluster work.
+///
+/// `now_unix_ms` is supplied by the coordinator so competing-node and clock
+/// edge cases are reproducible in the backend contract. Callers must still
+/// validate the returned fence in the same transaction as durable publication.
+/// The monotone revision in a returned [`Lease`] is part of its compare-and-swap
+/// identity: every successful renewal returns a replacement token, and delayed
+/// operations using an older same-fence token fail rather than regressing or
+/// resurrecting it.
+#[async_trait]
+pub trait CoordinationStore: Send + Sync + 'static {
+    async fn acquire_lease(
+        &self,
+        resource: &str,
+        owner_node_id: &str,
+        now_unix_ms: i64,
+        expires_at_unix_ms: i64,
+    ) -> Result<LeaseClaim, StoreError>;
+
+    async fn renew_lease(
+        &self,
+        lease: &Lease,
+        now_unix_ms: i64,
+        expires_at_unix_ms: i64,
+    ) -> Result<Option<Lease>, StoreError>;
+
+    async fn release_lease(&self, lease: &Lease, now_unix_ms: i64) -> Result<bool, StoreError>;
+}
+
+/// Durable mutations performed by singleton cluster jobs. Implementations
+/// must validate the exact lease token and its expiry in the same atomic
+/// transaction as the mutation.
+#[async_trait]
+pub trait FencedPublicationStore: Send + Sync + 'static {
+    async fn put_setting_fenced(
+        &self,
+        key: &str,
+        value: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    async fn put_setting_if_absent_fenced(
+        &self,
+        key: &str,
+        value: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn put_setting_if_absent_if_artwork_repair_current_fenced(
+        &self,
+        key: &str,
+        value: &str,
+        expected_item_id: i64,
+        repair_fence: &ArtworkRepairFence,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn mark_library_scanned_fenced(
+        &self,
+        id: i64,
+        refreshed: bool,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    async fn insert_item_fenced(
+        &self,
+        item: &NewItem,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<i64, StoreError>;
+    async fn apply_metadata_fenced(
+        &self,
+        item_id: i64,
+        patch: &MetadataPatch,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_metadata_if_artwork_repair_current_fenced(
+        &self,
+        item_id: i64,
+        patch: &MetadataPatch,
+        repair_fence: &ArtworkRepairFence,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn apply_book_metadata_fenced(
+        &self,
+        item_id: i64,
+        patch: &BookMetadataPatch,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_book_metadata_if_current_fenced(
+        &self,
+        expected: &Item,
+        patch: &BookMetadataPatch,
+        repair_fence: Option<&ArtworkRepairFence>,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn set_nfo_seeded_fenced(
+        &self,
+        item_id: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_file_fenced(
+        &self,
+        item_id: i64,
+        path: &str,
+        size: i64,
+        mtime: i64,
+        probe: &ProbeResult,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<i64, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure_library_root_fingerprint_fenced(
+        &self,
+        library_id: i64,
+        fingerprint: &str,
+        allow_establish: bool,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootFingerprintStatus, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_library_fenced(
+        &self,
+        library_id: i64,
+        root_fingerprint: &str,
+        gone_file_ids: &[i64],
+        prune_limit: u64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<ReconcileOutcome, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_cache_entry_fenced(
+        &self,
+        recipe_hash: &str,
+        file_id: i64,
+        recipe_version: i64,
+        node_id: &str,
+        relative_dir: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<bool, StoreError>;
+    async fn touch_cache_claim_fenced(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_cache_entry_fenced(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        relative_dir: &str,
+        bytes: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+    async fn forget_cache_entry_fenced(
+        &self,
+        recipe_hash: &str,
+        node_id: &str,
+        storage_class: &str,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<(), StoreError>;
+}
+
+/// Durable idempotency and routing for cluster-owned live HLS sessions.
+///
+/// Capability bytes stay in `session_id`; every mutation additionally fences
+/// on the never-reused incarnation plus owner epoch. Implementations bound
+/// client-controlled rows before inserting them.
+#[async_trait]
+pub trait MediaSessionStore: Send + Sync + 'static {
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        request_fingerprint: &str,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+        claim_expires_at_ms: i64,
+    ) -> Result<MediaSessionRequestClaim, StoreError>;
+
+    async fn assign_media_session_request_owner(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn activate_media_session(
+        &self,
+        activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    async fn fail_media_session_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn media_session_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn media_session_route_by_incarnation(
+        &self,
+        incarnation_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn renew_media_sessions(
+        &self,
+        owner_node_id: &str,
+        renewals: &[MediaSessionRenewal],
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Vec<String>, StoreError>;
+
+    /// Read a bounded, oldest-first inventory of expired active routes that a
+    /// survivor may independently prove it can reproduce.
+    async fn expired_media_sessions(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<MediaSessionRoute>, StoreError>;
+
+    /// Atomically transfer an exact expired owner epoch and its lease fence.
+    /// A racing survivor, delete, renewal, or maintenance pass makes the CAS
+    /// return `None` rather than publishing a second owner.
+    async fn claim_media_session_takeover(
+        &self,
+        takeover: &MediaSessionTakeover,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn end_media_session(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError>;
+
+    async fn owned_media_sessions(
+        &self,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Vec<OwnedMediaSessionLease>, StoreError>;
+}
+
+/// Node-local fragment indexes.
+///
+/// Like [`PlaybackTelemetryStore`], these rows describe what one machine's
+/// ffmpeg produced from one machine's copy of a file, and must never be
+/// submitted to Raft: an index is a list of output byte counts, and
+/// [`crate::segplan::match_landing`] compares exactly those numbers to decide
+/// where a repositioned producer landed. One node's answer governing another
+/// node's bytes would put a viewer in the wrong part of the film with nothing
+/// to report it.
+#[async_trait]
+pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Store or replace one file's index.
+    async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: &crate::segplan::FragmentIndex,
+    ) -> Result<(), StoreError>;
+
+    /// The stored index, but only when it still describes this source.
+    ///
+    /// Invalidation is by mismatch rather than by deletion: a changed file or
+    /// a changed video pipeline simply stops matching, so nothing has to
+    /// notice the change and nothing can fail to.
+    async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError>;
+
+    /// Drop one file's index. `true` when a row was there.
+    async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError>;
+
+    /// File ids this node holds node-local VOD rows for — indexes, plans, or
+    /// both. Bounded, and ordered so a sweep makes progress across ticks.
+    ///
+    /// The sweep this feeds cannot be a hook inside `delete_files`. That is a
+    /// *replicated* write, while these rows live in each node's own sidecar
+    /// and share no transaction with it — so a hook there would only ever
+    /// clean the node that happened to run the delete, and would miss every
+    /// node that was down at the time. Asking each node what it holds and
+    /// checking those ids against the replicated `files` table converges
+    /// everywhere, on each node's own schedule.
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError>;
+
+    /// Which of `file_ids` still exist in the replicated `files` table.
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError>;
+}
+
+/// Node-local rendition plans.
+///
+/// Node-local for [`FragmentIndexStore`]'s reason, and persisted for a
+/// different one. An index is a measurement: lose it and it is rebuilt from
+/// the file. A plan is a *decision* — ledger D10 makes it normative, and a
+/// client holds a playlist naming its boundaries by index. Re-deriving one is
+/// not a cheaper way to the same answer, because [`crate::fmp4::CutPolicy`] is
+/// built from tuning constants a release may change while the file, the
+/// pipeline and the index all stay identical. See
+/// [`crate::store::renditionplan`].
+#[async_trait]
+pub trait RenditionPlanStore: Send + Sync + 'static {
+    /// Store a plan unless the key already has one. `true` when this call is
+    /// the one that stored it.
+    ///
+    /// Not an upsert, and that is the point: the first plan written under a
+    /// key is the plan. A rendition whose boundaries must genuinely differ
+    /// gets a different key.
+    async fn put_rendition_plan(
+        &self,
+        rendition_key: &str,
+        file_id: i64,
+        plan: &crate::segplan::SegmentPlan,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<bool, StoreError>;
+
+    /// The stored plan, but only when it still describes this source.
+    async fn rendition_plan(
+        &self,
+        rendition_key: &str,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError>;
+
+    /// Drop every rendition plan for a file. Answers how many went.
+    async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
+    + MetricsStore
     + UserStore
     + ApiKeyStore
     + LibraryStore
     + MediaStore
     + WatchStore
+    + ReadingStore
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
+    + SharedCacheStore
+    + PretranscodeJobStore
     + OfflinePackageStore
     + PlaybackTelemetryStore
     + NetworkPriorStore
+    + FragmentIndexStore
+    + RenditionPlanStore
+    + CoordinationStore
+    + FencedPublicationStore
+    + MediaSessionStore
     + Send
     + Sync
     + 'static
@@ -1251,21 +2199,362 @@ pub trait Store:
 
 impl<T> Store for T where
     T: SettingsStore
+        + MetricsStore
         + UserStore
         + ApiKeyStore
         + LibraryStore
         + MediaStore
         + WatchStore
+        + ReadingStore
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore
+        + SharedCacheStore
+        + PretranscodeJobStore
         + OfflinePackageStore
         + PlaybackTelemetryStore
         + NetworkPriorStore
+        + FragmentIndexStore
+        + RenditionPlanStore
+        + RenditionPlanStore
+        + CoordinationStore
+        + FencedPublicationStore
+        + MediaSessionStore
         + Send
         + Sync
         + 'static
 {
+}
+
+/// The only application-facing boundary for catalogue consistency choices.
+///
+/// Ordinary [`Store`] methods remain Authority. This wrapper may run one
+/// explicitly eligible Hiqlite catalogue operation locally, but only while a
+/// fresh quorum watermark, matching local Raft generation, negotiated read
+/// protocol, and configured apply-lag budget all remain valid. It revalidates
+/// after the complete operation and discards the result before falling back to
+/// Authority when the proof changes in flight.
+#[derive(Clone)]
+pub struct CatalogueReader {
+    authority: Arc<dyn Store>,
+    #[cfg(feature = "hiqlite-store")]
+    bounded: Option<BoundedCatalogueReader>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone)]
+struct BoundedCatalogueReader {
+    store: Arc<HiqliteAuthStore>,
+    metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+    enabled: bool,
+    max_apply_lag_entries: u64,
+    #[cfg(feature = "cluster-read-cost-validation")]
+    revoke_after_next_local: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CatalogueReader {
+    /// Preserve the existing Authority behavior for SQLite, recovery boots,
+    /// tests, and callers that have not opted into bounded replica reads.
+    #[must_use]
+    pub fn authority(store: Arc<dyn Store>) -> Self {
+        Self {
+            authority: store,
+            #[cfg(feature = "hiqlite-store")]
+            bounded: None,
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        enabled: bool,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self {
+            authority,
+            bounded: Some(BoundedCatalogueReader {
+                store,
+                metrics,
+                enabled,
+                max_apply_lag_entries,
+                #[cfg(feature = "cluster-read-cost-validation")]
+                revoke_after_next_local: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+        }
+    }
+
+    /// Construct the production bounded reader for real seeded-store
+    /// contracts outside this module.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn validation_replicated(
+        authority: Arc<dyn Store>,
+        store: Arc<HiqliteAuthStore>,
+        metrics: crate::cluster::migration::status::PassiveRaftMetrics,
+        max_apply_lag_entries: u64,
+    ) -> Self {
+        Self::replicated(authority, store, metrics, true, max_apply_lag_entries)
+    }
+
+    /// Revoke the proof after exactly the next local query and before its
+    /// post-query validation, forcing result discard and Authority fallback.
+    #[cfg(all(feature = "hiqlite-store", feature = "cluster-read-cost-validation"))]
+    #[doc(hidden)]
+    pub fn validation_revoke_after_next_local(&self) {
+        if let Some(bounded) = &self.bounded {
+            bounded
+                .revoke_after_next_local
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn bounded<T, F, Fut>(&self, local_read: F) -> Option<T>
+    where
+        F: FnOnce(Arc<HiqliteAuthStore>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StoreError>>,
+    {
+        let bounded = self.bounded.as_ref()?;
+        if !bounded.enabled {
+            return None;
+        }
+        let store = Arc::clone(&bounded.store);
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let revoke_after_local = Arc::clone(&bounded.revoke_after_next_local);
+        let metrics = bounded.metrics.clone();
+        #[cfg(feature = "cluster-read-cost-validation")]
+        let post_query_metrics = metrics.clone();
+        // A bounded read is an optimization, never a new application-visible
+        // failure mode. Proof loss is represented by `None`; treat a local
+        // SQL/row-mapping failure the same way and retry the existing Authority
+        // path below. The Authority result remains the caller's result.
+        metrics
+            .run_bounded_replica(bounded.max_apply_lag_entries, move || async move {
+                let result = local_read(store).await;
+                #[cfg(feature = "cluster-read-cost-validation")]
+                if revoke_after_local.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    post_query_metrics.validation_revoke_bounded_proof();
+                }
+                result
+            })
+            .await?
+            .ok()
+    }
+
+    pub async fn get_library(&self, id: i64) -> Result<Option<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_library(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_library(id).await
+    }
+
+    pub async fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_list_libraries().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.list_libraries().await
+    }
+
+    pub async fn get_item(&self, id: i64) -> Result<Option<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item(id).await
+    }
+
+    pub async fn get_item_children(&self, parent_id: i64) -> Result<Vec<Item>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_item_children(parent_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_item_children(parent_id).await
+    }
+
+    pub async fn list_top_items_in_genre(
+        &self,
+        library_id: i64,
+        sort: ItemSort,
+        offset: i64,
+        limit: i64,
+        genre: Option<&str>,
+    ) -> Result<ItemPage, StoreError> {
+        // Both the existing Authority implementation and this local variant
+        // read the page and count in separate statements. The bounded permit
+        // covers that whole operation but deliberately does not promise a
+        // stronger cross-statement SQLite snapshot than Authority did.
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let genre = genre.map(str::to_owned);
+            if let Some(result) = self
+                .bounded(move |store| async move {
+                    store
+                        .local_list_top_items_in_genre(
+                            library_id,
+                            sort,
+                            offset,
+                            limit,
+                            genre.as_deref(),
+                        )
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority
+            .list_top_items_in_genre(library_id, sort, offset, limit, genre)
+            .await
+    }
+
+    pub async fn home_preview_pages(
+        &self,
+        limit_per_library: i64,
+    ) -> Result<Vec<HomePreviewPage>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_home_preview_pages(limit_per_library).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.home_preview_pages(limit_per_library).await
+    }
+
+    pub async fn recently_added(
+        &self,
+        library_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(
+                move |store| async move { store.local_recently_added(library_id, limit).await },
+            )
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.recently_added(library_id, limit).await
+    }
+
+    pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file(id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file(id).await
+    }
+
+    pub async fn files_for_item(&self, item_id: i64) -> Result<Vec<MediaFile>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_files_for_item(item_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.files_for_item(item_id).await
+    }
+
+    pub async fn child_counts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_child_counts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.child_counts(ids).await
+    }
+
+    pub async fn item_max_heights(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_max_heights(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_max_heights(ids).await
+    }
+
+    pub async fn item_media_facts(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, MediaFacts>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let ids = ids.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move { store.local_item_media_facts(&ids).await })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.item_media_facts(ids).await
+    }
+
+    pub async fn media_shape(&self) -> Result<MediaShape, StoreError> {
+        // Preserve the existing Authority method's multi-statement aggregate
+        // semantics. The permit prevents an expired/stale replica result; it
+        // is not a new transaction spanning these independent aggregates.
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(|store| async move { store.local_media_shape().await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.media_shape().await
+    }
+
+    pub async fn get_file_probe_json(&self, file_id: i64) -> Result<Option<String>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(result) = self
+            .bounded(move |store| async move { store.local_get_file_probe_json(file_id).await })
+            .await
+        {
+            return Ok(result);
+        }
+        self.authority.get_file_probe_json(file_id).await
+    }
 }
 
 // Compile-time proof that the composed trait remains object-safe and that the

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2460a132"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained separate-process cluster check initializes its explicit Ring provider before dispatching every controller and child mode. The authoritative replicated-storage job reuses one target across test and run profiles, so reverting this initialization permits Rustls feature unification to leave both providers enabled and makes the controller panic before the serving partition proof."

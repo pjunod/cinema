@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["156acb24"]
+points = ["cluster.auth", "cluster.page-reads"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained Store contracts exercise fixed-label local-read, authority-read, and write timers across SQLite and a real three-voter cluster, including ok, error, caller-cancelled, nested transaction failure, and saturating counter behavior without instrumenting the health probe or metrics scrape itself."

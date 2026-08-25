@@ -49,6 +49,33 @@ runbook. Until that work lands, a post-activation rollback means roll forward
 with an M2-capable binary against the retained active target. The commands
 below are only for the pre-activation SQLite case.
 
+### Upgrading an activated v5, v6, v7, or v8 cluster to v9
+
+Replicated schema v6 added ebook reading state. Schema v7 adds nullable
+`author`, `book_work_id`, `book_edition_id`, and `book_metadata_source` item
+columns plus the partial work-id index. Schema v8 adds the monotone
+`job_leases` coordination table. Schema v9 adds the distributed whole-title
+pre-transcode queue and the nullable authoritative manifest digest on cache
+locations; it does not change the peer protocol. Stop
+application traffic and update every voter as one maintenance operation. The
+first v9 daemon that reaches quorum accepts any activation marker from v5 to
+the current v9 and applies every missing step in order. Each step commits its
+table/columns/index and compatibility row in one Raft transaction before the
+daemon starts producers or binds HTTP. A v5 source commits all four additive
+steps through v9; v6, v7, and v8 sources start at their corresponding next
+step. Each voter atomically rewrites its local `activation.json` to v9 only
+after the replicated transactions are visible.
+
+A death before a step leaves the preceding schema authoritative. A death after
+the replicated write but before the local marker rewrite replays only the
+marker write on the next boot. Do not restart a v5, v6, v7, or v8 binary after v9
+commits: its strict compatibility check correctly refuses the newer schema. If
+a node fails during the maintenance window, leave the v9 quorum authoritative
+and roll that node forward with the same v9-or-newer binary. `reset-password`,
+`refresh-metadata`, and other maintenance clients do not own migration and
+will refuse until the running daemon has completed it. Replicated v4 has no
+supported direct path to v9 and remains refused.
+
 Every Ansible redeploy stops the Plurx Compose stack long enough to copy the
 closed SQLite database. The three newest copies stay on each node under
 `<PLURX_DATA>/backups/`, named
@@ -255,9 +282,22 @@ read when you open the tab, not on every Settings visit.
 | `Reconfiguration in progress — not redundant` | Two voters. Both machines are required for every write and every membership change, so this survives no failure — read the same warning in the table above. Add a third node. |
 | `Redundant — N voters` | Three or more voters. The panel names the majority required and how many nodes may be down. |
 
-The node table carries only what `GET /api/v1/cluster/nodes` exposes: node id,
-Raft id, voter/learner role, reachability, and last-seen. Addresses, media
-paths, and token material are not in that payload and are not shown.
+The node table leads with each machine's short OS hostname, labels the current
+leader beside it, then shows the advertised host and stable node id underneath.
+The advertised host may be a DNS name or IP; loopback is written `localhost`
+instead of `127.0.0.1`, and listener ports stay private. A native daemon reads
+the hostname from the OS. A container should set `PLURX_NODE_HOSTNAME` to the
+Docker host's `hostname -s`, because its own OS hostname is normally a generated
+container id. `GET /api/v1/cluster/nodes` also exposes the Raft id,
+voter/learner role, heartbeat freshness, and last-seen. A fresh heartbeat is a
+recent committed application heartbeat, not a direct socket probe; read the
+nested replication status for leader and apply-lag health. Media paths and
+token material are not in that payload and are not shown.
+
+The **Cluster log** under the roster holds membership, Hiqlite, and Raft events
+in its own 2,000-line process-local ring. Those events do not consume the
+general Settings → System log ring; cluster warnings and errors still reach
+stdout/journald so a startup failure remains visible without the web UI.
 
 **Add a node** mints one token through `POST /api/v1/cluster/join-tokens` and
 displays it exactly once, with a lifetime you pick between 10 minutes and 1
@@ -276,19 +316,357 @@ server as described below. The confirmation states what the terminal path
 states below — the removed machine's data directory is tombstoned, and
 rejoining means discarding it.
 
+### Inspecting a stopped voter without changing it
+
+Use `plurx-cluster-check inspect-wal` when a voter reports a missing log index,
+fails immediately after snapshot installation, or will not open its cluster
+listener. The production image includes this binary so the host needs Docker,
+not a Rust toolchain. It reads and bounds-checks WAL files without mapping them
+writable, opens standalone SQLite files immutable, contacts no peers, emits no
+application rows or raw Raft payloads, and refuses a WAL directory whose lock
+is live. If a crashed state machine still has a SQLite `-wal` sidecar, the tool
+copies only that database pair to private temporary space so SQLite can include
+the committed sidecar without writing to the evidence directory.
+
+Stop and preserve the voter before inspecting it. A clean report does not make
+the copy disposable: it proves only that physical Raft boundaries decode and
+line up, not that every application row is semantically correct.
+
+```bash
+cd /path/to/plurx/deploy
+
+# Resolve the exact image and host data path before stopping the voter.
+image="$(docker inspect plurxd --format '{{.Config.Image}}')"
+data_dir="$(docker inspect plurxd --format \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/plurx"}}{{.Source}}{{end}}{{end}}')"
+test -n "$image" && test -n "$data_dir" && test "${data_dir#/}" != "$data_dir"
+
+# Stop one voter only, then make an evidence copy before changing membership or files.
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+docker compose stop plurxd
+cp -a "$data_dir" "$data_dir.forensic-$stamp"
+
+# Run the inspector from the same image, with the evidence mounted read-only.
+docker run --rm --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=2g \
+  -v "$data_dir.forensic-$stamp:/forensic:ro" \
+  --entrypoint plurx-cluster-check "$image" \
+  inspect-wal --hiqlite-dir /forensic/hiqlite --output - \
+  > "wal-inspection-$stamp.json"
+jq . "wal-inspection-$stamp.json"
+```
+
+The private `/tmp` mount is used only when a crashed SQLite `-wal` sidecar is
+present. Size it above the copied `plurx.db` plus sidecar on unusually large
+catalogues; the source evidence remains mounted read-only.
+
+For a source checkout, the equivalent command is:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- \
+  inspect-wal --hiqlite-dir /path/to/forensic/hiqlite \
+  --output target/validation/wal-inspection.json
+```
+
+**How to read it:** the useful comparison is purge boundary → snapshot/local
+applied boundary → first retained WAL entry. A healthy compacted state normally
+has snapshot and local applied equal to `last_purged_log_id`, followed by a WAL
+entry at the next index.
+
+| Verdict or observation | Meaning | Next action |
+|---|---|---|
+| `clean` | Metadata CRC, retained WAL sequence, snapshot, and local applied boundaries agree. | Preserve the copy and investigate process-memory or transport failures; do not call the disk corrupt. |
+| `wal_number_one_reused_above_initial_range` | Snapshot installation purged the old generation and reused WAL number 1 at a high index. This is an observation, not damage. | Current builds reject reader memos from the purged generation. On an older build, this condition plus `LogIndexNotFound` identifies the fixed stale-memo defect. |
+| `metadata_corrupt` or `wal_missing` | Required physical state is absent or its metadata envelope cannot be trusted. | Keep the voter stopped. Recover by rejoining it from a healthy quorum; do not fabricate metadata by hand. |
+| `wal_file_gap`, `retained_gap`, `snapshot_wal_gap` | At least one log index needed between the snapshot and retained WAL is physically unaccounted for. | Keep the evidence and rejoin from a healthy quorum. |
+| `wal_header_payload_mismatch` | A WAL header's claimed boundary differs from its first or last decodable record. | Treat the local WAL as damaged and rejoin; keep the copy for a defect report. |
+| `metadata_behind_wal`, `metadata_ahead_of_wal`, `missing_purge_boundary` | Purge metadata and retained WAL disagree. | Do not edit `meta.hql`; rejoin from a healthy quorum and attach the JSON report. |
+| `snapshot_behind_purge_boundary` or `local_state_machine_behind_purge_boundary` | The state machine cannot account for entries already declared purged. | Keep the node stopped and rejoin it. |
+
+An unreadable header, impossible record length, CRC failure, non-regular input,
+or SQLite recovery failure makes the command exit nonzero and name the failed
+boundary on stderr rather than emitting a reassuring partial report. Keep the
+node stopped and preserve the evidence in that case.
+
+The tool does not remove a voter, mint a join token, delete a data directory,
+or start recovery automatically. Those are separate membership decisions: an
+inspector should never turn ambiguous evidence into an irreversible action.
+
 ### Joining and removing voters
 
 The rest of this section is the terminal path. It is the same three endpoints
 the Cluster tab drives, and is the right path for a scripted or headless setup.
 
-Use one, three, or more voters. Two voters are useful only while adding or
-removing a node: they require both processes for every write and survive no
-failure.
+Use one voter for a deliberately non-HA install and three voters for ordinary
+HA. Two voters are useful only while adding or removing a node: they require
+both processes for every write and survive no failure. Four voters still
+tolerate only one failure, but every write now needs three acknowledgements
+instead of two; it adds replica work without adding failure tolerance. Use five
+only when surviving two simultaneous voter losses is an explicit requirement
+and its measured write cost is acceptable. Removing a fourth voter is always
+an operator decision through the safe membership API, never an automated
+"performance" action.
+
+`make cluster-check` now creates
+`target/validation/cluster-topology-semantic.json`. It starts fresh independent
+three- and four-process clusters, sends the same 64 quorum-acknowledged setting
+writes to each elected leader, and records raw controller-to-node acknowledged
+write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
+physical Raft-entry count, the stable leader term, and every voter's applied
+index. Every voter locally reads back the deterministic 64-row/4,096-byte
+payload and must match the expected corpus digest. The round trip includes
+harness IPC and scheduling; it is not an internal Raft commit timer. This is
+deterministic semantic CI evidence: resource fields are explicitly null and
+the artifact cannot support a hardware or absolute-latency claim. A
+counterbalanced semantic run can be requested with
+`cargo run -p plurx-cluster-check -- topology <output.json> 4,3`; P0c's named
+runner wraps the same schema with isolated load generation and real per-node
+resource counters. The portable Draft 2020-12 schema enforces shape, topology,
+and evidence-scope resource fields; `validate_topology_artifact` remains the
+canonical check for cross-field hashes, recomputed percentiles, timestamps,
+applied lag, and leader/term semantics that JSON Schema cannot express.
+
+### Measuring page-route latency
+
+Use the page-latency runner against an already-running deployment. It does not
+start, stop, join, or reconfigure voters. First create an authenticated
+Playwright storage-state file for an administrator and make it owner-only;
+then record a run with safe, stable labels for the runner and target:
+
+```bash
+chmod 600 target/validation/page-storage-state.json
+scripts/cluster-page-latency \
+  --base-url https://plurx.example.test \
+  --storage-state target/validation/page-storage-state.json \
+  --output target/validation/cluster-page-latency.json \
+  --build-sha "$DEPLOYED_BUILD_SHA" \
+  --scenario healthy \
+  --target-role follower \
+  --voter-count 3 \
+  --hardware-label m6-pro \
+  --storage-label nvme \
+  --network-label lan-ethernet
+```
+
+The storage-state file must be a non-symlinked regular file with mode `0600`.
+The runner parses it through a no-follow file descriptor and passes the parsed
+object to Playwright, so the credential path is not reopened after validation;
+the state is never copied into the result, and there is deliberately no
+bearer-token argument. The output contains the full expected Git SHA, the
+server's matching build stamp, a bounded scenario, safe runner labels, raw
+phase times, normalized API route templates, statuses, and bounded failure
+codes. It rejects cookies, authorization fields, token-shaped values, URLs,
+IP addresses, UUIDs, media paths, and dynamic error text. A server reporting
+`unknown`, a dirty or fabricated stamp, a release tag that does not resolve to
+the supplied SHA in the runner checkout, or a different commit stops the run.
+The runner also requires the repository's Playwright `1.62.0` pin. It brackets
+every sample with checks for the target's actual role, voter count, membership,
+reachability scenario, Raft term, and leader-change count, and rechecks the
+build at the end without retaining node identity.
+
+For each route, `shell_us`, `content_us`, and `settled_us` measure from the nav
+click to the route's generation-fenced DOM milestones. The summary recomputes
+type-7 p50 and p95 values and the maximum from successful raw samples; failures
+are counted separately and never receive invented times. Compare named runs
+only when their role, voter count, hardware, storage, network path, and fault
+condition match. GitHub CI checks the schema and state machine, but its shared
+runner timing is not an absolute wall-clock performance gate. Choose `healthy`,
+`voter_unavailable`, `delayed_home_optional`, or `delayed_system_optional` for
+`--scenario`; never combine their artifacts. The result is written even when
+a named-runner budget fails: exit `1` means a p95, failure-count, or 30-sample
+requirement failed, while exit `2` means the run or artifact itself was
+invalid. Healthy and voter-unavailable runs enforce the reviewed first-content
+budgets plus Home settled. Each delayed cohort enforces first content and every
+sample must prove both a 250 ms response time for its named optional endpoint
+and a 250 ms settled-minus-content gap before its settled bound is relaxed.
+
+### Replaceable cluster writes
+
+Replicated cache activity is deliberately less chatty than cache ownership.
+Repeated unfenced claim or use touches for one recipe and node within one
+serving process share one successful quorum write for five seconds. Active
+producer claim renewals use the fenced publication path: they remain
+synchronous because the same transaction advances the producer lease. The
+durable activity timestamp can therefore trail the newest in-process unfenced
+activity by less than five seconds; no cache publication path moves it backward.
+Completion, integrity invalidation, forgetting a cache location, and every
+offline/job ownership transition remain synchronous quorum mutations and do
+not use this gate.
+
+Manifest integrity scrubbing is separately bounded rather than time-coalesced:
+up to 128 location observations and their cursors share one quorum transaction.
+Its observation timestamp is monotone even if two completed batches arrive out
+of order; the cursor stays coupled to the batch that performed the checks.
+
+Membership keeps its existing one-heartbeat-per-node, ten-second cadence and
+thirty-second reachable window. Only concurrent or duplicate submissions
+inside 250 ms are collapsed. A caller waits for the first durable result before
+suppression is reported, and a failed first write reserves no window, allowing
+the next waiter to retry. A node is reachable through exactly 30 seconds after
+its last committed heartbeat and leaves rotation immediately after that
+boundary.
+
+There is no configuration or schema migration for these coalescers. Rolling
+downgrade is safe: an older process resumes the prior higher write rate. If
+diagnosing cache age, compare timestamps with the five-second durability
+boundary rather than treating every request as a promised database update.
+
+### Run the named four-machine topology campaign
+
+The P0c runner uses four private Linux hosts for voters and a fifth, external
+controller for load generation. It never joins, removes, pauses, or reuses a
+live plurx voter. Each measured topology gets fresh containers, ports in the
+IANA dynamic/private range (`49152--65535`), and a new
+`/var/tmp/plurx-cluster-named.*` data root on local durable storage. A
+controller-generated 256-bit nonce makes every root a single, predeclared
+basename. The same nonce is part of every container name, so two campaigns can
+never claim the same cleanup target. Successful and failed runs remove only
+the exact container names and nonce paths they recorded before remote creation.
+Each newly created root also receives a sibling marker derived from the
+separate, private output-owner capability; cleanup refuses a colliding root
+without that marker instead of treating the random basename as proof of
+ownership. The marker remains until the root itself is gone, so interrupted
+cleanup is safely retryable. Voter containers carry the same capability in a
+private cleanup label, and cleanup refuses to stop a colliding container unless
+its raw Docker inspection matches.
+
+Build from the isolated clone and keep private hostnames and addresses in an
+ignored config under `target/`:
+
+```bash
+cp benchmarks/cluster-named-runner.example.json \
+  target/cluster-named-runner.json
+$EDITOR target/cluster-named-runner.json
+
+sha=$(git rev-parse HEAD)
+export PLURX_NAMED_HOSTS='private-ssh-alias-1 private-ssh-alias-2 private-ssh-alias-3 private-ssh-alias-4'
+scripts/cluster-named-runner image "$sha"
+scripts/cluster-named-runner collect \
+  target/cluster-named-runner.json \
+  target/cluster-topology-named
+```
+
+The image command refuses a dirty or untracked clone and sends `git archive` of
+the exact full source SHA to Docker, so ignored credentials and controller-only
+files cannot enter the build context. It builds for the common native
+architecture reported by the four voters and requires that SHA as the image
+tag. Both Dockerfile stages are pinned by manifest digest. The build embeds the
+full source SHA in the runner binary and the runtime image's OCI revision
+label; collection executes that binary by immutable image ID and verifies both
+identities locally and on every voter. Collection independently requires a
+clean controller tree with the same HEAD at its opening and closing
+boundaries. It rechecks the image digest, native Linux architecture, four
+distinct salted machine identities, and an external controller identity before
+and after measurement. It also resamples and binds those fingerprints to each
+raw run. Every measured and cleanup container executes the verified digest
+with pulls disabled, never the mutable tag.
+
+Runtime SSH names, private addresses, and raw machine ids are transport-only;
+committed artifacts use bounded, opaque classification labels and build-salted
+fingerprints. The runner rejects public labels that contain transports, URLs,
+IP addresses, credential/identity markers, or token-shaped values, and accepts
+only the local `plurx-cluster-check:<full-sha>` image name. Before collection,
+confirm the configured ports are free, the controller and voters have no
+concurrent build, scan, backup, or benchmark work, and every `/var/tmp` root is
+the declared local durable device rather than tmpfs or a network mount.
+
+Collection alternates `3→4` and `4→3`, creates independent clusters, and keeps
+every raw `pair-NN.json`. After at least three pairs it computes the paired
+four-voter ÷ three-voter ratios for write p99, CPU seconds, storage-write bytes,
+and network-transmit bytes. Resource counters are captured concurrently on all
+voters at the stable pre-write barrier and again after convergence; the
+artifact retains monotone workload-window deltas, while Linux `VmHWM` is reset
+at the opening barrier. It may stop only when all two-sided 95% Student-t
+intervals have at most 5% multiplicative half-width, or after seven pairs with
+an `inconclusive` result. `campaign.json` records the medians, intervals,
+stopping verdict, isolated load-generator declaration, and reviewed budgets.
+Every raw run repeats the same isolation declaration and records the exact
+controller and voter fingerprint set used for that topology. Validate retained
+bytes and every cross-file hash with:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- \
+  topology-campaign-validate path/to/campaign.json
+```
+
+The output directory must not exist. `collect` generates a per-invocation
+256-bit owner and must win one atomic directory claim before it arms its cleanup
+trap, reserves ports, or creates remote state. A losing controller never owns a
+manifest and therefore cannot clean the winner. Pair files and `campaign.json`
+are published with same-directory, no-replace hard links, so a competing writer
+cannot overwrite earlier evidence. During an active topology,
+`.active-cleanup.json` is bound to that owner and atomically created with mode
+`0600` because it contains private transport details. The helper traps
+interruption and replays only its manifest through time-bounded SSH cleanup. It
+opens both the manifest and owner marker without following links, requires
+regular mode-`0600` files, retains their descriptors during remote cleanup, and
+rechecks their device/inode identities before deleting the manifest. It does
+not automatically clean a stale manifest from another invocation. If the
+controller itself is killed, recover the retained manifest explicitly before
+reusing the runner hosts. Preserve that directory as evidence and choose a
+fresh output directory for the next campaign:
+
+```bash
+scripts/cluster-named-runner cleanup \
+  target/cluster-topology-named/.active-cleanup.json
+```
+
+**Keep consensus storage separate from heavy local I/O.** Until dedicated path
+settings ship, `storage.data_dir` remains the compatibility root. On a fresh
+install, child mounts can isolate their workloads:
+
+| Path | Durability | Placement |
+|---|---|---|
+| `<data_dir>/hiqlite` plus the data-root authority set described below | authoritative voter state and restart/rollback identity | durable local SSD/NVMe; never tmpfs, NFS, or SMB |
+| `<data_dir>/cache` and `<data_dir>/artwork` | persistent node-local bytes; cache content is regenerable except completed offline packages are user-visible | a stable local persistent mount with capacity monitoring |
+| `<data_dir>/transcode` | disposable live-session scratch | fast local scratch or sized tmpfs; safe to empty only while the daemon is stopped |
+
+Create and mount every child before the first `plurxd` start; an empty fallback
+directory on the root filesystem is not a successful installation. The
+data-root authority set is the entire `hiqlite/` tree (including its
+`activation.json`), `node.id`, `membership.json`, `secret_raft`, `secret_api`,
+`hiqlite-activated.json`, `hiqlite-readdress.json` when present, and the
+`migration/` directory when present. Preserve the retained `plurx.db` and
+`backups/` with that set for rollback and recovery; do not confuse the root
+`hiqlite-activated.json` lost-target fence with `hiqlite/activation.json`.
+Keep every secret and marker owner-only while copying. Keep the credential key
+with the same durable backup set. If
+`cluster.credential_key_file`/`PLURX_CREDENTIAL_KEY_FILE` overrides the default,
+that exact owner-only file is authoritative and belongs in the same backup and
+move procedure. Each voter owns its own Hiqlite storage: sharing that directory
+between machines defeats Raft's independent failure model.
+
+Do not mount over a populated child directory: that merely hides its data. To
+move an existing cluster, work one non-leader voter at a time. Eject it from
+the load balancer, stop `plurxd`, copy the child contents to the intended device
+while preserving ownership, modes, timestamps, and links, mount the device,
+and verify the copied tree plus free space before restart. Restart and require
+readiness, membership catch-up, and the expected cache/artwork inventory before
+moving the next voter. On failure, stop the daemon, unmount the new device, and
+restart from the untouched original directory; delete neither copy until the
+cluster has completed a soak period. If the authoritative device changes,
+copy the whole stopped data root first and mount `cache/`, `artwork/`, and
+`transcode/` separately only after the authority-set copy is verified. This
+include-first procedure automatically preserves new control files introduced
+by a later release. Never move two voters concurrently.
+
+**Synchronize clocks before cluster work.** All voters and the external load
+generator must run NTP/chrony (or an equivalent disciplined source), and
+monitor offset continuously. Membership reachability and artwork repair proofs
+currently compare Unix timestamps from different nodes. Treat an absolute
+offset above 250 ms, loss of synchronization, or an offset outside the bound
+recorded in the benchmark artifact as a go/no-go failure for membership changes,
+failure drills, or performance runs. Bounded-replica freshness uses a local
+monotonic deadline, but clock synchronization remains an operational
+prerequisite for the existing cross-node protocols and comparable evidence.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
-`join_url` when the public API is reached through a different hostname, port,
-or HTTPS reverse proxy; this is the URL embedded in a token for redemption.
+`join_url` when the public API used for cluster admission is reached through a
+different hostname, port, or HTTPS reverse proxy; this is the bootstrap URL
+embedded in a token for redemption. Set `artwork_url` to the current node's
+HTTP origin; membership retains that origin as the node's artwork and
+activity-snapshot endpoint, but never returns it from membership/status APIs.
 `advertise_host` is also the explicit opt-in that opens a never-joined voter's
 internal listeners beyond loopback. Leaving it empty preserves the old
 single-node network surface even though the configured bind defaults are
@@ -311,6 +689,7 @@ raft_bind = "0.0.0.0:32401"
 api_bind = "0.0.0.0:32402"
 advertise_host = "plurx-a.lan"
 join_url = "http://plurx-a.lan:32400"
+artwork_url = "http://plurx-a.lan:32400"
 ```
 
 Raft and the internal cluster API use automatic TLS. Startup refuses a public
@@ -319,6 +698,18 @@ plain-HTTP/reverse-proxy boundary in [SECURITY.md](SECURITY.md). The joining
 node opens the complete token locally and sends only its SHA-256 digest over
 that public URL; the Raft/API secrets and credential-wrapping key do not cross
 the redemption or finalization request.
+
+Cluster activity fan-out calls `/_internal/v1/activity-snapshot` at those
+explicit origins. The request carries a 30-second signature from the sender's
+durable per-node key and names the intended target, not a household
+user/admin/API-key bearer. Redirects are refused, responses are capped at an
+exact 256 KiB serialized budget, wrong-node answers are invalid, and at most
+64 peer calls share one concurrent two-second deadline. SQLite and
+never-joined one-node installs have no peers, make no calls, and add no
+listener. `join_url` may retain a reverse-proxy path prefix such as
+`https://cluster.example/plurx`; `artwork_url` is deliberately an origin only.
+The existing artwork-recovery HMAC remains unchanged for mixed-version v4
+rollouts; the per-node signature applies only to the new activity route.
 
 **Mint one token into a protected file.** The default lifetime is 10 minutes;
 the API clamps requests to 60–3,600 seconds. It returns the token once, so do
@@ -366,14 +757,236 @@ join_token_file = "/secure/plurx.join"
 
 **Read the roster.** `availability` is `single_node`,
 `degraded_reconfiguration`, or `high_availability`. Node rows deliberately
-contain only node id · Raft id · role · reachable · last-seen; addresses and
-token material never enter this payload. `last_seen_at` is Unix milliseconds;
-read the nested `replication` object for lag using the meanings above.
+contain only node id · short hostname · advertised host without its listener
+port · Raft id · role · leadership · heartbeat freshness · last-seen; internal Raft
+and API addresses, media paths, and token material never enter this payload.
+`last_seen_at` is Unix milliseconds; read the nested `replication` object for
+lag using the meanings above.
 
 ```bash
 curl -fsS "$PLURX/api/v1/cluster/nodes" \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | jq .
 ```
+
+**Update voters one at a time.** A three-voter cluster has a majority of two,
+so an update may stop exactly one voter. Never batch two Cinema restarts and
+never call the leave endpoint as an update hook: leave is permanent membership
+removal, while an update must reopen the same voter and the same data
+directory. Wait for `GET /readyz` to return 200 before advancing to the next
+machine. `/healthz` is insufficient here; it proves that HTTP is alive, not
+that the voter can use replicated storage or sees a leader. The private Ansible
+deployment uses `serial: 1`, fails the whole play on the first node error, and
+now gates each Cinema host on `/readyz`.
+
+**Enable bounded catalogue reads only after the rolling update settles.** Keep
+`cluster.bounded_replica_reads = false` while any voter runs an older build.
+After every voter is ready on the same bounded-read protocol, set the following
+identically on every voter and restart them one at a time again:
+
+```toml
+[cluster]
+bounded_replica_reads = true
+bounded_replica_max_lag_entries = 64
+```
+
+The optimization is limited to library browse, item/file lookup,
+recently-added, genre, Home previews, and technical-aggregate calls in the
+native and Plex-compatible read handlers. Authentication, watch state,
+settings, membership, leases, jobs, cache/offline ownership, mutations, and
+every write remain Authority operations. Search remains its existing
+node-local derived-index operation. Write-followed-by-read handlers continue to
+use Authority.
+
+A local result is returned only when a one-second quorum watermark, local
+term/leader/epoch, negotiated protocol, and the configured `0..10000` entry
+lag budget remain valid before and after the complete operation. Missing or
+changing proof and local SQL/mapping errors discard the local result and retry
+Authority. The existing multi-statement genre/count and media-shape operations
+retain their Authority semantics; the permit is not a new cross-statement
+snapshot guarantee.
+
+Set `cluster.bounded_replica_reads = false` on all voters, one at a time, for an
+immediate rollback that changes no schema or membership. `/readyz` removes a
+voter whose quorum proof is absent or whose local apply lag is nonzero; the
+read helper also falls back independently, so bypassing the load balancer does
+not turn an expired proof into a stale response.
+
+**Use readiness conservatively at the reverse proxy.** `/readyz` is an active
+replicated-store proof, not a free process counter: it checks cluster health and
+performs an authority `SELECT 1`. Start with a 10-second interval, a 2-second
+timeout, and three consecutive failures before ejecting a backend. Use
+`/healthz` for higher-frequency process supervision. Route new requests only to
+ready nodes, drain an ejected backend's existing connections, and do not
+automatically replay POST, PUT, PATCH, or DELETE requests after a backend
+failure.
+
+Keep HLS playlists, segments, and authenticated image traffic sticky to one
+ready backend for cache and session locality. A cookie or source-hash policy is
+fine; stickiness is an optimization, not an availability dependency. If that
+backend becomes unready, the next request may move to a survivor and the
+client-visible recovery contract still applies.
+
+### Cluster ingress, drain, and recovery
+
+Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
+live in [`deploy/cluster-routing/`](../deploy/cluster-routing/). All three use
+`/readyz`, not `/healthz`, for new traffic. Configure each voter's
+`cluster.artwork_url` as its node-specific public base even when
+`cluster.join_url` names the shared VIP or proxy; `GET /api/v1/cluster/ingress`
+returns the other currently reachable node bases to signed-in native clients as
+bounded media-only failover candidates.
+
+**Upgrade note.** Before this release `cluster.artwork_url` was read only by
+other nodes, fetching artwork from each other. It is now handed to every
+signed-in household client. If a voter's value names an address only the
+cluster can reach — a container name, a private interface, a management VLAN —
+change it to that node's real public base before enabling the media pool, or
+clients will spend a failover attempt on an address they cannot resolve. It is
+never given to an unauthenticated caller: `/api/v1/server`, which clients probe
+without a credential to identify an unknown server, does not carry it.
+
+Inspect the media plane directly on each backend before and during a rollout:
+
+```bash
+curl -fsS "$PLURX_NODE/api/v1/cluster/media" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | \
+  jq '{remote_placement_ready,session_takeover_ready,local_active_sessions,nodes}'
+```
+
+For a rolling restart, remove one voter from new load-balancer traffic without
+removing it from Raft membership. Keep its existing connections draining and
+wait for `local_active_sessions` to reach zero, then restart that same node and
+data directory. Note what that counter is: **transcode and remux sessions on
+this node only.** A direct-play viewer holds no session, so a node serving
+nothing but direct play reports zero while a dozen people are watching — drain
+those by connection count at the load balancer, not by this number. Re-admit it only after `/readyz` succeeds and the media status
+shows the current protocol. Advance to the next voter only then. The permanent
+leave endpoint is not a rolling-drain command; it refuses an active media owner
+and permanently changes quorum membership.
+
+If a node dies instead of draining, P7 takeover is a separately gated recovery
+path. `session_takeover_ready` is true only when both placement and takeover
+policy are effective. Native clients retry the unchanged relative direct/HLS
+URL through advertised survivors on transport failures; this does not consume
+their codec/HDR fallback ladders. Counters and latency are exported as
+`plurx_media_session_takeovers_total{method,outcome}` and
+`plurx_media_session_takeover_seconds{method}`.
+
+Backups do not become interchangeable merely because the database is
+replicated. Preserve the data directory, node identity, and cluster secrets for
+each voter in host/storage backups so the original majority can be restored.
+The shared cache, node-local transcode scratch, and session directories are
+rebuildable accelerators and must not be treated as the authoritative backup;
+the media sources remain external inputs. Do not restore one voter's copied
+Raft state as a fresh cluster or start two restored copies with the same node
+identity. Until quorum-aware restore is shipped, disaster recovery means
+restoring enough original voters to recover the original majority.
+
+**Let artwork converge before relying on a voter for failover.** Item rows name
+poster and backdrop files through Raft, while the image bytes remain in each
+node's local artwork directory. Every voter reconciles those names in the
+background: it pulls a missing file from a reachable peer under a short-lived
+cluster proof and atomically installs it. If no peer retains the file, a
+bounded, leader-arbitrated repair recreates provider-backed artwork. Home and
+Books voters instead recreate already-published bytes—including EPUB and
+audiobook embedded covers—only when their own node can read the local media,
+without republishing the catalogue row. A
+successor waits a full monotonic lease before fencing an abandoned older Raft
+term, so host clock skew cannot create overlapping provider work. Every
+provider-origin and catalogue mutation also requires that replicated
+owner/term/generation row and the exact `provider:artwork` singleton-job lease
+inside the same database statement; a timed-out old Raft command therefore
+commits as a no-op after leadership changes, lease takeover, or a later
+same-term repair attempt. Completion and timeout both retire the exact
+generation with a later conditional Raft command.
+For a Curator book, the provider owns recovery only after its validated cover
+was successfully cached and bound to the published filename. If Curator sent
+no cover, or its fetch failed, an embedded EPUB cover remains eligible for
+node-local byte recovery while Curator's title/work facts remain authoritative.
+Re-pairing an edition that already owns provider art is stricter: the edition
+and cover advance together only after the replacement bytes are fetched and
+their publication slot is reserved; otherwise the previous coherent pair is
+retained for a later retry. Curator filenames include a content version, so a
+replicated edition change is observed as a missing new name on every voter;
+no voter can mistake nonempty bytes from the prior edition for the new cover.
+If the allowed upstream URL later returns different validated bytes, the
+fenced repair publishes that new content-addressed generation before advancing
+the replicated filename, so the old pair survives any interruption. Voters
+scan for orphan generations every six hours and remove only exact
+Plurx-managed filenames that have been unreferenced for at least 24 hours.
+Each candidate is checked consistently against replicated catalogue state
+again while holding the same per-file reservation used by fetch/publication;
+ordinary user files in the artwork directory are never sweep targets.
+Requests also use the peer path immediately, so a newly joined voter does not
+show broken cards while the first inventory pass is still running. The configured
+`cluster.artwork_url` (or its default derived from `advertise_host`) must be a
+node-specific public HTTP base other voters can reach. It deliberately does not
+inherit `cluster.join_url`: the join URL may name a shared load balancer, while
+an artwork request must reach the voter that actually owns the local file.
+
+**Recover a temporary quorum loss by restoring the original voters.** With one
+of three voters available, Plurx deliberately commits no writes or membership
+changes. Bring back any second original voter with its existing data directory,
+node identity, and cluster secrets; Raft elects a leader and service recovers
+without an operator reconfiguration. Do not delete Raft state or mint a
+replacement node while the old majority may still exist.
+
+A permanently lost majority has no supported force-reconfigure or
+backup-to-fresh-cluster procedure in this release. A minority cannot safely
+declare itself the new cluster without proving the old majority is dead; doing
+so would create split brain if those machines returned. Preserve every
+surviving data directory and secret, keep the nodes stopped, and recover the
+original majority from host/storage backups. Quorum-aware backup/restore and a
+deterministic one-node disaster-recovery drill remain the explicit M6 work in
+[CLUSTERING-PLAN.md](CLUSTERING-PLAN.md).
+
+**Gracefully remove the node you are connected to.** Settings → Cluster →
+**Leave this cluster** calls the same admin-only operation. It resolves the
+node's offline work and coordinates a safe membership change with the
+surviving quorum. A durable removal fence and a final pre-proposal sweep prevent
+new or stranded local work. For an even voter set, the current leader commits
+the joint then uniform removal directly, then drains so the new odd quorum can
+elect. For an odd voter set, it confirms a successor first. The daemon then
+drains HTTP and exits.
+Membership changes are refused before offline-work settlement, leadership
+handoff, or fencing while active nodes are on mixed versions; finish the
+rolling upgrade and retry. Replicated guards keep an older binary from deleting
+a newer removal fence if versions change during an already-started operation,
+and refuse an older coordinator's new fence write before it can submit a stale
+absolute voter set—even when that older process is still the Raft leader.
+The command-line equivalent must target one node directly (or use a sticky
+route) for both the roster read and leave POST. The body binds the destructive
+request to the backend that produced `local_node_id`, so a load balancer cannot
+move a confirmed leave to another voter:
+
+```bash
+export PLURX_NODE=http://plurx-a.lan:32400
+LOCAL_NODE_ID=$(curl -fsS "$PLURX_NODE/api/v1/cluster/nodes" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | jq -er .local_node_id)
+curl -fsS -X POST "$PLURX_NODE/api/v1/cluster/leave" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -cn --arg node_id "$LOCAL_NODE_ID" '{node_id:$node_id}')" | jq .
+```
+
+This is permanent and refuses a 2→1 change. To reuse the machine, discard the
+old Plurx data directory and join it again with a fresh token. Do not use this
+operation for a rolling update or ordinary restart.
+
+As soon as removal enters its durable pending state, Plurx invalidates every
+singleton-job lease owned by that node in the same replicated transaction.
+The removed node identity is permanently refused new scheduler leases by
+replicated database triggers, so a still-running or resumed process—including
+one on the preceding rolling-upgrade version—cannot publish background work
+after the membership change. Startup and an idempotent removal retry restore
+missing owner fences for older tombstones. A definitively rejected removal
+clears that owner fence only when no concurrent, ambiguous, or older-version
+attempt still owns the shared removal state. Otherwise the API returns
+`membership_removal_pending`, the roster labels the node **Removal pending**,
+and the fence stays authoritative. Finish upgrading every cluster node and
+retry that same removal; do not return the fenced node to service. Invalidated
+job tokens remain stale even after a clean rollback, and the node must acquire
+fresh ones.
 
 **Remove a follower from three or more voters.** Use the node id from the
 roster, not its Raft id. The request refuses the current leader and any change
@@ -395,13 +1008,15 @@ before committing rather than acting on the list it started with.
 
 **Stop the removed node once the removal returns**, or repoint its clients at a
 surviving server. Removal takes the machine out of the cluster roster; it does
-not switch the machine off, and a removed plurxd that is still running and still
-reachable can still accept a download request and record the package against
-itself. Nothing resolves those: the removal that would have failed or moved them
-has already finished. They hold their reservation against the requesting user's
-byte budget until the seven-day expiry, and a package that reaches `ready` on a
-node you later switch off will not download. This is the only offline case
-removal does not clean up for you.
+not switch the machine off. A removed-but-still-running node that keeps
+receiving download requests is refused at the write path with a legible
+`node_removed` response — the durable insert checks the `cluster_nodes.removed_at`
+tombstone and returns `NodeIsTombstone` before any admission or quota step.
+Nothing ever reaches the encoder or holds a reservation against a tombstone.
+
+This is a fence on the offline package write path only. A removed-but-running
+node keeps its other write paths open, and the operator advice below still
+applies — but the offline case removal could not clean up for you is now closed.
 
 Before it commits, the cluster asks every other node whether it can actually
 read each package's source file — not whether the path looks the same, but
@@ -470,13 +1085,19 @@ membership addresses and token-file paths are intentionally file-only:
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Human-visible server name |
+| `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
 | `PLURX_DATA_DIR` | `storage.data_dir` | `./data` | Database, artwork, transcode cache (created if missing) |
 | `PLURX_SCAN_PRUNE_PERCENT` | `storage.scan_prune_percent` | `10` | Maximum percentage of known files one complete scan may remove; `0` disables automatic removal |
 | `PLURX_CREDENTIAL_KEY_FILE` | `cluster.credential_key_file` | `<data_dir>/credentials.key` | Node-local key that encrypts the stored Trakt bearer credential. Minted mode-`0600` on first boot, and required to stay owner-only. **Back it up with the database** — plurx refuses to start if the sealed rows outlive it, or if the key present is not the one that sealed them ([SECURITY.md](SECURITY.md)) |
+| `PLURX_SHARED_CACHE_DIR` | `cluster.shared_cache_dir` | empty | Optional node-local path to a writable cache filesystem mounted on every participating voter. Requires `PLURX_SHARED_CACHE_ID`; a path alone is never trusted as proof of shared storage |
+| `PLURX_SHARED_CACHE_ID` | `cluster.shared_cache_id` | empty | Stable operator name for that shared filesystem: 1–64 ASCII letters, digits, dots, dashes, or underscores. Every voter mounting the same filesystem must use the same value |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
+| `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
 | — | `cluster.join_url` | `http://<advertise_host>:<server port>` | Public plurxd base URL a fresh node uses to redeem/finalize its one-time token. Set the HTTPS proxy URL when applicable |
+| — | `cluster.artwork_url` | `http://<advertise_host>:<server port>` | Node-specific public plurxd base peers use to recover local artwork. Set an explicit per-node URL when `join_url` names a shared proxy or load balancer |
 | — | `cluster.join_token_file` | empty | Owner-only file containing one token on a fresh joining node. Empty bootstraps or reopens; a successful join deletes it |
 | `PLURX_CONFIG` | — | — | Explicit config-file path (must exist if set) |
 | `PLURX_FFMPEG` | — | `ffmpeg` | ffmpeg binary — point at jellyfin-ffmpeg for best hwaccel |
@@ -1302,6 +1923,192 @@ one `plurxd`; two processes pointed at the same data directory have separate
 registries and are unsupported because one can delete bytes the other is
 serving.
 
+### Distributed speculative production
+
+When `cache_produce_mins` is non-zero, one cluster lease owner ranks Continue
+Watching, Next Up, and Recently Added candidates and enqueues immutable source
+generations. It does not encode them. The generation identity includes the
+requested encoder and rate-control policy plus normalized audio language,
+subtitle language, and subtitle mode. Every voter with a configured local
+cache then competes for a distinct compatible row, so three idle workers can
+prepare three titles at once without three schedulers selecting the same work.
+
+Workers advertise the capabilities the local daemon actually proved at boot.
+A row that needs an unsupported decoder, encoder family, HLS output contract,
+tone-map path, output grade, or scratch budget stays queued instead of failing
+on the wrong node. Decoder names come from this ffmpeg's boot inventory;
+scratch is current free space on the cache filesystem after a 512 MiB safety
+reserve, compared with a full-title peak-output estimate plus 64 MiB overhead.
+Dolby Vision remains on the live path because its RPU renderer requires a more
+specific proof than the queue's ordinary HDR bit. After claiming, a worker
+opens and stats the source snapshot before starting ffmpeg. A node without that
+mount yields without consuming a shared failure attempt and temporarily
+excludes that job only from its own claims, so a mounted peer remains eligible
+immediately. A claim lasts 30 seconds and renews every 10 seconds. A renewal
+response at or after the predecessor's exact expiry self-fences even if the
+backend committed it. If a worker dies, another voter may take over after
+expiry; because staging is local, that voter starts the title from zero. A
+yielded job reclaimed on the same node resumes its numbered parts. Foreground
+playback still has priority and receives the encoder lane inside the existing
+five-second admission window.
+
+The queue admits at most 4,096 active and 10,000 total rows. Each candidate
+pass removes up to 512 ready rows whose local location has been evicted and
+retains only the newest 4,096 failed/cancelled dedupe tombstones. This bounds
+Raft history while preserving recent terminal suppression; terminal rows
+discard their capability/policy and staging payloads. Capability scans
+page in groups of 128 until they find the highest compatible row; a large band
+of GPU-specific work cannot starve a software-capable title behind it.
+Worker polling measures current free space and makes one cheap claim; it does
+not run a cache walk on every empty-queue poll. Each producer-enabled node also
+rate-limits one bounded local cache sweep to every 15 minutes, even while its
+queue is empty; the normal cleanup schedule remains an independent backstop.
+Both paths recognize queue staging and fenced final-directory syntax, so
+abandoned queue bytes remain reclaimable after restart even when there are no
+cache-location rows. Rename-to-publication holds both the recipe eviction
+guard and final-directory orphan guard until fenced completion.
+
+The cache bytes remain node-local. With P5 remote placement enabled, any
+ingress may select a voter that advertises the exact verified generation and
+proxy that worker's session, so a completed title is no longer useful only
+when the client happened to reach its holder. Enablement is still explicit:
+`PUT /api/v1/settings` with
+`{"cluster_media_pool_enabled": true}` succeeds only when every committed
+voter has a fresh current-protocol snapshot, and `GET /api/v1/cluster/media`
+separates enabled, rollout-ready, and effective-ready state.
+
+P7 can replace an expired HLS owner without changing the public session URL.
+Keep this second rollout gate off until P5 placement is healthy, then enable it
+with `PUT /api/v1/settings` and
+`{"cluster_session_takeover_enabled": true}`. Enabling is refused unless remote
+placement is enabled and every committed voter publishes the current media
+protocol; disabling always succeeds. A replacement resumes behind the last
+fetched frontier with bounded overlap, advances the owner epoch, and inserts an
+HLS discontinuity before publishing new segments. Direct-play range requests
+remain stateless and continue through any healthy ingress without this worker
+replacement path.
+
+Three operator-visible consequences of enabling it. Sessions created while the
+gate is on serve a playlist with no `EXT-X-PLAYLIST-TYPE`, because a
+replacement generation cannot satisfy EVENT semantics and the shape must not
+change under a player mid-film; this is the same shape the
+`hls.typeless_sliding` experiment serves. A replacement's segment numbers jump
+— each ownership epoch owns a range a million wide, so a first failover begins
+at `seg2000000`. And sessions that were already playing when the gate was
+turned on are **not** covered: they were created serving EVENT, so a takeover
+refuses them and those viewers restart exactly as they would have before. None
+of the three indicates retention pressure or a renumbering bug.
+
+Expect recovery on the order of **fifteen to twenty seconds**, not the ten the
+plan's acceptance names. Nothing contests a session until its lease expires,
+and the media-session lease is twelve seconds with a three-second renewal
+(`LEASE_TTL_MS`, `LEASE_INTERVAL`); the contest tick and the takeover deadline
+sit on top of that. Recovery is bounded and correct at these values, just not
+fast — closing the gap is tracked in `docs/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
+
+#### Optional verified shared cache
+
+P6 adds a direct shared-cache fast path without making it a cluster
+requirement. Local cache and P5 owner routing remain complete fallbacks. Use
+the shared path only when all participating voters mount the same writable
+filesystem; never point two daemons at one ordinary node-local cache directory.
+
+Configure both node-local values on every participating voter. Paths may differ
+between hosts, but the id must describe the same underlying filesystem:
+
+```toml
+[cluster]
+shared_cache_dir = "/srv/plurx-shared"
+shared_cache_id = "media-cache-a"
+```
+
+The equivalent container variables are `PLURX_SHARED_CACHE_DIR` and
+`PLURX_SHARED_CACHE_ID`. Create and mount the directory before starting plurx,
+and give the daemon uid permission to create, rename, read, and remove entries.
+The id is combined with the durable cluster identity, so the same operator name
+in two unrelated clusters does not alias replicated cache state.
+
+Startup does not trust matching configuration. Every committed voter must pass
+an authenticated two-way canary: each node writes unpredictable bytes, a peer
+reads them and writes a response, and the origin reads that response back. Only
+then does the node classify completed portable generations as shared. A
+one-voter cluster performs the same write/read proof locally. Missing mounts,
+read-only mounts, different filesystems, identity mismatches, and unreachable
+voters leave the fast path unavailable while P5 local-holder routing continues.
+
+Portable, manifest-fenced speculative generations are copied into immutable
+shared generation directories after local publication succeeds. A nonproducer
+may then serve the verified generation directly instead of proxying through its
+producer. Every requested manifest and object is still authenticated; the
+canary proves common writable storage at admission time, not permanent byte
+integrity.
+
+Media sessions, ready offline packages, and active offline downloads hold typed
+replicated pins for the exact storage/recipe/generation identity. Session pins
+renew in the existing owner-liveness batch rather than per segment. Shared GC
+requires the exact `shared-cache-gc:<storage_id>` lease and retires the pointer
+only when no unexpired pin exists in that same transaction. Retirement first
+turns the row into a non-readable cleanup tombstone, then quarantines and
+deletes the deterministic generation path, and finally removes the tombstone.
+A crash at any boundary leaves bounded retryable state for the next lease owner.
+
+Any runtime shared-root `ENOENT`, I/O, manifest, or identity failure immediately
+marks this node's proof suspect and disables shared classification. Look for
+`shared cache proof lost; falling back to node-local holders`. The local ready
+generation remains usable when shared publication fails, and a later successful
+canary readmits the shared path. The two TOML keys are forward-compatible and
+already-running mixed-version P5 nodes ignore them. That is not a database
+downgrade guarantee: once a restarted P6 node advances SQLite to v26 or the
+replicated cluster schema to v11, a P5 binary refuses that newer schema. Roll
+forward, or restore the matching pre-P6 database snapshot with the older binary;
+do not attempt a code-only downgrade.
+
+Operational evidence is available in Settings → Activity and Logs:
+
+| Evidence | Meaning |
+|---|---|
+| `queued speculative transcode` | The singleton scheduler inserted a new immutable generation |
+| `distributed speculative transcode ready` | This node atomically published a complete local generation |
+| `pre-transcode queue job lost its fence` | Renewal failed; the child self-preempts and cannot publish |
+| `producer_candidates` telemetry | Counts enqueued, deduplicated, missing, and rejected candidates |
+| `producer_pass` telemetry | Counts completed, yielded, capacity-delayed, lease-lost, and failed work |
+
+Every distributed generation has `generation-manifest.json`. Starting a cache
+hit authenticates that bounded manifest without walking the film; each playlist
+or segment request authenticates the exact bytes or open file it returns. A
+corrupt or unlisted requested object fails closed. The fenced manifest digest
+is stored on the cache-location row and must match the manifest before a cache
+start, so a self-consistent replacement is not trusted.
+
+Scheduled cache cleanup also scrubs unrequested objects. One pass considers at
+most 128 locations. It first performs a descriptor-bound manifest-presence
+heartbeat for broad holder freshness, then deep-verifies up to 4,096 objects
+under a two-second wall-clock ceiling and a physical-read ceiling of 132 MiB
+plus two EOF-probe bytes: one 128 MiB object · one 4 MiB manifest · one probe
+for each. The per-location object cursor is durable, and a location that
+consumed deep I/O sorts behind presence-only peers on the next rotation. One
+maximum-sized object therefore cannot starve every later generation.
+
+Cursor and heartbeat updates across a pass use one backend
+transaction/consensus entry. The scrubber holds a reader guard, checks for
+same-title foreground readers between objects, and yields that title when
+playback arrives; unrelated playback does not stop integrity work for the
+rest of the cache. On corruption it retires only the exact location row;
+guarded orphan cleanup owns the later directory removal. Unsafe relative paths
+are invalidated without touching the filesystem. In `cache: swept`, `corrupt`
+counts retired generations and `scrub_bytes` is physical manifest/object data
+read during this pass. Scheduled deep scrubbing is opportunistic, not a promise
+that every object was checked within a fixed time. Requested playlists and
+segments are always authenticated before they are returned.
+
+Ready offline downloads use the same manifest contract. If their exact cache
+generation fails an integrity check, the location is retired and the package
+changes to failed with `cache_integrity`; prepare it again. A request racing a
+newer replacement may fail itself, but its stale identity cannot retire the
+new package generation. Legacy and non-queue cache entries have neither an
+authoritative digest nor a scrub cursor and remain serveable as the explicit
+legacy path.
+
 ### Offline package storage and quotas
 
 Phone downloads are prepared under `<data_dir>/cache` beside finished
@@ -1417,13 +2224,21 @@ means enrichment has no TMDB key configured — the scan itself succeeded.
 
 ## Logs
 
-Structured `tracing` logs go to stdout/journald, and the same buffer is exposed
-in Settings → Logs with a level filter (`info` / `warn` / `error` / `debug`) and
-auto-refresh. Each line is `time  level  target — message`. The targets that
-matter most: `plurxd::scan` (library passes), `plurxd::meta` (provider matches),
-`plurxd::transcode` (encoder selection + why a hardware path was rejected),
+Structured `tracing` logs are split by job. Settings → System shows the general
+2,000-line process-local ring with a level filter (`info` / `warn` / `error` /
+`debug`) and auto-refresh. Settings → Cluster has a separate ring for
+membership, Hiqlite, and Raft detail, so replication traffic cannot evict the
+playback or library line you are looking for. General events and cluster
+warnings/errors go to stdout/journald; lower-severity cluster detail stays in
+the Cluster tab. Both rings obey `PLURX_LOG` and disappear at restart.
+
+Each line is `time  level  target — message`. The general targets that matter
+most are `plurxd::scan` (library passes), `plurxd::meta` (provider matches),
+`plurxd::transcode` (encoder selection + why a hardware path was rejected), and
 `plurxd::stream` (session lifecycle). Raise verbosity for one subsystem with
-`PLURX_LOG=plurxd::transcode=debug`.
+`PLURX_LOG=plurxd::transcode=debug`; use
+`PLURX_LOG=info,openraft=debug,hiqlite=debug` when the Cluster log needs Raft
+detail.
 
 ## Health & metrics
 
@@ -1431,8 +2246,33 @@ matter most: `plurxd::scan` (library passes), `plurxd::meta` (provider matches),
 |---|---|
 | `GET /healthz` | Liveness — the process is up |
 | `GET /readyz` | Readiness — storage is reachable (use for load-balancer health) |
-| `GET /metrics` | Prometheus text: uptime, streams, library/user counts, playback TTFF/stall/suspend/cache/session counters, and bounded offline queue, quota, timing, quality, failure, and transfer metrics |
+| `GET /metrics` | Prometheus text: process, playback, storage, Raft progress, and cached cluster-membership health |
 | `GET /api/v1/system/playback-events` | Admin-only node-local playback rows; filter by unix-ms `since`, exact `event`, and capped `limit` |
+
+The image's `HEALTHCHECK` runs `plurxd healthcheck`, which probes `/readyz`.
+Docker therefore marks a process with no leader or usable replicated store
+unhealthy instead of accepting the shallower `/healthz` liveness answer. Keep
+`/healthz` for a separate process-restart signal only when your supervisor can
+also keep unready nodes out of traffic.
+
+Cluster metrics are fixed-cardinality counts; they do not publish node ids,
+hostnames, addresses, media paths, or tokens, and a scrape performs no Store or
+Hiqlite operation.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_cluster_membership_sample_valid` and `_age_seconds` | `1` with age below 30 seconds means the background membership sample is current. Treat every derived cluster count as stale when this is `0`. |
+| `plurx_cluster_nodes{role="voter",heartbeat="fresh|stale"}` | Counts committed voters by application-heartbeat freshness. A stale row says its heartbeat did not commit in 30 seconds; it does not claim a direct TCP probe failed. |
+| `plurx_cluster_quorum_required` | Majority arithmetic from the committed voter set: `floor(voters / 2) + 1`. |
+| `plurx_cluster_heartbeat_quorum_available` | `1` means heartbeat-fresh voters meet that count. Confirm `plurx_raft_leader_known` and `/readyz` before calling the node serviceable. |
+| `plurx_cluster_local_is_voter` | `0` on a replicated process means this node is not in the committed voter set; it may still be joining, removed, or stale. |
+| `plurx_cluster_removals_pending` | Nonzero means a durable removal fence still needs an operator retry or resolution. |
+| `plurx_raft_current_term`, `plurx_raft_leader_known`, `plurx_raft_is_leader` | Local Raft leadership state from the cached watch. A known leader is required but does not by itself prove this node is caught up. |
+| `plurx_raft_applied_index`, `plurx_raft_commit_index`, `plurx_raft_apply_lag_entries` | Local apply progress against the quorum-confirmed commit watermark. Healthy readiness requires zero lag. |
+
+The compact Prometheus alert shape is: membership sample valid · leader known ·
+heartbeat quorum available · apply lag zero. `/readyz` remains the final active
+serving check because the metrics are deliberately passive and cached.
 
 ## Hardware transcode & recent Intel GPUs
 

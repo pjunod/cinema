@@ -525,3 +525,49 @@ probe contract is stable.
 - **No live-library mutation.** Every run owns a new database and scratch
   directory, because a QC tool must not alter watch state or caches in the
   server you actually use.
+
+## The VOD presentation — a recorded life (2026-08-25, M3 acceptance)
+
+Recorded against a debug `plurxd` on Linux serving the playback-lab fixture
+`remux-h264-multitrack-1080` (22.015 s), with `playback.vod_presentation` on
+and the fragment index built by the background job (`playback.vod_index_mins`
+set, one tick: `built a fragment index file_id=4 fragments=11`). Timings are
+wall-clock from `time curl`.
+
+```text
+POST /api/v1/files/4/hls/sessions
+     {"playback_id":"vod-e2e-1","copy":true,"aac":true,
+      "presentation":"vod","block_budget_secs":8}
+  -> 200 {"session_id":"8e4bad1c-…","encoder":"vod","vod":true,
+          "duration_ms":22015,"start_seconds":0.0,"media_origin_ms":0,…}
+
+GET /api/v1/hls/{s}/index.m3u8              -> 200, the whole film at once:
+  #EXT-X-PLAYLIST-TYPE:VOD · #EXT-X-MAP:URI="init.mp4"
+  seg00000–seg00004 (video, EXTINF 2.0/6.0/…) · seg00005 (#EXTINF:0.099 —
+  the audio tail, planned) · #EXT-X-ENDLIST
+
+GET /api/v1/hls/{s}/init.mp4                -> 200 · 1286 B   · 0.124 s
+GET /api/v1/hls/{s}/seg00000.m4s            -> 200 · 2129260 B · 0.042 s
+GET /api/v1/hls/{s}/seg00004.m4s  (far)     -> 200 · 1930851 B · 0.076 s
+GET /api/v1/hls/{s}/seg00005.m4s  (tail)    -> 200 · 3179 B    · 0.008 s
+
+GET /api/v1/hls/{s}/index.m3u8   (again)    -> 200, byte-identical (cmp)
+… 10 s idle — the durable-route lease loop renews a VOD session's route,
+    so nothing 410s under a paused player …
+GET /api/v1/hls/{s}/seg00001.m4s            -> 200
+GET /api/v1/hls/{s}/seg09999.m4s            -> 404 (the only 404 left:
+    a name the plan never planned)
+
+DELETE /api/v1/hls/{s}                      -> 204
+GET /api/v1/hls/{s}/index.m3u8              -> 410
+    {"code":"media_session_ended",
+     "message":"this session has ended and will not resume"}
+```
+
+`ffprobe` over `init.mp4 + seg00000 + … ` concatenated reports the film's own
+duration (21.999 s) — the served bytes are one decodable fMP4 stream. The
+server log for the run shows the whole lifecycle in four lines: `vod session
+attached (start entry 0)` → `spawned a producer generation` → `rendition
+stays working-set-only: TooLarge { …, threshold: 0 }` (no `cache.max_gb`
+configured in the lab, so admission correctly refuses) → `vod session ended
+for good: Deleted`.

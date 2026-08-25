@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: plurx
+spec:
+  selector:
+    app.kubernetes.io/name: plurx
+  ports:
+    - name: http
+      port: 32400
+      targetPort: http
+  # Deliberately absent: `sessionAffinity: ClientIP`. ingress-nginx balances
+  # straight to pod endpoints and never consults it, and anything that does
+  # consult it sees only the ingress controllers' source addresses — pinning
+  # every viewer in the cluster to one backend. Stickiness belongs on the
+  # Ingress below, where it is per-viewer.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: plurx
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: cookie
+    # `balanced` — the default — rebalances existing sessions whenever the
+    # endpoint set changes, which is precisely what a rolling drain does. The
+    # whole point of this file is that a viewer stays where they are.
+    nginx.ingress.kubernetes.io/affinity-mode: persistent
+    nginx.ingress.kubernetes.io/session-cookie-name: PLURX_NODE
+    nginx.ingress.kubernetes.io/session-cookie-secure: "true"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: Lax
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "2"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "75"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "75"
+    # ingress-nginx defaults to 1m; a backup import through this Ingress
+    # would 413 long before it finished.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  # ingress-nginx v1 ignores an Ingress with no class unless it was started
+  # with --watch-ingress-without-class. Without this the example is inert.
+  ingressClassName: nginx
+  rules:
+    - host: cinema.example.test
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: plurx
+                port:
+                  name: http
