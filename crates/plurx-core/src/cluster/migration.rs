@@ -758,7 +758,11 @@ async fn redeem_remote_join(
     payload: &JoinToken,
     request: RedeemJoinRequest,
 ) -> Result<(), StoreError> {
-    post_join_request(payload, "/api/v1/cluster/join/redeem", &request).await
+    let path = match payload.role() {
+        ClusterRole::Voter => "/api/v1/cluster/join/redeem",
+        ClusterRole::Learner => "/api/v1/cluster/learner/join/redeem",
+    };
+    post_join_request(payload, path, &request).await
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -766,7 +770,11 @@ async fn finalize_remote_join(
     payload: &JoinToken,
     request: FinalizeJoinRequest,
 ) -> Result<(), StoreError> {
-    post_join_request(payload, "/api/v1/cluster/join/finalize", &request).await
+    let path = match payload.role() {
+        ClusterRole::Voter => "/api/v1/cluster/join/finalize",
+        ClusterRole::Learner => "/api/v1/cluster/learner/join/finalize",
+    };
+    post_join_request(payload, path, &request).await
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -3814,11 +3822,33 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
+    async fn redeem_learner_join_for_test(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<RedeemJoinRequest>,
+    ) -> Response {
+        match manager.redeem_learner(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(error) => membership_http_error(error),
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     async fn finalize_join_for_test(
         State(manager): State<MembershipManager>,
         Json(request): Json<FinalizeJoinRequest>,
     ) -> Response {
         match manager.finalize(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(error) => membership_http_error(error),
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn finalize_learner_join_for_test(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<FinalizeJoinRequest>,
+    ) -> Response {
+        match manager.finalize_learner(&request).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(error) => membership_http_error(error),
         }
@@ -3924,8 +3954,16 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
             .route(
+                "/api/v1/cluster/learner/join/redeem",
+                post(redeem_learner_join_for_test),
+            )
+            .route(
                 "/api/v1/cluster/join/finalize",
                 post(finalize_join_for_test),
+            )
+            .route(
+                "/api/v1/cluster/learner/join/finalize",
+                post(finalize_learner_join_for_test),
             )
             .with_state(coordinator.clone());
         let http_task = tokio::spawn(async move {
@@ -4868,8 +4906,16 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
             .route(
+                "/api/v1/cluster/learner/join/redeem",
+                post(redeem_learner_join_for_test),
+            )
+            .route(
                 "/api/v1/cluster/join/finalize",
                 post(finalize_join_for_test),
+            )
+            .route(
+                "/api/v1/cluster/learner/join/finalize",
+                post(finalize_learner_join_for_test),
             )
             .with_state(coordinator.clone());
         let http_task = tokio::spawn(async move {
@@ -4883,7 +4929,7 @@ mod tests {
         //    before they have copied a token to another machine.
         assert_eq!(
             coordinator
-                .issue_token_for_role(Duration::from_secs(120), ClusterRole::Learner)
+                .issue_learner_token(Duration::from_secs(120))
                 .await
                 .expect_err("an unactivated cluster cannot mint a learner token")
                 .code(),
@@ -4905,10 +4951,30 @@ mod tests {
                 .changed
         );
         let learner_token = coordinator
-            .issue_token_for_role(Duration::from_secs(120), ClusterRole::Learner)
+            .issue_learner_token(Duration::from_secs(120))
             .await
             .expect("issue a learner token on an activated cluster");
         assert!(learner_token.token.starts_with("plxjoin:v2:"));
+
+        // A pre-P6 coordinator knows only the voter route and its old SQL
+        // transition. Replicated state must reject that transition even if
+        // the old HTTP decoder would otherwise ignore a caller's learner
+        // field and proceed with the stored digest.
+        let learner_digest = join_token_digest(&learner_token.token);
+        let old_coordinator = source_client
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                 WHERE token_hash = $2 AND state = 'issued'",
+                hiqlite::params!("old-coordinator", learner_digest.as_str()),
+            )
+            .await
+            .expect_err("the voter-path transition must reject a learner token");
+        assert!(
+            old_coordinator
+                .to_string()
+                .contains("learner token requires v2 admission"),
+            "unexpected old-coordinator refusal: {old_coordinator}"
+        );
 
         // 3. The join itself, through the operator's real entry point.
         let learner_dir = tempfile::tempdir().expect("learner data dir");

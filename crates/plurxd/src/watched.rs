@@ -699,7 +699,7 @@ mod tests {
 
         struct MovableAuthority(AtomicBool);
 
-        #[async_trait::async_trait]
+        #[plurx_core::cluster::coordination::cluster_job_async_trait]
         impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
             async fn may_run_cluster_jobs(&self) -> bool {
                 self.0.load(Ordering::SeqCst)

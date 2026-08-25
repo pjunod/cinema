@@ -611,7 +611,7 @@ Admission is a separate protocol, not a flag on the voter join, and it is
 available only after the activation above:
 
 1. Activate the learner protocol (previous section). Before that,
-   `POST /api/v1/cluster/join-tokens` with `{"role": "learner"}` is refused with
+   `POST /api/v1/cluster/learner-join-tokens` is refused with
    `learner_protocol_inactive` — at issuance, so nobody copies a token to
    another machine first.
 2. Mint the token on a voter:
@@ -619,11 +619,11 @@ available only after the activation above:
 ```
 curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"role": "learner", "expires_in_seconds": 600}' \
-  https://plurx.example.net/api/v1/cluster/join-tokens
+  -d '{"expires_in_seconds": 600}' \
+  https://plurx.example.net/api/v1/cluster/learner-join-tokens
 ```
 
-   Voter remains the default: a request that omits `role` mints exactly the
+   Voter admission stays on `/api/v1/cluster/join-tokens` and mints exactly the
    token it always did. A learner token is prefixed `plxjoin:v2:`; a voter token
    stays `plxjoin:v1:`.
 3. Put the token in the new node's `cluster.join_token_file` and start `plurxd`

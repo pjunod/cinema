@@ -719,17 +719,15 @@ reject the v2 flow before it persists secrets or admits a voter. Effective role
 always comes from live committed membership: Hiqlite's `learner_only` startup
 hint is not a permanent leadership guard after promotion.
 
-This clause originally also asked for a distinct *endpoint*. PR-1 does not add
-one, deliberately: `POST /cluster/join-tokens` takes an optional `role` and
-mints a `plxjoin:v2` token for a learner and a `plxjoin:v1` token for a voter,
-and the joiner's `POST /cluster/join/redeem` carries no role field at all — the
-coordinator reads the role back from the token record it wrote. A second
-admin-only route would be a second surface to gate and would version nothing
-that the token framing does not already version, while the request that must
-not be trusted with a role is the *joiner's*, which is where the versioning
-actually sits. The requirement the clause was protecting — an old coordinator or
-joiner rejects the v2 flow before persisting a secret — is met by the framing:
-a pre-P6 build reads `plxjoin:v2` as an unknown prefix and refuses.
+The endpoints are distinct too. Voters use `/cluster/join-tokens` and
+`/cluster/join/{redeem,finalize}`; learners use
+`/cluster/learner-join-tokens` and
+`/cluster/learner/join/{redeem,finalize}`. Neither redemption request carries a
+role. The coordinator reads it from the issued-token record, and a replicated
+trigger rejects an older coordinator's voter-path update of a learner token.
+The separation therefore fails closed at both ends: an old coordinator has no
+learner route and cannot consume its credential through the voter route, while
+an old joiner rejects the `plxjoin:v2` framing before persisting secrets.
 
 Publish one route/job eligibility matrix. Learners may run readiness-gated
 bounded catalogue reads and declared node-local media work, but never

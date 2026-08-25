@@ -935,7 +935,7 @@ mod tests {
     /// The gate's answer, movable while the loop that holds it keeps running.
     struct MovableAuthority(std::sync::atomic::AtomicBool);
 
-    #[async_trait::async_trait]
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
     impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
         async fn may_run_cluster_jobs(&self) -> bool {
             self.0.load(Ordering::SeqCst)

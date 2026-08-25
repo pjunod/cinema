@@ -1505,7 +1505,7 @@ mod tests {
     async fn a_node_without_a_vote_runs_no_trakt_sync_pass() {
         struct MovableAuthority(AtomicBool);
 
-        #[async_trait::async_trait]
+        #[plurx_core::cluster::coordination::cluster_job_async_trait]
         impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
             async fn may_run_cluster_jobs(&self) -> bool {
                 self.0.load(Ordering::SeqCst)

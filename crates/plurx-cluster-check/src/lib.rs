@@ -8034,7 +8034,7 @@ async fn handle_request(
             .map(|token| Response::IssuedJoinToken { token })
             .or_else(|error| Ok(membership_error_response(error))),
         Request::IssueLearnerJoinToken { ttl_ms } => membership_ref(membership)?
-            .issue_token_for_role(Duration::from_millis(ttl_ms), ClusterRole::Learner)
+            .issue_learner_token(Duration::from_millis(ttl_ms))
             .await
             .map(|token| Response::IssuedJoinToken { token })
             .or_else(|error| Ok(membership_error_response(error))),

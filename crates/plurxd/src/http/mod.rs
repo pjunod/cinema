@@ -99,9 +99,14 @@ pub fn router(state: AppState) -> Router {
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
-        // Membership control is admin-only. The two join routes below are the
-        // exception: their single-use token is its own narrow credential.
+        // Membership control is admin-only. The role-specific join routes
+        // below are the exception: their single-use token digest is its own
+        // narrow credential, and the caller never supplies the role.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
+        .route(
+            "/cluster/learner-join-tokens",
+            post(cluster::issue_learner_join_token),
+        )
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
@@ -124,6 +129,14 @@ pub fn router(state: AppState) -> Router {
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
         .route("/cluster/join/finalize", post(cluster::finalize_join))
+        .route(
+            "/cluster/learner/join/redeem",
+            post(cluster::redeem_learner_join),
+        )
+        .route(
+            "/cluster/learner/join/finalize",
+            post(cluster::finalize_learner_join),
+        )
         // Node-to-node artwork materialization. The handler verifies a
         // filename-bound cluster HMAC and current live membership; it does
         // not accept an account bearer and never proxies another hop.
@@ -3190,18 +3203,25 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-        // A learner is asked for by naming the role, and the role is the only
-        // thing the request may say about it: `redeem` derives what a token
-        // admits from the coordinator's own issued-token record, never from a
-        // joining node's request body, so there is nothing here to assert it
-        // with. An unknown role is a malformed request rather than a silently
-        // defaulted voter.
+        // Learner issuance has a wire-distinct endpoint. The joining node's
+        // request still carries no role: redemption derives it from the
+        // coordinator's own issued-token record.
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/cluster/learner-join-tokens",
+                None,
+                json!({ "expires_in_seconds": 600 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, body) = call(
             &app,
             post(
-                "/api/v1/cluster/join-tokens",
+                "/api/v1/cluster/learner-join-tokens",
                 Some(&admin),
-                json!({ "expires_in_seconds": 600, "role": "learner" }),
+                json!({ "expires_in_seconds": 600 }),
             ),
         )
         .await;

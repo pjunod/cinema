@@ -27,7 +27,7 @@ impl AdmittedRoleJobAuthority {
     }
 }
 
-#[async_trait::async_trait]
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
 impl ClusterJobAuthority for AdmittedRoleJobAuthority {
     async fn may_run_cluster_jobs(&self) -> bool {
         !self.0.is_learner()

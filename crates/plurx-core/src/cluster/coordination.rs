@@ -10,6 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::error::StoreError;
 use crate::store::Store;
 
+// Implementors outside plurx-core use the same object-safe async-trait
+// expansion without each crate taking a duplicate direct macro dependency.
+pub use async_trait::async_trait as cluster_job_async_trait;
+
 pub const MIN_LEASE_TTL: Duration = Duration::from_secs(1);
 pub const MAX_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 pub(crate) const MAX_LEASE_RESOURCE_BYTES: usize = 256;

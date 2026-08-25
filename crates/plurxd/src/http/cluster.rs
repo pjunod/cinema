@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::cluster::membership::{
-    ClusterRole, FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus,
-    ProtocolChange, RedeemJoinRequest,
+    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
+    RedeemJoinRequest,
 };
 use serde::Deserialize;
 
@@ -16,17 +16,12 @@ use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IssueJoinTokenRequest {
     /// Short by default because the token carries the complete authority to
     /// enter the cluster. Bounds prevent a typo from minting a near-permanent
     /// credential or one that expires before it can be copied.
     pub expires_in_seconds: Option<u64>,
-    /// What the token admits. Voter is the default and stays the default: a
-    /// request that does not say changes nothing about how joining works, and
-    /// silently turning an existing caller's token into a learner's would
-    /// change the cluster's availability without anyone asking for it.
-    pub role: Option<ClusterRole>,
 }
 
 #[derive(Deserialize)]
@@ -45,10 +40,21 @@ pub async fn issue_join_token(
     let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
     state
         .membership
-        .issue_token_for_role(
-            Duration::from_secs(seconds),
-            request.role.unwrap_or(ClusterRole::Voter),
-        )
+        .issue_token(Duration::from_secs(seconds))
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+pub async fn issue_learner_join_token(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<IssueJoinTokenRequest>,
+) -> Result<Json<IssuedJoinToken>, ApiError> {
+    let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
+    state
+        .membership
+        .issue_learner_token(Duration::from_secs(seconds))
         .await
         .map(Json)
         .map_err(api_error)
@@ -201,6 +207,18 @@ pub async fn redeem_join(
         .map_err(api_error)
 }
 
+pub async fn redeem_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<RedeemJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .redeem_learner(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
 pub async fn finalize_join(
     State(state): State<AppState>,
     Json(request): Json<FinalizeJoinRequest>,
@@ -208,6 +226,18 @@ pub async fn finalize_join(
     state
         .membership
         .finalize(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
+pub async fn finalize_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<FinalizeJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .finalize_learner(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)
