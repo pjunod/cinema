@@ -14,6 +14,7 @@
 //! notices until a user reports the "two different libraries" bug.
 
 use crate::domain::AudioStream;
+use serde::Serialize;
 
 /// One item's aggregate row: the totals over all its files, plus the columns
 /// of the single **best** file (see [`MediaFacts`] for what "best" means and
@@ -53,7 +54,7 @@ pub struct FactsRow {
 ///   A union would let the block claim "2160p · DV · TrueHD 7.1" for an item
 ///   where no single file is all three, and a client that offers to play what
 ///   the badges promise would then be lying.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct MediaFacts {
     /// How many files this item has.
     pub files: i64,

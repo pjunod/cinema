@@ -142,9 +142,25 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testEarlyEndGetsOneReopenButCannotLoopAtTheSamePosition"
 
 [[fixes]]
+id = "apple.build-claim-narrative-relocation"
+commits = ["05f930be"]
+# The regression this pins is a layout one: per-build narrative back at a shared
+# insertion point in the Apple README's status blockquote is what made every two
+# concurrent Apple changes conflict. The pointer below is what replaced it, and
+# the test is red the moment a `Build <n> …` sentence returns to that blockquote.
+source = "clients/apple/README.md"
+source_anchor = "Per-build release notes live in"
+test = "tests/operations/test_apple_build_claims.py"
+test_anchor = "test_the_shared_status_blockquotes_carry_no_per_build_narrative"
+
+[[fixes]]
 id = "apple.build-49-documentation-alignment"
 commits = ["c52c38b7"]
-source = "clients/apple/README.md"
+# Issue #509 moved every per-build sentence out of the Apple README's status
+# blockquote into docs/apple-builds/, because that shared insertion point is
+# what made two concurrent Apple branches conflict. The build 49 prose this
+# commit aligned is preserved verbatim in the archive; only its home moved.
+source = "docs/apple-builds/history-through-build-78.md"
 source_anchor = "build `49`"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
@@ -228,6 +244,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Caps.kt"
 source_anchor = "private fun decoderDolbyVisionProbe()"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "capabilityDiagnosticsExplainWhyDolbyVisionWasNotClaimed"
+
+[[fixes]]
+id = "android.playback-ledger-note-placement"
+commits = ["9cc4d912"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "private fun splitLedgerValue(value: String, facts: Int = 3)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackInfoOverlayTest.kt"
+test_anchor = "fun lightThemeStillShowsStructuredPlaybackDetails()"
 
 [[fixes]]
 id = "apple.stall-clock-regime-flap"
@@ -468,3 +492,27 @@ source = "clients/apple/Sources/ReaderView.swift"
 source_anchor = "IDs are quoted deliberately"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "clients.media-failover-origin-validation"
+commits = ["f5fb37af"]
+source = "clients/apple/Sources/Session.swift"
+source_anchor = "static func canonicalOrigin("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate"
+
+[[fixes]]
+id = "apple.media-failover-transport-only"
+commits = ["1415ce13", "b8f11bc6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isTransportPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyATransportFailureMovesToAnotherNode"
+
+[[fixes]]
+id = "apple.media-failover-recovery-disjoint"
+commits = ["19e2d818"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isCompatibilityPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNoFailureIsBothAMediaVerdictAndANodeFault"

@@ -232,6 +232,11 @@ async fn handle_socket(
             }
         };
 
+        #[cfg(feature = "validation-test-helpers")]
+        if crate::network::raft_client::validation_raft_partitioned() {
+            break;
+        }
+
         // Note: This was wrapped inside a `tokio::task` before just in case we would be able
         // to achieve higher throughput. After in depth testing, at least with openraft 0.9, it
         // has no benefit at all to do the extra work. Instead, it is actually a tiny performance

@@ -106,6 +106,10 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  writer::tests::single_file_snapshot_tail_restores_its_missing_purge_boundary \
 	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
+	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features cluster-read-cost-validation \
 	  --test store_contract -- --test-threads=1
 	$(CARGO) test --locked -p plurx-cluster-check \
@@ -352,6 +356,10 @@ hooks: ## Install the functionality-point pre-commit validator
 
 ## ---- apple clients -----------------------------------------------------
 
+.PHONY: apple-build-bump
+apple-build-bump: ## Claim the next Apple build number across every generated surface
+	@python3 -m validation.apple_build --merge-target "$${PLURX_MERGE_TARGET:-origin/main}"
+
 # iPhone and iPad run the exact same build products, so iOS compiles ONCE with
 # `build-for-testing` and both destinations replay it with
 # `test-without-building` — the third full Swift compile per run was pure
@@ -419,6 +427,8 @@ android-instrumentation-build: android-image ## Build app + test APKs for an emu
 android-instrumentation-run: ## Install and run instrumented tests (set PLURX_ANDROID_SERIAL)
 	@test -n "$${PLURX_ANDROID_SERIAL:-}" || { echo "set PLURX_ANDROID_SERIAL to a disposable emulator/device serial"; exit 1; }
 	adb -s "$${PLURX_ANDROID_SERIAL}" wait-for-device
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app.test >/dev/null 2>&1 || true
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app >/dev/null 2>&1 || true
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/debug/app-debug.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" shell am instrument -w \

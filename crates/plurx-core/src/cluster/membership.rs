@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::CStr;
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,6 +41,9 @@ const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
 /// heartbeats makes the old leader ineligible before a new term can exist.
 const ARTWORK_LEADER_QUORUM_FRESH_MS: u64 = 1_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// Collapse only duplicate/concurrent submissions. The ordinary ten-second
+/// cadence and thirty-second reachability contract remain unchanged.
+const HEARTBEAT_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 /// How long a removal waits for survivors to answer a source probe before
 /// treating silence as "cannot prove it". Long enough for a healthy node's
 /// poll plus a `stat` on a sleeping NAS; short enough that an operator gets an
@@ -192,7 +196,14 @@ const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // performed before a signature is known to be genuine so forged envelopes
 // cannot fill every executor with body hashing and Ed25519 verification.
 const MAX_INTERNAL_PREVERIFY_PER_SECOND: u8 = 64;
+const MAX_INTERNAL_READ_PREVERIFY_PER_SECOND: u16 = 1_024;
 const MAX_INTERNAL_REPLAYS_PER_PEER: usize = 4_096;
+// Five seconds at the admitted 1,024 reads/second, plus one second of margin.
+// Read proofs need their own short-lived cache: sharing the 30-second mutation
+// cache would either reject valid segment bursts or evict live mutation proofs.
+const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
+const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
+const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
@@ -236,6 +247,8 @@ pub enum MembershipError {
     LocalNodeNotActive,
     #[error("removal would leave fewer than two voters and lose the reconfiguration quorum")]
     QuorumLoss,
+    #[error("node owns active media sessions that must drain before removal")]
+    ActiveMediaSessions,
     /// The removal was refused because this node's offline work could not be
     /// resolved by the §6.7 rule. The payload is the operator-visible reason;
     /// lifting the blanket refusal must not turn removal into "always
@@ -272,6 +285,7 @@ impl MembershipError {
             Self::LeaveNodeMismatch => "leave_node_mismatch",
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
+            Self::ActiveMediaSessions => "media_sessions_active",
             Self::OfflineWork(_) => "node_owns_offline_work",
             Self::LeaderChanged(_) | Self::Internal(_) => "membership_internal",
         }
@@ -537,6 +551,101 @@ pub struct MembershipStatus {
     pub replication: ReplicationStatus,
 }
 
+/// Fixed-cardinality, process-local projection for Prometheus scrapes.
+///
+/// The handle intentionally cannot reach the Hiqlite client or application
+/// store. A background membership sample populates it so `/metrics` never
+/// turns an observability request into a cluster read.
+#[derive(Clone, Default)]
+pub struct PassiveMembershipMetrics {
+    inner: Option<Arc<MembershipMetricsCache>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PassiveMembershipMetricsView {
+    pub replicated: bool,
+    pub valid: bool,
+    pub age_seconds: Option<u64>,
+    pub errors: u64,
+    pub sample: Option<MembershipMetricsSample>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MembershipMetricsSample {
+    pub voters: u64,
+    pub learners: u64,
+    pub heartbeat_fresh_voters: u64,
+    pub heartbeat_stale_voters: u64,
+    pub removals_pending: u64,
+    pub local_is_voter: bool,
+}
+
+#[derive(Default)]
+struct MembershipMetricsCache {
+    state: Mutex<MembershipMetricsCacheState>,
+}
+
+#[derive(Default)]
+struct MembershipMetricsCacheState {
+    sample: Option<(Instant, MembershipMetricsSample)>,
+    errors: u64,
+}
+
+impl PassiveMembershipMetrics {
+    fn replicated() -> Self {
+        Self {
+            inner: Some(Arc::new(MembershipMetricsCache::default())),
+        }
+    }
+
+    fn record(&self, sample: MembershipMetricsSample) {
+        if let Some(inner) = self.inner.as_deref() {
+            inner
+                .state
+                .lock()
+                .expect("membership metrics cache poisoned")
+                .sample = Some((Instant::now(), sample));
+        }
+    }
+
+    fn record_error(&self) {
+        if let Some(inner) = self.inner.as_deref() {
+            let mut state = inner
+                .state
+                .lock()
+                .expect("membership metrics cache poisoned");
+            state.errors = state.errors.saturating_add(1);
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> PassiveMembershipMetricsView {
+        let Some(inner) = self.inner.as_deref() else {
+            return PassiveMembershipMetricsView {
+                replicated: false,
+                valid: false,
+                age_seconds: None,
+                errors: 0,
+                sample: None,
+            };
+        };
+        let state = inner
+            .state
+            .lock()
+            .expect("membership metrics cache poisoned");
+        let age = state
+            .sample
+            .map(|(sampled_at, _)| sampled_at.elapsed().as_secs());
+        PassiveMembershipMetricsView {
+            replicated: true,
+            valid: age.is_some_and(|age| age <= NODE_REACHABLE_WINDOW_MS as u64 / 1_000),
+            age_seconds: age,
+            errors: state.errors,
+            sample: state.sample.map(|(_, sample)| sample),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
@@ -622,7 +731,10 @@ const CAPABILITY_READY_PREDICATE: &str = "NOT EXISTS (SELECT 1 FROM cluster_node
 fn begin_removal_attempt_sql() -> String {
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
-         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE}"
+         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE} \
+           AND NOT EXISTS (SELECT 1 FROM media_sessions \
+             WHERE owner_node_id = $1 AND state = 'active' \
+               AND lease_expires_at_ms > $3)"
     )
 }
 
@@ -737,19 +849,67 @@ struct ReplicatedMembership {
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
     internal_auth_replays: Mutex<BTreeMap<String, InternalAuthReplayWindow>>,
+    internal_read_replays: Mutex<BTreeMap<String, InternalReadReplayWindow>>,
+    internal_read_preverify: Mutex<InternalReadAdmission>,
+    internal_read_authority: tokio::sync::Mutex<BTreeMap<String, InternalReadAuthority>>,
     internal_preverify_admission: Mutex<ActivityAuthAdmission>,
     activity_key_lookup_admission: Mutex<ActivityAuthAdmission>,
     activation_marker: ActivationMarker,
     replication: ReplicationMonitor,
+    membership_metrics: PassiveMembershipMetrics,
+    heartbeat_writes: HeartbeatWriteGate,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
 }
 
+#[derive(Default)]
+struct HeartbeatWriteGate {
+    last_committed: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl HeartbeatWriteGate {
+    /// Equal heartbeat callers serialize through the first durable result.
+    /// Failed writes do not reserve the window, so a waiter retries instead
+    /// of observing an optimistic success.
+    async fn run<F>(&self, operation: F) -> Result<bool, MembershipError>
+    where
+        F: Future<Output = Result<(), MembershipError>>,
+    {
+        let mut last_committed = self.last_committed.lock().await;
+        if last_committed.is_some_and(|committed| {
+            tokio::time::Instant::now().duration_since(committed) < HEARTBEAT_COALESCE_WINDOW
+        }) {
+            return Ok(false);
+        }
+        operation.await?;
+        *last_committed = Some(tokio::time::Instant::now());
+        Ok(true)
+    }
+}
+
+fn reachable_after(now: i64) -> i64 {
+    now.saturating_sub(NODE_REACHABLE_WINDOW_MS)
+}
+
+fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
+    now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
+}
+
 struct ActivityAuthAdmission {
     window_started: Instant,
     checks: u8,
+}
+
+struct InternalReadAdmission {
+    window_started: Instant,
+    checks: u16,
+}
+
+struct InternalReadAuthority {
+    expires_at: Instant,
+    refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -775,6 +935,29 @@ impl InternalAuthReplayWindow {
     }
 }
 
+#[derive(Default)]
+struct InternalReadReplayWindow {
+    accepted: VecDeque<(String, Instant)>,
+}
+
+impl InternalReadReplayWindow {
+    fn admit(&mut self, nonce: &str, now: Instant) -> bool {
+        while self.accepted.front().is_some_and(|(_, accepted_at)| {
+            now.saturating_duration_since(*accepted_at)
+                > Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64)
+        }) {
+            self.accepted.pop_front();
+        }
+        if self.accepted.iter().any(|(accepted, _)| accepted == nonce)
+            || self.accepted.len() >= MAX_INTERNAL_READ_REPLAYS_PER_PEER
+        {
+            return false;
+        }
+        self.accepted.push_back((nonce.to_owned(), now));
+        true
+    }
+}
+
 impl ActivityAuthAdmission {
     fn admit(&mut self, now: Instant, maximum: u8) -> bool {
         if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
@@ -782,6 +965,20 @@ impl ActivityAuthAdmission {
             self.checks = 0;
         }
         if self.checks >= maximum {
+            return false;
+        }
+        self.checks += 1;
+        true
+    }
+}
+
+impl InternalReadAdmission {
+    fn admit(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.window_started) >= Duration::from_secs(1) {
+            self.window_started = now;
+            self.checks = 0;
+        }
+        if self.checks >= MAX_INTERNAL_READ_PREVERIFY_PER_SECOND {
             return false;
         }
         self.checks += 1;
@@ -865,6 +1062,14 @@ impl MembershipManager {
         self.inner.is_some()
     }
 
+    #[must_use]
+    pub fn metrics_handle(&self) -> PassiveMembershipMetrics {
+        self.inner
+            .as_deref()
+            .map(|inner| inner.membership_metrics.clone())
+            .unwrap_or_default()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn replicated(
         client: Client,
@@ -882,6 +1087,7 @@ impl MembershipManager {
             system_short_hostname().as_deref().unwrap_or_default(),
             &local.api_address,
         );
+        let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
@@ -897,6 +1103,12 @@ impl MembershipManager {
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_admission: Mutex::new(BTreeMap::new()),
                 internal_auth_replays: Mutex::new(BTreeMap::new()),
+                internal_read_replays: Mutex::new(BTreeMap::new()),
+                internal_read_preverify: Mutex::new(InternalReadAdmission {
+                    window_started: Instant::now(),
+                    checks: 0,
+                }),
+                internal_read_authority: tokio::sync::Mutex::new(BTreeMap::new()),
                 internal_preverify_admission: Mutex::new(ActivityAuthAdmission {
                     window_started: Instant::now(),
                     checks: 0,
@@ -907,6 +1119,8 @@ impl MembershipManager {
                 }),
                 activation_marker,
                 replication,
+                membership_metrics,
+                heartbeat_writes: HeartbeatWriteGate::default(),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
@@ -959,6 +1173,12 @@ impl MembershipManager {
         }
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
+        if let Err(error) = self.refresh_membership_metrics().await {
+            tracing::warn!(
+                code = error.code(),
+                "initial cluster membership metrics refresh failed"
+            );
+        }
         self.publish_activity_signing_key().await?;
         self.refresh_activity_public_keys().await?;
         self.publish_http_url().await
@@ -1484,6 +1704,23 @@ impl MembershipManager {
 
     pub async fn heartbeat(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        inner
+            .heartbeat_writes
+            .run(self.commit_heartbeat(inner))
+            .await
+            .map(|_| ())
+    }
+
+    /// Submit a heartbeat without the duplicate gate so the separate-process
+    /// fault harness can prove tombstone SQL is actually exercised.
+    #[cfg(feature = "cluster-validation")]
+    #[doc(hidden)]
+    pub async fn validation_force_heartbeat(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.commit_heartbeat(inner).await
+    }
+
+    async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
         let now = unix_ms()?;
         inner
             .client
@@ -1616,6 +1853,18 @@ impl MembershipManager {
             .map_err(|_| {
                 MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
             })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_read_replays
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal("internal read replay lock was poisoned".to_owned())
+            })?
+            .retain(|node_id, _| keys.contains_key(node_id));
+        inner
+            .internal_read_authority
+            .lock()
+            .await
             .retain(|node_id, _| keys.contains_key(node_id));
         *inner.activity_public_keys.lock().map_err(|_| {
             MembershipError::Internal("activity public-key lock was poisoned".to_owned())
@@ -1962,14 +2211,20 @@ impl MembershipManager {
         trigger_election(&inner.local.api_address, &inner.secrets.api).await
     }
 
-    /// Public HTTP bases for currently reachable peers, used only to recover
-    /// node-local materialized bytes such as artwork. The ordinary membership
-    /// status deliberately continues to omit addresses.
+    /// Public HTTP bases for currently reachable peers.
+    ///
+    /// Originally node-to-node only, for recovering materialized bytes such as
+    /// artwork. Since the media pool's client failover it is also what
+    /// `GET /api/v1/cluster/ingress` hands to a **signed-in** client, so these
+    /// values are no longer purely internal — an operator's
+    /// `cluster.artwork_url` must name an address a household client can
+    /// actually reach. The ordinary membership status still omits addresses,
+    /// and no unauthenticated route exposes them.
     pub async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
             return Ok(Vec::new());
         };
-        let reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(unix_ms()?);
         let rows = inner
             .client
             .query_map::<HttpUrlRow, _>(
@@ -2026,7 +2281,7 @@ impl MembershipManager {
         if mac.verify_slice(&signature).is_err() {
             return Ok(false);
         }
-        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(now);
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
@@ -2075,9 +2330,26 @@ impl MembershipManager {
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
-                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
+                reachable: node_is_reachable(now, row.last_seen_at),
             })
             .collect())
+    }
+
+    /// Number of committed voters, including this node. Media rollout gates
+    /// compare this with the bounded peer directory so a missing, legacy, or
+    /// over-limit voter fails closed instead of being silently omitted.
+    pub async fn activity_voter_count(&self) -> Result<usize, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(1);
+        };
+        Ok(inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .voter_ids()
+            .take(MAX_ACTIVITY_PEERS.saturating_add(2))
+            .count())
     }
 
     /// Sign one short-lived, sender-and-target-bound activity request with
@@ -2221,6 +2493,135 @@ impl MembershipManager {
             .await
     }
 
+    /// Authenticate an idempotent read-only relay. Signature verification is
+    /// mandatory, globally rate-bounded, and each signed nonce is single-use
+    /// for the complete five-second read window. A separate, right-sized
+    /// replay cache keeps segment bursts from consuming mutation admission;
+    /// the live-voter proof is cached for one second per sender behind a
+    /// single-flight mutex so segment bursts do not become Raft read bursts.
+    pub async fn authorize_internal_peer_read_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        if auth.target_node_id != inner.identity.node_id
+            || now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64
+            || auth.node_id == auth.target_node_id
+            || auth.node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || auth.target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || !canonical_internal_auth_nonce(&auth.nonce)
+            || auth.signature.len() != ED25519_SIGNATURE_HEX_BYTES
+        {
+            return Ok(false);
+        }
+        if !inner
+            .internal_read_preverify
+            .lock()
+            .map_err(|_| {
+                MembershipError::Internal(
+                    "internal read preverification lock was poisoned".to_owned(),
+                )
+            })?
+            .admit(Instant::now())
+        {
+            return Ok(false);
+        }
+        let Some(message) = internal_peer_auth_message(
+            &auth.node_id,
+            &auth.target_node_id,
+            auth.timestamp_ms,
+            &auth.nonce,
+            method,
+            path,
+            body,
+        ) else {
+            return Ok(false);
+        };
+        let signature = match hex::decode(&auth.signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
+        };
+        if !self
+            .activity_signature_is_valid(&auth.node_id, &message, &signature)
+            .await?
+        {
+            return Ok(false);
+        }
+        if !self.admit_internal_read_replay(&auth.node_id, &auth.nonce)? {
+            return Ok(false);
+        }
+        if unix_ms()?.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+            return Ok(false);
+        }
+        let observed = Instant::now();
+        let refresh = {
+            let mut authority = inner.internal_read_authority.lock().await;
+            if let Some(entry) = authority.get(&auth.node_id) {
+                if entry.expires_at > observed {
+                    return Ok(unix_ms()?.abs_diff(auth.timestamp_ms)
+                        <= INTERNAL_READ_AUTH_WINDOW_MS as u64);
+                }
+                Arc::clone(&entry.refresh)
+            } else {
+                // Only senders with a verified cached signing key reach this
+                // map. Keep expired entries as their per-sender single-flight
+                // gates; membership/key eviction removes them, so the map has
+                // the same hard peer bound without a global slow-query lock.
+                if authority.len() >= MAX_ACTIVITY_PEERS {
+                    return Ok(false);
+                }
+                let refresh = Arc::new(tokio::sync::Mutex::new(()));
+                authority.insert(
+                    auth.node_id.clone(),
+                    InternalReadAuthority {
+                        expires_at: observed,
+                        refresh: Arc::clone(&refresh),
+                    },
+                );
+                refresh
+            }
+        };
+        let _refresh = refresh.lock().await;
+        // Queueing behind this sender's single-flight consumes both the proof
+        // window and heartbeat freshness. Re-sample wall time after the wait;
+        // never let the timestamp captured before signature verification
+        // authorize a later consensus read or cached-authority hit.
+        let authority_now = unix_ms()?;
+        if authority_now.abs_diff(auth.timestamp_ms) > INTERNAL_READ_AUTH_WINDOW_MS as u64 {
+            return Ok(false);
+        }
+        {
+            // A waiter for this sender may find that the task ahead of it
+            // already refreshed authority. Re-check without coupling any
+            // other sender to the consistent read below.
+            let authority = inner.internal_read_authority.lock().await;
+            if authority
+                .get(&auth.node_id)
+                .is_some_and(|entry| entry.expires_at > Instant::now())
+            {
+                return Ok(
+                    unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64
+                );
+            }
+        }
+        let live = self
+            .verify_live_activity_authority(&auth.node_id, authority_now)
+            .await?;
+        let proof_still_fresh =
+            unix_ms()?.abs_diff(auth.timestamp_ms) <= INTERNAL_READ_AUTH_WINDOW_MS as u64;
+        if live && proof_still_fresh {
+            let mut authority = inner.internal_read_authority.lock().await;
+            if let Some(entry) = authority.get_mut(&auth.node_id) {
+                entry.expires_at = Instant::now() + INTERNAL_READ_AUTHORITY_TTL;
+            }
+        }
+        Ok(live && proof_still_fresh)
+    }
+
     async fn activity_signature_is_valid(
         &self,
         node_id: &str,
@@ -2299,6 +2700,14 @@ impl MembershipManager {
                     MembershipError::Internal("internal peer replay lock was poisoned".to_owned())
                 })?
                 .remove(&evicted);
+            inner
+                .internal_read_replays
+                .lock()
+                .map_err(|_| {
+                    MembershipError::Internal("internal read replay lock was poisoned".to_owned())
+                })?
+                .remove(&evicted);
+            inner.internal_read_authority.lock().await.remove(&evicted);
         }
         Ok(true)
     }
@@ -2359,6 +2768,22 @@ impl MembershipManager {
             .admit(nonce, now))
     }
 
+    fn admit_internal_read_replay(
+        &self,
+        node_id: &str,
+        nonce: &str,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = Instant::now();
+        let mut replays = inner.internal_read_replays.lock().map_err(|_| {
+            MembershipError::Internal("internal read replay lock was poisoned".to_owned())
+        })?;
+        Ok(replays
+            .entry(node_id.to_owned())
+            .or_default()
+            .admit(nonce, now))
+    }
+
     async fn verify_live_activity_authority(
         &self,
         node_id: &str,
@@ -2373,11 +2798,11 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        let reachable_after = now.saturating_sub(NODE_REACHABLE_WINDOW_MS);
+        let reachable_after = reachable_after(now);
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
-                "SELECT node.raft_id \
+                "SELECT node.raft_id, node.last_seen_at \
                  FROM cluster_nodes node \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL \
                    AND node.last_seen_at >= $2 \
@@ -2386,11 +2811,72 @@ impl MembershipManager {
                 params!(node_id, reachable_after),
             )
             .await?;
+        let verified_reachable_after = unix_ms()?.saturating_sub(NODE_REACHABLE_WINDOW_MS);
         Ok(rows.len() == 1
+            && rows[0].last_seen_at >= verified_reachable_after
             && metrics
                 .membership_config
                 .voter_ids()
                 .any(|raft_id| raft_id == rows[0].raft_id))
+    }
+
+    async fn refresh_membership_metrics(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let result = async {
+            let now = unix_ms()?;
+            let metrics = inner.client.metrics_db().await?;
+            let voters = metrics
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>();
+            let members = metrics
+                .membership_config
+                .nodes()
+                .map(|(raft_id, _)| *raft_id)
+                .collect::<BTreeSet<_>>();
+            let rows = inner
+                .client
+                .query_map::<MembershipMetricsRow, _>(
+                    "SELECT node.raft_id, node.last_seen_at, \
+                            EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                              WHERE removal.node_id = node.node_id) AS removal_pending \
+                     FROM cluster_nodes node WHERE node.removed_at IS NULL",
+                    params!(),
+                )
+                .await?;
+            let rows = rows
+                .into_iter()
+                .filter(|row| members.contains(&row.raft_id))
+                .map(|row| (row.raft_id, row))
+                .collect::<BTreeMap<_, _>>();
+            let heartbeat_fresh_voters = voters
+                .iter()
+                .filter(|raft_id| {
+                    rows.get(raft_id)
+                        .is_some_and(|row| node_is_reachable(now, row.last_seen_at))
+                })
+                .count() as u64;
+            Ok::<_, MembershipError>(MembershipMetricsSample {
+                voters: voters.len() as u64,
+                learners: members.difference(&voters).count() as u64,
+                heartbeat_fresh_voters,
+                heartbeat_stale_voters: (voters.len() as u64)
+                    .saturating_sub(heartbeat_fresh_voters),
+                removals_pending: rows.values().filter(|row| row.removal_pending).count() as u64,
+                local_is_voter: voters.contains(&inner.identity.raft_id),
+            })
+        }
+        .await;
+        match result {
+            Ok(sample) => {
+                inner.membership_metrics.record(sample);
+                Ok(())
+            }
+            Err(error) => {
+                inner.membership_metrics.record_error();
+                Err(error)
+            }
+        }
     }
 
     pub async fn heartbeat_loop(self) {
@@ -2401,9 +2887,18 @@ impl MembershipManager {
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             match self.heartbeat().await {
                 Err(error) => {
+                    if let Some(inner) = self.inner.as_deref() {
+                        inner.membership_metrics.record_error();
+                    }
                     tracing::warn!(code = error.code(), "cluster node heartbeat failed");
                 }
                 Ok(()) => {
+                    if let Err(error) = self.refresh_membership_metrics().await {
+                        tracing::warn!(
+                            code = error.code(),
+                            "cluster membership metrics refresh failed"
+                        );
+                    }
                     if let Err(error) = self.refresh_activity_public_keys().await {
                         tracing::warn!(
                             code = error.code(),
@@ -2455,7 +2950,7 @@ impl MembershipManager {
                     NodeRole::Learner
                 },
                 is_leader: metrics.current_leader == Some(row.raft_id as u64),
-                reachable: now.saturating_sub(row.last_seen_at) <= NODE_REACHABLE_WINDOW_MS,
+                reachable: node_is_reachable(now, row.last_seen_at),
                 last_seen_at: row.last_seen_at,
                 removal_pending: row.removal_pending,
             })
@@ -2782,7 +3277,7 @@ impl MembershipManager {
                 ),
                 (
                     begin_removal_attempt_sql(),
-                    params!(node_id, attempt_id.as_str()),
+                    params!(node_id, attempt_id.as_str(), now),
                 ),
                 (
                     BEGIN_REMOVAL_INTENT_SQL.to_owned(),
@@ -2814,6 +3309,18 @@ impl MembershipManager {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         if results.get(1).copied() != Some(1) {
+            let active_sessions = inner
+                .client
+                .query_consistent_map::<CountRow, _>(
+                    "SELECT COUNT(*) AS count FROM media_sessions \
+                     WHERE owner_node_id = $1 AND state = 'active' \
+                       AND lease_expires_at_ms > $2",
+                    params!(node_id, now),
+                )
+                .await?;
+            if active_sessions.first().is_some_and(|row| row.count > 0) {
+                return Err(MembershipError::ActiveMediaSessions);
+            }
             return Err(MembershipError::MembershipUpgradeRequired);
         }
         if !self.node_is_tombstoned(node_id).await? {
@@ -2986,6 +3493,10 @@ impl MembershipManager {
         if let Ok(mut replays) = inner.internal_auth_replays.lock() {
             replays.remove(node_id);
         }
+        if let Ok(mut replays) = inner.internal_read_replays.lock() {
+            replays.remove(node_id);
+        }
+        inner.internal_read_authority.lock().await.remove(node_id);
         if let Err(error) = inner
             .client
             .execute(
@@ -3686,6 +4197,12 @@ struct MembershipNodeRow {
     removal_pending: bool,
 }
 
+struct MembershipMetricsRow {
+    raft_id: u64,
+    last_seen_at: i64,
+    removal_pending: bool,
+}
+
 struct ActivityPeerRow {
     node_id: String,
     raft_id: u64,
@@ -3721,6 +4238,7 @@ impl From<&mut Row<'_>> for ActivityPublicKeyRow {
 
 struct ActivityAuthNodeRow {
     raft_id: u64,
+    last_seen_at: i64,
 }
 
 impl From<&mut Row<'_>> for ActivityAuthNodeRow {
@@ -3728,6 +4246,7 @@ impl From<&mut Row<'_>> for ActivityAuthNodeRow {
         let raft_id: i64 = row.get("raft_id");
         Self {
             raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            last_seen_at: row.get("last_seen_at"),
         }
     }
 }
@@ -3861,6 +4380,17 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             raft_id: row.get("raft_id"),
             api_address: row.get("api_address"),
             hostname: row.get("hostname"),
+            last_seen_at: row.get("last_seen_at"),
+            removal_pending: row.get("removal_pending"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for MembershipMetricsRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
             last_seen_at: row.get("last_seen_at"),
             removal_pending: row.get("removal_pending"),
         }
@@ -4084,6 +4614,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn passive_membership_metrics_distinguish_unavailable_from_fresh_cluster_state() {
+        let unavailable = PassiveMembershipMetrics::default().snapshot();
+        assert!(!unavailable.replicated);
+        assert!(!unavailable.valid);
+        assert!(unavailable.sample.is_none());
+
+        let metrics = PassiveMembershipMetrics::replicated();
+        let sample = MembershipMetricsSample {
+            voters: 4,
+            learners: 0,
+            heartbeat_fresh_voters: 3,
+            heartbeat_stale_voters: 1,
+            removals_pending: 0,
+            local_is_voter: true,
+        };
+        metrics.record(sample);
+        let view = metrics.snapshot();
+        assert!(view.replicated);
+        assert!(view.valid);
+        assert_eq!(view.age_seconds, Some(0));
+        assert_eq!(view.sample, Some(sample));
+        assert_eq!(view.errors, 0);
+
+        metrics.record_error();
+        assert_eq!(metrics.snapshot().errors, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_gate_pins_commit_window_and_retries_failures() {
+        let gate = HeartbeatWriteGate::default();
+        let commits = std::sync::atomic::AtomicUsize::new(0);
+
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("leading heartbeat"));
+        tokio::time::advance(HEARTBEAT_COALESCE_WINDOW - Duration::from_millis(1)).await;
+        assert!(!gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("inside-window heartbeat"));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("boundary heartbeat"));
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+        tokio::time::advance(HEARTBEAT_COALESCE_WINDOW).await;
+        let failed = gate
+            .run(async {
+                Err(MembershipError::Internal(
+                    "injected heartbeat failure".to_owned(),
+                ))
+            })
+            .await;
+        assert!(failed.is_err());
+        assert!(gate
+            .run(async {
+                commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+            .expect("heartbeat retry"));
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn reachability_expires_immediately_after_the_allowed_missed_beats() {
+        assert_eq!(
+            NODE_REACHABLE_WINDOW_MS as u128,
+            HEARTBEAT_INTERVAL.as_millis() * 3,
+            "reachability must remain explicitly coupled to heartbeat cadence"
+        );
+        let last_seen_at = 1_000_000;
+        assert!(node_is_reachable(
+            last_seen_at + NODE_REACHABLE_WINDOW_MS,
+            last_seen_at
+        ));
+        assert!(!node_is_reachable(
+            last_seen_at + NODE_REACHABLE_WINDOW_MS + 1,
+            last_seen_at
+        ));
+        assert_eq!(
+            reachable_after(last_seen_at + NODE_REACHABLE_WINDOW_MS + 1),
+            last_seen_at + 1
+        );
+    }
+
+    #[test]
     fn activity_key_cache_replaces_one_peer_without_exceeding_its_bound() {
         let mut keys = (0..MAX_ACTIVITY_PEERS)
             .map(|index| (format!("node-{index:03}"), vec![index as u8; 32]))
@@ -4114,6 +4743,20 @@ mod tests {
             started + Duration::from_secs(1),
             MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND
         ));
+    }
+
+    #[test]
+    fn internal_media_read_preverification_has_a_bounded_burst() {
+        let started = Instant::now();
+        let mut admission = InternalReadAdmission {
+            window_started: started,
+            checks: 0,
+        };
+        for _ in 0..MAX_INTERNAL_READ_PREVERIFY_PER_SECOND {
+            assert!(admission.admit(started));
+        }
+        assert!(!admission.admit(started));
+        assert!(admission.admit(started + Duration::from_secs(1)));
     }
 
     #[test]
@@ -4155,6 +4798,30 @@ mod tests {
         let started = Instant::now();
         let mut replays = InternalAuthReplayWindow::default();
         for index in 0..MAX_INTERNAL_REPLAYS_PER_PEER {
+            assert!(replays.admit(&format!("nonce-{index}"), started));
+        }
+        assert!(!replays.admit("overflow", started));
+        assert!(!replays.admit("nonce-0", started));
+    }
+
+    #[test]
+    fn internal_read_replay_is_rejected_for_the_entire_read_window() {
+        let started = Instant::now();
+        let mut replays = InternalReadReplayWindow::default();
+
+        assert!(replays.admit("nonce-a", started));
+        assert!(!replays.admit("nonce-a", started + Duration::from_millis(4_999)));
+        assert!(replays.admit(
+            "nonce-a",
+            started + Duration::from_millis(INTERNAL_READ_AUTH_WINDOW_MS as u64 + 1)
+        ));
+    }
+
+    #[test]
+    fn internal_read_replay_cache_rejects_instead_of_evicting_live_proofs() {
+        let started = Instant::now();
+        let mut replays = InternalReadReplayWindow::default();
+        for index in 0..MAX_INTERNAL_READ_REPLAYS_PER_PEER {
             assert!(replays.admit(&format!("nonce-{index}"), started));
         }
         assert!(!replays.admit("overflow", started));
@@ -4233,6 +4900,55 @@ mod tests {
     }
 
     #[test]
+    fn removal_attempt_and_active_media_session_are_mutually_exclusive() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                   lease_expires_at_ms INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
+                 INSERT INTO cluster_node_capabilities VALUES (\
+                   'node-a', 'membership_removal_attempt_refs_v1', 10); \
+                 INSERT INTO media_sessions VALUES ('node-a', 'active', 100);",
+            )
+            .expect("seed active media owner");
+
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(),
+                    rusqlite::params!["node-a", "blocked-attempt", 50],
+                )
+                .expect("refuse removal while media is active"),
+            0
+        );
+        connection
+            .execute(
+                "UPDATE media_sessions SET state = 'ended' WHERE owner_node_id = 'node-a'",
+                [],
+            )
+            .expect("drain media owner");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(),
+                    rusqlite::params!["node-a", "admitted-attempt", 50],
+                )
+                .expect("admit removal after media drains"),
+            1
+        );
+    }
+
+    #[test]
     fn one_attempt_cannot_roll_back_a_concurrent_removal_fence() {
         fn rollback(connection: &mut rusqlite::Connection, node_id: &str, attempt_id: &str) {
             let transaction = connection.transaction().expect("rollback transaction");
@@ -4276,6 +4992,8 @@ mod tests {
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
                    revision INTEGER, updated_at_ms INTEGER); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
+                   lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 1, 10, NULL); \
                  INSERT INTO cluster_nodes VALUES ('node-old', 2, 20, NULL); \
                  INSERT INTO cluster_nodes VALUES ('staged-join', 99, 30, NULL); \
@@ -4317,7 +5035,7 @@ mod tests {
             transaction
                 .execute(
                     &begin_removal_attempt_sql(),
-                    rusqlite::params!["blocked", "blocked-attempt"],
+                    rusqlite::params!["blocked", "blocked-attempt", 0],
                 )
                 .expect("gate mixed-version begin"),
             0

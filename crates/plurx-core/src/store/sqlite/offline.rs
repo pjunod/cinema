@@ -65,6 +65,44 @@ fn lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OfflineLease> {
     })
 }
 
+fn pin_shared_offline_consumer(
+    tx: &rusqlite::Transaction<'_>,
+    package_id: &str,
+    consumer_kind: &str,
+    consumer_id: &str,
+    expires_at_ms: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "INSERT INTO cache_consumer_pins
+            (storage_id, recipe_hash, generation_id, consumer_kind,
+             consumer_id, consumer_epoch, expires_at_ms)
+         SELECT l.storage_id, l.recipe_hash, l.generation_id, ?2, ?3, 1, ?4
+           FROM offline_packages p
+           JOIN transcode_cache_locations l ON l.recipe_hash = p.recipe_hash
+          WHERE p.id = ?1 AND p.state = 'ready'
+            AND l.storage_class = 'shared' AND l.complete = 1
+         ON CONFLICT(
+            storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
+         DO UPDATE SET expires_at_ms = MAX(
+            cache_consumer_pins.expires_at_ms, excluded.expires_at_ms)",
+        params![package_id, consumer_kind, consumer_id, expires_at_ms],
+    )
+}
+
+fn release_offline_pins(
+    tx: &rusqlite::Transaction<'_>,
+    package_id: &str,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM cache_consumer_pins
+          WHERE (consumer_kind = 'offline_package' AND consumer_id = ?1)
+             OR (consumer_kind = 'offline_download' AND consumer_id IN (
+                    SELECT token_hash FROM offline_package_leases
+                     WHERE package_id = ?1))",
+        [package_id],
+    )
+}
+
 fn same_request(existing: &OfflinePackage, requested: &NewOfflinePackage) -> bool {
     existing.file_id == requested.file_id
         && existing.node_id == requested.node_id
@@ -531,12 +569,18 @@ impl OfflinePackageStore for SqliteStore {
             message.to_owned(),
         );
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
                 "UPDATE offline_packages SET state = 'failed', phase = 'integrity',
                     error_code = ?4, error_message = ?5, updated_at = unixepoch()
                   WHERE id = ?1 AND node_id = ?2 AND recipe_hash = ?3 AND state = 'ready'",
                 params![id, node, recipe, code, message],
-            )? == 1)
+            )?;
+            if changed == 1 {
+                release_offline_pins(&tx, &id)?;
+            }
+            tx.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
@@ -588,6 +632,13 @@ impl OfflinePackageStore for SqliteStore {
                          updated_at = unixepoch() WHERE id = ?1",
                     params![id, expires_at],
                 )?;
+                pin_shared_offline_consumer(
+                    &tx,
+                    &id,
+                    "offline_download",
+                    &hash,
+                    expires_at.saturating_mul(1_000),
+                )?;
                 let renewed = tx.query_row(
                     "SELECT token_hash, package_id, created_at, last_access_at, expires_at \
                      FROM offline_package_leases WHERE package_id = ?1",
@@ -607,6 +658,13 @@ impl OfflinePackageStore for SqliteStore {
                 "UPDATE offline_packages SET last_access_at = unixepoch(), \
                  expires_at = ?2, updated_at = unixepoch() WHERE id = ?1",
                 params![id, expires_at],
+            )?;
+            pin_shared_offline_consumer(
+                &tx,
+                &id,
+                "offline_download",
+                &hash,
+                expires_at.saturating_mul(1_000),
             )?;
             let created = tx.query_row(
                 "SELECT token_hash, package_id, created_at, last_access_at, expires_at \
@@ -664,6 +722,13 @@ impl OfflinePackageStore for SqliteStore {
                      updated_at = ?2 WHERE id = ?1",
                     params![package.id, now, renewed_expires_at],
                 )?;
+                pin_shared_offline_consumer(
+                    &tx,
+                    &package.id,
+                    "offline_download",
+                    &hash,
+                    renewed_expires_at.saturating_mul(1_000),
+                )?;
                 package.last_access_at = now;
                 package.updated_at = now;
                 package.expires_at = renewed_expires_at;
@@ -688,14 +753,31 @@ impl OfflinePackageStore for SqliteStore {
             recipe_hash.to_owned(),
         );
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
                 "UPDATE offline_packages SET state = 'ready', phase = 'ready', \
                  progress_millis = 1000, recipe_hash = ?3, actual_bytes = ?4, \
                  duration_ms = ?5, error_code = NULL, error_message = NULL, \
                  updated_at = unixepoch(), last_access_at = unixepoch() \
                  WHERE id = ?1 AND node_id = ?2 AND state IN ('queued', 'preparing')",
                 params![id, node, hash, actual_bytes, duration_ms],
-            )? > 0)
+            )?;
+            if changed == 1 {
+                let expires_at = tx.query_row(
+                    "SELECT expires_at FROM offline_packages WHERE id = ?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                pin_shared_offline_consumer(
+                    &tx,
+                    &id,
+                    "offline_package",
+                    &id,
+                    expires_at.saturating_mul(1_000),
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
@@ -707,17 +789,42 @@ impl OfflinePackageStore for SqliteStore {
     ) -> Result<bool, StoreError> {
         let id = package_id.to_owned();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let owned = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM offline_packages WHERE id = ?1 AND user_id = ?2)",
+                params![id, user_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if owned {
+                release_offline_pins(&tx, &id)?;
+            }
+            let changed = tx.execute(
                 "DELETE FROM offline_packages WHERE id = ?1 AND user_id = ?2",
                 params![id, user_id],
-            )? > 0)
+            )?;
+            tx.commit()?;
+            Ok(changed == 1)
         })
         .await
     }
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError> {
         self.with_conn(move |conn| {
-            Ok(conn.execute("DELETE FROM offline_packages WHERE expires_at <= ?1", [now])? as u64)
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM cache_consumer_pins
+                  WHERE (consumer_kind = 'offline_package' AND consumer_id IN (
+                            SELECT id FROM offline_packages WHERE expires_at <= ?1))
+                     OR (consumer_kind = 'offline_download' AND consumer_id IN (
+                            SELECT l.token_hash FROM offline_package_leases l
+                            JOIN offline_packages p ON p.id = l.package_id
+                           WHERE p.expires_at <= ?1))",
+                [now],
+            )?;
+            let changed =
+                tx.execute("DELETE FROM offline_packages WHERE expires_at <= ?1", [now])?;
+            tx.commit()?;
+            Ok(changed as u64)
         })
         .await
     }

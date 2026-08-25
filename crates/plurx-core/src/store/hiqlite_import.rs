@@ -589,6 +589,67 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_session_requests",
+        columns: &[
+            "user_id",
+            "request_id",
+            "request_fingerprint",
+            "playback_id",
+            "state",
+            "claim_expires_at_ms",
+            "incarnation_id",
+            "owner_node_id",
+            "response_json",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, request_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "media_playback_pointers",
+        columns: &[
+            "user_id",
+            "playback_id",
+            "current_incarnation_id",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, playback_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "media_sessions",
+        columns: &[
+            "incarnation_id",
+            "session_id",
+            "user_id",
+            "playback_id",
+            "request_fingerprint",
+            "owner_node_id",
+            "owner_epoch",
+            "lease_expires_at_ms",
+            "state",
+            "recipe_json",
+            "response_json",
+            "produced_playable_through_ms",
+            "fetched_through_ms",
+            "media_origin_ms",
+            "media_sequence",
+            "discontinuity_sequence",
+            "updated_at_ms",
+        ],
+        order_by: "incarnation_id",
+        minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "pretranscode_jobs",
         columns: &[
             "id",
@@ -644,9 +705,43 @@ const TABLES: &[TablePlan] = &[
             "scrub_object_index",
             "last_used_at",
             "last_seen_at",
+            "storage_id",
+            "generation_id",
         ],
         order_by: "recipe_hash, node_id, storage_class",
         minimum_schema: 11,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cache_storage_members",
+        columns: &[
+            "storage_id",
+            "node_id",
+            "storage_class",
+            "verified_at_ms",
+            "verification_state",
+        ],
+        order_by: "storage_id, node_id",
+        minimum_schema: 26,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cache_consumer_pins",
+        columns: &[
+            "storage_id",
+            "recipe_hash",
+            "generation_id",
+            "consumer_kind",
+            "consumer_id",
+            "consumer_epoch",
+            "expires_at_ms",
+        ],
+        order_by: "storage_id, recipe_hash, generation_id, consumer_kind, consumer_id",
+        minimum_schema: 26,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1682,6 +1777,24 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 24
             {
                 "0".to_owned()
+            } else if table.name == "transcode_cache_locations"
+                && *column == "storage_id"
+                && schema_version < 26
+            {
+                if qualify {
+                    "'node:' || source.node_id || ':cache'".to_owned()
+                } else {
+                    "'node:' || node_id || ':cache'".to_owned()
+                }
+            } else if table.name == "transcode_cache_locations"
+                && *column == "generation_id"
+                && schema_version < 26
+            {
+                if qualify {
+                    "source.relative_dir".to_owned()
+                } else {
+                    "relative_dir".to_owned()
+                }
             } else if qualify {
                 format!("source.{column}")
             } else {
@@ -1867,9 +1980,32 @@ mod tests {
     fn replicated_tables_exclude_node_local_and_derived_state() {
         let names = TABLES.iter().map(|table| table.name).collect::<Vec<_>>();
         assert!(!names.contains(&"playback_events"));
+        assert!(
+            !names.contains(&"fragment_indexes"),
+            "a fragment index describes one machine's ffmpeg output; replicating \
+             it would let one node's byte counts place another node's landings"
+        );
         assert!(!names.contains(&"items_fts"));
         assert!(!names.contains(&"offline_lease_guards"));
-        assert_eq!(names.len(), 20, "review every imported durable table");
+        assert!(names.contains(&"media_session_requests"));
+        assert!(names.contains(&"media_playback_pointers"));
+        assert!(names.contains(&"media_sessions"));
+        assert!(names.contains(&"cache_storage_members"));
+        assert!(names.contains(&"cache_consumer_pins"));
+        assert_eq!(names.len(), 25, "review every imported durable table");
+    }
+
+    #[test]
+    fn pre_v26_cache_locations_project_stable_local_storage_identity() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "transcode_cache_locations")
+            .copied()
+            .expect("cache location table plan");
+        let v25 = value_projection(table, 25, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(v25.ends_with("'node:' || node_id || ':cache', relative_dir"));
+        assert!(current.ends_with("storage_id, generation_id"));
     }
 
     #[test]

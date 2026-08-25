@@ -34,27 +34,34 @@ use plurx_core::cluster::migration::{
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::config::Config;
 use plurx_core::domain::{
-    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheManifestCheck,
-    CredentialGeneration, ItemEdit, ItemKind, ItemSort, LibraryKind, MetadataPatch,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
-    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
-    TraktAuth,
+    scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
+    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionTakeover, MetadataPatch, NetworkPriorObservation,
+    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
+    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
 };
 use plurx_core::error::StoreError;
+use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
-#[cfg(feature = "cluster-read-cost-validation")]
-use plurx_core::store::MetricsStore;
+use plurx_core::segplan::{
+    FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
+    SEGPLAN_VERSION,
+};
 #[cfg(feature = "hiqlite-store")]
 use plurx_core::store::{
-    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, OfflinePackageStore,
-    PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore,
-    TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
+    OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
+    TraktStore, TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE,
+    AUTH_SCHEMA_VERSION,
 };
 use plurx_core::store::{
     ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
     RootFingerprintStatus, SqliteStore, Store,
 };
+#[cfg(feature = "cluster-read-cost-validation")]
+use plurx_core::store::{CatalogueReader, MetricsStore};
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "hiqlite-store")]
@@ -80,6 +87,23 @@ impl From<&mut Row<'_>> for I64Value {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             value: row.get("value"),
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[derive(Debug, PartialEq, Eq)]
+struct CacheTouchTimes {
+    last_used_at: i64,
+    last_seen_at: i64,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl From<&mut Row<'_>> for CacheTouchTimes {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            last_used_at: row.get("last_used_at"),
+            last_seen_at: row.get("last_seen_at"),
         }
     }
 }
@@ -236,6 +260,25 @@ const CACHE_METHODS: &[&str] = &[
     "forget_cache_entry",
     "cache_bytes",
 ];
+const SHARED_CACHE_METHODS: &[&str] = &[
+    "put_cache_storage_member",
+    "cache_storage_member",
+    "mark_cache_storage_suspect",
+    "shared_cache_hit",
+    "touch_shared_cache_entry",
+    "claim_shared_cache_entry",
+    "complete_shared_cache_entry",
+    "abandon_shared_cache_entry",
+    "finalize_abandoned_shared_cache_entry",
+    "stale_shared_cache_claims",
+    "acquire_cache_consumer_pin",
+    "renew_cache_consumer_pins",
+    "release_cache_consumer_pin",
+    "prune_expired_cache_consumer_pins",
+    "shared_cache_gc_candidates",
+    "retire_shared_cache_generation",
+    "finalize_retired_shared_cache_generation",
+];
 const PRETRANSCODE_METHODS: &[&str] = &[
     "pretranscode_job",
     "enqueue_pretranscode_job",
@@ -284,12 +327,41 @@ const TELEMETRY_METHODS: &[&str] = &[
     "prune_playback_events",
     "playback_events",
 ];
+const FRAGMENT_INDEX_METHODS: &[&str] = &[
+    "put_fragment_index",
+    "fragment_index",
+    "forget_fragment_index",
+    // The orphan sweep's two halves. Node-local on one side and replicated on
+    // the other, which is the reason the sweep exists rather than a hook in
+    // `delete_files`.
+    "vod_row_file_ids",
+    "surviving_file_ids",
+];
+const RENDITION_PLAN_METHODS: &[&str] = &[
+    "put_rendition_plan",
+    "rendition_plan",
+    "forget_rendition_plans",
+];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
     "observe_network_prior",
     "network_prior",
     "prune_network_priors",
 ];
 const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
+const MEDIA_SESSION_METHODS: &[&str] = &[
+    "claim_media_session_request",
+    "assign_media_session_request_owner",
+    "activate_media_session",
+    "fail_media_session_request",
+    "media_session_route",
+    "media_session_route_by_incarnation",
+    "renew_media_sessions",
+    "expired_media_sessions",
+    "claim_media_session_takeover",
+    "end_media_session",
+    "maintain_media_sessions",
+    "owned_media_sessions",
+];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "put_setting_fenced",
     "put_setting_if_absent_fenced",
@@ -611,6 +683,1217 @@ async fn monotone_lease_contract_runs_through_dyn_store() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn media_session_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let first_user = store
+            .create_user("session-user-a", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create first session user: {error}"));
+        let second_user = store
+            .create_user("session-user-b", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create second session user: {error}"));
+        let (_, shared_file_id) = seed_file(&store, "session-shared-pin-contract").await;
+        let shared_storage_id = format!("shared:session-lifecycle:{backend}");
+        let shared_recipe = format!("shared-session-pin-{backend}");
+        let shared_generation_id = "shared-session-generation";
+        store
+            .put_cache_storage_member(&CacheStorageMember {
+                storage_id: shared_storage_id.clone(),
+                node_id: format!("{backend}-session-reader"),
+                storage_class: "shared".to_owned(),
+                verified_at_ms: 80,
+                verification_state: "verified".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify session storage: {error}"));
+        assert!(store
+            .claim_shared_cache_entry(
+                &shared_recipe,
+                shared_file_id,
+                1,
+                &shared_storage_id,
+                shared_generation_id,
+                "session/shared/generation",
+                81,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim session generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &shared_recipe,
+                &shared_storage_id,
+                shared_generation_id,
+                4_096,
+                &"f".repeat(64),
+                82,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete session generation: {error}")));
+        let shared_generation = store
+            .shared_cache_hit(&shared_recipe, &shared_storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read session generation: {error}"))
+            .expect("session generation");
+        let shared_gc_lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{shared_storage_id}"),
+                "session-gc-owner",
+                83,
+                1_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire session GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh session GC lease was held"),
+        };
+        let fingerprint = "a".repeat(64);
+        let conflicting = "b".repeat(64);
+        let incarnation_a = "00000000-0000-4000-8000-0000000000a1";
+        let incarnation_a_retry = "00000000-0000-4000-8000-0000000000a2";
+        let session_a = "00000000-0000-4000-8000-0000000000b1";
+
+        assert!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "uppercase-fingerprint",
+                    &"A".repeat(64),
+                    "uppercase-playback",
+                    "00000000-0000-4000-8000-0000000000f1",
+                    1,
+                    2,
+                )
+                .await
+                .is_err(),
+            "{backend}: fingerprints must use one canonical lowercase encoding"
+        );
+
+        let expired_incarnation = "00000000-0000-4000-8000-0000000000d1";
+        let recovered_incarnation = "00000000-0000-4000-8000-0000000000d2";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-attempt",
+                    &fingerprint,
+                    "expired-attempt-playback",
+                    expired_incarnation,
+                    1,
+                    2,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring request: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-attempt",
+                    &fingerprint,
+                    "expired-attempt-playback",
+                    recovered_incarnation,
+                    2,
+                    12,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reclaim exact expired request: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == recovered_incarnation
+        ));
+        assert!(store
+            .fail_media_session_request(
+                first_user.id,
+                "expired-attempt",
+                recovered_incarnation,
+                3,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle expired request fixture: {error}")));
+
+        let failed_incarnation = "00000000-0000-4000-8000-0000000000e1";
+        let retried_incarnation = "00000000-0000-4000-8000-0000000000e2";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &fingerprint,
+                    "retryable-attempt-playback",
+                    failed_incarnation,
+                    10,
+                    20,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim retry fixture: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == failed_incarnation
+        ));
+        assert!(store
+            .fail_media_session_request(first_user.id, "retryable-attempt", failed_incarnation, 11,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail retry fixture: {error}")));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &fingerprint,
+                    "retryable-attempt-playback",
+                    retried_incarnation,
+                    12,
+                    22,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reacquire failed request: {error}")),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == retried_incarnation
+        ));
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    &conflicting,
+                    "retryable-attempt-playback",
+                    failed_incarnation,
+                    13,
+                    23,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: conflict retried request: {error}")),
+            MediaSessionRequestClaim::Conflict,
+            "{backend}"
+        );
+        assert!(
+            store
+                .fail_media_session_request(
+                    first_user.id,
+                    "retryable-attempt",
+                    retried_incarnation,
+                    14,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle retry fixture: {error}"))
+        );
+
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a,
+                    100,
+                    200,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim session request: {error}")),
+            MediaSessionRequestClaim::Acquired {
+                incarnation_id: incarnation_a.to_owned(),
+            },
+            "{backend}"
+        );
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    110,
+                    210,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay in-flight request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. }
+                if incarnation_id == incarnation_a
+        ));
+        assert_eq!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &conflicting,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    110,
+                    210,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: conflict session request: {error}")),
+            MediaSessionRequestClaim::Conflict,
+            "{backend}"
+        );
+        assert!(store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "attempt-a",
+                incarnation_a,
+                "node-a",
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
+
+        let first = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_a.to_owned(),
+                session_id: session_a.to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some("attempt-a".to_owned()),
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: r#"{"version":1}"#.to_owned(),
+                response_json: r#"{"session":"a"}"#.to_owned(),
+                media_origin_ms: 12_500,
+                now_ms: 130,
+                lease_expires_at_ms: 330,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate first session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first activation must win"));
+        assert!(first.predecessor.is_none(), "{backend}");
+        assert_eq!(first.route.owner_epoch, 1, "{backend}");
+        assert!(store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: shared_storage_id.clone(),
+                    recipe_hash: shared_recipe.clone(),
+                    generation_id: shared_generation_id.to_owned(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_a.to_owned(),
+                    consumer_epoch: 1,
+                    expires_at_ms: 330,
+                },
+                131,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pin predecessor session: {error}")));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    140,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay resolved request: {error}")),
+            MediaSessionRequestClaim::Resolved(route) if route.session_id == session_a
+        ));
+
+        let session_b = "00000000-0000-4000-8000-0000000000b2";
+        let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
+        let second = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_b.to_owned(),
+                session_id: session_b.to_owned(),
+                user_id: second_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-b".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                // Write-once at activation. Every generation's frontier is
+                // measured from this zero, so a claim that rewrote it would
+                // silently reinterpret every offset already published.
+                media_origin_ms: 90_000,
+                now_ms: 145,
+                lease_expires_at_ms: 345,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate cross-user session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: cross-user activation must win"));
+        assert!(second.predecessor.is_none(), "{backend}");
+        assert_eq!(
+            store
+                .owned_media_sessions("node-b", 344)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list live node-b session: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
+
+        let session_a2 = "00000000-0000-4000-8000-0000000000b3";
+        let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
+        let superseding = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation_a2.to_owned(),
+                session_id: session_a2.to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 150,
+                lease_expires_at_ms: 350,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: supersede session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: superseding activation must win"));
+        assert_eq!(
+            superseding
+                .predecessor
+                .as_ref()
+                .map(|route| route.session_id.as_str()),
+            Some(session_a),
+            "{backend}"
+        );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &shared_storage_id,
+                &shared_recipe,
+                shared_generation_id,
+                CacheConsumerKind::MediaSession,
+                incarnation_a,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect predecessor pin: {error}")),
+            "{backend}: fencing a predecessor must delete its shared-cache pin"
+        );
+        assert_eq!(
+            store
+                .media_session_route(session_a)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_a2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect current incarnation: {error}"))
+                .map(|route| route.session_id),
+            Some(session_a2.to_owned()),
+            "{backend}"
+        );
+
+        let stale = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 160,
+                lease_expires_at_ms: 360,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale successor verdict: {error}"));
+        assert!(
+            stale.is_none(),
+            "{backend}: stale predecessor CAS must lose"
+        );
+        let stale_legacy = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
+                user_id: first_user.id,
+                playback_id: "shared-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 161,
+                lease_expires_at_ms: 361,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale legacy successor verdict: {error}"));
+        assert!(
+            stale_legacy.is_none(),
+            "{backend}: a legacy reopen must require the pointer to remain absent"
+        );
+        assert_eq!(
+            store
+                .media_session_route(session_a2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect fenced successor: {error}"))
+                .map(|route| route.state),
+            Some("active".to_owned()),
+            "{backend}: a delayed reopen must not end the current successor"
+        );
+
+        assert!(store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: shared_storage_id.clone(),
+                    recipe_hash: shared_recipe.clone(),
+                    generation_id: shared_generation_id.to_owned(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_a2.to_owned(),
+                    consumer_epoch: 1,
+                    expires_at_ms: 350,
+                },
+                190,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pin active media session: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 199, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: active session pin retirement: {error}"))
+            .is_none());
+
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "node-a",
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_a2.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 20_000,
+                        fetched_through_ms: 10_000,
+                        media_sequence: 5,
+                    }],
+                    200,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew current session: {error}")),
+            vec![incarnation_a2.to_owned()],
+            "{backend}"
+        );
+        let renewed_route = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect renewed frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(
+            renewed_route.produced_playable_through_ms, 20_000,
+            "{backend}"
+        );
+        assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(renewed_route.media_sequence, 5, "{backend}");
+
+        // Monotone progress (§8.8). A generation that restarts its local
+        // encoder resets its own index and will heartbeat a lower frontier;
+        // the replicated high-water mark must absorb that, not follow it.
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "node-a",
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_a2.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 4_000,
+                        fetched_through_ms: 1_000,
+                        media_sequence: 1,
+                    }],
+                    201,
+                    // The same expiry the live renewal set: this fixture is
+                    // about the frontier columns, and must not disturb the
+                    // exact-expiry refusal asserted below.
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew with a regressed frontier: {error}")),
+            vec![incarnation_a2.to_owned()],
+            "{backend}: a regressed frontier still renews the lease"
+        );
+        let held = store
+            .media_session_route(session_a2)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect held frontiers: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: renewed route disappeared"));
+        assert_eq!(held.produced_playable_through_ms, 20_000, "{backend}");
+        assert_eq!(held.fetched_through_ms, 10_000, "{backend}");
+        assert_eq!(
+            held.media_sequence, 5,
+            "{backend}: the sequence high-water mark is what a successor \
+             starts above; it may never move backwards"
+        );
+        // P6's guarantee, restored: renewing the session renews its typed
+        // reader pin, so the generation it is reading cannot be retired out
+        // from under it. The renewal batch's placeholder scramble broke this
+        // and the assertion was inverted to match; the assertion is the
+        // contract, not the observation.
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 360, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renewed session pin retirement: {error}"))
+            .is_none());
+        assert!(store
+            .renew_media_sessions(
+                "node-a",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_a2.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 30_000,
+                    fetched_through_ms: 15_000,
+                    media_sequence: 6,
+                }],
+                400,
+                500,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject exact-expiry renewal: {error}"))
+            .is_empty());
+
+        let owned_a = store
+            .owned_media_sessions("node-a", 399)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list node-a sessions: {error}"));
+        assert_eq!(owned_a.len(), 1, "{backend}");
+        assert_eq!(owned_a[0].session_id, session_a2, "{backend}");
+        assert!(
+            store
+                .owned_media_sessions("node-b", 399)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list expired node-b sessions: {error}"))
+                .is_empty(),
+            "{backend}: owner inventory must exclude an expired lease"
+        );
+
+        let expired = store
+            .expired_media_sessions(399, 64)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
+        let expired_b = expired
+            .iter()
+            .find(|route| route.session_id == session_b)
+            .unwrap_or_else(|| panic!("{backend}: expired route must be offered for takeover"));
+        assert_eq!(expired_b.owner_epoch, 1, "{backend}");
+        assert_eq!(expired_b.media_origin_ms, 90_000, "{backend}");
+        let takeover = MediaSessionTakeover {
+            incarnation_id: incarnation_b.to_owned(),
+            expected_owner_node_id: "node-b".to_owned(),
+            expected_owner_epoch: 1,
+            next_owner_node_id: "node-c".to_owned(),
+            now_ms: 399,
+            lease_expires_at_ms: 600,
+        };
+        let taken = store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim expired session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: eligible survivor must win takeover"));
+        assert_eq!(taken.session_id, session_b, "{backend}");
+        assert_eq!(taken.owner_node_id, "node-c", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+        assert_eq!(taken.discontinuity_sequence, 1, "{backend}");
+        assert_eq!(
+            taken.media_origin_ms, 90_000,
+            "{backend}: a claim moves ownership, never the timeline's zero"
+        );
+        assert!(store
+            .claim_media_session_takeover(&takeover)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay takeover CAS: {error}"))
+            .is_none());
+        assert!(store
+            .renew_media_sessions(
+                "node-b",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_b.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 1,
+                    fetched_through_ms: 1,
+                    media_sequence: 1,
+                }],
+                400,
+                700,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale owner renewal: {error}"))
+            .is_empty());
+
+        let ended = store
+            .end_media_session(session_a2, 410)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end current session: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ended route exists"));
+        assert_eq!(ended.session_id, session_a2, "{backend}");
+        assert!(store
+            .owned_media_sessions("node-a", 410)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list sessions after end: {error}"))
+            .is_empty());
+        assert!(!store
+            .release_cache_consumer_pin(
+                &shared_storage_id,
+                &shared_recipe,
+                shared_generation_id,
+                CacheConsumerKind::MediaSession,
+                incarnation_a2,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect ended session pin: {error}")),
+            "{backend}: ending a session must delete its shared-cache pin"
+        );
+        assert!(store
+            .retire_shared_cache_generation(&shared_generation, 411, &shared_gc_lease)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{backend}: retire generation after session end: {error}"
+            ))
+            .is_some());
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    420,
+                    520,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay superseded request: {error}")),
+            MediaSessionRequestClaim::Resolved(route)
+                if route.session_id == session_a && route.state == "ended"
+        ));
+
+        let expired_activation_incarnation = "00000000-0000-4000-8000-0000000000a6";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-activation",
+                    &fingerprint,
+                    "expired-playback",
+                    expired_activation_incarnation,
+                    430,
+                    440,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring activation: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "expired-activation",
+                expired_activation_incarnation,
+                "node-a",
+                439,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
+        assert!(store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: expired_activation_incarnation.to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
+                user_id: first_user.id,
+                playback_id: "expired-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some("expired-activation".to_owned()),
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 440,
+                lease_expires_at_ms: 640,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject expired activation: {error}"))
+            .is_none());
+
+        let expired_owner_incarnation = "00000000-0000-4000-8000-0000000000a7";
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "expired-owner",
+                    &fingerprint,
+                    "expired-owner-playback",
+                    expired_owner_incarnation,
+                    450,
+                    460,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim expiring owner: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(!store
+            .assign_media_session_request_owner(
+                first_user.id,
+                "expired-owner",
+                expired_owner_incarnation,
+                "node-a",
+                460,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject expired owner: {error}")));
+
+        // Expired routes remain active for one bounded takeover window, then
+        // maintenance terminals an unclaimed or abandoned successor.
+        let maintenance_now = 60_601;
+        store
+            .maintain_media_sessions(maintenance_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: expire active sessions: {error}"));
+        assert!(store
+            .owned_media_sessions("node-b", maintenance_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect expired inventory: {error}"))
+            .is_empty());
+        assert_eq!(
+            store
+                .media_session_route(session_b)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect expired route: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}: expired active routes must become terminal"
+        );
+
+        let prune_now = maintenance_now + 24 * 60 * 60 * 1_000 + 1;
+        store
+            .maintain_media_sessions(prune_now)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prune ended sessions: {error}"));
+        assert!(store
+            .media_session_route(session_b)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned route: {error}"))
+            .is_none());
+    })
+    .await;
+}
+
+/// Ending an incarnation that has just been taken over must act on the owner
+/// it really has.
+///
+/// The route read that drives the end is not inside the mutation, so a claim
+/// can commit between the two. If the dependent statements trust that stale
+/// snapshot, the end clamps a lease the dead node no longer holds, leaves the
+/// successor's shared-cache pin behind, and hands the caller a route naming a
+/// host that is gone — so the abort is sent into the void while the
+/// replacement encoder keeps running and keeps its admission slot.
+#[tokio::test]
+async fn ending_a_taken_over_session_acts_on_the_current_owner() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("takeover-end-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let fingerprint = "e".repeat(64);
+        let incarnation = "00000000-0000-4000-8000-00000000e001";
+        let session = "00000000-0000-4000-8000-00000000e002";
+
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                user_id: user.id,
+                playback_id: "takeover-end-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-old".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 4_000,
+                now_ms: 1_000,
+                lease_expires_at_ms: 2_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+
+        let taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation.to_owned(),
+                expected_owner_node_id: "node-old".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "node-new".to_owned(),
+                now_ms: 2_000,
+                lease_expires_at_ms: 14_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the survivor must win the claim"));
+        assert_eq!(taken.owner_node_id, "node-new", "{backend}");
+        assert_eq!(taken.owner_epoch, 2, "{backend}");
+
+        let ended = store
+            .end_media_session(session, 3_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: ending a live session returns its route"));
+        assert_eq!(
+            ended.owner_node_id, "node-new",
+            "{backend}: the end must name the owner it is actually stopping"
+        );
+        assert_eq!(ended.owner_epoch, 2, "{backend}");
+
+        let route = store
+            .media_session_route(session)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read ended route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the ended row is retained"));
+        assert_eq!(route.state, "ended", "{backend}");
+        assert!(
+            route.lease_expires_at_ms <= 3_000,
+            "{backend}: an ended incarnation keeps no live lease"
+        );
+        assert!(
+            store
+                .owned_media_sessions("node-new", 3_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: successor inventory: {error}"))
+                .is_empty(),
+            "{backend}: the successor must not still own an ended incarnation"
+        );
+
+        // The ended incarnation's coordination lease is clamped, not merely
+        // its session row: nothing may still hold `session:<incarnation>` at
+        // the successor's fence. A third node acquiring it cleanly is what
+        // proves the clamp landed on the owner the end actually had.
+        let reacquired = store
+            .acquire_lease(
+                &format!("session:{incarnation}"),
+                "node-third",
+                3_200,
+                9_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reacquire ended lease: {error}"));
+        assert!(
+            matches!(reacquired, LeaseClaim::Acquired(_)),
+            "{backend}: an ended incarnation leaves no live lease behind: {reacquired:?}"
+        );
+
+        // Idempotent, and still reporting the same owner.
+        let again = store
+            .end_media_session(session, 3_100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
+        assert_eq!(again.owner_node_id, "node-new", "{backend}");
+
+        // §7.2: a delete racing a takeover resolves to ended. Once ended, no
+        // survivor may claim the incarnation back into life.
+        assert!(
+            store
+                .expired_media_sessions(4_000, 64)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
+                .iter()
+                .all(|route| route.incarnation_id != incarnation),
+            "{backend}: an ended incarnation is not offered for takeover"
+        );
+        assert!(
+            store
+                .claim_media_session_takeover(&MediaSessionTakeover {
+                    incarnation_id: incarnation.to_owned(),
+                    expected_owner_node_id: "node-new".to_owned(),
+                    expected_owner_epoch: 2,
+                    next_owner_node_id: "node-third".to_owned(),
+                    now_ms: 4_000,
+                    lease_expires_at_ms: 16_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim an ended incarnation: {error}"))
+                .is_none(),
+            "{backend}: no replacement child may be created for an ended incarnation"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("session-cap-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create capped session user: {error}"));
+        let fingerprint = "d".repeat(64);
+        let mut predecessor = None;
+        for index in 0_u128..64 {
+            let incarnation_id = uuid::Uuid::from_u128(0x1000 + index).to_string();
+            let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
+            let playback_id = format!("cap-playback-{index}");
+            store
+                .activate_media_session(&MediaSessionActivation {
+                    incarnation_id: incarnation_id.clone(),
+                    session_id,
+                    user_id: user.id,
+                    playback_id: playback_id.clone(),
+                    expected_predecessor_incarnation_id: None,
+                    fence_predecessor: false,
+                    request_id: None,
+                    request_fingerprint: fingerprint.clone(),
+                    owner_node_id: "cap-node".to_owned(),
+                    recipe_json: "{}".to_owned(),
+                    response_json: "{}".to_owned(),
+                    media_origin_ms: 0,
+                    now_ms: 100,
+                    lease_expires_at_ms: 10_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed capped session: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: capped session {index} must activate"));
+            if index == 0 {
+                predecessor = Some(incarnation_id);
+            }
+        }
+
+        let first_attempt = uuid::Uuid::from_u128(0x3000).to_string();
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "cap-replacement",
+                    &fingerprint,
+                    "cap-playback-0",
+                    &first_attempt,
+                    1_000,
+                    1_001,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim capped replacement: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+
+        let replacement = uuid::Uuid::from_u128(0x3001).to_string();
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "cap-replacement",
+                    &fingerprint,
+                    "cap-playback-0",
+                    &replacement,
+                    1_001,
+                    2_000,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{backend}: reclaim expired capped replacement: {error}")
+                }),
+            MediaSessionRequestClaim::Acquired { incarnation_id }
+                if incarnation_id == replacement
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "cap-replacement",
+                &replacement,
+                "cap-node",
+                1_002,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
+        let outcome = store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: replacement,
+                session_id: uuid::Uuid::from_u128(0x4000).to_string(),
+                user_id: user.id,
+                playback_id: "cap-playback-0".to_owned(),
+                expected_predecessor_incarnation_id: predecessor,
+                fence_predecessor: true,
+                request_id: Some("cap-replacement".to_owned()),
+                request_fingerprint: fingerprint,
+                owner_node_id: "cap-node".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 1_003,
+                lease_expires_at_ms: 10_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate capped replacement: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: capped replacement must activate"));
+        assert!(outcome.predecessor.is_some(), "{backend}");
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_media_activation_requires_its_lease_mutation() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated media activation contract state");
+    let raw = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect raw replicated media activation client");
+    let user = store
+        .create_user("lease-fence-user", "hash", false)
+        .await
+        .expect("create lease-fence user");
+    let fingerprint = "c".repeat(64);
+
+    let max_incarnation = "00000000-0000-4000-8000-0000000000c1";
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                user.id,
+                "max-revision-attempt",
+                &fingerprint,
+                "max-revision-playback",
+                max_incarnation,
+                100,
+                200,
+            )
+            .await
+            .expect("claim max-revision activation"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    assert!(store
+        .assign_media_session_request_owner(
+            user.id,
+            "max-revision-attempt",
+            max_incarnation,
+            "removed-node",
+            110,
+        )
+        .await
+        .expect("assign max-revision owner"));
+    raw.execute(
+        "INSERT INTO job_leases
+            (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+         VALUES ($1, $2, 1, 9223372036854775807, $3, $4)",
+        hiqlite::params!(
+            format!("session:{max_incarnation}"),
+            "removed-node",
+            320_i64,
+            120_i64
+        ),
+    )
+    .await
+    .expect("seed exhausted media lease");
+    assert!(store
+        .activate_media_session(&MediaSessionActivation {
+            incarnation_id: max_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
+            user_id: user.id,
+            playback_id: "max-revision-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("max-revision-attempt".to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "removed-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            media_origin_ms: 0,
+            now_ms: 120,
+            lease_expires_at_ms: 320,
+        })
+        .await
+        .expect("reject exhausted media lease")
+        .is_none());
+
+    let removed_incarnation = "00000000-0000-4000-8000-0000000000c3";
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                user.id,
+                "removed-owner-attempt",
+                &fingerprint,
+                "removed-owner-playback",
+                removed_incarnation,
+                130,
+                230,
+            )
+            .await
+            .expect("claim removed-owner activation"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    assert!(store
+        .assign_media_session_request_owner(
+            user.id,
+            "removed-owner-attempt",
+            removed_incarnation,
+            "removed-node",
+            140,
+        )
+        .await
+        .expect("assign removed owner"));
+    raw.execute(
+        "INSERT INTO job_leases
+            (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+         VALUES ($1, $2, 1, 7, $3, $4)",
+        hiqlite::params!(
+            format!("session:{removed_incarnation}"),
+            "removed-node",
+            350_i64,
+            150_i64
+        ),
+    )
+    .await
+    .expect("seed retained removed-owner media lease");
+    raw.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, '', $2)",
+        hiqlite::params!("internal.cluster_job_owner_removed.removed-node", 150_i64),
+    )
+    .await
+    .expect("mark media owner removed");
+    assert!(store
+        .activate_media_session(&MediaSessionActivation {
+            incarnation_id: removed_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
+            user_id: user.id,
+            playback_id: "removed-owner-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("removed-owner-attempt".to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: "removed-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            media_origin_ms: 0,
+            now_ms: 150,
+            lease_expires_at_ms: 350,
+        })
+        .await
+        .expect("reject removed-owner media lease")
+        .is_none());
 }
 
 #[tokio::test]
@@ -2460,34 +3743,20 @@ async fn contract_applied_index(client: &Client) -> u64 {
 struct ContractLeaderPoint {
     leader_id: u64,
     term: u64,
-    applied_index: u64,
+    committed_index: u64,
 }
 
 #[cfg(feature = "hiqlite-store")]
 async fn contract_leader_point(client: &Client) -> ContractLeaderPoint {
-    let mut last_observation = "no metrics sample".to_owned();
-    for _ in 0..100 {
-        match client.metrics_db().await {
-            Ok(metrics) => {
-                last_observation = format!(
-                    "endpoint={}, leader={:?}, term={}, applied={:?}",
-                    metrics.id, metrics.current_leader, metrics.current_term, metrics.last_applied
-                );
-                if metrics.current_leader == Some(metrics.id) {
-                    if let Some(applied) = metrics.last_applied {
-                        return ContractLeaderPoint {
-                            leader_id: metrics.id,
-                            term: metrics.current_term,
-                            applied_index: applied.index,
-                        };
-                    }
-                }
-            }
-            Err(error) => last_observation = error.to_string(),
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let watermark = client
+        .db_quorum_watermark()
+        .await
+        .expect("obtain a leader-issued quorum commit watermark");
+    ContractLeaderPoint {
+        leader_id: watermark.leader_id,
+        term: watermark.term,
+        committed_index: watermark.committed_index,
     }
-    panic!("remote measurement client did not resolve the applied leader: {last_observation}");
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2495,9 +3764,27 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
     assert_eq!(
         (after.leader_id, after.term),
         (before.leader_id, before.term),
-        "auth activity entry accounting requires one stable leader and term"
+        "replicated-write entry accounting requires one stable leader and term"
     );
-    after.applied_index.saturating_sub(before.applied_index)
+    after.committed_index.saturating_sub(before.committed_index)
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn contract_cache_touch_times(
+    client: &Client,
+    recipe_hash: &str,
+    node_id: &str,
+) -> CacheTouchTimes {
+    let mut rows = client
+        .query_consistent_map::<CacheTouchTimes, _>(
+            "SELECT last_used_at, last_seen_at FROM transcode_cache_locations \
+             WHERE recipe_hash = $1 AND node_id = $2 AND storage_class = 'local'",
+            hiqlite::params!(recipe_hash, node_id),
+        )
+        .await
+        .expect("read cache touch timestamps");
+    assert_eq!(rows.len(), 1, "cache timestamp fixture must be unique");
+    rows.pop().expect("cache timestamp row")
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2643,7 +3930,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     )
     .await
     .expect("connect manifest cursor observer");
-    let before = contract_applied_index(&observer).await;
+    let before = contract_leader_point(&observer).await;
     assert_eq!(
         store
             .mark_cache_manifests_checked(&checks)
@@ -2652,9 +3939,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
         2
     );
     assert_eq!(
-        contract_applied_index(&observer)
-            .await
-            .saturating_sub(before),
+        contract_stable_leader_delta(before, contract_leader_point(&observer).await),
         1,
         "one scrub page must be one consensus transaction"
     );
@@ -3100,6 +4385,199 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fenced_cache_publication_never_regresses_activity_timestamps() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect fenced cache clock observer");
+    let telemetry = cluster._root.path().join("fenced-cache-clock-telemetry.db");
+    let store = Arc::new(
+        HiqliteAuthStore::validation_bootstrap_at(
+            client.clone(),
+            CONTRACT_INSTANCE_ID,
+            &telemetry,
+            1_000,
+        )
+        .await
+        .expect("bootstrap fixed-clock fenced cache store"),
+    );
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset fenced cache clock state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let (_, file_id) = seed_file(&dynamic, "fenced-cache-clock").await;
+    let lease_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("fenced cache lease clock after epoch")
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let mut lease = acquired(
+        store
+            .acquire_lease(
+                "candidate:fenced-cache-clock",
+                "clock-node",
+                lease_clock,
+                lease_clock.saturating_add(100_000),
+            )
+            .await
+            .expect("acquire fenced cache clock lease"),
+        "hiqlite fenced cache clock",
+    );
+    let replacement = publication_successor(&lease);
+    assert!(store
+        .claim_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            file_id,
+            1,
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("seed fenced cache clock claim"));
+    lease = replacement;
+    client
+        .execute(
+            "UPDATE transcode_cache_locations SET last_used_at = $1, last_seen_at = $1 \
+             WHERE recipe_hash = $2 AND node_id = $3",
+            hiqlite::params!(9_000_i64, "fenced-cache-clock-recipe", "clock-node"),
+        )
+        .await
+        .expect("advance cache timestamps ahead of the store clock");
+
+    let replacement = publication_successor(&lease);
+    assert!(store
+        .claim_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            file_id,
+            1,
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("repeat fenced cache claim after clock rollback"));
+    lease = replacement;
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "fenced claim publication must retain newer activity timestamps"
+    );
+
+    let replacement = publication_successor(&lease);
+    store
+        .touch_cache_claim_fenced(
+            "fenced-cache-clock-recipe",
+            "clock-node",
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("touch fenced cache claim after clock rollback");
+    lease = replacement;
+    let replacement = publication_successor(&lease);
+    store
+        .complete_cache_entry_fenced(
+            "fenced-cache-clock-recipe",
+            "clock-node",
+            "fc/fenced-cache-clock-recipe",
+            4_096,
+            &lease,
+            &replacement,
+        )
+        .await
+        .expect("complete fenced cache entry after clock rollback");
+    lease = replacement;
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "fenced touch and completion must retain newer activity timestamps"
+    );
+
+    let requirements = serde_json::to_string(&PretranscodeRequirements {
+        version: PretranscodeRequirements::VERSION,
+        decoder: "h264".to_owned(),
+        acceptable_encoder_families: vec!["software".to_owned()],
+        output_contract: "hls-v1".to_owned(),
+        tone_map: false,
+        output_grade: "sdr".to_owned(),
+        scratch_bytes: 1,
+    })
+    .expect("fenced cache clock requirements");
+    let job = NewPretranscodeJob {
+        id: "00000000-0000-4000-8000-000000000599".to_owned(),
+        dedupe_key: "fenced-cache-clock-job".to_owned(),
+        file_id,
+        source_size: 10_000,
+        source_mtime: 1,
+        target_height: 720,
+        policy_generation: "clock-v1".to_owned(),
+        requirements_json: requirements,
+        reason: "recent".to_owned(),
+        priority: 100,
+        not_before_ms: 1_000,
+        created_at_ms: 1_000,
+    };
+    assert!(enqueue_with_successor(store.as_ref(), &job, &mut lease)
+        .await
+        .expect("enqueue fixed-clock pretranscode publication"));
+    let capabilities = PretranscodeWorkerCapabilities {
+        version: PretranscodeRequirements::VERSION,
+        decoders: vec!["h264".to_owned()],
+        encoder_families: vec!["software".to_owned()],
+        max_target_height: 2_160,
+        output_contracts: vec!["hls-v1".to_owned()],
+        tone_map: false,
+        output_grades: vec!["sdr".to_owned()],
+        scratch_bytes: 2,
+    };
+    let claimed = store
+        .claim_pretranscode_job("clock-node", &capabilities, &[], 1_000, 10_000)
+        .await
+        .expect("claim fixed-clock pretranscode publication")
+        .expect("fixed-clock pretranscode job");
+    assert!(store
+        .complete_pretranscode_job(
+            &claimed,
+            "fenced-cache-clock-recipe",
+            1,
+            "fc/fenced-cache-clock-recipe",
+            4_096,
+            None,
+            &"c".repeat(64),
+            1_000,
+        )
+        .await
+        .expect("complete fixed-clock pretranscode publication"));
+    assert_eq!(
+        contract_cache_touch_times(&client, "fenced-cache-clock-recipe", "clock-node").await,
+        CacheTouchTimes {
+            last_used_at: 9_000,
+            last_seen_at: 9_000,
+        },
+        "pretranscode completion must retain newer activity timestamps"
+    );
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
@@ -3535,7 +5013,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
+async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -3564,6 +5042,35 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3641,7 +5148,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v5 through v9 migration");
+        .expect("daemon v5 through v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.proof")
@@ -3692,7 +5199,7 @@ async fn replicated_v5_store_migrates_atomically_through_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
+async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -3720,6 +5227,35 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let results = client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3792,7 +5328,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v6 to v9 migration");
+        .expect("daemon v6 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v6.proof")
@@ -3834,7 +5370,7 @@ async fn replicated_v6_store_migrates_atomically_to_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
+async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -3866,6 +5402,35 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -3920,7 +5485,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v7 to v9 migration");
+        .expect("daemon v7 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v7.proof")
@@ -3950,7 +5515,7 @@ async fn replicated_v7_store_migrates_atomically_to_v9_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
+async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -3982,6 +5547,35 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
             (
                 "DROP TRIGGER IF EXISTS pretranscode_jobs_cancel_source",
                 hiqlite::params!(),
@@ -4035,7 +5629,7 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
 
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v8 to v9 migration");
+        .expect("daemon v8 to v11 migration");
     assert_eq!(
         migrated
             .get_setting("migration.v8.proof")
@@ -4074,11 +5668,273 @@ async fn replicated_v8_store_migrates_exactly_to_v9_on_daemon_open() {
              AND name = 'pretranscode_jobs_cancel_source'",
             1,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('media_session_requests', 'media_playback_pointers', 'media_sessions')",
+            3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner', \
+                          'media_sessions_user', 'media_sessions_expiry', \
+                          'media_sessions_retention')",
+            5,
+        ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v9 schema");
+            .expect("inspect migrated v11 schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        true,
+        None,
+    )
+    .await
+    .expect("connect v9 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v9-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v9 migration fixture");
+    current
+        .put_setting("migration.v9.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER IF EXISTS transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_lru",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX IF EXISTS transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_playback_pointers", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            ("DROP TABLE media_session_requests", hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version = 9 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v9 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v9 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 9 is incompatible"),
+        "{strict_error}"
+    );
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v9 to v11 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v9.proof")
+            .await
+            .expect("read v9 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('media_session_requests', 'media_playback_pointers', 'media_sessions')",
+            3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('media_session_requests_expiry', 'media_sessions_owner', \
+                          'media_sessions_user', 'media_sessions_expiry', \
+                          'media_sessions_retention')",
+            5,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v11 session schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v10 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v10-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v10 migration fixture");
+    current
+        .put_setting("migration.v10.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER transcode_cache_location_identity_au",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER transcode_cache_location_identity_ai",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX transcode_cache_storage_lru", hiqlite::params!()),
+            (
+                "DROP INDEX transcode_cache_storage_generation",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cache_consumer_pins", hiqlite::params!()),
+            ("DROP TABLE cache_storage_members", hiqlite::params!()),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN generation_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 10 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v10 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v10 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 10 is incompatible"),
+        "{strict_error}"
+    );
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v10 to v11 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v10.proof")
+            .await
+            .expect("read v10 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
+             WHERE name IN ('storage_id', 'generation_id')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('cache_storage_members', 'cache_consumer_pins')",
+            2,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('transcode_cache_storage_generation', \
+                          'transcode_cache_storage_lru', 'cache_storage_members_node', \
+                          'cache_consumer_pins_expiry')",
+            4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('transcode_cache_location_identity_ai', \
+                          'transcode_cache_location_identity_au')",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v11 shared-cache schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -4537,6 +6393,22 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                 .expect("populate composite-key paged parity locations");
         }
     }
+    connection
+        .execute_batch(
+            "UPDATE transcode_cache_locations
+                SET storage_id = 'shared:fixture', generation_id = 'fixture-generation'
+              WHERE recipe_hash = 'fixture-recipe'
+                AND node_id = 'fixture-page-node-000' AND storage_class = 'shared';
+             INSERT INTO cache_storage_members
+                (storage_id, node_id, storage_class, verified_at_ms, verification_state)
+                VALUES ('shared:fixture', 'fixture-node', 'shared', 500, 'verified');
+             INSERT INTO cache_consumer_pins
+                (storage_id, recipe_hash, generation_id, consumer_kind,
+                 consumer_id, consumer_epoch, expires_at_ms)
+                VALUES ('shared:fixture', 'fixture-recipe', 'fixture-generation',
+                        'offline_package', 'fixture-package', 1, 999999000);",
+        )
+        .expect("populate shared cache import facts");
     drop(connection);
     path
 }
@@ -4727,6 +6599,17 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             DROP TRIGGER transcode_cache_location_identity_au;
+             DROP TRIGGER transcode_cache_location_identity_ai;
+             DROP INDEX transcode_cache_storage_lru;
+             DROP INDEX transcode_cache_storage_generation;
+             DROP TABLE cache_consumer_pins;
+             DROP TABLE cache_storage_members;
+             DROP INDEX rendition_plans_by_file;
+             DROP TABLE rendition_plans;
+             DROP TABLE fragment_indexes;
+             ALTER TABLE transcode_cache_locations DROP COLUMN generation_id;
+             ALTER TABLE transcode_cache_locations DROP COLUMN storage_id;
              DROP TRIGGER library_roots_paths_au;
              DROP TABLE scan_reconcile_items;
              DROP TABLE scan_reconcile_guards;
@@ -4734,6 +6617,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE playback_events;
              DROP TABLE network_priors;
              DROP TABLE reading_state;
+             DROP TABLE media_session_requests;
+             DROP TABLE media_playback_pointers;
+             DROP TABLE media_sessions;
              DROP TABLE job_leases;
              DROP TRIGGER pretranscode_jobs_cancel_source;
              DROP INDEX pretranscode_jobs_active;
@@ -4802,7 +6688,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 20);
+    assert_eq!(report.tables.len(), 25);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -6179,7 +8065,10 @@ async fn sqlite_import_verification_refusals_have_teeth() {
 
 #[test]
 fn contract_inventory_matches_every_store_method() {
-    let source = include_str!("../src/store/mod.rs");
+    let source = include_str!("../src/store/mod.rs")
+        .split_once("pub trait Store:")
+        .expect("Store composite boundary")
+        .0;
     let declared = source
         .lines()
         .filter_map(|line| line.strip_prefix("    async fn "))
@@ -6196,11 +8085,15 @@ fn contract_inventory_matches_every_store_method() {
         API_KEY_METHODS,
         OUTBOX_METHODS,
         CACHE_METHODS,
+        SHARED_CACHE_METHODS,
         PRETRANSCODE_METHODS,
         OFFLINE_METHODS,
         TELEMETRY_METHODS,
         NETWORK_PRIOR_METHODS,
+        FRAGMENT_INDEX_METHODS,
+        RENDITION_PLAN_METHODS,
         COORDINATION_METHODS,
+        MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
         METRICS_METHODS,
     ]
@@ -6209,11 +8102,255 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 194, "review the Store method count");
+    assert_eq!(declared.len(), 231, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn rendition_plan_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");
+        let entry = |index: u32, start: u64, kind: PlanEntryKind, cut: PlanCut| PlanEntry {
+            index,
+            kind,
+            start_ticks: start,
+            duration_ticks: 112_128,
+            est_bytes: 48_000_000 + u64::from(index),
+            cut,
+            fragments: if kind == PlanEntryKind::Video { 4 } else { 0 },
+        };
+        let plan = SegmentPlan {
+            version: SEGPLAN_VERSION,
+            timescale: 16_000,
+            entries: vec![
+                entry(0, 0, PlanEntryKind::Video, PlanCut::Clean),
+                entry(1, 112_128, PlanEntryKind::Video, PlanCut::ByteCeiling),
+                entry(2, 224_256, PlanEntryKind::AudioTail, PlanCut::EndOfStream),
+            ],
+            target_duration: 15,
+        };
+
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing plan: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        assert!(
+            store
+                .put_rendition_plan("rk", 42, &plan, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a plan: {error}")),
+            "backend {backend}: storing the first plan under a key is the write"
+        );
+        let read = store
+            .rendition_plan("rk", &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the plan: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the plan it just stored"));
+        assert_eq!(read, plan, "backend {backend}");
+
+        // A plan is a decision a client already holds a playlist for, so a
+        // second one under the same key is refused rather than applied. A
+        // backend that upserted here would re-cut a rendition under the index
+        // a viewer is mid-seek against.
+        let mut recut = plan.clone();
+        recut.entries[0].duration_ticks = 999;
+        assert!(
+            !store
+                .put_rendition_plan("rk", 42, &recut, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: store a second plan: {error}")),
+            "backend {backend}: a second plan under one key must not be stored"
+        );
+        assert_eq!(
+            store
+                .rendition_plan("rk", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-read: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: still stored")),
+            plan,
+            "backend {backend}: the first plan is still the plan"
+        );
+
+        // Invalidation by mismatch, the same discipline the index keeps.
+        let moved_on = SourceIdentity::new(8_192, 1_700_000_000_000, "fingerprint");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &moved_on)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a resized source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        let repiped = SourceIdentity::new(4_096, 1_700_000_000_000, "other-pipeline");
+        assert_eq!(
+            store
+                .rendition_plan("rk", &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a repiped source: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        // One file carries several renditions; forgetting the file takes all
+        // of them and leaves another file's alone.
+        store
+            .put_rendition_plan("rk-720", 42, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store a second rendition: {error}"));
+        store
+            .put_rendition_plan("rk-other", 43, &plan, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store another file's: {error}"));
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the file's plans: {error}")),
+            2,
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .rendition_plan("rk-other", &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: another file's plan: {error}"))
+                .is_some(),
+            "backend {backend}: forgetting one file must not take another's"
+        );
+        assert_eq!(
+            store
+                .forget_rendition_plans(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget twice: {error}")),
+            0,
+            "backend {backend}"
+        );
+
+        // The sweep's two queries. Both backends must answer the same way, and
+        // they reach the answer differently: SQLite reads one database, while
+        // hiqlite asks its own sidecar what it holds and the replicated table
+        // which of those still exist. That split is the whole reason the sweep
+        // is per-node rather than a hook inside `delete_files`.
+        let held = store
+            .vod_row_file_ids(512)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list held rows: {error}"));
+        assert!(
+            held.contains(&43),
+            "backend {backend}: the surviving file's plan must still be listed, got {held:?}"
+        );
+        assert!(
+            held.windows(2).all(|pair| pair[0] < pair[1]),
+            "backend {backend}: ordered so consecutive sweeps make progress"
+        );
+
+        // Neither file id was ever inserted into `files`, so both are orphans
+        // — which is exactly what the sweep is looking for.
+        let alive = store
+            .surviving_file_ids(&held)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: check survivors: {error}"));
+        assert!(
+            alive.is_empty(),
+            "backend {backend}: no rows in `files`, so nothing survives, got {alive:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fragment_index_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");
+        let index = FragmentIndex::new(
+            16_000,
+            vec![
+                IndexRow {
+                    dts: 0,
+                    duration: 28_016,
+                    bytes: 104_452,
+                    video_bytes: 103_836,
+                    class: CutClass::CleanIdr,
+                },
+                IndexRow {
+                    dts: 28_016,
+                    duration: 28_032,
+                    bytes: 110_038,
+                    video_bytes: 109_422,
+                    class: CutClass::Dirty,
+                },
+            ],
+            "abc123",
+            identity.clone(),
+        );
+
+        assert_eq!(
+            store
+                .fragment_index(42, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a missing index: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        store
+            .put_fragment_index(42, &index)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store an index: {error}"));
+        let read = store
+            .fragment_index(42, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read the index: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the index it just stored"));
+        assert_eq!(read, index, "backend {backend}");
+
+        // Invalidation is by mismatch, never by deletion: a changed file or a
+        // changed video pipeline simply stops matching. A backend that ignored
+        // either half would serve byte counts describing a stream that is no
+        // longer produced, and the landing matcher compares exactly those.
+        let moved_on = SourceIdentity::new(8_192, 1_700_000_000_000, "fingerprint");
+        assert_eq!(
+            store
+                .fragment_index(42, &moved_on)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a resized source: {error}")),
+            None,
+            "backend {backend}"
+        );
+        let repiped = SourceIdentity::new(4_096, 1_700_000_000_000, "other-pipeline");
+        assert_eq!(
+            store
+                .fragment_index(42, &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read a repiped source: {error}")),
+            None,
+            "backend {backend}"
+        );
+
+        assert!(
+            store
+                .forget_fragment_index(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget the index: {error}")),
+            "backend {backend}"
+        );
+        assert!(
+            !store
+                .forget_fragment_index(42)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget it twice: {error}")),
+            "backend {backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -6735,6 +8872,316 @@ async fn clustered_page_read_primitives_have_bounded_client_calls() {
     assert_eq!(counts.write_calls, 1);
     assert_eq!(success_after.write_calls, success_before.write_calls);
     assert_eq!(failure_after, failure_before + 1);
+}
+
+/// Every P3b catalogue operation must return the same serialized value through
+/// its local and Authority paths against one real replicated fixture. The
+/// genre and media-shape cases intentionally cover their existing
+/// multi-statement semantics while the fixture is quiescent; bounded reads do
+/// not claim a stronger snapshot than Authority.
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test]
+async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once() {
+    use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ReplicationMonitor};
+
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset bounded catalogue target");
+
+    let fixture = tempfile::tempdir().expect("bounded catalogue fixture");
+    let source = populated_current_import_fixture(fixture.path());
+    let connection = rusqlite::Connection::open(&source).expect("open catalogue fixture");
+    connection
+        .execute_batch(
+            "UPDATE files
+                SET height = 1080, probe_json = '{\"streams\":[]}'
+              WHERE id = 30;
+             INSERT INTO items
+                (id, library_id, kind, parent_id, title, sort_title,
+                 season_number, episode_number, added_at, updated_at, tags, genres)
+             VALUES
+                (11, 9, 'episode', 10, 'Imported Episode', 'Imported Episode',
+                 1, 1, 201, 202, '[]', '[\"Drama\"]');",
+        )
+        .expect("seed non-vacuous catalogue rows");
+    drop(connection);
+    let prepared = prepare_sqlite_import(fixture.path()).expect("prepare catalogue fixture");
+    store
+        .import_sqlite_backup(
+            &prepared.backup_path,
+            &prepared.backup_sha256,
+            prepared.schema_version,
+        )
+        .await
+        .expect("import bounded catalogue fixture");
+
+    let authority_store: Arc<dyn Store> = store.clone();
+    let authority = CatalogueReader::authority(Arc::clone(&authority_store));
+    assert!(
+        !authority
+            .recently_added(Some(9), 20)
+            .await
+            .expect("Authority recent seed")
+            .is_empty(),
+        "recently-added parity must exercise an eligible row"
+    );
+    assert_eq!(
+        authority
+            .item_max_heights(&[10])
+            .await
+            .expect("Authority height seed")
+            .get(&10),
+        Some(&1080),
+        "height parity must exercise a non-null aggregate"
+    );
+    assert_eq!(
+        authority
+            .get_file_probe_json(30)
+            .await
+            .expect("Authority probe seed")
+            .as_deref(),
+        Some(r#"{"streams":[]}"#),
+        "probe parity must exercise a non-null JSON payload"
+    );
+
+    macro_rules! assert_catalogue_parity {
+        ($label:literal, $method:ident($($arg:expr),* $(,)?)) => {{
+            let expected = serde_json::to_value(
+                authority
+                    .$method($($arg),*)
+                    .await
+                    .unwrap_or_else(|error| panic!("Authority {}: {error}", $label)),
+            )
+            .unwrap_or_else(|error| panic!("serialize Authority {}: {error}", $label));
+
+            store.validation_reset_operation_counts();
+            let reader = CatalogueReader::validation_replicated(
+                Arc::clone(&authority_store),
+                Arc::clone(&store),
+                PassiveRaftMetrics::validation_bounded_ready(),
+                64,
+            );
+            let actual = serde_json::to_value(
+                reader
+                    .$method($($arg),*)
+                    .await
+                    .unwrap_or_else(|error| panic!("bounded {}: {error}", $label)),
+            )
+            .unwrap_or_else(|error| panic!("serialize bounded {}: {error}", $label));
+            assert_eq!(actual, expected, "{} local/Authority parity", $label);
+            let counts = store.validation_operation_counts();
+            assert_eq!(
+                counts.consistent_query_calls, 0,
+                "{} unexpectedly fell back to Authority",
+                $label
+            );
+            assert!(
+                counts.non_consistent_query_calls > 0,
+                "{} did not exercise its local SQL",
+                $label
+            );
+        }};
+    }
+
+    assert_catalogue_parity!("get library", get_library(9));
+    assert_catalogue_parity!("list libraries", list_libraries());
+    assert_catalogue_parity!("get item", get_item(20));
+    assert_catalogue_parity!("item children", get_item_children(20));
+    assert_catalogue_parity!(
+        "genre page",
+        list_top_items_in_genre(9, ItemSort::Title, 0, 20, Some("Drama"))
+    );
+    assert_catalogue_parity!("home previews", home_preview_pages(8));
+    assert_catalogue_parity!("recently added", recently_added(Some(9), 20));
+    assert_catalogue_parity!("get file", get_file(30));
+    assert_catalogue_parity!("files for item", files_for_item(10));
+    assert_catalogue_parity!("child counts", child_counts(&[10, 20]));
+    assert_catalogue_parity!("item max heights", item_max_heights(&[10, 20]));
+    assert_catalogue_parity!("item media facts", item_media_facts(&[10, 20]));
+    assert_catalogue_parity!("media shape", media_shape());
+    assert_catalogue_parity!("probe JSON", get_file_probe_json(30));
+
+    let expected = authority
+        .get_item(20)
+        .await
+        .expect("Authority fallback value");
+
+    store.validation_reset_operation_counts();
+    store.validation_fail_next_non_consistent_query();
+    let query_error_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    let actual = query_error_reader
+        .get_item(20)
+        .await
+        .expect("local query error must fall back");
+    assert_eq!(
+        serde_json::to_value(actual).expect("serialize query-error result"),
+        serde_json::to_value(&expected).expect("serialize expected item")
+    );
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store.validation_reset_operation_counts();
+    let proof_loss_reader = CatalogueReader::validation_replicated(
+        Arc::clone(&authority_store),
+        Arc::clone(&store),
+        PassiveRaftMetrics::validation_bounded_ready(),
+        64,
+    );
+    proof_loss_reader.validation_revoke_after_next_local();
+    let actual = proof_loss_reader
+        .get_item(20)
+        .await
+        .expect("proof loss must discard and fall back");
+    assert_eq!(
+        serde_json::to_value(actual).expect("serialize proof-loss result"),
+        serde_json::to_value(&expected).expect("serialize expected item")
+    );
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 1);
+    assert_eq!(counts.consistent_query_calls, 1);
+
+    store.validation_reset_operation_counts();
+    let no_proof_reader = CatalogueReader::validation_replicated(
+        authority_store,
+        Arc::clone(&store),
+        ReplicationMonitor::sqlite().metrics_handle(),
+        64,
+    );
+    no_proof_reader
+        .get_item(20)
+        .await
+        .expect("missing proof must use Authority");
+    let counts = store.validation_operation_counts();
+    assert_eq!(counts.non_consistent_query_calls, 0);
+    assert_eq!(counts.consistent_query_calls, 1);
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replaceable_cache_touch_burst_has_one_physical_write_budget() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let observer = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect replaceable-touch consensus observer");
+    let store = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replaceable-touch state");
+    let dynamic: Arc<dyn Store> = store.clone();
+    let (_, file_id) = seed_file(&dynamic, "replaceable-touch").await;
+    assert!(store
+        .claim_cache_entry(
+            "replaceable-touch-recipe",
+            file_id,
+            1,
+            "cache-node",
+            "re/replaceable-touch-recipe",
+        )
+        .await
+        .expect("seed replaceable cache claim"));
+
+    store.validation_reset_operation_counts();
+    let before_burst = contract_leader_point(&observer).await;
+    let start = Arc::new(tokio::sync::Barrier::new(81));
+    let mut touches = tokio::task::JoinSet::new();
+    for _ in 0..80 {
+        let store = Arc::clone(&store);
+        let start = Arc::clone(&start);
+        touches.spawn(async move {
+            start.wait().await;
+            store
+                .touch_cache_claim("replaceable-touch-recipe", "cache-node")
+                .await
+        });
+    }
+    start.wait().await;
+    while let Some(result) = touches.join_next().await {
+        result
+            .expect("cache touch task")
+            .expect("cache touch result");
+    }
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "80 equal cache touches must submit one physical write"
+    );
+    let after_burst = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(before_burst, after_burst),
+        1,
+        "80 equal cache touches must commit one Raft entry"
+    );
+
+    store.validation_reset_operation_counts();
+    store
+        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096)
+        .await
+        .expect("terminal cache completion");
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "terminal completion must bypass the replaceable gate"
+    );
+    let after_completion = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(after_burst, after_completion),
+        1,
+        "terminal completion must commit its own Raft entry"
+    );
+
+    store.validation_reset_operation_counts();
+    for index in 0..8 {
+        store
+            .touch_cache_entry(&format!("uncoalesced-control-{index}"), "cache-node")
+            .await
+            .expect("distinct control touch");
+    }
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        8,
+        "distinct identities are the uncoalesced load control"
+    );
+    let after_control = contract_leader_point(&observer).await;
+    assert_eq!(
+        contract_stable_leader_delta(after_completion, after_control),
+        8,
+        "the distinct-identity control must physically exceed the burst budget"
+    );
+
+    store.validation_reset_operation_counts();
+    store
+        .forget_cache_entry("replaceable-touch-recipe", "cache-node", "local")
+        .await
+        .expect("terminal cache removal");
+    assert_eq!(
+        store.validation_operation_counts().write_calls,
+        1,
+        "terminal removal must bypass the replaceable gate"
+    );
+    assert_eq!(
+        contract_stable_leader_delta(after_control, contract_leader_point(&observer).await),
+        1,
+        "terminal removal must commit its own Raft entry"
+    );
 }
 
 #[tokio::test]
@@ -8766,6 +11213,675 @@ async fn transcode_cache_contract_runs_through_dyn_store() {
                 .is_empty(),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn shared_cache_pin_and_fenced_gc_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "shared-cache-contract").await;
+        let storage_id = format!("cluster:contract:{backend}:shared");
+        let member = CacheStorageMember {
+            storage_id: storage_id.clone(),
+            node_id: format!("{backend}-reader"),
+            storage_class: "shared".to_owned(),
+            verified_at_ms: 100,
+            verification_state: "verified".to_owned(),
+        };
+        store
+            .put_cache_storage_member(&member)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
+        assert_eq!(
+            store
+                .cache_storage_member(&storage_id, &member.node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read shared member: {error}")),
+            Some(member.clone()),
+            "{backend}"
+        );
+
+        let abandoned_recipe = format!("shared-abandoned-recipe-{backend}");
+        assert!(store
+            .claim_shared_cache_entry(
+                &abandoned_recipe,
+                file_id,
+                1,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+                101,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim abandoned generation: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, 100, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list fresh claims: {error}"))
+            .is_empty());
+        let stale_claims = store
+            .stale_shared_cache_claims(&storage_id, 101, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list stale claims: {error}"));
+        assert_eq!(stale_claims.len(), 1, "{backend}");
+        assert_eq!(stale_claims[0].generation_id, "generation-abandon");
+        assert!(!store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-successor",
+                "shared/abandon/generation-successor",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject stale abandon: {error}")));
+        assert!(store
+            .abandon_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact abandon: {error}")));
+        assert_eq!(
+            store
+                .stale_shared_cache_claims(&storage_id, 0, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list abandoned claim: {error}"))
+                .len(),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .finalize_abandoned_shared_cache_entry(
+                &abandoned_recipe,
+                &storage_id,
+                "generation-abandon",
+                "shared/abandon/generation",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize abandoned claim: {error}")));
+        assert!(store
+            .stale_shared_cache_claims(&storage_id, i64::MAX, 8)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list finalized claims: {error}"))
+            .is_empty());
+
+        let recipe_hash = format!("shared-cache-recipe-{backend}");
+        let generation_id = "generation-a";
+        assert!(store
+            .claim_shared_cache_entry(
+                &recipe_hash,
+                file_id,
+                1,
+                &storage_id,
+                generation_id,
+                "shared/recipe/generation-a",
+                110,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim shared generation: {error}")));
+        assert!(!store
+            .claim_shared_cache_entry(
+                &recipe_hash,
+                file_id,
+                1,
+                &storage_id,
+                "generation-loser",
+                "shared/recipe/generation-loser",
+                111,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: duplicate shared claim: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &recipe_hash,
+                &storage_id,
+                generation_id,
+                4_096,
+                &"a".repeat(64),
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete shared generation: {error}")));
+        let generation = store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: shared cache hit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: shared generation disappeared"));
+        assert_eq!(generation.generation_id, generation_id, "{backend}");
+        assert!(store
+            .touch_shared_cache_entry(&recipe_hash, &storage_id, generation_id, 150)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: touch shared generation: {error}")));
+        assert_eq!(
+            store
+                .shared_cache_hit(&recipe_hash, &storage_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read touched generation: {error}"))
+                .expect("touched generation")
+                .last_used_at,
+            150,
+            "{backend}: shared cache uses millisecond timestamps"
+        );
+
+        let mut lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{storage_id}"),
+                "gc-owner",
+                125,
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire shared GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh shared GC lease was held"),
+        };
+
+        let session_pin = CacheConsumerPin {
+            storage_id: storage_id.clone(),
+            recipe_hash: recipe_hash.clone(),
+            generation_id: generation_id.to_owned(),
+            consumer_kind: CacheConsumerKind::MediaSession,
+            consumer_id: "session-incarnation".to_owned(),
+            consumer_epoch: 2,
+            expires_at_ms: 1_000,
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&session_pin, 130)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire session pin: {error}")));
+        assert!(!store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    consumer_epoch: 1,
+                    expires_at_ms: 1_500,
+                    ..session_pin.clone()
+                },
+                131,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject stale pin epoch: {error}")));
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 200, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pinned GC candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .retire_shared_cache_generation(&generation, 200, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject pinned retirement: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .renew_cache_consumer_pins(
+                    &[CacheConsumerPin {
+                        expires_at_ms: 1_500,
+                        ..session_pin.clone()
+                    }],
+                    201,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew session pin: {error}")),
+            1,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .renew_cache_consumer_pins(
+                    &[CacheConsumerPin {
+                        expires_at_ms: 1_200,
+                        ..session_pin.clone()
+                    }],
+                    202,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay older renewal: {error}")),
+            1,
+            "{backend}"
+        );
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 1_300, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: monotone pin candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &session_pin.consumer_id,
+                session_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: release session pin: {error}")));
+
+        let lookup_pin = CacheConsumerPin {
+            consumer_id: "lookup-crash-bridge".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 215,
+            ..session_pin.clone()
+        };
+        assert!(store
+            .acquire_cache_consumer_pin(&lookup_pin, 210)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire crash bridge pin: {error}")));
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 214, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early pin prune: {error}")),
+            0,
+            "{backend}: live bridge pin must survive pruning"
+        );
+        assert_eq!(
+            store
+                .prune_expired_cache_consumer_pins(&storage_id, 215, 8)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired pin prune: {error}")),
+            1,
+            "{backend}: a crashed lookup owner must not leak its expired pin"
+        );
+        assert!(!store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &recipe_hash,
+                generation_id,
+                CacheConsumerKind::MediaSession,
+                &lookup_pin.consumer_id,
+                lookup_pin.consumer_epoch,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned bridge pin: {error}")));
+
+        let racing_pin = CacheConsumerPin {
+            consumer_kind: CacheConsumerKind::OfflineDownload,
+            consumer_id: "racing-reader".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 1_600,
+            ..session_pin.clone()
+        };
+        let pin_store = Arc::clone(&store);
+        let retire_store = Arc::clone(&store);
+        let pin_future = async {
+            pin_store
+                .acquire_cache_consumer_pin(&racing_pin, 220)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: racing pin: {error}"))
+        };
+        let retire_future = async {
+            retire_store
+                .retire_shared_cache_generation(&generation, 220, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: racing retirement: {error}"))
+        };
+        let (pin_won, gc_successor) = tokio::join!(pin_future, retire_future);
+        let gc_won = gc_successor.is_some();
+        assert_ne!(
+            pin_won, gc_won,
+            "{backend}: pin acquisition and retirement must choose exactly one winner"
+        );
+        if pin_won {
+            assert!(store
+                .release_cache_consumer_pin(
+                    &storage_id,
+                    &recipe_hash,
+                    generation_id,
+                    CacheConsumerKind::OfflineDownload,
+                    &racing_pin.consumer_id,
+                    racing_pin.consumer_epoch,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release racing pin: {error}")));
+            lease = store
+                .retire_shared_cache_generation(&generation, 221, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: retire race survivor: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: race survivor was not retired"));
+        } else {
+            lease = gc_successor.expect("GC race winner successor");
+        }
+        assert!(store
+            .shared_cache_hit(&recipe_hash, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired shared lookup: {error}"))
+            .is_none());
+        let cleanup_candidates = store
+            .shared_cache_gc_candidates(&storage_id, 222, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retired cleanup candidate: {error}"));
+        assert_eq!(cleanup_candidates.len(), 1, "{backend}");
+        assert!(cleanup_candidates[0].cleanup_pending, "{backend}");
+        let mut wrong_generation = cleanup_candidates[0].clone();
+        wrong_generation.relative_dir.push_str("-wrong");
+        assert!(store
+            .finalize_retired_shared_cache_generation(&wrong_generation, 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: wrong tombstone finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after wrong finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: wrong finalization advanced the GC lease"));
+        lease = store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 223, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalize retired generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retired generation was not finalized"));
+        assert!(store
+            .shared_cache_gc_candidates(&storage_id, 224, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: finalized GC candidates: {error}"))
+            .is_empty());
+        assert!(store
+            .finalize_retired_shared_cache_generation(&cleanup_candidates[0], 224, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat finalization: {error}"))
+            .is_none());
+        let renewal_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("contract clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let renewal_expiry = lease.expires_at_unix_ms.saturating_add(1_000);
+        lease = store
+            .renew_lease(&lease, renewal_now, renewal_expiry)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew after repeat finalization: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: absent finalization advanced the GC lease"));
+
+        let offline_recipe = format!("shared-offline-recipe-{backend}");
+        assert!(store
+            .claim_shared_cache_entry(
+                &offline_recipe,
+                file_id,
+                1,
+                &storage_id,
+                "generation-offline",
+                "shared/offline/generation",
+                230,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim offline generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &offline_recipe,
+                &storage_id,
+                "generation-offline",
+                8_192,
+                &"b".repeat(64),
+                240,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete offline generation: {error}")));
+        let offline_generation = store
+            .shared_cache_hit(&offline_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: offline shared hit: {error}"))
+            .expect("offline generation");
+        let package_pin = CacheConsumerPin {
+            storage_id: storage_id.clone(),
+            recipe_hash: offline_recipe.clone(),
+            generation_id: "generation-offline".to_owned(),
+            consumer_kind: CacheConsumerKind::OfflinePackage,
+            consumer_id: "offline-package".to_owned(),
+            consumer_epoch: 1,
+            expires_at_ms: 1_700,
+        };
+        let offline_pins = [
+            package_pin.clone(),
+            CacheConsumerPin {
+                consumer_kind: CacheConsumerKind::OfflineDownload,
+                consumer_id: "offline-download".to_owned(),
+                ..package_pin
+            },
+        ];
+        for pin in &offline_pins {
+            assert!(store
+                .acquire_cache_consumer_pin(pin, 250)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: acquire offline pin: {error}")));
+        }
+        for pin in &offline_pins {
+            assert!(store
+                .retire_shared_cache_generation(&offline_generation, 251, &lease)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: offline pin retirement: {error}"))
+                .is_none());
+            assert!(store
+                .release_cache_consumer_pin(
+                    &pin.storage_id,
+                    &pin.recipe_hash,
+                    &pin.generation_id,
+                    pin.consumer_kind,
+                    &pin.consumer_id,
+                    pin.consumer_epoch,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: release offline pin: {error}")));
+        }
+        assert!(store
+            .retire_shared_cache_generation(&offline_generation, 252, &lease)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire unpinned offline generation: {error}")
+            })
+            .is_some());
+
+        assert!(store
+            .mark_cache_storage_suspect(&storage_id, &member.node_id, 300)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: mark shared storage suspect: {error}")));
+        assert_eq!(
+            store
+                .cache_storage_member(&storage_id, &member.node_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read suspect member: {error}"))
+                .map(|member| member.verification_state),
+            Some("suspect".to_owned()),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-shared-pin-contract").await;
+        let storage_id = format!("shared:offline-lifecycle:{backend}");
+        store
+            .put_cache_storage_member(&CacheStorageMember {
+                storage_id: storage_id.clone(),
+                node_id: format!("{backend}-offline-reader"),
+                storage_class: "shared".to_owned(),
+                verified_at_ms: 100,
+                verification_state: "verified".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: verify shared storage: {error}"));
+        let mut lease = match store
+            .acquire_lease(
+                &format!("shared-cache-gc:{storage_id}"),
+                "offline-gc-owner",
+                110,
+                10_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: acquire shared GC lease: {error}"))
+        {
+            LeaseClaim::Acquired(lease) => lease,
+            LeaseClaim::Held { .. } => panic!("{backend}: fresh shared GC lease was held"),
+        };
+
+        let package_recipe = format!("offline-package-pin-{backend}");
+        let package_generation_id = "offline-package-generation";
+        assert!(store
+            .claim_shared_cache_entry(
+                &package_recipe,
+                file_id,
+                1,
+                &storage_id,
+                package_generation_id,
+                "offline/package/generation",
+                120,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim package generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &package_recipe,
+                &storage_id,
+                package_generation_id,
+                1_024,
+                &"c".repeat(64),
+                130,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete package generation: {error}")));
+        let package_generation = store
+            .shared_cache_hit(&package_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read package generation: {error}"))
+            .expect("package generation");
+        let package = offline_request(
+            "shared-package-pin",
+            "shared-package-pin-request",
+            user_id,
+            file_id,
+        );
+        assert!(matches!(
+            store
+                .create_offline_package(&package, 100, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create shared package: {error}")),
+            OfflineCreateOutcome::Created(_)
+        ));
+        assert!(store
+            .mark_offline_package_ready(
+                &package.id,
+                &package.node_id,
+                &package_recipe,
+                1_024,
+                60_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: ready shared package: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&package_generation, 140, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: package pin retirement: {error}"))
+            .is_none());
+        assert!(store
+            .delete_offline_package(&package.id, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: delete shared package: {error}")));
+        lease = store
+            .retire_shared_cache_generation(&package_generation, 150, &lease)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: retire generation after package deletion: {error}")
+            })
+            .unwrap_or_else(|| panic!("{backend}: package generation was not retired"));
+
+        let download_recipe = format!("offline-download-pin-{backend}");
+        let download_generation_id = "offline-download-generation";
+        let download = offline_request(
+            "shared-download-pin",
+            "shared-download-pin-request",
+            user_id,
+            file_id,
+        );
+        assert!(matches!(
+            store
+                .create_offline_package(&download, 160, 100_000, 100_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create download package: {error}")),
+            OfflineCreateOutcome::Created(_)
+        ));
+        assert!(store
+            .mark_offline_package_ready(
+                &download.id,
+                &download.node_id,
+                &download_recipe,
+                2_048,
+                60_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: ready download package: {error}")));
+        let token_hash = "e".repeat(64);
+        assert!(matches!(
+            store
+                .put_offline_lease(&download.id, user_id, &token_hash, 20_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: create download lease: {error}")),
+            OfflineLeaseOutcome::Created(_)
+        ));
+        assert!(store
+            .claim_shared_cache_entry(
+                &download_recipe,
+                file_id,
+                1,
+                &storage_id,
+                download_generation_id,
+                "offline/download/generation",
+                170,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim download generation: {error}")));
+        assert!(store
+            .complete_shared_cache_entry(
+                &download_recipe,
+                &storage_id,
+                download_generation_id,
+                2_048,
+                &"d".repeat(64),
+                180,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete download generation: {error}")));
+        let download_generation = store
+            .shared_cache_hit(&download_recipe, &storage_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read download generation: {error}"))
+            .expect("download generation");
+        assert!(store
+            .release_cache_consumer_pin(
+                &storage_id,
+                &download_recipe,
+                download_generation_id,
+                CacheConsumerKind::OfflinePackage,
+                &download.id,
+                1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: isolate download pin: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&download_generation, 190, &lease)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: download pin retirement: {error}"))
+            .is_none());
+        assert!(store
+            .delete_offline_package(&download.id, user_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: delete download package: {error}")));
+        assert!(store
+            .retire_shared_cache_generation(&download_generation, 200, &lease)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{backend}: retire generation after download deletion: {error}"
+            ))
+            .is_some());
     })
     .await;
 }

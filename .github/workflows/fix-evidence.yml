@@ -11,7 +11,7 @@ jobs:
   revert-proof:
     name: report whether retained Rust tests reject the base implementation
     if: contains(github.event.pull_request.labels.*.name, 'fixes-behavior')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

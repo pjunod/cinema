@@ -12,7 +12,9 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p plurxd && cp target/release/plurxd /plurxd
+    cargo build --release -p plurxd -p plurx-cluster-check \
+    && cp target/release/plurxd /plurxd \
+    && cp target/release/plurx-cluster-check /plurx-cluster-check
 
 FROM debian:bookworm-slim
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
@@ -81,6 +83,10 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
 COPY --from=build /plurxd /usr/local/bin/plurxd
+# Stopped-node recovery and cluster validation tooling. The WAL inspector is
+# read-only, refuses a live lock, and lets an operator diagnose the same image
+# that produced the on-disk state without installing Rust on the host.
+COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
 
 # Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
 # either var to point elsewhere. It's a superset of system ffmpeg, so this is

@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
 
 #[cfg(feature = "sqlite")]
-pub use crate::client::{DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot};
+pub use crate::client::{
+    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
+    DB_LOCAL_READ_PROTOCOL_VERSION,
+};
 #[cfg(feature = "sqlite")]
 pub use crate::snapshot_metrics::{
     DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,
@@ -31,6 +34,12 @@ pub use crate::snapshot_metrics::{
 use crate::store::state_machine::sqlite::state_machine::Response;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};
+#[cfg(feature = "validation-test-helpers")]
+pub use crate::network::raft_client::validation_set_raft_partitioned;
+#[cfg(feature = "validation-test-helpers")]
+pub use crate::store::state_machine::sqlite::state_machine::{
+    validation_apply_pause_observed, validation_pause_apply, validation_resume_apply,
+};
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use config::{NodeConfig, RaftConfig, RateLimitConfig};
 #[cfg(feature = "sqlite")]

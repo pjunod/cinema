@@ -12,10 +12,14 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use plurx_core::domain::{PlaybackEvent, PretranscodeJob, PretranscodeWorkerCapabilities};
+use plurx_core::domain::{
+    CacheConsumerKind, CacheConsumerPin, PlaybackEvent, PretranscodeJob,
+    PretranscodeWorkerCapabilities,
+};
+use plurx_core::error::StoreError;
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
     self, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing, Pipeline,
@@ -44,9 +48,48 @@ const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
+const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
+const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
+const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
+
+/// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
+/// authorize playback and therefore never belong in logs, traces, metrics, or
+/// diagnostics even though they look like ordinary identifiers.
+pub(crate) fn session_log_id(session_id: &str) -> String {
+    let digest = Sha256::digest(session_id.as_bytes());
+    format!("s-{}", hex::encode(digest))
+}
+
+/// Remove the bearer capability anywhere a child-process diagnostic echoed
+/// it. Structured fields already use [`session_log_id`], but ffmpeg repeats
+/// paths and complete arguments in stderr; sanitizing the message body keeps
+/// those unstructured surfaces under the same contract.
+fn session_log_text(text: &str, session_id: &str) -> String {
+    if session_id.is_empty() {
+        return text.to_owned();
+    }
+    text.replace(session_id, &session_log_id(session_id))
+}
+
+fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
+    format!("{label}: {}", session_log_text(&args.join(" "), session_id))
+}
+
+fn log_ffmpeg_stderr(session_id: &str, encoder: &str, line: &str) {
+    let line = session_log_text(line, session_id);
+    tracing::warn!(
+        session = %session_log_id(session_id),
+        encoder,
+        "transcode ffmpeg: {line}"
+    );
+}
 
 fn capacity_error(message: impl AsRef<str>) -> String {
     format!("{RETRYABLE_CAPACITY_PREFIX}{}", message.as_ref())
+}
+
+fn replacement_deadline_error() -> String {
+    capacity_error("the replacement start expired before it could reap its predecessor")
 }
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
@@ -442,6 +485,12 @@ impl SegmentIndex {
         self.segs.last().map(|s| s.end_ms)
     }
 
+    fn next_media_sequence(&self) -> i64 {
+        self.segs
+            .last()
+            .map_or(0, |segment| segment.index.saturating_add(1).max(0))
+    }
+
     /// Where a given segment ends, for turning "the client fetched segment N"
     /// into a position on the media timeline.
     fn end_ms_of(&self, index: i64) -> Option<i64> {
@@ -653,9 +702,15 @@ fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
     typeless_sliding: bool,
+    takeover: Option<&SessionTakeoverStart>,
 ) -> Vec<u8> {
-    let first_retained = first_retained.filter(|index| *index > 0).unwrap_or(0);
-    if first_retained == 0 && !typeless_sliding {
+    // A successor's numbering starts at its epoch floor, not at zero, so the
+    // "nothing has been pruned yet" baseline is that floor.
+    let baseline = takeover.map_or(0, |takeover| takeover.media_sequence);
+    let first_retained = first_retained
+        .filter(|index| *index > baseline)
+        .unwrap_or(baseline);
+    if first_retained == 0 && !typeless_sliding && takeover.is_none() {
         return raw;
     }
     let Ok(text) = std::str::from_utf8(&raw) else {
@@ -701,6 +756,7 @@ fn served_live_playlist(
 
     let mut out = String::with_capacity(text.len());
     let mut wrote_media_sequence = false;
+    let mut wrote_discontinuity_sequence = false;
     let mut wrote_start = false;
     for line in &lines[..header_end] {
         let trimmed = line.trim();
@@ -713,6 +769,18 @@ fn served_live_playlist(
         if trimmed.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
             wrote_media_sequence = true;
+        } else if trimmed.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            if let Some(takeover) = takeover {
+                let includes_boundary = first_retained <= takeover.media_sequence;
+                let sequence = takeover
+                    .discontinuity_sequence
+                    .saturating_sub(i64::from(includes_boundary));
+                out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+                wrote_discontinuity_sequence = true;
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
         } else {
             out.push_str(line);
             out.push('\n');
@@ -720,6 +788,18 @@ fn served_live_playlist(
     }
     if !wrote_media_sequence {
         out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
+    }
+    if let Some(takeover) = takeover {
+        let includes_boundary = first_retained <= takeover.media_sequence;
+        if !wrote_discontinuity_sequence {
+            let sequence = takeover
+                .discontinuity_sequence
+                .saturating_sub(i64::from(includes_boundary));
+            out.push_str(&format!("#EXT-X-DISCONTINUITY-SEQUENCE:{sequence}\n"));
+        }
+        if includes_boundary {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
     }
     if typeless_sliding && !wrote_start {
         out.push_str("#EXT-X-START:TIME-OFFSET=0\n");
@@ -972,13 +1052,13 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(session = %sid, encoder = encoder_label, "transcode ffmpeg: {line}");
+                log_ffmpeg_stderr(&sid, encoder_label, &line);
             }
             // Stderr closing means the process ended. Logging it (with how long
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
             tracing::warn!(
-                session = %sid, encoder = encoder_label,
+                session = %session_log_id(&sid), encoder = encoder_label,
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1029,11 +1109,11 @@ fn spawn_ffmpeg_pipe(
                 if is_progress_line(&line) {
                     apply_progress_line(&progress, generation, &line);
                 } else {
-                    tracing::warn!(session = %sid, encoder = "copy", "transcode ffmpeg: {line}");
+                    log_ffmpeg_stderr(&sid, "copy", &line);
                 }
             }
             tracing::warn!(
-                session = %sid, encoder = "copy",
+                session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
@@ -1053,7 +1133,7 @@ fn spawn_ffmpeg_pipe(
 /// Keep the environment local to ffmpeg rather than changing the daemon's
 /// process environment, and use the data directory whose ownership plurxd has
 /// already proved by creating its session and cache directories.
-fn configure_ffmpeg_runtime(
+pub(crate) fn configure_ffmpeg_runtime(
     command: &mut tokio::process::Command,
     runtime_cache: &std::path::Path,
 ) {
@@ -1261,7 +1341,7 @@ async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: Strin
             }
             WatchNext::Stall => {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(&sid),
                     stalled_s = session.progress.stalled_for().as_secs(),
                     produced_ms = session.progress.out_time_ms(),
                     "{}",
@@ -1381,6 +1461,7 @@ struct CachedLocationIdentity {
     recipe_hash: String,
     node_id: String,
     storage_class: String,
+    generation_id: Option<String>,
     relative_dir: String,
     manifest_digest: Option<String>,
 }
@@ -1395,6 +1476,16 @@ enum CacheOfferVerdict {
         verified: bool,
         observed_at: Instant,
     },
+}
+
+struct CacheOfferVerification {
+    verified: bool,
+    revoke_shared_member: bool,
+}
+
+struct PreparedSharedCacheRead {
+    dir: PathBuf,
+    manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
 }
 
 impl LastRequest {
@@ -1482,6 +1573,9 @@ struct Session {
     item_id: i64,
     item_title: String,
     user_name: String,
+    /// Namespaced immutable user id for clustered sessions, or the legacy
+    /// username scope for process-local callers.
+    supersession_user: String,
     /// The player instance that owns this session — the supersession key.
     playback_id: String,
     /// Whether this session's height came from server Auto policy. A manual
@@ -1619,6 +1713,8 @@ struct Session {
     /// Snapshot of the EVENT-to-typeless experiment at session creation. A
     /// settings edit must never mutate one URL's playlist type mid-play.
     typeless_sliding: bool,
+    /// Fenced successor coordinates for URI and playlist continuity.
+    takeover: Option<SessionTakeoverStart>,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
     /// transition is evidence about the EVENT/sliding experiment.
@@ -1662,6 +1758,23 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// Where this generation's session-relative zero sits on the durable
+    /// incarnation timeline.
+    ///
+    /// Derived, never stored, and derived from `media_origin_seconds` — the
+    /// origin this session *achieved*. A remux cannot start anywhere but a
+    /// keyframe, so it begins at or before the position it was asked for;
+    /// recording the requested offset instead would report a frontier ahead
+    /// of the media actually produced, and the next successor would resume
+    /// past a span no generation ever fills. Because there is one field to
+    /// read, no construction site can pick the wrong one.
+    fn frontier_offset_ms(&self) -> i64 {
+        self.takeover.as_ref().map_or(0, |takeover| {
+            ((self.media_origin_seconds * 1_000.0).round() as i64)
+                .saturating_sub(takeover.origin_base_ms)
+        })
+    }
+
     /// Fail this session *and say why*, in one step.
     ///
     /// The pairing is the point: a bare `failed.store(true)` is how a cause
@@ -2103,6 +2216,14 @@ impl SegmentDelivery {
         self.expected_bytes = self.expected_bytes.min(bytes);
     }
 
+    /// Mark a conditional or unsatisfiable response that intentionally has no
+    /// media body. Opening the authenticated object proved the capability;
+    /// the HTTP contract owes zero bytes and must not look like abandonment.
+    pub(crate) fn finish_without_body(&mut self) {
+        self.expected_bytes = 0;
+        self.finish();
+    }
+
     fn emit(&self, event: &str, reason: &str, ms: i64, mut extra: serde_json::Value) {
         // Stamped centrally rather than at each call site: an untagged
         // `segment_delivery_*` row is indistinguishable from a client fetch,
@@ -2120,7 +2241,7 @@ impl SegmentDelivery {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(self.session_id.clone()),
+                session_id: Some(session_log_id(&self.session_id)),
                 file_id: Some(self.session.file_id),
                 event: event.to_owned(),
                 method: Some(self.method.to_owned()),
@@ -2149,7 +2270,7 @@ impl SegmentDelivery {
         self.slow_read_reported = true;
         let waited_ms = elapsed.as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             waited_ms,
             delivered_bytes = self.delivered_bytes,
@@ -2178,7 +2299,7 @@ impl SegmentDelivery {
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2203,7 +2324,7 @@ impl SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::error!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2232,7 +2353,7 @@ impl Drop for SegmentDelivery {
         self.terminal = true;
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
-            session = %self.session_id,
+            session = %session_log_id(&self.session_id),
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
@@ -2599,6 +2720,42 @@ pub struct StartInfo {
     pub vod: bool,
 }
 
+/// A cluster worker and the process-local replacement gate that must remain
+/// held until the ingress has durably accepted or rejected that worker.
+pub(crate) struct ClusterSessionStart {
+    pub(crate) info: StartInfo,
+    pub(crate) replacement: ClusterReplacementGuard,
+}
+
+/// Serializes replacement of one user's player on this worker. Holding this
+/// only through ffmpeg spawn is insufficient: a second start could otherwise
+/// broad-reap the unpublished first worker before its durable activation.
+pub(crate) struct ClusterReplacementGuard {
+    registry: Arc<ClusterReplacementGates>,
+    key: String,
+    permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for ClusterReplacementGuard {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        let Ok(mut entries) = self.registry.entries.lock() else {
+            return;
+        };
+        if entries
+            .get(&self.key)
+            .is_some_and(|gate| gate.upgrade().is_none())
+        {
+            entries.remove(&self.key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClusterReplacementGates {
+    entries: std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+}
+
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
@@ -2675,6 +2832,61 @@ pub struct SessionInfo {
     pub suspend_count: u64,
 }
 
+/// Monotone failover coordinates sampled for the owner's two-second liveness
+/// batch. This intentionally excludes activity-page locks and byte accounting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionFrontier {
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_sequence: i64,
+}
+
+/// Coordinates selected before an expired incarnation is reproduced locally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionTakeoverStart {
+    /// The durable incarnation this generation continues. Teardown keys off
+    /// the incarnation rather than the process-local request record, because
+    /// a successor is not created by any request on this node.
+    pub incarnation_id: String,
+    /// The replicated row's `media_origin_ms`: the fixed zero every
+    /// generation's frontier is measured from. The offset a session finally
+    /// records is the difference between the origin it *achieved* and this
+    /// base, so a copy session's keyframe pull-back cannot over-report
+    /// progress and strand media no generation ever produces.
+    pub origin_base_ms: i64,
+    /// Where this generation was asked to resume, relative to `origin_base_ms`.
+    pub frontier_offset_ms: i64,
+    pub media_sequence: i64,
+    pub discontinuity_sequence: i64,
+    pub owner_epoch: i64,
+}
+
+/// The fMP4 init object a given ownership generation publishes.
+///
+/// Epoch 1 — every session that has never been taken over — keeps the
+/// historical `init.mp4`, so no existing URL changes meaning. A fenced
+/// successor names its own object: §7.3 forbids overwriting an init a client
+/// may already have cached, and requires every URI in a newly served playlist
+/// to stay retrievable once the old disk is gone.
+pub(crate) fn init_object_name(owner_epoch: Option<i64>) -> String {
+    match owner_epoch {
+        Some(epoch) if epoch > 1 => format!("init-e{epoch}.mp4"),
+        _ => "init.mp4".to_owned(),
+    }
+}
+
+/// True for the init object of any generation. Every filename allowlist,
+/// codec probe, and Apple tier rewrite compares through this, so a
+/// generation-specific init is never mistaken for an arbitrary file.
+pub(crate) fn is_init_object(name: &str) -> bool {
+    if name == "init.mp4" {
+        return true;
+    }
+    name.strip_prefix("init-e")
+        .and_then(|rest| rest.strip_suffix(".mp4"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Cheap identity used to choose the globally newest activity before walking
 /// any session telemetry locks.
 #[derive(Clone, Debug)]
@@ -2686,7 +2898,8 @@ pub struct DeliveryCandidate {
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
@@ -2729,9 +2942,47 @@ pub struct SessionRequest {
     /// because the passthrough filter on a non-DV input emits a broken
     /// picture at exit 0 rather than failing (measured).
     pub hdr10: bool,
+    /// Which presentation the client asked for. Defaults to the live
+    /// presentation, so every shipped client and every stored recipe
+    /// deserializes to exactly the behaviour it always had; `"vod"` is the
+    /// per-request half of the plan §2.7 opt-in (the other half is the
+    /// `playback.vod_presentation` setting). A VOD request the server cannot
+    /// honour — no fragment index, varying parameter sets, a transcode rung,
+    /// a subtitle burn — falls back to the live presentation with one log
+    /// line saying why, never to an error: the opt-in is a request, not a
+    /// promise.
+    #[serde(default, skip_serializing_if = "Presentation::is_live")]
+    pub presentation: Presentation,
+    /// Client's ceiling for one blocking segment GET, in seconds. Clamped to
+    /// the server's own cap; `None` takes the server default. VOD only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_budget_secs: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The two presentations a session can be created under (plan §2.7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Presentation {
+    /// Today's behaviour: an EVENT playlist that grows, prunes and rewrites.
+    #[default]
+    Live,
+    /// The film-addressed immutable playlist served from a segment plan.
+    Vod,
+}
+
+impl Presentation {
+    /// Serialization skips the default so every legacy request and stored
+    /// recipe stays byte-identical to what an older binary wrote — a rolling
+    /// upgrade's old workers and a rollback's takeover parses both read
+    /// `deny_unknown_fields` envelopes, and only a genuine VOD request should
+    /// ever be new to them.
+    fn is_live(&self) -> bool {
+        *self == Presentation::Live
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionKind {
     Transcode {
         height: i64,
@@ -2746,7 +2997,7 @@ pub enum SessionKind {
 /// Why a client is replacing an existing session. This is deliberately typed
 /// even while `stall` is the only server-normalized cause: an unknown future
 /// value must be refused, not accidentally treated as ordinary create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
     Stall,
@@ -2769,6 +3020,7 @@ struct CopySessionOptions {
 #[derive(Clone, Copy)]
 struct SessionOwner<'a> {
     user_name: &'a str,
+    supersession_user: &'a str,
     playback_id: &'a str,
     automatic: bool,
 }
@@ -2785,7 +3037,7 @@ impl SessionRequest {
     /// For an Auto transcode the numeric height is excluded on purpose: a
     /// network-prior refresh between transport attempts may recompute it, but
     /// the same `request_id` must still recover the first persisted answer.
-    fn intent_fingerprint(&self, user_name: &str) -> String {
+    fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
             SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
             SessionKind::Transcode { height } => format!("t{height}"),
@@ -2800,6 +3052,15 @@ impl SessionRequest {
         // did — a replay in flight across a deploy still recovers its session.
         let kind = if self.hdr10 {
             format!("{kind}+hdr10")
+        } else {
+            kind
+        };
+        // Same append-only discipline: a VOD-presented session answers a
+        // different playlist shape, so it cannot recover a live session's id
+        // (or vice versa), while every legacy request keeps the exact
+        // fingerprint it always had.
+        let kind = if self.presentation == Presentation::Vod {
+            format!("{kind}+vod")
         } else {
             kind
         };
@@ -2820,6 +3081,21 @@ impl SessionRequest {
             self.reopen_reason.map(ReopenReason::as_str),
         ])
         .to_string()
+    }
+
+    fn intent_fingerprint(&self, user_name: &str) -> String {
+        self.intent_fingerprint_with_user_scope(Some(user_name))
+    }
+
+    /// Fixed-width durable identity used by the replicated session claim.
+    ///
+    /// Replicated request rows are already scoped by the immutable user id.
+    /// Exclude the mutable username so an account rename cannot turn an
+    /// otherwise identical idempotent replay into a conflict. The established
+    /// process-local identity above keeps the username scope it has always had.
+    pub(crate) fn durable_intent_fingerprint(&self, user_id: i64) -> String {
+        let durable = serde_json::json!([user_id, self.intent_fingerprint_with_user_scope(None),]);
+        hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }
 
@@ -2886,7 +3162,7 @@ impl RequestClaim<'_> {
             // to leave unsaid.
             debug_assert!(false, "completed claim lost its own reservation");
             tracing::warn!(
-                session = session_id,
+                session = %session_log_id(session_id),
                 "request claim vanished before completion; a replay may duplicate this session"
             );
         }
@@ -3797,7 +4073,7 @@ async fn remove_staged_child(
     }
 }
 
-async fn quarantine_remove_cache_tree(
+pub(crate) async fn quarantine_remove_cache_tree(
     path: &std::path::Path,
     max_depth: usize,
 ) -> Result<(), String> {
@@ -4238,6 +4514,11 @@ impl RateControlSnapshot {
 pub struct TranscodeManager {
     store: Arc<dyn Store>,
     work_dir: PathBuf,
+    /// The VOD presentation's serving runtime (plan §2). Sessions created
+    /// under `presentation:"vod"` live here rather than in `sessions`; every
+    /// serving entry point dispatches to it first and falls through when the
+    /// id is not one of its own.
+    vod: Arc<crate::vodserve::VodServe>,
     /// Writable XDG cache inherited by ffmpeg and libraries such as fontconfig.
     runtime_cache: PathBuf,
     /// Extracted text subtitles shared with the WebVTT endpoint.
@@ -4264,6 +4545,7 @@ pub struct TranscodeManager {
     /// node with no cache root simply always misses, and every path below is
     /// written so that a miss is the ordinary case.
     cache: Option<CacheConfig>,
+    shared_cache: Option<Arc<crate::shared_cache::SharedCacheCoordinator>>,
     /// Last completed cache-filesystem capacity sample. Request and scheduler
     /// paths read only this atomic projection: `statvfs` can block forever on
     /// a hard network mount and therefore belongs to one non-accumulating
@@ -4286,6 +4568,7 @@ pub struct TranscodeManager {
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    cluster_replacement_gates: Arc<ClusterReplacementGates>,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
@@ -4430,6 +4713,7 @@ impl TranscodeManager {
             );
         }
         TranscodeManager {
+            vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,
             runtime_cache,
@@ -4441,6 +4725,7 @@ impl TranscodeManager {
             pipeline,
             admissions: Admissions::new(),
             cache: None,
+            shared_cache: None,
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
@@ -4448,6 +4733,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -4511,6 +4797,13 @@ impl TranscodeManager {
         let cache_parent = cache_dir.parent().unwrap_or(cache_dir.as_path());
         self.runtime_cache = cache_parent.join("runtime");
         self.subtitle_cache = cache_parent.join("subs");
+        // Renditions are durable state — admitted ones are the copy cache the
+        // plan promises — so they live beside the persistent caches rather
+        // than in scratch. Replaced before serving starts, like the caches.
+        self.vod = crate::vodserve::VodServe::new(
+            cache_parent.join("renditions"),
+            Arc::clone(&self.store),
+        );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
                 path = %self.runtime_cache.display(),
@@ -4525,8 +4818,53 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_shared_cache(
+        mut self,
+        shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
+    ) -> Self {
+        self.shared_cache = Some(shared_cache);
+        self
+    }
+
     pub fn cache_readers(&self) -> &crate::cachekeep::ActiveCacheReaders {
         &self.cache_readers
+    }
+
+    /// Pin a shared-cache-backed worker before its durable route is exposed.
+    /// Non-cache and node-local sessions need no distributed pin and succeed
+    /// immediately.
+    pub(crate) async fn pin_shared_session(
+        &self,
+        session_id: &str,
+        incarnation_id: &str,
+        owner_epoch: i64,
+        expires_at_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let session = self.sessions.lock().await.get(session_id).cloned();
+        let Some(location) = session
+            .as_ref()
+            .and_then(|session| session.cache_location.as_ref())
+            .filter(|location| location.storage_class == "shared")
+        else {
+            return Ok(true);
+        };
+        let Some(generation_id) = location.generation_id.as_ref() else {
+            return Ok(false);
+        };
+        self.store
+            .acquire_cache_consumer_pin(
+                &CacheConsumerPin {
+                    storage_id: location.node_id.clone(),
+                    recipe_hash: location.recipe_hash.clone(),
+                    generation_id: generation_id.clone(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id: incarnation_id.to_owned(),
+                    consumer_epoch: owner_epoch,
+                    expires_at_ms,
+                },
+                crate::media_sessions::unix_ms(),
+            )
+            .await
     }
 
     #[cfg(test)]
@@ -4560,6 +4898,13 @@ impl TranscodeManager {
     /// and the serving path have to agree about both, and two copies of "the
     /// cache root" is how they come to disagree after somebody makes one
     /// configurable.
+    /// Where ffmpeg's own caches go, so a background child gets the same
+    /// environment a session's does — an unset `XDG_CACHE_HOME` makes
+    /// fontconfig rebuild its cache on every spawn.
+    pub fn runtime_cache_dir(&self) -> &std::path::Path {
+        self.runtime_cache.as_path()
+    }
+
     pub fn cache_location(&self) -> Option<(&std::path::Path, &str)> {
         self.cache
             .as_ref()
@@ -5461,11 +5806,86 @@ impl TranscodeManager {
             .map(Some)
     }
 
+    /// Prefer a currently verified shared generation, then preserve the
+    /// established node-local lookup as the fallback. Replicated rows are not
+    /// mount proof: the shared coordinator must still expose a live root.
+    async fn cache_read_location(
+        &self,
+        recipe_hash: &str,
+        cache: &CacheConfig,
+    ) -> Result<Option<(CachedLocationIdentity, PathBuf)>, StoreError> {
+        if let Some(shared) = self.shared_cache.as_ref() {
+            if let (Some(storage_id), Some(root)) = (shared.storage_id(), shared.root().await) {
+                if let Some(hit) = self.store.shared_cache_hit(recipe_hash, storage_id).await? {
+                    // Placement and cross-node serving require the immutable
+                    // object inventory. Legacy local entries remain readable,
+                    // but never become shared solely because their directory
+                    // happens to sit under the configured mount.
+                    if hit.manifest_digest.is_some() {
+                        return Ok(Some((
+                            CachedLocationIdentity {
+                                recipe_hash: recipe_hash.to_owned(),
+                                node_id: hit.storage_id,
+                                storage_class: "shared".to_owned(),
+                                generation_id: Some(hit.generation_id),
+                                relative_dir: hit.relative_dir,
+                                manifest_digest: hit.manifest_digest,
+                            },
+                            root,
+                        )));
+                    }
+                }
+            }
+        }
+        self.local_cache_read_location(recipe_hash, cache).await
+    }
+
+    async fn local_cache_read_location(
+        &self,
+        recipe_hash: &str,
+        cache: &CacheConfig,
+    ) -> Result<Option<(CachedLocationIdentity, PathBuf)>, StoreError> {
+        Ok(self
+            .store
+            .cache_hit(recipe_hash, &cache.node_id)
+            .await?
+            .map(|hit| {
+                (
+                    CachedLocationIdentity {
+                        recipe_hash: recipe_hash.to_owned(),
+                        node_id: cache.node_id.clone(),
+                        storage_class: hit.storage_class,
+                        generation_id: None,
+                        relative_dir: hit.relative_dir,
+                        manifest_digest: hit.manifest_digest,
+                    },
+                    cache.dir.clone(),
+                )
+            }))
+    }
+
     async fn invalidate_cache_location(
         &self,
         location: &CachedLocationIdentity,
         reason: &'static str,
     ) -> bool {
+        if location.storage_class == "shared" {
+            if let Some(shared) = self.shared_cache.as_ref() {
+                shared.report_io_failure(reason).await;
+            }
+            // A read failure is evidence about this node's admitted mount,
+            // not proof that every voter lost the portable generation. Keep
+            // the replicated pointer and its reader pins intact so healthy
+            // members may continue serving it; fenced GC owns global
+            // retirement.
+            tracing::warn!(
+                recipe = %location.recipe_hash,
+                storage = %location.node_id,
+                reason,
+                "shared cache read failed; disabled this member without retiring the generation"
+            );
+            return false;
+        }
         Self::invalidate_cache_location_with_store(self.store.as_ref(), location, reason).await
     }
 
@@ -5544,26 +5964,15 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-        let Some(hit) = self
-            .store
-            .cache_hit(&hash, &cache.node_id)
-            .await
-            .ok()
-            .flatten()
+        let Some((identity, cache_root)) =
+            self.cache_read_location(&hash, cache).await.ok().flatten()
         else {
             return false;
         };
         // Legacy completions do not carry a byte inventory and therefore
         // cannot make the stronger cluster placement claim.
-        let Some(expected_manifest) = hit.manifest_digest.clone() else {
+        let Some(expected_manifest) = identity.manifest_digest.clone() else {
             return false;
-        };
-        let identity = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
         };
         let now = Instant::now();
         {
@@ -5620,16 +6029,24 @@ impl TranscodeManager {
         let verdicts = Arc::clone(&self.cache_offer_verdicts);
         let store = Arc::clone(&self.store);
         let readers = self.cache_readers.clone();
-        let cache_root = cache.dir.clone();
+        let shared_cache = self.shared_cache.clone();
         tokio::spawn(async move {
-            let verified = Self::verify_cache_offer_location(
+            let verification = Self::verify_cache_offer_location(
                 Arc::clone(&store),
                 readers,
+                shared_cache.clone(),
                 cache_root,
                 identity.clone(),
                 expected_manifest,
             )
             .await;
+            if verification.revoke_shared_member && identity.storage_class == "shared" {
+                if let Some(shared_cache) = shared_cache.as_ref() {
+                    shared_cache
+                        .report_io_failure("offer_integrity_failed")
+                        .await;
+                }
+            }
             let mut verdicts = verdicts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5641,7 +6058,7 @@ impl TranscodeManager {
                     hash,
                     CacheOfferVerdict::Ready {
                         identity,
-                        verified,
+                        verified: verification.verified,
                         observed_at: Instant::now(),
                     },
                 );
@@ -5654,66 +6071,277 @@ impl TranscodeManager {
     async fn verify_cache_offer_location(
         store: Arc<dyn Store>,
         readers: crate::cachekeep::ActiveCacheReaders,
+        shared_cache: Option<Arc<crate::shared_cache::SharedCacheCoordinator>>,
         cache_root: PathBuf,
         identity: CachedLocationIdentity,
         expected_manifest: String,
-    ) -> bool {
-        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
-            return false;
-        };
-        let Some(dir) =
-            crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
-        else {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "unsafe_relative_path",
-            )
-            .await;
-            return false;
-        };
-        let manifest = match crate::manifest_cache::load(
-            crate::manifest_cache::GenerationKey {
-                cache_root,
-                node_id: identity.node_id.clone(),
-                recipe_hash: identity.recipe_hash.clone(),
-                storage_class: identity.storage_class.clone(),
-                relative_dir: identity.relative_dir.clone(),
-                manifest_digest: expected_manifest,
-            },
-            &dir,
+    ) -> CacheOfferVerification {
+        if identity.storage_class == "shared" {
+            let Some(coordinator) = shared_cache else {
+                return CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                };
+            };
+            let task_store = Arc::clone(&store);
+            return coordinator
+                .run_mount_io("offer_verification_timeout", async move {
+                    Ok(Self::verify_cache_offer_location_inner(
+                        task_store,
+                        readers,
+                        cache_root,
+                        identity,
+                        expected_manifest,
+                    )
+                    .await)
+                })
+                .await
+                .unwrap_or(CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                });
+        }
+        Self::verify_cache_offer_location_inner(
+            store,
+            readers,
+            cache_root,
+            identity,
+            expected_manifest,
         )
         .await
-        {
-            Ok(manifest) => manifest,
-            Err(_) => {
+    }
+
+    async fn verify_cache_offer_location_inner(
+        store: Arc<dyn Store>,
+        readers: crate::cachekeep::ActiveCacheReaders,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+    ) -> CacheOfferVerification {
+        let Some(_lookup) = readers.begin_lookup(&identity.recipe_hash) else {
+            return CacheOfferVerification {
+                verified: false,
+                revoke_shared_member: false,
+            };
+        };
+        let shared_pin = if identity.storage_class == "shared" {
+            let Some(generation_id) = identity.generation_id.as_ref() else {
+                return CacheOfferVerification {
+                    verified: false,
+                    revoke_shared_member: false,
+                };
+            };
+            let now_ms = unix_ms();
+            let pin = CacheConsumerPin {
+                storage_id: identity.node_id.clone(),
+                recipe_hash: identity.recipe_hash.clone(),
+                generation_id: generation_id.clone(),
+                consumer_kind: CacheConsumerKind::MediaSession,
+                consumer_id: format!("offer-{}", uuid::Uuid::new_v4().simple()),
+                consumer_epoch: 1,
+                expires_at_ms: now_ms.saturating_add(SHARED_LOOKUP_PIN_MS),
+            };
+            match store.acquire_cache_consumer_pin(&pin, now_ms).await {
+                Ok(true) => Some(pin),
+                Ok(false) | Err(_) => {
+                    return CacheOfferVerification {
+                        verified: false,
+                        revoke_shared_member: false,
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        let verified = async {
+            let Some(dir) =
+                crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir).await
+            else {
+                if identity.storage_class != "shared" {
+                    let _ = Self::invalidate_cache_location_with_store(
+                        store.as_ref(),
+                        &identity,
+                        "unsafe_relative_path",
+                    )
+                    .await;
+                }
+                return false;
+            };
+            let manifest = match crate::manifest_cache::load(
+                crate::manifest_cache::GenerationKey {
+                    cache_root,
+                    node_id: identity.node_id.clone(),
+                    recipe_hash: identity.recipe_hash.clone(),
+                    storage_class: identity.storage_class.clone(),
+                    relative_dir: identity.relative_dir.clone(),
+                    manifest_digest: expected_manifest,
+                },
+                &dir,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(_) => {
+                    if identity.storage_class != "shared" {
+                        let _ = Self::invalidate_cache_location_with_store(
+                            store.as_ref(),
+                            &identity,
+                            "manifest_invalid",
+                        )
+                        .await;
+                    }
+                    return false;
+                }
+            };
+            let playlist_valid = manifest
+                .read_verified_playlist(&dir, "index.m3u8")
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(validated_vod_part)
+                .is_some();
+            if !playlist_valid && identity.storage_class != "shared" {
                 let _ = Self::invalidate_cache_location_with_store(
                     store.as_ref(),
                     &identity,
-                    "manifest_invalid",
+                    "playlist_invalid_vod",
                 )
                 .await;
-                return false;
             }
-        };
-        let playlist_valid = manifest
-            .read_verified_playlist(&dir, "index.m3u8")
-            .await
-            .ok()
-            .flatten()
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(validated_vod_part)
-            .is_some();
-        if !playlist_valid {
-            let _ = Self::invalidate_cache_location_with_store(
-                store.as_ref(),
-                &identity,
-                "playlist_invalid_vod",
-            )
-            .await;
+            playlist_valid
         }
-        playlist_valid
+        .await;
+
+        if let Some(pin) = shared_pin.as_ref() {
+            let _ = store
+                .release_cache_consumer_pin(
+                    &pin.storage_id,
+                    &pin.recipe_hash,
+                    &pin.generation_id,
+                    pin.consumer_kind,
+                    &pin.consumer_id,
+                    pin.consumer_epoch,
+                )
+                .await;
+        };
+        CacheOfferVerification {
+            verified,
+            revoke_shared_member: !verified && shared_pin.is_some(),
+        }
+    }
+
+    async fn prepare_shared_cached_read(
+        store: Arc<dyn Store>,
+        coordinator: Arc<crate::shared_cache::SharedCacheCoordinator>,
+        cache_root: PathBuf,
+        identity: CachedLocationIdentity,
+        expected_manifest: String,
+        consumer_id: String,
+    ) -> Result<PreparedSharedCacheRead, String> {
+        coordinator
+            .run_mount_io("shared_serve_read_timeout", async move {
+                let generation_id = identity
+                    .generation_id
+                    .as_ref()
+                    .ok_or_else(|| "shared cache generation identity is missing".to_owned())?;
+                let now_ms = unix_ms();
+                let pin = CacheConsumerPin {
+                    storage_id: identity.node_id.clone(),
+                    recipe_hash: identity.recipe_hash.clone(),
+                    generation_id: generation_id.clone(),
+                    consumer_kind: CacheConsumerKind::MediaSession,
+                    consumer_id,
+                    consumer_epoch: 1,
+                    expires_at_ms: now_ms.saturating_add(SHARED_LOOKUP_PIN_MS),
+                };
+                if !store
+                    .acquire_cache_consumer_pin(&pin, now_ms)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(
+                        "shared cache generation retired before it could be pinned".to_owned()
+                    );
+                }
+                // This random session-id pin is only the lookup-to-activation
+                // bridge. The activated route acquires its durable
+                // incarnation/epoch pin separately. Always retire the bridge
+                // at its hard lifetime even when activation succeeds or its
+                // caller is cancelled; otherwise a permanently hot generation
+                // accumulates one expired durable row per playback forever.
+                let cleanup_store = Arc::clone(&store);
+                let cleanup_pin = pin.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(
+                        u64::try_from(SHARED_LOOKUP_PIN_MS).unwrap_or(u64::MAX),
+                    ))
+                    .await;
+                    let _ = cleanup_store
+                        .release_cache_consumer_pin(
+                            &cleanup_pin.storage_id,
+                            &cleanup_pin.recipe_hash,
+                            &cleanup_pin.generation_id,
+                            cleanup_pin.consumer_kind,
+                            &cleanup_pin.consumer_id,
+                            cleanup_pin.consumer_epoch,
+                        )
+                        .await;
+                });
+                let prepared = async {
+                    let dir =
+                        crate::cachekeep::validated_entry_dir(&cache_root, &identity.relative_dir)
+                            .await
+                            .ok_or_else(|| "shared cache generation path is unsafe".to_owned())?;
+                    tokio::fs::metadata(dir.join("index.m3u8"))
+                        .await
+                        .map_err(|error| {
+                            format!("shared cache playlist is unavailable: {error}")
+                        })?;
+                    let manifest = crate::manifest_cache::load(
+                        crate::manifest_cache::GenerationKey {
+                            cache_root,
+                            node_id: identity.node_id.clone(),
+                            recipe_hash: identity.recipe_hash.clone(),
+                            storage_class: identity.storage_class.clone(),
+                            relative_dir: identity.relative_dir.clone(),
+                            manifest_digest: expected_manifest,
+                        },
+                        &dir,
+                    )
+                    .await?;
+                    let playlist_valid = manifest
+                        .read_verified_playlist(&dir, "index.m3u8")
+                        .await
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .and_then(validated_vod_part)
+                        .is_some();
+                    if !playlist_valid {
+                        return Err("shared cache playlist failed integrity validation".to_owned());
+                    }
+                    Ok(PreparedSharedCacheRead { dir, manifest })
+                }
+                .await;
+                if prepared.is_err() {
+                    let _ = store
+                        .release_cache_consumer_pin(
+                            &pin.storage_id,
+                            &pin.recipe_hash,
+                            &pin.generation_id,
+                            pin.consumer_kind,
+                            &pin.consumer_id,
+                            pin.consumer_epoch,
+                        )
+                        .await;
+                }
+                prepared
+            })
+            .await
     }
 
     /// Serve a finished transcode, if this exact one has already been made.
@@ -5737,127 +6365,189 @@ impl TranscodeManager {
         let hash = self
             .effective_recipe(&mut digest, file, opts, encoder, false)
             .hash();
-
-        // Claim deletion safety before looking at either the row or the
-        // filesystem. A miss is not active playback; upgrade this generic
-        // guard only after the complete generation has been validated.
-        let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
-            tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
-            return None;
-        };
-
-        let hit = match self.store.cache_hit(&hash, &cache.node_id).await {
-            Ok(Some(hit)) => hit,
-            other => {
-                // The name is logged on a miss because "why is this not
-                // hitting?" is otherwise unanswerable from outside: the hash
-                // is a pure function of a dozen inputs, and a producer and a
-                // player disagreeing about any one of them looks identical to
-                // an empty cache. With the name in both logs the disagreement
-                // is one `grep` rather than a bisect.
-                if let Err(e) = other {
-                    tracing::warn!(recipe = %hash, error = %e, "cache lookup failed");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let (mut cache_location, mut cache_root) =
+            match self.cache_read_location(&hash, cache).await {
+                Ok(Some(hit)) => hit,
+                other => {
+                    // The name is logged on a miss because "why is this not
+                    // hitting?" is otherwise unanswerable from outside: the hash
+                    // is a pure function of a dozen inputs, and a producer and a
+                    // player disagreeing about any one of them looks identical to
+                    // an empty cache. With the name in both logs the disagreement
+                    // is one `grep` rather than a bisect.
+                    if let Err(e) = other {
+                        tracing::warn!(recipe = %hash, error = %e, "cache lookup failed");
+                    }
+                    tracing::debug!(recipe = %hash, file = file.id, "transcode cache miss");
+                    return None;
                 }
-                tracing::debug!(recipe = %hash, file = file.id, "transcode cache miss");
-                return None;
+            };
+        let mut prepared_shared = None;
+        if cache_location.storage_class == "shared" {
+            let prepared = match (
+                self.shared_cache.as_ref(),
+                cache_location.manifest_digest.clone(),
+            ) {
+                (Some(coordinator), Some(expected_manifest)) => {
+                    Self::prepare_shared_cached_read(
+                        Arc::clone(&self.store),
+                        Arc::clone(coordinator),
+                        cache_root.clone(),
+                        cache_location.clone(),
+                        expected_manifest,
+                        session_id.clone(),
+                    )
+                    .await
+                }
+                _ => Err("shared cache generation has no admitted manifest".to_owned()),
+            };
+            match prepared {
+                Ok(prepared) => prepared_shared = Some(prepared),
+                Err(error) => {
+                    if let Some(shared_cache) = self.shared_cache.as_ref() {
+                        shared_cache
+                            .report_io_failure("shared_serve_preflight_failed")
+                            .await;
+                    }
+                    tracing::warn!(recipe = %hash, %error, "shared cache read failed; trying node-local cache");
+                    let local = match self.local_cache_read_location(&hash, cache).await {
+                        Ok(Some(local)) => local,
+                        Ok(None) => return None,
+                        Err(error) => {
+                            tracing::warn!(recipe = %hash, %error, "local cache fallback lookup failed");
+                            return None;
+                        }
+                    };
+                    (cache_location, cache_root) = local;
+                }
             }
-        };
-        let cache_location = CachedLocationIdentity {
-            recipe_hash: hash.clone(),
-            node_id: cache.node_id.clone(),
-            storage_class: hit.storage_class.clone(),
-            relative_dir: hit.relative_dir.clone(),
-            manifest_digest: hit.manifest_digest.clone(),
-        };
-        let Some(dir) = crate::cachekeep::validated_entry_dir(&cache.dir, &hit.relative_dir).await
-        else {
-            self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
-                .await;
-            return None;
-        };
-        // The row says the bytes are there; the disk is what actually has to
-        // have them. A cache root on a mount that did not come back after a
-        // reboot would otherwise serve a playlist for an empty directory —
-        // the row survives what the filesystem does not.
-        if tokio::fs::metadata(dir.join("index.m3u8")).await.is_err() {
-            tracing::warn!(
-                recipe = %hash, dir = %dir.display(),
-                "cache row points at a directory with no playlist — treating as a miss"
-            );
-            self.invalidate_cache_location(&cache_location, "playlist_missing")
-                .await;
-            return None;
         }
-        let cache_manifest = if let Some(expected) = hit.manifest_digest.as_deref() {
-            let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
-            if tokio::fs::metadata(&manifest_path).await.is_err() {
+        // Local deletion safety is process-local. Shared generations instead
+        // need a durable exact-generation pin before the first filesystem
+        // read, otherwise GC can retire the row between lookup and owner
+        // publication. The short lookup pin bridges to the durable media
+        // session pin installed before the route is exposed.
+        let cache_lookup = if cache_location.storage_class == "shared" {
+            prepared_shared.as_ref()?;
+            None
+        } else {
+            let Some(guard) = self.cache_readers.begin_lookup(&hash) else {
+                tracing::debug!(recipe = %hash, file = file.id, "cache entry is being evicted");
+                return None;
+            };
+            Some(guard)
+        };
+        let (dir, cache_manifest) = if let Some(prepared) = prepared_shared.take() {
+            (prepared.dir, Some(prepared.manifest))
+        } else {
+            let Some(dir) =
+                crate::cachekeep::validated_entry_dir(&cache_root, &cache_location.relative_dir)
+                    .await
+            else {
+                self.invalidate_cache_location(&cache_location, "unsafe_relative_path")
+                    .await;
+                return None;
+            };
+            // The row says the bytes are there; the disk is what actually has
+            // to have them. A cache root on a mount that did not come back
+            // after a reboot would otherwise serve a playlist for an empty
+            // directory — the row survives what the filesystem does not.
+            if tokio::fs::metadata(dir.join("index.m3u8")).await.is_err() {
                 tracing::warn!(
                     recipe = %hash,
                     dir = %dir.display(),
-                    "cache location has a fenced manifest digest but no manifest — treating as a miss"
+                    "cache row points at a directory with no playlist — treating as a miss"
                 );
-                self.invalidate_cache_location(&cache_location, "manifest_missing")
+                self.invalidate_cache_location(&cache_location, "playlist_missing")
                     .await;
                 return None;
             }
-            match crate::manifest_cache::load(
-                crate::manifest_cache::GenerationKey {
-                    cache_root: cache.dir.clone(),
-                    node_id: cache.node_id.clone(),
-                    recipe_hash: hash.clone(),
-                    storage_class: hit.storage_class.clone(),
-                    relative_dir: hit.relative_dir.clone(),
-                    manifest_digest: expected.to_owned(),
-                },
-                &dir,
-            )
-            .await
-            {
-                Ok(manifest) => Some(manifest),
-                Err(error) => {
+            let cache_manifest = if let Some(expected) = cache_location.manifest_digest.as_deref() {
+                let manifest_path = dir.join(plurx_core::transcode::manifest::MANIFEST_FILE);
+                if tokio::fs::metadata(&manifest_path).await.is_err() {
                     tracing::warn!(
                         recipe = %hash,
                         dir = %dir.display(),
-                        %error,
-                        "cache generation manifest is invalid — treating as a miss"
+                        "cache location has a fenced manifest digest but no manifest — treating as a miss"
                     );
-                    self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                    self.invalidate_cache_location(&cache_location, "manifest_missing")
                         .await;
                     return None;
                 }
+                match crate::manifest_cache::load(
+                    crate::manifest_cache::GenerationKey {
+                        cache_root: cache_root.clone(),
+                        node_id: cache_location.node_id.clone(),
+                        recipe_hash: hash.clone(),
+                        storage_class: cache_location.storage_class.clone(),
+                        relative_dir: cache_location.relative_dir.clone(),
+                        manifest_digest: expected.to_owned(),
+                    },
+                    &dir,
+                )
+                .await
+                {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        tracing::warn!(
+                            recipe = %hash,
+                            dir = %dir.display(),
+                            %error,
+                            "cache generation manifest is invalid — treating as a miss"
+                        );
+                        self.invalidate_cache_location(&cache_location, "manifest_invalid")
+                            .await;
+                        return None;
+                    }
+                }
+            } else {
+                // Legacy rows predate fenced manifests. A stray manifest may
+                // be a losing queue adoption, so bounded legacy reads remain
+                // the only authority until a fenced completion installs its
+                // digest.
+                None
+            };
+            let playlist_bytes = match &cache_manifest {
+                Some(manifest) => manifest
+                    .read_verified_playlist(&dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten(),
+                None => plurx_core::transcode::manifest::read_bounded_playlist(&dir, "index.m3u8")
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            let playlist_valid = playlist_bytes
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(validated_vod_part)
+                .is_some();
+            if !playlist_valid {
+                self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
+                    .await;
+                return None;
             }
-        } else {
-            // Legacy rows predate fenced manifests. A stray manifest may be a
-            // losing queue adoption, so bounded legacy reads remain the only
-            // authority until a fenced completion installs its digest.
+            (dir, cache_manifest)
+        };
+        let cache_reader = if cache_location.storage_class == "shared" {
             None
+        } else {
+            Some(self.cache_readers.begin_playback(&hash)?)
         };
-        let playlist_bytes = match &cache_manifest {
-            Some(manifest) => manifest
-                .read_verified_playlist(&dir, "index.m3u8")
-                .await
-                .ok()
-                .flatten(),
-            None => plurx_core::transcode::manifest::read_bounded_playlist(&dir, "index.m3u8")
-                .await
-                .ok()
-                .flatten(),
-        };
-        let playlist_valid = playlist_bytes
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .and_then(validated_vod_part)
-            .is_some();
-        if !playlist_valid {
-            self.invalidate_cache_location(&cache_location, "playlist_invalid_vod")
-                .await;
-            return None;
-        }
-        let cache_reader = self.cache_readers.begin_playback(&hash)?;
         drop(cache_lookup);
-        let _ = self.store.touch_cache_entry(&hash, &cache.node_id).await;
-
-        let session_id = uuid::Uuid::new_v4().to_string();
+        if let Some(generation_id) = cache_location.generation_id.as_deref() {
+            let _ = self
+                .store
+                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
+                .await;
+        } else {
+            let _ = self
+                .store
+                .touch_cache_entry(&hash, &cache_location.node_id)
+                .await;
+        }
         let session = Arc::new(Session {
             dir,
             child: Mutex::new(None),
@@ -5876,7 +6566,7 @@ impl TranscodeManager {
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
-            _cache_reader: Some(cache_reader),
+            _cache_reader: cache_reader,
             subtitle_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
@@ -5885,6 +6575,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title: item_title.to_owned(),
             user_name: owner.user_name.to_owned(),
+            supersession_user: owner.supersession_user.to_owned(),
             playback_id: owner.playback_id.to_owned(),
             automatic: owner.automatic,
             kind: SessionKind::Transcode {
@@ -5924,6 +6615,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -5933,7 +6625,7 @@ impl TranscodeManager {
             return None;
         }
         tracing::info!(
-            %session_id, recipe = %hash, file = file.id,
+            session = %session_log_id(&session_id), recipe = %hash, file = file.id,
             "serving a cached transcode — no encoder started"
         );
         self.emit_session_event(
@@ -6331,6 +7023,7 @@ impl TranscodeManager {
                 recipe_hash: hash.clone(),
                 node_id: cache.node_id.clone(),
                 storage_class: cached.storage_class.clone(),
+                generation_id: None,
                 relative_dir: cached.relative_dir.clone(),
                 manifest_digest: cached.manifest_digest.clone(),
             };
@@ -6811,6 +7504,27 @@ impl TranscodeManager {
                 .await
                 .map_err(|error| error.to_string())?;
         }
+        if let (Some(shared_cache), Some(manifest)) =
+            (self.shared_cache.as_ref(), manifest.as_ref())
+        {
+            match shared_cache
+                .publish_generation(&hash, file.id, CACHE_RECIPE_VERSION, &final_dir, manifest)
+                .await
+            {
+                Ok(true) => tracing::info!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    "portable transcode published to the shared cache"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    recipe = %hash,
+                    generation = %manifest.generation_id,
+                    %error,
+                    "shared cache publication failed; the node-local generation remains ready"
+                ),
+            }
+        }
         drop(publication_guard);
         let _ = quarantine_remove_cache_tree(&temp, 3).await;
         tracing::info!(
@@ -7173,10 +7887,128 @@ impl TranscodeManager {
     /// caller holding a session its twin's supersession had already killed.
     /// Now the second caller finds the reservation and waits for the first
     /// one's session instead.
+    #[cfg(test)]
     pub async fn create_session(
         &self,
         req: &SessionRequest,
         user_name: &str,
+    ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
+        self.create_session_inner(req, user_name, &supersession_user, None, None)
+            .await
+    }
+
+    /// Start a cluster-owned replacement while retaining its process-local
+    /// serialization gate for the ingress activation verdict.
+    pub async fn create_cluster_session(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterSessionStart, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the replacement start expired before it could reap its predecessor",
+            ));
+        }
+        let info = self
+            .create_session_inner(req, user_name, &supersession_user, Some(deadline), None)
+            .await?;
+        Ok(ClusterSessionStart { info, replacement })
+    }
+
+    /// Start a provisional fenced-successor generation. The caller publishes
+    /// ownership only after this method has acquired capacity and produced a
+    /// live local worker; a losing CAS stops the provisional session.
+    pub(crate) async fn create_cluster_takeover_session(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        takeover: SessionTakeoverStart,
+    ) -> Result<ClusterSessionStart, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        let replacement = self
+            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .await?;
+        // Same check the ordinary cluster start makes after its gate wait: a
+        // start with no budget left cannot finish, and spawning ffmpeg only to
+        // abandon it costs an admission slot for nothing.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(capacity_error(
+                "the takeover start expired while waiting for this player's gate",
+            ));
+        }
+        let info = self
+            .create_session_inner(
+                req,
+                user_name,
+                &supersession_user,
+                Some(deadline),
+                Some(takeover),
+            )
+            .await?;
+        Ok(ClusterSessionStart { info, replacement })
+    }
+
+    async fn acquire_cluster_replacement_gate(
+        &self,
+        key: String,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterReplacementGuard, String> {
+        let gate = {
+            let mut entries = self
+                .cluster_replacement_gates
+                .entries
+                .lock()
+                .map_err(|_| "cluster replacement gate registry was poisoned".to_owned())?;
+            entries.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(gate) = entries.get(&key).and_then(Weak::upgrade) {
+                gate
+            } else {
+                if entries.len() >= MAX_CLUSTER_REPLACEMENT_GATES {
+                    return Err(capacity_error(
+                        "too many player replacements are active on this worker",
+                    ));
+                }
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                entries.insert(key.clone(), Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let gate_deadline = std::cmp::min(
+            deadline,
+            tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
+        );
+        let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
+            .await
+            .map_err(|_| {
+                capacity_error("another replacement for this player is still being committed")
+            })?;
+        Ok(ClusterReplacementGuard {
+            registry: Arc::clone(&self.cluster_replacement_gates),
+            key,
+            permit: Some(permit),
+        })
+    }
+
+    async fn create_session_inner(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
     ) -> Result<StartInfo, String> {
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
@@ -7192,7 +8024,7 @@ impl TranscodeManager {
             ));
         }
         let claim = match req.request_id.as_deref() {
-            Some(key) => match self.claim_request(key, req, user_name).await? {
+            Some(key) => match self.claim_request(key, req, supersession_user).await? {
                 Claimed::Recovered(info) => return Ok(info),
                 Claimed::Mine(claim, normalized) => Some((claim, normalized)),
             },
@@ -7207,48 +8039,296 @@ impl TranscodeManager {
             None => (None, req),
         };
 
-        let info = match req.kind {
-            SessionKind::Transcode { height } => {
-                self.start_with_audio_offset(
-                    req.file_id,
-                    height,
-                    req.start_seconds,
-                    req.audio_index,
-                    req.subtitle_burn,
-                    req.audio_offset_ms,
-                    user_name,
-                    &req.playback_id,
-                    req.automatic,
-                    req.hdr10,
-                )
-                .await?
-            }
-            SessionKind::Copy {
-                aac,
-                preserve_dolby_vision,
-            } => {
-                self.start_copy_with_audio_offset(
-                    req.file_id,
-                    req.start_seconds,
-                    req.audio_index,
-                    req.audio_offset_ms,
-                    CopySessionOptions {
-                        transcode_audio: aac,
-                        preserve_dolby_vision,
-                    },
-                    user_name,
-                    &req.playback_id,
-                    req.automatic,
-                )
-                .await?
+        let info = if let Some(info) = self
+            .try_vod_session(
+                req,
+                supersession_user,
+                replacement_deadline,
+                takeover.is_some(),
+            )
+            .await?
+        {
+            info
+        } else {
+            match req.kind {
+                SessionKind::Transcode { height } => {
+                    self.start_with_audio_offset(
+                        req.file_id,
+                        height,
+                        req.start_seconds,
+                        req.audio_index,
+                        req.subtitle_burn,
+                        req.audio_offset_ms,
+                        user_name,
+                        supersession_user,
+                        replacement_deadline,
+                        takeover,
+                        &req.playback_id,
+                        req.automatic,
+                        req.hdr10,
+                    )
+                    .await?
+                }
+                SessionKind::Copy {
+                    aac,
+                    preserve_dolby_vision,
+                } => {
+                    self.start_copy_with_audio_offset(
+                        req.file_id,
+                        req.start_seconds,
+                        req.audio_index,
+                        req.audio_offset_ms,
+                        CopySessionOptions {
+                            transcode_audio: aac,
+                            preserve_dolby_vision,
+                        },
+                        user_name,
+                        supersession_user,
+                        replacement_deadline,
+                        takeover,
+                        &req.playback_id,
+                        req.automatic,
+                    )
+                    .await?
+                }
             }
         };
         if let Some(claim) = claim {
-            let live: std::collections::HashSet<String> =
+            let mut live: std::collections::HashSet<String> =
                 self.sessions.lock().await.keys().cloned().collect();
+            // VOD sessions are live too: without them here, the next create's
+            // completion would purge their Ready records, breaking both
+            // idempotent replay and the cluster stop path's match check.
+            live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
         Ok(info)
+    }
+
+    /// The VOD arm of session creation (plan §2.7, milestone M3).
+    ///
+    /// `None` means "not this presentation" — the caller proceeds down the
+    /// live-presentation arms exactly as if the opt-in had never been sent,
+    /// which is the fallback contract: a VOD request the server cannot honour
+    /// degrades to today's behaviour, never to an error. One log line inside
+    /// names each fallback reason.
+    async fn try_vod_session(
+        &self,
+        req: &SessionRequest,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        is_takeover: bool,
+    ) -> Result<Option<StartInfo>, String> {
+        if req.presentation != Presentation::Vod {
+            return Ok(None);
+        }
+        if is_takeover {
+            // A takeover continues a live incarnation's exact serving shape;
+            // a presentation switch is a new create's business.
+            tracing::info!("vod presentation refused for a takeover start");
+            return Ok(None);
+        }
+        let Some(settings) = self.vod_settings(req).await? else {
+            tracing::info!(
+                file = req.file_id,
+                "vod presentation requested but playback.vod_presentation is off"
+            );
+            return Ok(None);
+        };
+        let file = self
+            .store
+            .get_file(req.file_id)
+            .await
+            .map_err(|error| format!("reading the source file: {error}"))?
+            .ok_or_else(|| "the file no longer exists".to_owned())?;
+        // One player replacing its own stream sweeps both registries: the
+        // live sessions it may be leaving, and any VOD session it holds
+        // (`reap_superseded_until` sweeps both).
+        self.reap_superseded_before(replacement_deadline, supersession_user, &req.playback_id)
+            .await?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        match self
+            .vod
+            .try_create(req, &file, &settings, supersession_user, session_id)
+            .await?
+        {
+            Some(start) => Ok(Some(StartInfo {
+                playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
+                session_id: start.session_id,
+                duration_ms: Some(start.duration_ms),
+                // Like a cached generation: the timeline is the whole film
+                // from zero, and the client seeks — that is the point.
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                target_height: file.height.unwrap_or(0),
+                kind: req.kind,
+                encoder: "vod",
+                // A copy session encodes nothing; same answer the live copy
+                // arm gives.
+                grade: OutputGrade::Sdr,
+                vod: true,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Read the VOD serving settings, `None` when the presentation is off.
+    async fn vod_settings(
+        &self,
+        req: &SessionRequest,
+    ) -> Result<Option<crate::vodserve::VodSettings>, String> {
+        let read = |key: &'static str| {
+            let store = Arc::clone(&self.store);
+            async move {
+                store
+                    .get_setting(key)
+                    .await
+                    .map_err(|error| format!("reading {key}: {error}"))
+            }
+        };
+        if read(plurx_core::store::keys::VOD_PRESENTATION)
+            .await?
+            .as_deref()
+            != Some("1")
+        {
+            return Ok(None);
+        }
+        /// Un-admitted working sets across the node when the operator has not
+        /// said otherwise: enough for a handful of concurrent films' ahead
+        /// windows without threatening a small disk.
+        const DEFAULT_WORKING_SET_BYTES: u64 = 8 << 30;
+        /// The server's ceiling on one blocking segment fetch. hls.js's own
+        /// manifest-load budget is 10 s (M0-P3), so the default answer comes
+        /// back typed before a stock player gives up on its own.
+        const DEFAULT_BLOCK_BUDGET_SECS: f64 = 8.0;
+        const MAX_BLOCK_BUDGET_SECS: f64 = 30.0;
+        let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
+            Some(raw) => match raw.trim().parse::<u64>() {
+                // The settings surface refuses a zero on the way in; one that
+                // arrived by another route is still not a budget this can run
+                // with, and "not configured" is the honest reading.
+                Ok(0) | Err(_) => DEFAULT_WORKING_SET_BYTES,
+                Ok(bytes) => bytes,
+            },
+            None => DEFAULT_WORKING_SET_BYTES,
+        };
+        let server_cap = match read(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|s| s.is_finite() && *s > 0.0)
+                .map(|s| s.min(MAX_BLOCK_BUDGET_SECS))
+                .unwrap_or(DEFAULT_BLOCK_BUDGET_SECS),
+            None => DEFAULT_BLOCK_BUDGET_SECS,
+        };
+        let block_secs = req
+            .block_budget_secs
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| s.min(server_cap))
+            .unwrap_or(server_cap);
+        // Admitted renditions are the copy cache, so they answer to the same
+        // budget the pre-transcode cache does. `0`/absent keeps admission
+        // closed: renditions serve and evict under the working set, and
+        // nothing is promised durability.
+        let completed_cache_bytes = match read(plurx_core::store::keys::CACHE_MAX_GB).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                .saturating_mul(1 << 30),
+            None => 0,
+        };
+        Ok(Some(crate::vodserve::VodSettings {
+            working_set_bytes,
+            completed_cache_bytes,
+            block_budget: Duration::from_secs_f64(block_secs),
+        }))
+    }
+
+    /// The VOD dispatch half of [`Self::playlist`]: `None` when the id is not
+    /// a VOD session's.
+    pub async fn vod_playlist(
+        &self,
+        session_id: &str,
+    ) -> Option<Result<Vec<u8>, crate::vodserve::VodError>> {
+        self.vod.playlist(session_id).await
+    }
+
+    /// The VOD dispatch half of [`Self::segment`]: `None` when the id is not
+    /// a VOD session's.
+    pub async fn vod_segment(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Option<Result<Option<crate::vodserve::SegmentReady>, crate::vodserve::VodError>> {
+        self.vod.segment(session_id, name).await
+    }
+
+    /// The file a live VOD session serves, for response-time source facts.
+    pub async fn vod_session_file_id(&self, session_id: &str) -> Option<i64> {
+        self.vod.session_file_id(session_id).await
+    }
+
+    /// Live (un-tombstoned) VOD session ids, for operator surfaces.
+    pub async fn vod_live_session_ids(&self) -> Vec<String> {
+        self.vod.live_session_ids().await
+    }
+
+    /// Rebuild a reaped VOD session from its durable route's recipe (plan
+    /// §2.5: sessions are handles, and a handle whose durable route is still
+    /// active resurrects instead of failing the viewer). The caller has
+    /// already verified the route: this node owns it, it is active, and its
+    /// lease has not expired. `false` when the recipe is not a VOD one or the
+    /// rendition cannot be re-attached — the caller then answers as it always
+    /// has.
+    pub async fn vod_resurrect(&self, recipe_json: &str, session_id: &str, user_id: i64) -> bool {
+        let Ok(remote) =
+            serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
+        else {
+            return false;
+        };
+        let req = remote.request;
+        if req.presentation != Presentation::Vod {
+            return false;
+        }
+        let Ok(Some(settings)) = self.vod_settings(&req).await else {
+            return false;
+        };
+        let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
+            return false;
+        };
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        match self
+            .vod
+            .try_create(
+                &req,
+                &file,
+                &settings,
+                &supersession_user,
+                session_id.to_owned(),
+            )
+            .await
+        {
+            Ok(Some(_)) => {
+                tracing::info!(
+                    session = %session_log_id(session_id),
+                    "resurrected a vod session from its durable route"
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
+    pub async fn vod_maintain_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.vod.maintain().await;
+        }
     }
 
     /// Resolve a `request_id` to either a reservation this call owns or the
@@ -7261,9 +8341,9 @@ impl TranscodeManager {
         &self,
         key: &str,
         request: &SessionRequest,
-        user_name: &str,
+        supersession_user: &str,
     ) -> Result<Claimed<'_>, String> {
-        let intent_fingerprint = request.intent_fingerprint(user_name);
+        let intent_fingerprint = request.intent_fingerprint(supersession_user);
         let deadline = Instant::now() + INFLIGHT_WAIT;
         loop {
             // What the map says right now, decided under one lock so there is
@@ -7309,14 +8389,16 @@ impl TranscodeManager {
                         requests: &self.requests,
                         key: Some(key.to_owned()),
                     };
-                    let (normalized, target_height) =
-                        match self.normalize_claimed_request(request, user_name).await {
-                            Ok(normalized) => normalized,
-                            Err(error) => {
-                                drop(claim);
-                                return Err(error);
-                            }
-                        };
+                    let (normalized, target_height) = match self
+                        .normalize_claimed_request(request, supersession_user)
+                        .await
+                    {
+                        Ok(normalized) => normalized,
+                        Err(error) => {
+                            drop(claim);
+                            return Err(error);
+                        }
+                    };
                     {
                         let mut requests = self.requests.lock().expect("requests mutex");
                         let Some(entry) = requests.get_mut(key) else {
@@ -7333,7 +8415,7 @@ impl TranscodeManager {
                                 "request {key} resolved to a target that differs from its session"
                             ));
                         }
-                        tracing::debug!(%session_id, request_id = key, "idempotent create: same session");
+                        tracing::debug!(session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
                         return Ok(Claimed::Recovered(info));
                     }
                     // Its session is gone; the entry is stale, not
@@ -7367,7 +8449,7 @@ impl TranscodeManager {
     async fn normalize_claimed_request(
         &self,
         request: &SessionRequest,
-        user_name: &str,
+        supersession_user: &str,
     ) -> Result<(SessionRequest, Option<i64>), String> {
         let Some(previous_session_id) = request.previous_session_id.as_deref() else {
             let target_height = match request.kind {
@@ -7379,13 +8461,33 @@ impl TranscodeManager {
         let Some(ReopenReason::Stall) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
         };
+        // A stall reopen bound to a VOD predecessor: validate the binding
+        // against the VOD registry and pass the request through untouched. A
+        // VOD session has no persisted rung to inherit — the reopen decides
+        // its own presentation, so a client falling back to the live one
+        // simply omits the flag.
+        if let Some(facts) = self.vod.reopen_facts(previous_session_id).await {
+            if facts.supersession_user != supersession_user
+                || facts.playback_id != request.playback_id
+                || facts.file_id != request.file_id
+            {
+                return Err(invalid_reopen_error(
+                    "the previous session does not belong to this user, playback, and file",
+                ));
+            }
+            let target_height = match request.kind {
+                SessionKind::Transcode { height } if !request.automatic => Some(height),
+                _ => None,
+            };
+            return Ok((request.clone(), target_height));
+        }
         let (previous_user, previous_playback, previous_file, previous_height, automatic, kind) = {
             let sessions = self.sessions.lock().await;
             let previous = sessions
                 .get(previous_session_id)
                 .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
             (
-                previous.user_name.clone(),
+                previous.supersession_user.clone(),
                 previous.playback_id.clone(),
                 previous.file_id,
                 previous.target_height,
@@ -7393,7 +8495,7 @@ impl TranscodeManager {
                 previous.kind,
             )
         };
-        if previous_user != user_name
+        if previous_user != supersession_user
             || previous_playback != request.playback_id
             || previous_file != request.file_id
         {
@@ -7421,6 +8523,22 @@ impl TranscodeManager {
 
     /// Describe a session that already exists, for an idempotent re-create.
     async fn recover(&self, session_id: &str) -> Option<StartInfo> {
+        if let Some(recovered) = self.vod.recovered_start(session_id).await {
+            // An idempotent replay of a VOD create: repeat the persisted
+            // answer, field for field, from the session record.
+            return Some(StartInfo {
+                playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
+                session_id: recovered.start.session_id,
+                duration_ms: Some(recovered.start.duration_ms),
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                target_height: recovered.target_height,
+                kind: recovered.kind,
+                encoder: "vod",
+                grade: OutputGrade::Sdr,
+                vod: true,
+            });
+        }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         if session.failed.load(Relaxed) {
             return None;
@@ -7461,6 +8579,32 @@ impl TranscodeManager {
                 .unwrap_or(default),
             _ => default,
         }
+    }
+
+    /// Whether this session must serve the typeless sliding playlist shape.
+    ///
+    /// The standing answer is the `HLS_TYPELESS_SLIDING` experiment. Session
+    /// takeover adds a second, non-negotiable reason: a fenced successor
+    /// renumbers from its epoch floor and advertises none of the
+    /// predecessor's segments (§7.3), which is exactly what RFC 8216 §6.2.1
+    /// forbids an EVENT playlist from doing. A URL a successor may republish
+    /// therefore serves the stable shape from its *first* response instead of
+    /// changing shape under the client at failover.
+    /// The shape a cluster-published session will serve, asked before the
+    /// session exists so the recipe can record it. A successor may only
+    /// replace a session that was already serving this shape.
+    pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
+        self.stable_playlist_shape(true, false).await
+    }
+
+    async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
+        if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
+            return true;
+        }
+        cluster_published
+            && self
+                .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
+                .await
     }
 
     /// A feature switch stored in the ordinary settings table. Only the
@@ -8045,12 +9189,33 @@ impl TranscodeManager {
     /// automatic quality restarts would have turned that from a rare
     /// annoyance into a loop. A player instance restarts its own stream all
     /// the time and never anyone else's, which is exactly the scope wanted.
-    async fn reap_superseded(&self, playback_id: &str) {
+    async fn reap_superseded_until(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
         let doomed: Vec<(String, Arc<Session>)> = {
-            let sessions = self.sessions.lock().await;
+            let sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(replacement_deadline_error());
+            }
+            // A player replacing its stream supersedes whichever presentation
+            // it was on — a legacy create ends this viewer's VOD session too.
+            // AFTER the deadline check: a start with no budget left must not
+            // tombstone a still-playing predecessor and then fail to replace
+            // it (the sweep itself is in-memory and costs nothing).
+            self.vod.supersede(supersession_user, playback_id, "").await;
             sessions
                 .iter()
-                .filter(|(_, s)| s.playback_id == playback_id)
+                .filter(|(_, s)| {
+                    s.supersession_user == supersession_user && s.playback_id == playback_id
+                })
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect()
         };
@@ -8058,7 +9223,10 @@ impl TranscodeManager {
             // Retirement releases both admission pools before the caller goes
             // on to ask for a slot of its own. A player replacing its own
             // session must not queue behind the session it just replaced.
-            if !self.retire_session(&session_id, &session).await {
+            if !self
+                .retire_session_until(&session_id, &session, deadline)
+                .await?
+            {
                 continue;
             }
             self.emit_session_event(
@@ -8072,14 +9240,30 @@ impl TranscodeManager {
             )
             .await;
             tracing::info!(
-                %session_id, playback_id,
+                session = %session_log_id(&session_id),
+                playback = %session_log_id(playback_id),
                 "reaped superseded transcode session (this player started a new one)"
             );
         }
+        Ok(())
+    }
+
+    /// Preserve the cluster ingress deadline across request recovery and
+    /// normalization. Those awaits are necessary before supersession, but a
+    /// start that consumed its budget there must not kill a still-playable
+    /// predecessor and then fail before replacing it.
+    async fn reap_superseded_before(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        supersession_user: &str,
+        playback_id: &str,
+    ) -> Result<(), String> {
+        self.reap_superseded_until(deadline, supersession_user, playback_id)
+            .await
     }
 
     /// Start a transcode session for a file, superseding this viewer's previous
-    /// session on the same file (see [`Self::reap_superseded`]).
+    /// session on the same file (see [`Self::reap_superseded_before`]).
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub async fn start(
@@ -8092,6 +9276,7 @@ impl TranscodeManager {
         user_name: &str,
         playback_id: &str,
     ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
         self.start_with_audio_offset(
             file_id,
             target_height,
@@ -8100,6 +9285,9 @@ impl TranscodeManager {
             subtitle_override,
             0,
             user_name,
+            &supersession_user,
+            None,
+            None,
             playback_id,
             false,
             false,
@@ -8227,6 +9415,9 @@ impl TranscodeManager {
         subtitle_override: Option<i64>,
         audio_offset_ms: i64,
         user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
@@ -8235,7 +9426,16 @@ impl TranscodeManager {
         // Before spawning, not after: the point is to never have two encoders
         // for one player running at once, and reaping first also frees the
         // hardware slot the new session is about to want.
-        self.reap_superseded(playback_id).await;
+        //
+        // A takeover is a continuation of an existing incarnation, not a new
+        // player start, so it supersedes nothing. Reaping here would retire
+        // whatever this viewer and player id are already running on THIS
+        // node — including a session the client legitimately started here
+        // while the old owner's lease was still expiring.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -8277,7 +9477,7 @@ impl TranscodeManager {
         let (mut encoder, grade) = self
             .encoder_and_grade_for(&file, hdr10, target_height)
             .await?;
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -8288,21 +9488,27 @@ impl TranscodeManager {
             None,
             grade,
         );
-        if let Some(info) = self
-            .serve_cached(
-                &file,
-                &opts,
-                encoder,
-                &item_title,
-                SessionOwner {
-                    user_name,
-                    playback_id,
-                    automatic,
-                },
-            )
-            .await
-        {
-            return Ok(info);
+        if let Some(takeover) = takeover.as_ref() {
+            opts.start_number = takeover.media_sequence;
+        }
+        if takeover.is_none() {
+            if let Some(info) = self
+                .serve_cached(
+                    &file,
+                    &opts,
+                    encoder,
+                    &item_title,
+                    SessionOwner {
+                        user_name,
+                        supersession_user,
+                        playback_id,
+                        automatic,
+                    },
+                )
+                .await
+            {
+                return Ok(info);
+            }
         }
         // Can this ffmpeg build actually burn? Asked here — after the cache
         // lookup, which needs no ffmpeg at all, and before any slot, process
@@ -8350,7 +9556,10 @@ impl TranscodeManager {
         let sw_permit = admission.sw_permit;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let dir = self.work_dir.join(&session_id);
+        // The public UUID is a bearer capability. Keep it out of ffmpeg's
+        // argv and stderr entirely by giving the scratch directory an
+        // independent, process-private name.
+        let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
@@ -8360,7 +9569,7 @@ impl TranscodeManager {
         // patched. Same builder, so the two cannot describe different sessions.
         // The software permit's thread budget rides in the same rebuild: what
         // admission reserved is exactly what x264 is told to spend.
-        let opts = self.live_lookup_options(
+        let mut opts = self.live_lookup_options(
             rate_control,
             encoder,
             &file,
@@ -8371,8 +9580,13 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
+        if let Some(takeover) = takeover.as_ref() {
+            opts.start_number = takeover.media_sequence;
+        }
         let pacing = self.pacing(false).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let args = transcode::hls_args(&file, encoder, &opts, pacing, &dir.to_string_lossy());
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
@@ -8390,11 +9604,11 @@ impl TranscodeManager {
             opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap),
         );
         tracing::info!(
-            %session_id, encoder = encoder.label(), pipeline = opts.pipeline.name(),
+            session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
             declined = declined.unwrap_or(""),
             build = crate::version::BUILD,
-            "transcode ffmpeg args: {}", args.join(" ")
+            "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
         let progress = Arc::new(Progress::new());
         let generation = progress.begin_attempt();
@@ -8414,7 +9628,7 @@ impl TranscodeManager {
         )?;
 
         tracing::info!(
-            %session_id, file_id, target_height, start_seconds,
+            session = %session_log_id(&session_id), file_id, target_height, start_seconds,
             encoder = encoder.label(), "started transcode session"
         );
 
@@ -8445,6 +9659,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title,
             user_name: user_name.to_owned(),
+            supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
             kind: SessionKind::Transcode {
@@ -8488,6 +9703,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -8549,7 +9765,7 @@ impl TranscodeManager {
                             // says which. The speed says how much headroom it
                             // has while doing it.
                             tracing::info!(
-                                session = %sid,
+                                session = %session_log_id(&sid),
                                 speed = session.progress.speed(),
                                 "transcode producing segments (hardware path healthy)"
                             );
@@ -8580,7 +9796,7 @@ impl TranscodeManager {
                             if !suspended && !announced_slow {
                                 announced_slow = true;
                                 tracing::info!(
-                                    session = %sid,
+                                    session = %session_log_id(&sid),
                                     produced_ms = session.progress.out_time_ms(),
                                     speed = session.progress.speed(),
                                     "no finished segment yet, but the encoder is still \
@@ -8675,7 +9891,7 @@ impl TranscodeManager {
         if downgrade_pipeline {
             let Some(fallback) = opts.pipeline.fallback() else {
                 tracing::error!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     pipeline = opts.pipeline.name(),
                     "renderer stalled and has no color-safe fallback; refusing to retry through a different color transform"
                 );
@@ -8693,7 +9909,7 @@ impl TranscodeManager {
             retry_opts.effective_rate_control = software_rate_control;
         }
         tracing::warn!(
-            session = %sid,
+            session = %session_log_id(sid),
             stalled_s = session.progress.stalled_for().as_secs(),
             pipeline = opts.pipeline.name(),
             retry_pipeline = retry_opts.pipeline.name(),
@@ -8760,14 +9976,14 @@ impl TranscodeManager {
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
                 tracing::info!(
-                    session = %sid,
+                    session = %session_log_id(sid),
                     encoder = retry_encoder.label(),
                     pipeline = retry_opts.pipeline.name(),
                     "fallback transcode started"
                 );
             }
             Err(e) => {
-                tracing::error!(session = %sid, "fallback transcode failed: {e}");
+                tracing::error!(session = %session_log_id(sid), "fallback transcode failed: {e}");
                 session.fail(PlaylistError::SessionFailed(
                     "the fallback encoder could not be started".into(),
                 ));
@@ -8793,6 +10009,7 @@ impl TranscodeManager {
         user_name: &str,
         playback_id: &str,
     ) -> Result<StartInfo, String> {
+        let supersession_user = serde_json::json!(["username", user_name]).to_string();
         self.start_copy_with_audio_offset(
             file_id,
             start_seconds,
@@ -8800,6 +10017,9 @@ impl TranscodeManager {
             0,
             options,
             user_name,
+            &supersession_user,
+            None,
+            None,
             playback_id,
             false,
         )
@@ -8815,12 +10035,19 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         options: CopySessionOptions,
         user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
         // Same reasoning as `start`; the copy path matters more if anything,
         // since an abandoned remux reads the source as fast as the disk allows.
-        self.reap_superseded(playback_id).await;
+        // A takeover continues an existing incarnation and supersedes nothing.
+        if takeover.is_none() {
+            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+                .await?;
+        }
 
         let mut file = self
             .store
@@ -8853,7 +10080,7 @@ impl TranscodeManager {
             .unwrap_or_else(|| "(unknown)".to_owned());
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let dir = self.work_dir.join(&session_id);
+        let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
@@ -8866,17 +10093,34 @@ impl TranscodeManager {
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
         let pacing = self.pacing(true).await;
-        let typeless_sliding = self.bool_setting(keys::HLS_TYPELESS_SLIDING).await;
+        let typeless_sliding = self
+            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
+            .await;
         let legacy_args = || {
-            transcode::hls_copy_args_with_dolby_vision(
-                &file,
-                start_seconds,
-                audio_index,
-                options.transcode_audio,
-                pacing,
-                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision),
-                &dir.to_string_lossy(),
-            )
+            let dolby_vision =
+                transcode::DolbyVisionCopyOptions::new(have_dovi, options.preserve_dolby_vision);
+            match takeover.as_ref() {
+                Some(takeover) => transcode::hls_copy_args_with_sequence(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    takeover.media_sequence,
+                    &init_object_name(Some(takeover.owner_epoch)),
+                    &dir.to_string_lossy(),
+                ),
+                None => transcode::hls_copy_args_with_dolby_vision(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    dolby_vision,
+                    &dir.to_string_lossy(),
+                ),
+            }
         };
         let progress = Arc::new(Progress::new());
         let generation = progress.begin_attempt();
@@ -8888,7 +10132,7 @@ impl TranscodeManager {
         // leading picture at. If anything about that stream turns out to be
         // unreadable, the reader task respawns this same session on the
         // arguments below, so the worst case is exactly today's behaviour.
-        let segmenting = copyseg::supports(file.video_codec.as_deref());
+        let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
         let (child, pipe_stdout) = if segmenting {
             let args = transcode::copy_pipe_args_with_dolby_vision(
                 &file,
@@ -8900,9 +10144,9 @@ impl TranscodeManager {
                 options.preserve_dolby_vision,
             );
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "segmenter",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
                 build = crate::version::BUILD,
-                "copy-video HLS ffmpeg args: {}", args.join(" ")
+                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
             );
             match spawn_ffmpeg_pipe(
                 &args,
@@ -8916,7 +10160,7 @@ impl TranscodeManager {
                     // Spawning failed before any of this was decided, so there
                     // is nothing to unwind: start the legacy path here.
                     tracing::warn!(
-                        %session_id,
+                        session = %session_log_id(&session_id),
                         "copy segmenter could not start ffmpeg ({e}); using the HLS muxer"
                     );
                     let args = legacy_args();
@@ -8935,9 +10179,9 @@ impl TranscodeManager {
         } else {
             let args = legacy_args();
             tracing::info!(
-                %session_id, file_id, start_seconds, mode = "legacy",
+                session = %session_log_id(&session_id), file_id, start_seconds, mode = "legacy",
                 build = crate::version::BUILD,
-                "copy-video HLS ffmpeg args: {}", args.join(" ")
+                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
             );
             let child = spawn_ffmpeg(
                 &args,
@@ -8988,6 +10232,7 @@ impl TranscodeManager {
             item_id: file.item_id,
             item_title,
             user_name: user_name.to_owned(),
+            supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
             kind: SessionKind::Copy {
@@ -9025,6 +10270,7 @@ impl TranscodeManager {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding,
+            takeover,
             first_slide_logged: AtomicBool::new(false),
         });
         if !self
@@ -9062,7 +10308,7 @@ impl TranscodeManager {
                 match outcome {
                     copyseg::Outcome::Ran(counts) => {
                         tracing::info!(
-                            session = %sid, build = crate::version::BUILD,
+                            session = %session_log_id(&sid), build = crate::version::BUILD,
                             "{}", copyseg::summary(&counts)
                         );
                     }
@@ -9099,7 +10345,7 @@ impl TranscodeManager {
                             return;
                         };
                         tracing::warn!(
-                            session = %sid,
+                            session = %session_log_id(&sid),
                             "copy segmenter cannot read this stream ({reason}); \
                              falling back to ffmpeg's HLS muxer for this session"
                         );
@@ -9144,10 +10390,10 @@ impl TranscodeManager {
                                     dir.clone(),
                                     sid.clone(),
                                 );
-                                tracing::info!(session = %sid, "fallback copy started");
+                                tracing::info!(session = %session_log_id(&sid), "fallback copy started");
                             }
                             Err(e) => {
-                                tracing::error!(session = %sid, "fallback copy failed: {e}");
+                                tracing::error!(session = %session_log_id(&sid), "fallback copy failed: {e}");
                                 session.fail(PlaylistError::SessionFailed(
                                     "the fallback remux could not be started".into(),
                                 ));
@@ -9190,6 +10436,119 @@ impl TranscodeManager {
     /// Number of live transcode sessions (for /metrics).
     pub async fn active_sessions(&self) -> usize {
         self.sessions.lock().await.len()
+    }
+
+    /// Publish a provisional successor under the incarnation's stable bearer
+    /// capability after the replicated owner CAS succeeds.
+    pub(crate) async fn adopt_session_id(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+    ) -> bool {
+        if provisional_id == durable_session_id {
+            return self.sessions.lock().await.contains_key(durable_session_id);
+        }
+        let mut sessions = self.sessions.lock().await;
+        if sessions.contains_key(durable_session_id) {
+            return false;
+        }
+        let Some(session) = sessions.remove(provisional_id) else {
+            return false;
+        };
+        sessions.insert(durable_session_id.to_owned(), session);
+        drop(sessions);
+
+        let mut requests = self.requests.lock().expect("requests mutex");
+        for entry in requests.values_mut() {
+            if matches!(&entry.state, RequestState::Ready(id) if id == provisional_id) {
+                entry.state = RequestState::Ready(durable_session_id.to_owned());
+            }
+        }
+        true
+    }
+
+    /// The fMP4 init object this session actually publishes.
+    ///
+    /// Anything that opens the init by name — the exact-codec probe, the
+    /// Apple High-tier rewrite — must ask, because a fenced successor names
+    /// its init after its ownership epoch. `None` for an unknown session.
+    pub(crate) async fn session_init_object(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        Some(init_object_name(
+            session
+                .takeover
+                .as_ref()
+                .map(|takeover| takeover.owner_epoch),
+        ))
+    }
+
+    /// Snapshot only the monotone coordinates needed by the replicated owner
+    /// heartbeat. Session identities are cloned under the map lock; the
+    /// segment locks are then sampled without holding that global lock.
+    pub(crate) async fn session_frontiers(
+        &self,
+        session_ids: &[String],
+    ) -> HashMap<String, SessionFrontier> {
+        let selected = {
+            let sessions = self.sessions.lock().await;
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    sessions
+                        .get(session_id)
+                        .cloned()
+                        .map(|session| (session_id.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut frontiers = HashMap::with_capacity(selected.len());
+        // A VOD session's frontier is film-addressed: the end of the last
+        // segment it was served. The renewal batch drops any route without a
+        // frontier entry and fences it as "cluster lease lost", so a missing
+        // arm here is a kill, not a default.
+        for session_id in session_ids {
+            if selected.iter().any(|(id, _)| id == session_id) {
+                continue;
+            }
+            if let Some(ms) = self.vod.frontier_ms(session_id).await {
+                frontiers.insert(
+                    session_id.clone(),
+                    SessionFrontier {
+                        produced_playable_through_ms: ms,
+                        fetched_through_ms: ms,
+                        media_sequence: 0,
+                    },
+                );
+            }
+        }
+        for (session_id, session) in selected {
+            let (local_produced_through_ms, media_sequence) = {
+                let segments = session.segments.lock().await;
+                (
+                    segments.produced_playable_end_ms().unwrap_or(0).max(0),
+                    segments.next_media_sequence(),
+                )
+            };
+            let local_fetched_through_ms = session
+                .fetched_end_ms
+                .load(Relaxed)
+                .clamp(0, local_produced_through_ms);
+            let offset = session.frontier_offset_ms();
+            let produced_playable_through_ms = offset.saturating_add(local_produced_through_ms);
+            let fetched_through_ms = offset
+                .saturating_add(local_fetched_through_ms)
+                .min(produced_playable_through_ms);
+            frontiers.insert(
+                session_id,
+                SessionFrontier {
+                    produced_playable_through_ms,
+                    fetched_through_ms,
+                    media_sequence,
+                },
+            );
+        }
+        frontiers
     }
 
     /// Every live session, paired with how it is really delivering.
@@ -9344,7 +10703,7 @@ impl TranscodeManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
                     .unwrap_or(0),
-                session_id: Some(session_id.to_owned()),
+                session_id: Some(session_log_id(session_id)),
                 file_id: Some(session.file_id),
                 event: event.to_owned(),
                 method: Some(method.to_owned()),
@@ -9372,15 +10731,39 @@ impl TranscodeManager {
     /// therefore complete before the other can act: a late replacement sees
     /// `retired`, while a late retirement kills the published successor.
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
+        self.retire_session_until(session_id, session, None)
+            .await
+            .expect("unbounded session retirement cannot expire")
+    }
+
+    async fn retire_session_until(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, String> {
         #[cfg(test)]
         session.retirement_started.store(true, Release);
-        let _transition = session.child_transition.lock().await;
+        let _transition = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
+                .await
+                .map_err(|_| replacement_deadline_error())?,
+            None => session.child_transition.lock().await,
+        };
         let removed = {
-            let mut sessions = self.sessions.lock().await;
+            let mut sessions = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+                    .await
+                    .map_err(|_| replacement_deadline_error())?,
+                None => self.sessions.lock().await,
+            };
             let still_live = sessions
                 .get(session_id)
                 .is_some_and(|active| Arc::ptr_eq(active, session));
             if still_live {
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(replacement_deadline_error());
+                }
                 session.retired.store(true, Release);
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
@@ -9388,13 +10771,13 @@ impl TranscodeManager {
             still_live
         };
         if !removed {
-            return false;
+            return Ok(false);
         }
         session.release_hardware();
         session.release_software();
         session.kill_child().await;
         session.discard_dir().await;
-        true
+        Ok(true)
     }
 
     /// Publish a newly spawned session only while the process-local serving
@@ -9424,6 +10807,26 @@ impl TranscodeManager {
     /// routine, and an admin killing one from the activity page is somebody
     /// intervening.
     pub async fn stop_session(&self, session_id: &str, reason: &'static str) -> bool {
+        // A VOD session ends with a tombstone rather than a retirement: its
+        // rendition may outlive it (admitted cache, other readers), but this
+        // id answers 410 ever after. The cause keys off the same reason
+        // strings the live path already uses.
+        {
+            let cause = if reason.contains("superseded") {
+                crate::vodserve::Terminal::Superseded
+            } else if reason.contains("revoked") || reason.contains("credential") {
+                crate::vodserve::Terminal::Revoked
+            } else if reason.contains("replaced") || reason.contains("rescan") {
+                crate::vodserve::Terminal::Replaced
+            } else if reason.contains("admin") || reason.contains("operator") {
+                crate::vodserve::Terminal::AdminStop
+            } else {
+                crate::vodserve::Terminal::Deleted
+            };
+            if self.vod.end(session_id, cause).await {
+                return true;
+            }
+        }
         let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
             return false;
         };
@@ -9447,8 +10850,47 @@ impl TranscodeManager {
             },
         )
         .await;
-        tracing::info!(%session_id, reason, "transcode session ended");
+        tracing::info!(session = %session_log_id(session_id), reason, "transcode session ended");
         true
+    }
+
+    /// Snapshot the live capability ids without holding the session map while
+    /// replicated lease I/O runs.
+    pub async fn active_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// Snapshot only workers still eligible for durable lease renewal. A
+    /// fenced worker remains in the map until teardown acquires its child
+    /// transition, but its lease authority must stop at the fencing verdict.
+    pub async fn renewable_session_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, session)| !session.retired.load(Acquire))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        // VOD sessions hold durable routes too; invisible here, the lease
+        // loop settles their routes as stale ~3 s after create and every
+        // request answers 410. Tombstoned ones are deliberately absent —
+        // dropping out of the live set is how their routes get ended.
+        ids.extend(self.vod.live_session_ids().await);
+        ids
+    }
+
+    /// Make a set of sessions immediately unservable without waiting for
+    /// process teardown or recursive scratch cleanup. The detached cleanup
+    /// path later takes `child_transition`, removes the registry entries, and
+    /// reaps their resources; every serving path observes this monotonic bit.
+    pub async fn fence_sessions(&self, session_ids: &[String]) {
+        let sessions = self.sessions.lock().await;
+        for session_id in session_ids {
+            if let Some(session) = sessions.get(session_id) {
+                session.retired.store(true, Release);
+            }
+        }
     }
 
     async fn stop_all_sessions_for_serving_fence(&self) {
@@ -9459,12 +10901,21 @@ impl TranscodeManager {
             .iter()
             .map(|(id, session)| (id.clone(), Arc::clone(session)))
             .collect::<Vec<_>>();
+        for (_, session) in &sessions {
+            // Serving authority is lost now, not after a producer transition
+            // happens to unblock. Lease renewal and every media path observe
+            // this bit while detached teardown catches up.
+            session.retired.store(true, Release);
+        }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
                 if self.retire_session(&session_id, &session).await {
                     // Do not publish a Store-backed playback event here: quorum
                     // loss is exactly the condition that triggered teardown.
-                    tracing::warn!(%session_id, "transcode session self-fenced after quorum loss");
+                    tracing::warn!(
+                        session = %session_log_id(&session_id),
+                        "transcode session self-fenced after quorum loss"
+                    );
                 }
             },
         ))
@@ -9497,8 +10948,103 @@ impl TranscodeManager {
         }
     }
 
+    /// Abort a remote start only when this process can prove it owns the
+    /// worker behind that incarnation.
+    ///
+    /// The ordinary proof is the process-local idempotency record left by the
+    /// start request. A fenced successor has no such record — nothing on this
+    /// node requested it — so it carries the incarnation on the session
+    /// itself. Without the second proof DELETE and the peer abort endpoint are
+    /// permanent no-ops against every taken-over session: they return success
+    /// while the replacement encoder keeps running and keeps its admission
+    /// slot, and §7.2's "a delete racing takeover resolves to ended without a
+    /// replacement child remaining alive" holds only by the slower lease-loss
+    /// path.
+    pub async fn stop_session_for_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        reason: &'static str,
+    ) -> bool {
+        let matches = self.requests.lock().is_ok_and(|requests| {
+            requests.get(request_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+        });
+        let matches = matches
+            || self
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|session| {
+                    session
+                        .takeover
+                        .as_ref()
+                        .is_some_and(|takeover| takeover.incarnation_id == request_id)
+                });
+        // A VOD session is stoppable by its durable route without a match in
+        // the live maps: its ids are unguessable and never recycled, and the
+        // route store is the caller's authority.
+        let matches = matches || self.vod.owns(session_id).await;
+        matches && self.stop_session(session_id, reason).await
+    }
+
+    /// `stop_session` with a ceiling on how long teardown may take.
+    ///
+    /// Retirement takes the child-transition gate, kills the process, and
+    /// recursively deletes the scratch tree — all unbounded, and all of it
+    /// serialized behind a hardware-to-software replacement that may itself be
+    /// respawning ffmpeg. A takeover's cleanup runs inside a bounded fan-out,
+    /// so it fences the session (making it immediately unservable, which is
+    /// the part that must not wait) and leaves the slow half to the detached
+    /// reaper rather than occupying a fan-out slot indefinitely.
+    ///
+    /// `hold` is anything the caller must not release until teardown has
+    /// really finished — in practice the cluster replacement guard. Dropping
+    /// that guard while the child is still alive lets the next start for the
+    /// same player through, and since a takeover deliberately supersedes
+    /// nothing, the result is two encoders for one player.
+    pub(crate) async fn stop_session_until<T: Send + 'static>(
+        self: &Arc<Self>,
+        session_id: &str,
+        reason: &'static str,
+        deadline: tokio::time::Instant,
+        hold: T,
+    ) -> bool {
+        // Fencing is the half that must be immediate and cannot block: every
+        // serving path reads this monotone bit.
+        self.fence_sessions(std::slice::from_ref(&session_id.to_owned()))
+            .await;
+        // Teardown itself runs detached, never cancelled. Dropping a
+        // half-finished retirement would leave the manager entry gone with the
+        // encoder still running, which is strictly worse than waiting.
+        let manager = Arc::clone(self);
+        let owned_id = session_id.to_owned();
+        let teardown = tokio::spawn(async move {
+            let stopped = manager.stop_session(&owned_id, reason).await;
+            drop(hold);
+            stopped
+        });
+        match tokio::time::timeout_at(deadline, teardown).await {
+            Ok(Ok(stopped)) => stopped,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                tracing::warn!(
+                    session = %session_log_id(session_id),
+                    reason,
+                    "session teardown outlived its deadline; fenced, teardown continues detached"
+                );
+                false
+            }
+        }
+    }
+
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
+        if session.retired.load(Acquire) {
+            return None;
+        }
         *session.last_request.lock().await = LastRequest::now(kind);
         Some(session)
     }
@@ -9569,7 +11115,7 @@ impl TranscodeManager {
             return false;
         }
         tracing::error!(
-            session = %session_id,
+            session = %session_log_id(session_id),
             %status,
             "HLS producer exited unsuccessfully before publishing a usable playlist; \
              failing the session"
@@ -9620,11 +11166,35 @@ impl TranscodeManager {
                 return Err(session.failure_reason());
             }
             let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
-                manifest
-                    .read_verified_playlist(&session.dir, "index.m3u8")
-                    .await
-                    .ok()
-                    .flatten()
+                if session
+                    .cache_location
+                    .as_ref()
+                    .is_some_and(|location| location.storage_class == "shared")
+                {
+                    let Some(shared_cache) = self.shared_cache.as_ref() else {
+                        return Err(PlaylistError::SessionFailed(
+                            "shared cache coordinator is unavailable".to_owned(),
+                        ));
+                    };
+                    let manifest = Arc::clone(manifest);
+                    let directory = session.dir.clone();
+                    shared_cache
+                        .run_mount_io("shared_playlist_read_timeout", async move {
+                            manifest
+                                .read_verified_playlist(&directory, "index.m3u8")
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                } else {
+                    manifest
+                        .read_verified_playlist(&session.dir, "index.m3u8")
+                        .await
+                        .ok()
+                        .flatten()
+                }
             } else {
                 plurx_core::transcode::manifest::read_bounded_playlist(&session.dir, "index.m3u8")
                     .await
@@ -9664,14 +11234,23 @@ impl TranscodeManager {
                         return Ok(bytes);
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
-                    if let Some(first_retained_index) = first_retained.filter(|index| *index > 0) {
+                    // A successor begins numbering at its epoch floor, so
+                    // "has anything been pruned" is measured from that floor
+                    // and a fresh takeover does not report itself as sliding.
+                    let slide_baseline = session
+                        .takeover
+                        .as_ref()
+                        .map_or(0, |takeover| takeover.media_sequence);
+                    if let Some(first_retained_index) =
+                        first_retained.filter(|index| *index > slide_baseline)
+                    {
                         if !session.first_slide_logged.swap(true, Relaxed) {
                             let now_unix = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|duration| duration.as_secs() as i64)
                                 .unwrap_or(session.started_unix);
                             tracing::info!(
-                                session = %session_id,
+                                session = %session_log_id(session_id),
                                 first_retained_index,
                                 wall_seconds_since_start =
                                     now_unix.saturating_sub(session.started_unix),
@@ -9701,12 +11280,13 @@ impl TranscodeManager {
                         bytes,
                         first_retained,
                         session.typeless_sliding,
+                        session.takeover.as_ref(),
                     ));
                 }
             }
             if session.cached {
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     "cached playlist was missing, empty, oversized, or failed its manifest"
                 );
                 self.fail_cached_session_integrity(
@@ -9733,7 +11313,7 @@ impl TranscodeManager {
             // recovery path must not be reported as terminal.
             if Instant::now() >= deadline {
                 tracing::warn!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "no usable HLS playlist within the startup budget; telling the client \
                      to retry rather than that the stream failed"
@@ -9803,7 +11383,7 @@ impl TranscodeManager {
         let first_retained = session.segments.lock().await.first_retained_index();
         if segment_was_pruned(idx, first_retained) {
             tracing::warn!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 segment = name,
                 first_retained_segment = ?first_retained,
                 "HLS segment request fell behind the retained playlist window"
@@ -9838,12 +11418,35 @@ impl TranscodeManager {
             if !manifest.contains_object(name) {
                 return Ok(None);
             }
-            match manifest.open_verified_object(&session.dir, name).await {
+            let verified_object = if session
+                .cache_location
+                .as_ref()
+                .is_some_and(|location| location.storage_class == "shared")
+            {
+                let Some(shared_cache) = self.shared_cache.as_ref() else {
+                    return Err(SegmentOpenError::Capacity);
+                };
+                let manifest = Arc::clone(manifest);
+                let directory = session.dir.clone();
+                let name = name.to_owned();
+                match shared_cache
+                    .run_mount_io("shared_segment_read_timeout", async move {
+                        Ok(manifest.open_verified_object(&directory, &name).await)
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => return Err(SegmentOpenError::Capacity),
+                }
+            } else {
+                manifest.open_verified_object(&session.dir, name).await
+            };
+            match verified_object {
                 Ok(Some(opened)) => Some(opened),
                 Err(error) if error.is_capacity() => return Err(SegmentOpenError::Capacity),
                 Ok(None) | Err(_) => {
                     tracing::error!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         "cached object failed its generation manifest"
                     );
@@ -9900,7 +11503,7 @@ impl TranscodeManager {
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
-                        session = %session_id,
+                        session = %session_log_id(session_id),
                         segment = name,
                         waited_ms,
                         progress_idle_ms = session
@@ -9969,7 +11572,7 @@ impl TranscodeManager {
                 let failure = session.failure_reason();
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason = failure.code(),
@@ -10015,7 +11618,7 @@ impl TranscodeManager {
                     "producer_timeout"
                 };
                 tracing::error!(
-                    session = %session_id,
+                    session = %session_log_id(session_id),
                     segment = name,
                     waited_ms,
                     reason,
@@ -10171,7 +11774,7 @@ impl TranscodeManager {
             *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count,
                 hold_reason = ?hold.map(|hold| hold.reason),
                 release_value = hold.map(|hold| hold.release_value),
@@ -10195,7 +11798,7 @@ impl TranscodeManager {
             let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
             let hold_reason = held.map(|(_, reason)| reason);
             tracing::info!(
-                session = %session_id,
+                session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
                 ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
                 "resuming transcode: the client caught up"
@@ -10339,7 +11942,7 @@ impl TranscodeManager {
                 )
                 .await;
                 tracing::info!(
-                    session_id = %id,
+                    session = %session_log_id(&id),
                     idle_seconds,
                     last_request,
                     "reaped idle transcode session"
@@ -10378,8 +11981,8 @@ impl TranscodeManager {
 
 /// Only `segNNNNN.ts` names are valid segment requests.
 fn is_safe_segment(name: &str) -> bool {
-    // fMP4 (copy-video) HLS: a single shared init segment.
-    if name == "init.mp4" {
+    // fMP4 (copy-video) HLS: one init object per ownership generation.
+    if is_init_object(name) {
         return true;
     }
     // `segNNNNN.ts` (transcode) or `segNNNNN.m4s` (copy fMP4).
@@ -10670,7 +12273,7 @@ fn one_rung_below(current: i64) -> i64 {
 }
 
 /// One advertised rung of the ladder.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rung {
     pub height: i64,
     /// The rung's nominal cost on the wire: video target + audio, in kb/s.
@@ -10977,6 +12580,7 @@ fn test_session(dir: PathBuf) -> Session {
         item_id: 1,
         item_title: "T".into(),
         user_name: "paul".into(),
+        supersession_user: serde_json::json!(["username", "paul"]).to_string(),
         playback_id: "pb-test".into(),
         // The steppable shape: server-chosen height, and a kind that agrees
         // with `method` and `target_height` below. A stall reopen bound to
@@ -11011,6 +12615,7 @@ fn test_session(dir: PathBuf) -> Session {
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
         typeless_sliding: false,
+        takeover: None,
         first_slide_logged: AtomicBool::new(false),
     }
 }
@@ -11018,6 +12623,63 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_session_ids_are_stably_redacted_for_observability() {
+        let raw = "00000000-0000-4000-8000-0000000000d1";
+        let redacted = session_log_id(raw);
+        assert_eq!(redacted, session_log_id(raw));
+        assert_ne!(
+            redacted,
+            session_log_id("00000000-0000-4000-8000-0000000000d2")
+        );
+        assert_eq!(redacted.len(), 66);
+        assert!(redacted.starts_with("s-"));
+        assert!(!redacted.contains(raw));
+    }
+
+    #[test]
+    fn captured_ffmpeg_command_and_stderr_logs_redact_bearer_capabilities() {
+        use tracing_subscriber::prelude::*;
+
+        let raw = "00000000-0000-4000-8000-0000000000d1";
+        let capability_url = format!("/api/v1/hls/{raw}/index.m3u8");
+        let args = vec![
+            "-i".to_owned(),
+            capability_url.clone(),
+            format!("/var/lib/plurx/transcode/{raw}/index.m3u8"),
+        ];
+        let logs = Arc::new(crate::logbuf::LogBuffer::new(8));
+        let subscriber =
+            tracing_subscriber::registry().with(crate::logbuf::BufferLayer(Arc::clone(&logs)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                "{}",
+                ffmpeg_args_log_message("transcode ffmpeg args", &args, raw)
+            );
+            log_ffmpeg_stderr(
+                raw,
+                "qsv",
+                &format!("could not write {capability_url}: permission denied"),
+            );
+        });
+
+        let captured = logs.tail("trace", 8);
+        assert_eq!(captured.len(), 2, "{captured:?}");
+        for entry in captured {
+            assert!(!entry.message.contains(raw), "{}", entry.message);
+            assert!(
+                !entry.message.contains(&capability_url),
+                "{}",
+                entry.message
+            );
+            assert!(
+                entry.message.contains(&session_log_id(raw)),
+                "{}",
+                entry.message
+            );
+        }
+    }
 
     #[test]
     fn scratch_capacity_fails_closed_when_the_background_sample_expires() {
@@ -11554,6 +13216,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         let hdr10 = SessionRequest {
             hdr10: true,
@@ -11565,6 +13229,21 @@ mod tests {
         );
         assert!(hdr10.intent_fingerprint("paul").contains("t1080+hdr10"));
         assert!(request.intent_fingerprint("paul").contains("\"t1080\""));
+        assert_ne!(
+            request.intent_fingerprint("old-name"),
+            request.intent_fingerprint("new-name"),
+            "the legacy process-local key keeps its global username scope"
+        );
+        assert_eq!(
+            request.durable_intent_fingerprint(7),
+            request.clone().durable_intent_fingerprint(7),
+            "the replicated key is scoped by immutable user id, not username"
+        );
+        assert_ne!(
+            request.durable_intent_fingerprint(7),
+            request.durable_intent_fingerprint(8),
+            "different durable users remain distinct"
+        );
     }
 
     #[test]
@@ -11605,6 +13284,122 @@ mod tests {
         assert!(!is_safe_segment("index.m3u8"));
         assert!(!is_safe_segment("other.mp4"));
         assert!(!is_safe_segment("seg0/../../etc.ts"));
+    }
+
+    /// A fenced successor's `EXT-X-MAP` names its own init object. If the
+    /// serving allowlist does not know that shape, the very first thing a
+    /// taken-over copy session advertises is unretrievable and no fMP4
+    /// segment can be decoded for the rest of the session.
+    #[test]
+    fn every_generation_init_object_is_routable() {
+        assert_eq!(init_object_name(None), "init.mp4");
+        assert_eq!(init_object_name(Some(1)), "init.mp4");
+        assert_eq!(init_object_name(Some(2)), "init-e2.mp4");
+        assert_eq!(init_object_name(Some(37)), "init-e37.mp4");
+
+        for epoch in [None, Some(1), Some(2), Some(37), Some(2_000)] {
+            let name = init_object_name(epoch);
+            assert!(is_init_object(&name), "{name} is an init object");
+            assert!(is_safe_segment(&name), "{name} must be servable");
+            assert_eq!(segment_index(&name), None, "{name} is not a segment index");
+        }
+
+        // The shape is still an allowlist, not a prefix match.
+        assert!(!is_init_object("init-e.mp4"));
+        assert!(!is_init_object("init-ex.mp4"));
+        assert!(!is_init_object("init-e2.mp4.bak"));
+        assert!(!is_init_object("init-e2/../../etc.mp4"));
+        assert!(!is_safe_segment("init-e.mp4"));
+        assert!(!is_safe_segment("init-ex.mp4"));
+    }
+
+    /// A remux begins at the keyframe at or before its requested start, so
+    /// the offset a session records must come from the origin it *achieved*.
+    /// Recording the requested one over-reports this generation's frontier by
+    /// the pull-back, and the next successor resumes past a span no
+    /// generation ever produced.
+    #[tokio::test]
+    async fn a_session_measures_its_offset_from_the_origin_it_reached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 120_000,
+            frontier_offset_ms: 600_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+
+        // Asked to resume at 720.000s absolute — 600s past the row's origin —
+        // and an accurate seek lands exactly there.
+        let mut exact = test_session(dir.path().join("exact"));
+        exact.takeover = Some(takeover.clone());
+        exact.media_origin_seconds = 720.0;
+        assert_eq!(exact.frontier_offset_ms(), 600_000);
+
+        // The same request on a remux whose nearest keyframe is 9s earlier.
+        let mut pulled_back = test_session(dir.path().join("pulled-back"));
+        pulled_back.takeover = Some(takeover);
+        pulled_back.media_origin_seconds = 711.0;
+        assert_eq!(
+            pulled_back.frontier_offset_ms(),
+            591_000,
+            "the offset follows the media this generation really starts at"
+        );
+
+        let ordinary = test_session(dir.path().join("ordinary"));
+        assert_eq!(ordinary.frontier_offset_ms(), 0);
+    }
+
+    /// DELETE and the peer abort prove ownership from the process-local
+    /// request record. A fenced successor has none — nothing on this node
+    /// requested it — so without the incarnation carried on the session both
+    /// return success while the replacement encoder keeps running.
+    #[tokio::test]
+    async fn delete_reaches_a_taken_over_session_with_no_request_record() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        let mut session = test_session(dir.path().join("session"));
+        session.takeover = Some(SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 0,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        });
+        mgr.sessions
+            .lock()
+            .await
+            .insert("capability-a".into(), Arc::new(session));
+
+        assert!(
+            !mgr.stop_session_for_request("incarnation-b", "capability-a", "test")
+                .await,
+            "a different incarnation may not stop this worker"
+        );
+        assert!(
+            mgr.sessions.lock().await.contains_key("capability-a"),
+            "the refused abort left the worker alone"
+        );
+        assert!(
+            mgr.stop_session_for_request("incarnation-a", "capability-a", "test")
+                .await,
+            "the incarnation that owns the successor stops it"
+        );
+        assert!(
+            !mgr.sessions.lock().await.contains_key("capability-a"),
+            "the worker is gone, not merely reported as gone"
+        );
     }
 
     #[test]
@@ -13031,7 +14826,7 @@ mod tests {
                    #EXT-X-ENDLIST\n";
 
         assert_eq!(
-            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false),
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false, None),
             raw.as_bytes(),
             "before pruning the client sees the writer's EVENT playlist unchanged"
         );
@@ -13040,6 +14835,7 @@ mod tests {
             raw.as_bytes().to_vec(),
             Some(2),
             false,
+            None,
         ))
         .expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2"), "{served}");
@@ -13071,11 +14867,20 @@ mod tests {
                    seg00001.m4s\n\
                    #EXTINF:4.000,\n\
                    seg00002.m4s\n";
-        let before =
-            String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(0), true))
-                .expect("before utf8");
-        let after = String::from_utf8(served_live_playlist(raw.as_bytes().to_vec(), Some(2), true))
-            .expect("after utf8");
+        let before = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(0),
+            true,
+            None,
+        ))
+        .expect("before utf8");
+        let after = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(2),
+            true,
+            None,
+        ))
+        .expect("after utf8");
 
         for playlist in [&before, &after] {
             assert!(
@@ -13101,6 +14906,109 @@ mod tests {
         assert!(before.contains("seg00000.m4s"), "{before}");
         assert!(!after.contains("seg00000.m4s"), "{after}");
         assert!(after.contains("seg00002.m4s"), "{after}");
+    }
+
+    #[test]
+    fn takeover_playlist_declares_one_monotone_discontinuity() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:4\n\
+                   #EXT-X-PLAYLIST-TYPE:EVENT\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg00004.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg00005.m4s\n";
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 8_000,
+            media_sequence: 4,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let first = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(4),
+            false,
+            Some(&takeover),
+        ))
+        .expect("takeover playlist");
+        assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
+        assert!(first.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"), "{first}");
+        assert_eq!(first.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(first.contains("#EXT-X-MAP:URI=\"init-e2.mp4\""));
+
+        let slid = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            Some(5),
+            false,
+            Some(&takeover),
+        ))
+        .expect("slid takeover playlist");
+        assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
+        assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
+    }
+
+    /// A successor numbers from its epoch floor, so "nothing has been pruned
+    /// yet" is that floor and not zero. Measuring from zero made the first
+    /// response of every takeover claim it had already begun sliding, and
+    /// pinned MEDIA-SEQUENCE to 0 while the segments on disk were numbered in
+    /// the millions.
+    #[test]
+    fn an_untouched_takeover_playlist_reports_its_epoch_floor() {
+        let raw = "#EXTM3U\n\
+                   #EXT-X-VERSION:7\n\
+                   #EXT-X-TARGETDURATION:2\n\
+                   #EXT-X-MEDIA-SEQUENCE:2000000\n\
+                   #EXT-X-MAP:URI=\"init-e2.mp4\"\n\
+                   #EXTINF:2.000,\n\
+                   seg2000000.m4s\n\
+                   #EXTINF:2.000,\n\
+                   seg2000001.m4s\n";
+        let takeover = SessionTakeoverStart {
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 8_000,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        };
+        let served = String::from_utf8(served_live_playlist(
+            raw.as_bytes().to_vec(),
+            None,
+            false,
+            Some(&takeover),
+        ))
+        .expect("takeover playlist");
+
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2000000"), "{served}");
+        assert!(
+            served.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"),
+            "{served}"
+        );
+        assert_eq!(served.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+        assert!(served.contains("seg2000000.m4s"), "{served}");
+        assert!(served.contains("seg2000001.m4s"), "{served}");
+
+        // Every URI the successor advertises must be one the serving path
+        // will actually hand back.
+        for line in served.lines() {
+            let line = line.trim();
+            if let Some(uri) = line.strip_prefix("#EXT-X-MAP:URI=\"") {
+                let uri = uri.trim_end_matches('"');
+                assert!(
+                    is_safe_segment(uri),
+                    "advertised init {uri} must be servable"
+                );
+            } else if !line.starts_with('#') && !line.is_empty() {
+                assert!(
+                    is_safe_segment(line),
+                    "advertised segment {line} must be servable"
+                );
+            }
+        }
     }
 
     // ---- the append-oriented index (review §2.6) ----------------------------
@@ -13634,6 +15542,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         }
     }
 
@@ -14609,7 +16519,7 @@ mod tests {
                 .expect("suspend row");
             assert_eq!(
                 suspend.session_id.as_deref(),
-                Some(info.session_id.as_str())
+                Some(session_log_id(&info.session_id).as_str())
             );
             assert_eq!(suspend.hold_reason.as_deref(), Some("time"));
             assert_eq!(suspend.readrate, Some(1.0));
@@ -15218,6 +17128,7 @@ mod tests {
             item_id: 1,
             item_title: "Watchdog Fixture".into(),
             user_name: "paul".into(),
+            supersession_user: serde_json::json!(["username", "paul"]).to_string(),
             playback_id: "pb-watchdog".into(),
             automatic: true,
             kind: SessionKind::Transcode { height: 1080 },
@@ -15248,6 +17159,7 @@ mod tests {
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             typeless_sliding: false,
+            takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })
     }
@@ -15788,6 +17700,40 @@ mod tests {
             session.begin_copy_child_replacement().await.is_none(),
             "a retired session must never publish another producer"
         );
+    }
+
+    #[tokio::test]
+    async fn fenced_session_is_not_renewable_while_teardown_is_blocked() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("fenced-renewal".into(), Arc::clone(&session));
+        let transition = session.child_transition.lock().await;
+
+        manager.fence_sessions(&["fenced-renewal".to_owned()]).await;
+        assert_eq!(
+            manager.active_session_ids().await,
+            vec!["fenced-renewal".to_owned()],
+            "the teardown barrier keeps the worker discoverable for cleanup"
+        );
+        assert!(
+            manager.renewable_session_ids().await.is_empty(),
+            "the same fenced worker must never be submitted for renewal"
+        );
+        drop(transition);
+        assert!(manager.stop_session("fenced-renewal", "test").await);
     }
 
     /// The inverse transition ordering matters too: a hardware fallback can
@@ -16348,6 +18294,7 @@ mod tests {
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
+                    supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
                 },
@@ -17362,6 +19309,7 @@ mod tests {
                 "Heat",
                 SessionOwner {
                     user_name: "paul",
+                    supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
                 },
@@ -17659,6 +19607,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
 
         // The idempotency identity is `intent_fingerprint`, so that is what
@@ -17763,6 +19713,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
 
         let (a, b) = tokio::join!(
@@ -17810,6 +19762,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
@@ -17858,6 +19812,8 @@ mod tests {
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
         };
         let previous = mgr
             .create_session(&original, "paul")
@@ -17942,7 +19898,7 @@ mod tests {
 
         let request = reopen_request(41, "shared-player", "stall-vs-seek", "stalled-session");
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("stall-vs-seek", &request, "paul")
+            .claim_request("stall-vs-seek", &request, r#"["username","paul"]"#)
             .await
             .expect("bound claim")
         else {
@@ -17960,6 +19916,157 @@ mod tests {
             "the target is stored before either session can be superseded"
         );
         drop(claim);
+    }
+
+    #[tokio::test]
+    async fn clustered_stall_reopen_survives_username_rename() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let previous_dir = tempfile::tempdir().expect("previous session");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let immutable_scope = serde_json::json!(["user_id", 42]).to_string();
+        let mut previous = test_session(previous_dir.path().to_path_buf());
+        previous.user_name = "name-before-rename".into();
+        previous.supersession_user = immutable_scope.clone();
+        previous.playback_id = "renamed-player".into();
+        previous.file_id = 42;
+        previous.target_height = 1080;
+        previous.automatic = true;
+        previous.kind = SessionKind::Transcode { height: 1080 };
+        mgr.sessions
+            .lock()
+            .await
+            .insert("renamed-session".into(), Arc::new(previous));
+
+        let request = reopen_request(42, "renamed-player", "renamed-reopen", "renamed-session");
+        let Claimed::Mine(claim, normalized) = mgr
+            .claim_request("renamed-reopen", &request, &immutable_scope)
+            .await
+            .expect("immutable user id still owns the renamed session")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(normalized.kind, SessionKind::Transcode { height: 720 });
+        drop(claim);
+
+        let foreign = SessionRequest {
+            request_id: Some("renamed-foreign".into()),
+            ..request
+        };
+        assert!(mgr
+            .claim_request(
+                "renamed-foreign",
+                &foreign,
+                &serde_json::json!(["user_id", 43]).to_string(),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_gate_refuses_a_wait_past_its_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let key = r#"[["user_id",42],"deadline-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key.clone(), tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("a timed-out replacement must never reach predecessor reap"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+
+        drop(held);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a live retry acquires the released gate");
+        drop(reacquired);
+    }
+
+    #[tokio::test]
+    async fn clustered_replacement_rechecks_deadline_before_predecessor_reap() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = tempfile::tempdir().expect("work");
+        let predecessor_dir = tempfile::tempdir().expect("predecessor");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let immutable_scope = serde_json::json!(["user_id", 42]).to_string();
+        let mut predecessor = test_session(predecessor_dir.path().to_path_buf());
+        predecessor.supersession_user = immutable_scope.clone();
+        predecessor.playback_id = "deadline-player".into();
+        let predecessor = Arc::new(predecessor);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("still-playable".into(), Arc::clone(&predecessor));
+
+        let sessions_guard = mgr.sessions.lock().await;
+        let sessions_error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("session-map contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&sessions_error),
+            "{sessions_error}"
+        );
+        drop(sessions_guard);
+
+        let transition_guard = predecessor.child_transition.lock().await;
+        let transition_error = mgr
+            .reap_superseded_before(
+                Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+                &immutable_scope,
+                "deadline-player",
+            )
+            .await
+            .expect_err("child-transition contention must not outlive the replacement deadline");
+        assert!(
+            is_retryable_capacity_error(&transition_error),
+            "{transition_error}"
+        );
+        drop(transition_guard);
+
+        assert!(
+            mgr.sessions.lock().await.contains_key("still-playable"),
+            "both expired lock acquisitions must leave the predecessor live"
+        );
     }
 
     /// Track intent is orthogonal to height normalization. A stall claim keeps
@@ -17999,7 +20106,7 @@ mod tests {
             ..reopen_request(52, "track-player", "stall-track", "track-stall")
         };
         let Claimed::Mine(stall_claim, normalized) = mgr
-            .claim_request("stall-track", &request, "paul")
+            .claim_request("stall-track", &request, r#"["username","paul"]"#)
             .await
             .expect("stall claim")
         else {
@@ -18018,7 +20125,7 @@ mod tests {
             ..request
         };
         let Claimed::Mine(track_claim, ordinary) = mgr
-            .claim_request("user-track-change", &track_change, "paul")
+            .claim_request("user-track-change", &track_change, r#"["username","paul"]"#)
             .await
             .expect("ordinary track claim")
         else {
@@ -18070,7 +20177,7 @@ mod tests {
         for attempt in ["floor-retry-1", "floor-retry-2", "floor-retry-3"] {
             let request = reopen_request(63, "floor-player", attempt, "floor-session");
             let Claimed::Mine(claim, normalized) = mgr
-                .claim_request(attempt, &request, "paul")
+                .claim_request(attempt, &request, r#"["username","paul"]"#)
                 .await
                 .expect("floor claim")
             else {
@@ -18146,7 +20253,7 @@ mod tests {
             let attempt = format!("sub-floor-retry-{height}");
             let request = reopen_request(64 + index as i64, &playback_id, &attempt, &session_id);
             let Claimed::Mine(claim, normalized) = mgr
-                .claim_request(&attempt, &request, "paul")
+                .claim_request(&attempt, &request, r#"["username","paul"]"#)
                 .await
                 .expect("sub-floor claim")
             else {
@@ -18223,7 +20330,7 @@ mod tests {
             "device-a-session",
         );
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("device-a-reopen", &request, "paul")
+            .claim_request("device-a-reopen", &request, r#"["username","paul"]"#)
             .await
             .expect("device A claim")
         else {
@@ -18238,7 +20345,7 @@ mod tests {
             ..request.clone()
         };
         let Claimed::Mine(device_b_claim, device_b_normalized) = mgr
-            .claim_request("device-b-reopen", &device_b, "paul")
+            .claim_request("device-b-reopen", &device_b, r#"["username","paul"]"#)
             .await
             .expect("device B claim")
         else {
@@ -18256,7 +20363,11 @@ mod tests {
             ..request
         };
         assert!(mgr
-            .claim_request("foreign-user-reopen", &foreign_user, "other-user")
+            .claim_request(
+                "foreign-user-reopen",
+                &foreign_user,
+                r#"["username","other-user"]"#,
+            )
             .await
             .is_err_and(|error| error.contains("does not belong")));
     }
@@ -18293,7 +20404,7 @@ mod tests {
         .await;
         let request = reopen_request(85, "manual-player", "manual-retry", "manual-session");
         let Claimed::Mine(claim, normalized) = mgr
-            .claim_request("manual-retry", &request, "paul")
+            .claim_request("manual-retry", &request, r#"["username","paul"]"#)
             .await
             .expect("manual claim")
         else {

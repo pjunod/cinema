@@ -9,88 +9,19 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-08-23): source is v0.2.7, Apple build 81. Native text
+> Status (2026-08-22): source is v0.2.7, Apple build 82. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
-> landed. Build 81 marks a duration-estimated Skip Credits button as an estimate
-> so it no longer reads exactly like a chapter-derived marker. Build 80 preserves
-> full signed 64-bit reader item/file routes across
-> the native-to-JavaScript handoff. Build 79 compacts all three playback-info
-> modes, bounds Debug to the available tvOS canvas, and uses severity colors for
-> fields that need attention.
-> Build 78 keeps the ten-foot tvOS dashboard as Standard and adds the shared Mini
-> and full Debug modes on iOS and tvOS. Build 77
-> carries the explicit delivered-SDR acknowledgement required
-> for a forced bitmap-subtitle session over an HDR source while refusing an
-> unplanned HDR downgrade. Build 75 adds online PDFKit reading on iPhone/iPad with
-> exact-revision temporary bytes, page resume, local search, and protected-
-> document refusal. Build 74 consumes the server-owned ebook format/action registry and
-> keeps external formats out of the built-in and offline readers. Build 73
-> preserves the full tab shell when offline downloads open first, so reconnect
-> and Settings remain reachable. Build 72 displays bounded book author metadata and only exact
-> work-linked editions. Build 71 scopes newest pending offline reading state to the exact
-> item/file/revision edition. Build 70 adds profile-scoped, atomically published offline EPUBs,
-> token-free local reading, and newest-locator reconnect replay on iPhone/iPad.
-> Build 69 adds in-app online EPUB reading on iPhone/iPad through an
-> isolated same-origin WebView with memory-only authentication, shared locator
-> resume, and no tvOS reader action. Build 68 adds revision-bound ebook
-> reading-state wire models and authenticated API routes. Build 67 adopts the
-> bound same-session stall reopen: a sustained
-> stall on a growing session names its exact `previous_session_id` with
-> `reopen_reason: "stall"` so the server answers one rung down, every create
-> states `quality_auto`, and the ladder-floor retry budget the server
-> deliberately does not implement lives here (§ Quality row). Build 66 adds
-> unattended physical-device bandwidth acceptance with exact runway evidence.
-> Build 65 keeps the delivery watchdog honest about a player that is still
-> making progress. Build 64 corrects build 63's delivery watchdog, which fired on
-> healthy buffered playback and interrupted a 2160p session roughly every two
-> minutes; the film clock and buffered runway are now required to corroborate
-> the server's delivery meter. Build 63 hardens stall recovery against the tvOS freeze observed
-> on 2160p copy-HLS: a shared no-progress clock immune to
-> `timeControlStatus` flapping, a bounded unestablished leash instead of a
-> disarmed detector, a server-truth delivery watchdog on the status poll,
-> and a rolling automatic-reopen budget that ends storms at the visible
-> failure screen. Build 62 lists the audio and subtitle tracks a file
-> actually has on the detail screen and lets a viewer choose both before
-> pressing Play (§6).
-> Build 60 requires a concrete selected PGS track before treating the
-> overlay as active. Its physical non-PGS baseline reached active PiP and
-> returned or stopped cleanly on iPhone Air (iOS 26.6) and iPad Pro 13-inch
-> (M4, iPadOS 26.6); the separate PGS refusal remains unverified on hardware.
-> Build 59 keeps every supported-but-unavailable iOS PiP state tappable
-> long enough to explain it, including a detached AVKit controller and the in-
-> app-only PGS overlay. The not-ready explanation clears after five seconds so
-> it cannot pin the player banner or iOS system chrome. Build 58
-> distinguishes a recognized `pgs-v1` Overlay from the
-> Burn-in fallback in the subtitle menu and ships the decidable physical-iPad
-> run in
-> [APPLE-PGS-OVERLAY-ACCEPTANCE.md](APPLE-PGS-OVERLAY-ACCEPTANCE.md).
-> Build 57 requires Select to engage tvOS progress scrubbing, leaving
-> left/right free to cross the transport row without a seek. Build 56 restores
-> bidirectional tvOS focus between show/season header actions and their non-empty
-> child shelves. Build 53 gives season episode artwork a direct Play action
-> while the copy remains Details on iPhone/iPad; tvOS keeps one lifted card
-> whose Select action plays. Build 52 preserves completed offline asset
-> locations across the
-> equivalent `/private/var` and `/var` container spellings returned by the
-> system. Build 51 divides long final audio tails into bounded HLS segments,
-> completes repeated boundaries in the final 5% at their actual media position,
-> and gives genuinely early repeats a telemetered **Try Again** / **Close**
-> failure instead of another automatic reopen. Build 49 adds first-class
-> audiobook details and playback through the
-> shared audio player and progress path. Source and simulator coverage verifies
-> audio-container direct-play routing, resume/Start over selection, global
-> progress, and missing-part advancement; physical-device acceptance remains
-> pending. The native scrubber remains local to the current audiobook part and
-> audiobook offline packages are not yet supported. Build 46 also emits the
-> Performance II N0 TTFF beacon at the first
-> advancing online frame, including the live HLS session id when one exists and
-> separating cold starts from resumes; passing real-device ingest remains
-> unclaimed. The default-off `pgs-v1` overlay client
-> is staged but is not a release claim until the server gate and physical
-> matrix pass. Copied Dolby
-> Vision was resolved on the physical Apple TV 2026-08-03; the historical
-> `-12927` investigation is superseded by
+> landed.
+>
+> Per-build release notes live in
+> [`apple-builds/`](apple-builds/README.md). Builds through 78 are archived in
+> [`history-through-build-78.md`](apple-builds/history-through-build-78.md).
+>
+> The default-off `pgs-v1` overlay client is staged but is not a release claim
+> until the server gate and physical matrix pass. Copied Dolby Vision was
+> resolved on the physical Apple TV 2026-08-03; the historical `-12927`
+> investigation is superseded by
 > [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md)'s
 > resolved status. Repository evidence still says build 70 has not reached
 > TestFlight and the deployment ledger still ends at server `787eaa6`, so
@@ -130,7 +61,7 @@ Vision investigation are recorded in
 | Quality | Auto adaptation, Original, explicit rungs | Server Auto plus explicit ladder rungs; a change that fails to create its session leaves the current stream playing. A sustained stall on a growing session now reopens *bound*: the create names the exact `previous_session_id` with `reopen_reason: "stall"` under one `request_id` minted for that stall, so the server answers one rung down and a transport replay returns that same persisted answer instead of stepping twice. Every create also states `quality_auto`, so the promise height a subtitle burn posts is not misread as a sticky manual pick. The ladder floor is bounded here, not on the server: two consecutive reopens that fail to buy a strictly lower rung end in the ordinary stall failure, and a minute of recovered film starts a fresh episode so one blip does not disable recovery for the rest of the title. Direct play, VOD, and offline recovery stay unbound, a stall ticket is dropped once a seek or track change has superseded the session it names, and a refused bound create (`400`) is retried once unbound under a fresh `request_id`. The server-truth delivery watchdog shares this arm, so a wedge the player never reported also names its predecessor and stops at the floor with the delivery-specific message. Two independent bounds now guard it and their order matters: the ladder floor is consulted first because the rolling automatic-reopen storm cap records a timestamp when it admits, and a reopen the floor refuses must not spend a rolling slot a later unrelated stall would then be missing. | Continuous adaptation and an honest Original option when compatible; device-verify the step-down and the floor bound on a physically starved link, including a stall the player itself never reports |
 | Playback info | Mini, Standard, and Debug views with detailed source, output, network, encoder, and stall data | All three use compact typography and spacing. Mini keeps the picture visible; Standard retains the organized ten-foot tvOS Source/Playing/Server dashboard; Debug is bounded to the available canvas and groups every build, transport, player/access-log, and live server-session field into three columns on TV. Severity colors call out starvation, stalls, idle delivery, slow encoding, and unhealthy player state. Selected-subtitle route/state remains explicit (`PGS overlay · preparing`, ready overlay, unavailable, native WebVTT, or burned in). Sustained and self-recovered stalls reach the bounded server log with HLS session and per-item attempt identity, contiguous loaded runway, AVPlayer wait/buffer flags, access-log request/transfer counters, and the aged last successful server supply snapshot; live ingest replaces it with fresher session state when possible. Recovery TTFF is a separate attempt. | Add frame presentation rate where AVPlayer exposes it; validate correlated stall ingest on physical iPad |
 | Media badges | Source badges on detail pages; source-vs-delivered dynamic range in the player | Same shape: detail pages carry resolution/codec/dynamic range source-only; the player's chip dims and names what is actually being delivered (§5) | Extend the same mechanism to audio (Atmos → AAC) and resolution (4K → rung), each with its own truth table |
-| Intro/credits | Manual and automatic skip | Manual marker button that says which kind of marker it came from: a chapter-derived marker keeps the plain label and the solid `forward.end.fill` glyph, while the duration-based end-credits estimate the server flags `chapter: false` renders as `≈ Skip Credits` with the hollow `forward.end` glyph and the VoiceOver label "Skip Credits, estimated". The mark leads because this label is one line and an accessibility text size truncates its tail. A marker with no `chapter` field, as an older server sends, is treated as exact. | P1: persisted auto-skip and next-episode handling for end credits. The web reference does not yet distinguish an estimated marker, so this row is currently ahead of it |
+| Intro/credits | Manual and automatic skip | Manual marker button | P1: persisted auto-skip and next-episode handling for end credits |
 | Autoplay | Next episode, then next season; default on | Same traversal and default | Add a cancelable countdown and “Up Next” metadata |
 | Audio sync | Persisted per-file ±ms correction | Missing | P1: expose the existing server offset endpoint and restart at position |
 | Progress/Trakt | Periodic and final progress | Every 10 seconds, exit, and natural end | Verify app interruption/background transitions |

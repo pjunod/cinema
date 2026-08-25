@@ -766,6 +766,10 @@ impl SecureDirectory {
                     };
                     return Err(io::Error::other("source changed while it was linked"));
                 }
+                // The file inode already existed, but this directory entry did
+                // not. Persist the destination directory before a caller can
+                // rename and publish its enclosing generation.
+                destination.sync_all()?;
                 return Ok(identity.size);
             }
             let link_error = io::Error::last_os_error();
@@ -806,10 +810,21 @@ impl SecureDirectory {
                 }
                 Ok(identity.size)
             })();
-            if result.is_err() {
-                unsafe { libc::unlinkat(destination.as_raw_fd(), destination_name.as_ptr(), 0) };
+            match result {
+                Ok(size) => {
+                    // `output.sync_all()` persists contents; this persists the
+                    // new name in the destination directory as well.
+                    destination.sync_all()?;
+                    Ok(size)
+                }
+                Err(error) => {
+                    unsafe {
+                        libc::unlinkat(destination.as_raw_fd(), destination_name.as_ptr(), 0)
+                    };
+                    let _ = destination.sync_all();
+                    Err(error)
+                }
             }
-            result
         })
         .await
         .map_err(io::Error::other)?
@@ -1086,38 +1101,44 @@ pub async fn atomic_write_child(
 /// directory. Once the name is removed, only the returned descriptor can
 /// mutate the snapshot; this is used to stream exactly the bytes that were
 /// authenticated rather than a live inode another writer may edit in place.
+fn anonymous_file_in_directory_blocking(directory: &Path) -> io::Result<File> {
+    let directory = open_directory_nofollow_blocking(directory)?;
+    let name = child_name(&format!(
+        ".plurx-snapshot-{}",
+        uuid::Uuid::new_v4().simple()
+    ))?;
+    let raw_fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(File::from(fd))
+}
+
 pub async fn anonymous_file_in_directory(directory: &Path) -> io::Result<tokio::fs::File> {
     let directory = directory.to_owned();
     tokio::task::spawn_blocking(move || {
-        let directory = open_directory_nofollow_blocking(&directory)?;
-        let name = child_name(&format!(
-            ".plurx-snapshot-{}",
-            uuid::Uuid::new_v4().simple()
-        ))?;
-        let raw_fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if raw_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(tokio::fs::File::from_std(File::from(fd)))
+        anonymous_file_in_directory_blocking(&directory).map(tokio::fs::File::from_std)
     })
     .await
     .map_err(io::Error::other)?
 }
 
 /// Create a pathname-free memory-backed file for authenticated response
-/// snapshots. Linux uses a sealable memfd; macOS uses `SHM_ANON`. Neither
-/// consumes free space from the media cache filesystem.
+/// snapshots. Linux uses a sealable memfd. macOS POSIX shared-memory objects
+/// do not support the file read/write/seek contract this caller needs, so it
+/// uses a securely created, immediately unlinked file in the canonical system
+/// temp directory instead of consuming media-cache space.
 pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
     #[cfg(target_os = "linux")]
     let raw_fd = {
@@ -1131,28 +1152,26 @@ pub fn anonymous_memory_file() -> io::Result<tokio::fs::File> {
         }
     };
     #[cfg(target_os = "macos")]
-    let raw_fd = unsafe {
-        // Darwin defines SHM_ANON as the sentinel pointer `(char *)1`; the
-        // libc crate does not currently expose that macro.
-        libc::shm_open(
-            std::ptr::dangling::<libc::c_char>(),
-            libc::O_RDWR | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
+    {
+        let directory = std::fs::canonicalize(std::env::temp_dir())?;
+        anonymous_file_in_directory_blocking(&directory).map(tokio::fs::File::from_std)
+    }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let raw_fd = -1;
 
-    if raw_fd < 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(not(target_os = "macos"))]
+    {
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        Ok(tokio::fs::File::from_std(File::from(fd)))
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    Ok(tokio::fs::File::from_std(File::from(fd)))
 }
 
-/// Seal a completed Linux memfd against every later write/resize. macOS's
-/// anonymous shared-memory object has no public name and remains private to
-/// this process; plurx retains only the read path after this call.
+/// Seal a completed Linux memfd against every later write/resize. Other
+/// platforms already expose only an unlinked private descriptor; plurx
+/// retains only the read path after this call.
 pub fn seal_anonymous_memory_file(file: &tokio::fs::File) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {

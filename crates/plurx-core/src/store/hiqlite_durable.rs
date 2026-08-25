@@ -10,7 +10,9 @@ use hiqlite::Row;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::hiqlite::{database_error, timeout_store, validate_sql, HiqliteAuthStore, TimedClient};
+use super::hiqlite::{
+    database_error, timeout_store, validate_sql, CacheTouchKey, HiqliteAuthStore, TimedClient,
+};
 use super::{
     OfflinePackageStore, OutboxEntry, TraktStore, TranscodeCacheStore, WatchedOutboxStore,
 };
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS transcode_cache_locations (
     node_id       TEXT NOT NULL,
     storage_class TEXT NOT NULL CHECK (storage_class IN ('local', 'shared')),
     relative_dir  TEXT NOT NULL,
+    storage_id    TEXT NOT NULL DEFAULT '',
+    generation_id TEXT NOT NULL DEFAULT '',
     bytes         INTEGER NOT NULL,
     complete      INTEGER NOT NULL,
     manifest_digest TEXT,
@@ -194,6 +198,8 @@ struct DurableDump {
     pretranscode_jobs: Vec<String>,
     transcode_cache_recipes: Vec<String>,
     transcode_cache_locations: Vec<String>,
+    cache_storage_members: Vec<String>,
+    cache_consumer_pins: Vec<String>,
     offline_packages: Vec<String>,
     offline_package_leases: Vec<String>,
     offline_lease_guards: Vec<String>,
@@ -245,8 +251,24 @@ pub(super) async fn local_durable_digest(client: &TimedClient) -> Result<String,
         transcode_cache_locations: rows(
             client,
             "SELECT json_array(recipe_hash, node_id, storage_class, relative_dir, bytes, \
-                    complete, manifest_digest, scrub_object_index, last_used_at, last_seen_at) AS value \
+                    complete, manifest_digest, scrub_object_index, last_used_at, last_seen_at, \
+                    storage_id, generation_id) AS value \
              FROM transcode_cache_locations ORDER BY recipe_hash, node_id, storage_class",
+        )
+        .await?,
+        cache_storage_members: rows(
+            client,
+            "SELECT json_array(storage_id, node_id, storage_class, verified_at_ms, \
+                    verification_state) AS value \
+             FROM cache_storage_members ORDER BY storage_id, node_id",
+        )
+        .await?,
+        cache_consumer_pins: rows(
+            client,
+            "SELECT json_array(storage_id, recipe_hash, generation_id, consumer_kind, \
+                    consumer_id, consumer_epoch, expires_at_ms) AS value \
+             FROM cache_consumer_pins \
+             ORDER BY storage_id, recipe_hash, generation_id, consumer_kind, consumer_id",
         )
         .await?,
         offline_packages: rows(
@@ -811,14 +833,25 @@ impl TranscodeCacheStore for HiqliteAuthStore {
     }
 
     async fn touch_cache_claim(&self, recipe_hash: &str, node_id: &str) -> Result<(), StoreError> {
-        let now = self.now()?;
-        self.execute(
-            "UPDATE transcode_cache_locations SET last_seen_at = $1 \
-             WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0",
-            params!(now, recipe_hash, node_id),
+        self.coalesce_cache_touch(
+            CacheTouchKey::Claim {
+                recipe_hash: recipe_hash.to_owned(),
+                node_id: node_id.to_owned(),
+            },
+            async {
+                // Read the wall clock only after this identity wins admission;
+                // queued callers must not publish their older invocation time.
+                let now = self.now()?;
+                self.execute(
+                    "UPDATE transcode_cache_locations SET last_seen_at = MAX(last_seen_at, $1) \
+                     WHERE recipe_hash = $2 AND node_id = $3 AND complete = 0",
+                    params!(now, recipe_hash, node_id),
+                )
+                .await?;
+                Ok(())
+            },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn complete_cache_entry(
@@ -830,7 +863,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         let now = self.now()?;
         self.execute(
             "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
-                 last_used_at = $2, last_seen_at = $2 \
+                 last_used_at = MAX(last_used_at, $2), last_seen_at = MAX(last_seen_at, $2) \
              WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = 'local'",
             params!(bytes, now, recipe_hash, node_id),
         )
@@ -839,14 +872,23 @@ impl TranscodeCacheStore for HiqliteAuthStore {
     }
 
     async fn touch_cache_entry(&self, recipe_hash: &str, node_id: &str) -> Result<(), StoreError> {
-        let now = self.now()?;
-        self.execute(
-            "UPDATE transcode_cache_locations SET last_used_at = $1 \
-             WHERE recipe_hash = $2 AND node_id = $3",
-            params!(now, recipe_hash, node_id),
+        self.coalesce_cache_touch(
+            CacheTouchKey::Use {
+                recipe_hash: recipe_hash.to_owned(),
+                node_id: node_id.to_owned(),
+            },
+            async {
+                let now = self.now()?;
+                self.execute(
+                    "UPDATE transcode_cache_locations SET last_used_at = MAX(last_used_at, $1) \
+                     WHERE recipe_hash = $2 AND node_id = $3",
+                    params!(now, recipe_hash, node_id),
+                )
+                .await?;
+                Ok(())
+            },
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn cache_by_age(
@@ -919,7 +961,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
             return Ok(0);
         }
         let sql = "UPDATE transcode_cache_locations
-                    SET last_seen_at = $1, scrub_object_index = $2
+                    SET last_seen_at = MAX(last_seen_at, $1), scrub_object_index = $2
                    WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = $5
                      AND relative_dir = $6 AND manifest_digest = $7 AND complete = 1";
         validate_sql(sql)?;
@@ -1083,6 +1125,26 @@ impl TranscodeCacheStore for HiqliteAuthStore {
                 ),
             ),
             (
+                "DELETE FROM cache_consumer_pins
+                  WHERE EXISTS (
+                    SELECT 1 FROM transcode_cache_locations location
+                     WHERE location.recipe_hash = $1 AND location.node_id = $2
+                       AND location.storage_class = $3 AND location.relative_dir = $4
+                       AND (location.manifest_digest = $5
+                         OR (location.manifest_digest IS NULL AND $5 IS NULL))
+                       AND cache_consumer_pins.storage_id = location.storage_id
+                       AND cache_consumer_pins.recipe_hash = location.recipe_hash
+                       AND cache_consumer_pins.generation_id = location.generation_id)"
+                    .to_owned(),
+                params!(
+                    recipe_hash,
+                    node_id,
+                    storage_class,
+                    relative_dir,
+                    manifest_digest
+                ),
+            ),
+            (
                 "DELETE FROM transcode_cache_locations WHERE recipe_hash = $1
                        AND node_id = $2 AND storage_class = $3 AND relative_dir = $4
                        AND (manifest_digest = $5
@@ -1114,7 +1176,7 @@ impl TranscodeCacheStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.get(1).copied().unwrap_or_default() == 1)
+        Ok(results.get(2).copied().unwrap_or_default() == 1)
     }
 
     async fn forget_cache_entry(
@@ -1965,15 +2027,39 @@ impl OfflinePackageStore for HiqliteAuthStore {
         message: &str,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
-        Ok(self
-            .execute(
+        let statements = vec![
+            (
                 "UPDATE offline_packages SET state = 'failed', phase = 'integrity',
                     error_code = $1, error_message = $2, updated_at = $3
-                  WHERE id = $4 AND node_id = $5 AND recipe_hash = $6 AND state = 'ready'",
+                  WHERE id = $4 AND node_id = $5 AND recipe_hash = $6 AND state = 'ready'"
+                    .to_owned(),
                 params!(code, message, now, package_id, node_id, recipe_hash),
-            )
+            ),
+            (
+                "DELETE FROM cache_consumer_pins
+                  WHERE ((consumer_kind = 'offline_package' AND consumer_id = $1)
+                     OR (consumer_kind = 'offline_download' AND consumer_id IN (
+                            SELECT token_hash FROM offline_package_leases
+                             WHERE package_id = $1)))
+                    AND EXISTS (
+                        SELECT 1 FROM offline_packages
+                         WHERE id = $1 AND node_id = $2 AND recipe_hash = $3
+                           AND state = 'failed' AND phase = 'integrity')"
+                    .to_owned(),
+                params!(package_id, node_id, recipe_hash),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let results = self
+            .client()
+            .txn(statements)
             .await?
-            == 1)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.first().copied().unwrap_or_default() == 1)
     }
 
     async fn put_offline_lease(
@@ -2018,6 +2104,26 @@ impl OfflinePackageStore for HiqliteAuthStore {
                    AND EXISTS (SELECT 1 FROM offline_lease_guards WHERE package_id = $3)"
                     .to_owned(),
                 params!(now, expires_at, package_id),
+            ),
+            (
+                "INSERT INTO cache_consumer_pins
+                    (storage_id, recipe_hash, generation_id, consumer_kind,
+                     consumer_id, consumer_epoch, expires_at_ms)
+                 SELECT l.storage_id, l.recipe_hash, l.generation_id,
+                        'offline_download', $1, 1, $2
+                   FROM offline_packages p
+                   JOIN transcode_cache_locations l ON l.recipe_hash = p.recipe_hash
+                  WHERE p.id = $3 AND p.state = 'ready'
+                    AND l.storage_class = 'shared' AND l.complete = 1
+                    AND EXISTS (
+                        SELECT 1 FROM offline_lease_guards
+                         WHERE package_id = $3 AND token_hash = $1)
+                 ON CONFLICT(
+                    storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
+                 DO UPDATE SET expires_at_ms = MAX(
+                    cache_consumer_pins.expires_at_ms, excluded.expires_at_ms)"
+                    .to_owned(),
+                params!(token_hash, expires_at.saturating_mul(1_000), package_id),
             ),
             (
                 "DELETE FROM offline_lease_guards WHERE package_id = $1".to_owned(),
@@ -2119,6 +2225,30 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     .to_owned(),
                 params!(now, renewed_expires_at, current.id.as_str()),
             ),
+            (
+                "INSERT INTO cache_consumer_pins
+                    (storage_id, recipe_hash, generation_id, consumer_kind,
+                     consumer_id, consumer_epoch, expires_at_ms)
+                 SELECT l.storage_id, l.recipe_hash, l.generation_id,
+                        'offline_download', $1, 1, $2
+                   FROM offline_packages p
+                   JOIN transcode_cache_locations l ON l.recipe_hash = p.recipe_hash
+                   JOIN offline_package_leases lease ON lease.package_id = p.id
+                  WHERE p.id = $3 AND p.state = 'ready' AND lease.token_hash = $1
+                    AND lease.expires_at > $4
+                    AND l.storage_class = 'shared' AND l.complete = 1
+                 ON CONFLICT(
+                    storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
+                 DO UPDATE SET expires_at_ms = MAX(
+                    cache_consumer_pins.expires_at_ms, excluded.expires_at_ms)"
+                    .to_owned(),
+                params!(
+                    token_hash,
+                    renewed_expires_at.saturating_mul(1_000),
+                    current.id.as_str(),
+                    now
+                ),
+            ),
         ];
         for (sql, _) in &statements {
             validate_sql(sql)?;
@@ -2152,13 +2282,14 @@ impl OfflinePackageStore for HiqliteAuthStore {
         duration_ms: i64,
     ) -> Result<bool, StoreError> {
         let now = self.now()?;
-        Ok(self
-            .execute(
+        let statements = vec![
+            (
                 "UPDATE offline_packages SET state = 'ready', phase = 'ready', \
                  progress_millis = 1000, recipe_hash = $1, actual_bytes = $2, \
                  duration_ms = $3, error_code = NULL, error_message = NULL, \
                  updated_at = $4, last_access_at = $4 \
-                 WHERE id = $5 AND node_id = $6 AND state IN ('queued', 'preparing')",
+                 WHERE id = $5 AND node_id = $6 AND state IN ('queued', 'preparing')"
+                    .to_owned(),
                 params!(
                     recipe_hash,
                     actual_bytes,
@@ -2167,9 +2298,40 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     package_id,
                     node_id
                 ),
-            )
+            ),
+            (
+                "INSERT INTO cache_consumer_pins
+                    (storage_id, recipe_hash, generation_id, consumer_kind,
+                     consumer_id, consumer_epoch, expires_at_ms)
+                 SELECT l.storage_id, l.recipe_hash, l.generation_id,
+                        'offline_package', p.id, 1,
+                        CASE WHEN p.expires_at > 9223372036854775
+                             THEN 9223372036854775807
+                             ELSE p.expires_at * 1000 END
+                   FROM offline_packages p
+                   JOIN transcode_cache_locations l ON l.recipe_hash = p.recipe_hash
+                  WHERE p.id = $1 AND p.node_id = $2 AND p.recipe_hash = $3
+                    AND p.state = 'ready'
+                    AND l.storage_class = 'shared' AND l.complete = 1
+                 ON CONFLICT(
+                    storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
+                 DO UPDATE SET expires_at_ms = MAX(
+                    cache_consumer_pins.expires_at_ms, excluded.expires_at_ms)"
+                    .to_owned(),
+                params!(package_id, node_id, recipe_hash),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let results = self
+            .client()
+            .txn(statements)
             .await?
-            > 0)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.first().copied().unwrap_or_default() == 1)
     }
 
     async fn delete_offline_package(
@@ -2177,22 +2339,65 @@ impl OfflinePackageStore for HiqliteAuthStore {
         package_id: &str,
         user_id: i64,
     ) -> Result<bool, StoreError> {
-        Ok(self
-            .execute(
-                "DELETE FROM offline_packages WHERE id = $1 AND user_id = $2",
+        let statements = vec![
+            (
+                "DELETE FROM cache_consumer_pins
+                  WHERE ((consumer_kind = 'offline_package' AND consumer_id = $1)
+                     OR (consumer_kind = 'offline_download' AND consumer_id IN (
+                            SELECT token_hash FROM offline_package_leases
+                             WHERE package_id = $1)))
+                    AND EXISTS (
+                        SELECT 1 FROM offline_packages WHERE id = $1 AND user_id = $2)"
+                    .to_owned(),
                 params!(package_id, user_id),
-            )
+            ),
+            (
+                "DELETE FROM offline_packages WHERE id = $1 AND user_id = $2".to_owned(),
+                params!(package_id, user_id),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let results = self
+            .client()
+            .txn(statements)
             .await?
-            > 0)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.get(1).copied().unwrap_or_default() == 1)
     }
 
     async fn expire_offline_packages(&self, now: i64) -> Result<u64, StoreError> {
-        Ok(self
-            .execute(
-                "DELETE FROM offline_packages WHERE expires_at <= $1",
+        let statements = vec![
+            (
+                "DELETE FROM cache_consumer_pins
+                  WHERE (consumer_kind = 'offline_package' AND consumer_id IN (
+                            SELECT id FROM offline_packages WHERE expires_at <= $1))
+                     OR (consumer_kind = 'offline_download' AND consumer_id IN (
+                            SELECT l.token_hash FROM offline_package_leases l
+                            JOIN offline_packages p ON p.id = l.package_id
+                           WHERE p.expires_at <= $1))"
+                    .to_owned(),
                 params!(now),
-            )
-            .await? as u64)
+            ),
+            (
+                "DELETE FROM offline_packages WHERE expires_at <= $1".to_owned(),
+                params!(now),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let results = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(results.get(1).copied().unwrap_or_default() as u64)
     }
 
     // --- Node removal (`CLUSTERING-PLAN.md` §6.7) -------------------------

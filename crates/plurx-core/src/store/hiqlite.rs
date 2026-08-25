@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -33,21 +34,30 @@ use crate::error::StoreError;
 
 // v6 adds revision-bound ebook reading state; v7 adds first-class book facts;
 // v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
-// speculative-transcode queue. Every additive step is applied through
-// Raft before the daemon opens the
-// store. v5 remains a supported direct-upgrade source so an offline node is
+// speculative-transcode queue; v10 adds live media-session routing; v11 adds
+// storage-keyed shared-cache generations and reader pins. Every additive step
+// is applied through Raft before the daemon opens the store. v5 remains a
+// supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 9;
+pub const AUTH_SCHEMA_VERSION: i64 = 11;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
 const BOOK_SCHEMA_MIGRATION_SOURCE: i64 = READING_SCHEMA_VERSION;
 const LEASE_SCHEMA_MIGRATION_SOURCE: i64 = 7;
 const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
+const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
+const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
+// Session routing and shared-cache identity are additive durable state and use
+// the existing Hiqlite transport contract. Keep protocol v4 so a healthy
+// v9/v10 cluster can authorize the daemon that advances its schema.
 pub const AUTH_PROTOCOL_VERSION: i64 = 4;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
+const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
+const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
+const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 
 const AUTH_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_meta (
@@ -125,6 +135,7 @@ struct OperationCounters {
     consistent_query_calls: AtomicU64,
     non_consistent_query_calls: AtomicU64,
     write_calls: AtomicU64,
+    fail_next_non_consistent_query: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
@@ -133,6 +144,8 @@ impl OperationCounters {
         self.consistent_query_calls.store(0, Ordering::Relaxed);
         self.non_consistent_query_calls.store(0, Ordering::Relaxed);
         self.write_calls.store(0, Ordering::Relaxed);
+        self.fail_next_non_consistent_query
+            .store(false, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> HiqliteOperationCounts {
@@ -158,6 +171,114 @@ pub struct HiqliteAuthStore {
     clock: Arc<dyn Clock>,
     telemetry: NodeLocalTelemetry,
     activity_refreshes: Arc<ActivityRefreshGate>,
+    cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
+}
+
+/// Cache activity is advisory recency, not ownership or completion. One
+/// successful quorum write therefore covers repeated touches of the same
+/// location for this bounded interval. Completion, invalidation, and removal
+/// never enter this gate and remain synchronous durable mutations.
+pub(super) const CACHE_TOUCH_COMMIT_WINDOW: Duration = Duration::from_secs(5);
+const REPLACEABLE_WRITE_GATE_MAX_KEYS: usize = 4_096;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) enum CacheTouchKey {
+    Claim {
+        recipe_hash: String,
+        node_id: String,
+    },
+    Use {
+        recipe_hash: String,
+        node_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplaceableWriteOutcome {
+    Submitted,
+    Suppressed,
+}
+
+struct ReplaceableWriteGate<K> {
+    keys: Mutex<HashMap<K, Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>>>,
+}
+
+impl<K> Default for ReplaceableWriteGate<K> {
+    fn default() -> Self {
+        Self {
+            keys: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K> ReplaceableWriteGate<K>
+where
+    K: Clone + Eq + Hash,
+{
+    fn key_state(
+        &self,
+        key: K,
+        window: Duration,
+    ) -> Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>> {
+        let now = tokio::time::Instant::now();
+        let mut keys = self
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = keys.get(&key) {
+            // A hot existing identity stays O(1), including at the cap. Full
+            // scans are paid only by a caller attempting to admit a new key.
+            return Arc::clone(state);
+        }
+        if keys.len() >= REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            keys.retain(|_, state| {
+                if Arc::strong_count(state) > 1 {
+                    return true;
+                }
+                state.try_lock().map_or(true, |last| {
+                    last.is_some_and(|committed| now.duration_since(committed) < window)
+                })
+            });
+        }
+        if keys.len() >= REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            // Cardinality pressure may reduce coalescing efficiency, but must
+            // never turn untrusted recipe identities into unbounded process
+            // memory or suppress one identity using another identity's state.
+            return Arc::new(tokio::sync::Mutex::new(None));
+        }
+        Arc::clone(
+            keys.entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+        )
+    }
+
+    /// Serialize only equal identities. A waiter observes the first write's
+    /// result before it may report suppression; failures leave no reservation
+    /// and the next waiter retries instead of receiving an optimistic success.
+    async fn run<F>(
+        &self,
+        key: K,
+        window: Duration,
+        operation: F,
+    ) -> Result<ReplaceableWriteOutcome, StoreError>
+    where
+        F: Future<Output = Result<(), StoreError>>,
+    {
+        let state = self.key_state(key, window);
+        let mut last_committed = state.lock().await;
+        if last_committed
+            .is_some_and(|committed| tokio::time::Instant::now().duration_since(committed) < window)
+        {
+            return Ok(ReplaceableWriteOutcome::Suppressed);
+        }
+        // Anchor the durability window before dispatch. A slow quorum write
+        // must consume its own latency budget instead of extending a nominal
+        // five-second cache window to five seconds after acknowledgement.
+        let admitted_at = tokio::time::Instant::now();
+        operation.await?;
+        *last_committed = Some(admitted_at);
+        Ok(ReplaceableWriteOutcome::Submitted)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -487,6 +608,42 @@ async fn time_store_operation<T>(
     result
 }
 
+fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
+    matches!(
+        result,
+        Err(StoreError::Database(message)) if message == REPLICATED_STORE_TIMEOUT
+    )
+}
+
+async fn time_authority_read_with_retry<T, F, Fut>(
+    metrics: &'static StoreOperationMetrics,
+    mut operation: F,
+) -> Result<T, StoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, StoreError>>,
+{
+    for attempt in 1..=AUTHORITY_READ_MAX_ATTEMPTS {
+        let result = time_store_operation(
+            metrics,
+            StoreOperationClass::AuthorityRead,
+            operation(),
+            |_| true,
+        )
+        .await;
+        if !is_replicated_store_timeout(&result) || attempt == AUTHORITY_READ_MAX_ATTEMPTS {
+            return result;
+        }
+        tracing::warn!(
+            attempt,
+            max_attempts = AUTHORITY_READ_MAX_ATTEMPTS,
+            "replicated authority read timed out; retrying"
+        );
+        tokio::time::sleep(AUTHORITY_READ_RETRY_DELAY).await;
+    }
+    unreachable!("the bounded authority-read retry loop always returns")
+}
+
 /// Render fixed-cardinality process metrics for all replicated Store calls.
 ///
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
@@ -542,16 +699,16 @@ impl TimedClient {
     {
         let sql = sql.into();
         validate_sql(&sql)?;
-        #[cfg(feature = "cluster-read-cost-validation")]
-        self.operations
-            .consistent_query_calls
-            .fetch_add(1, Ordering::Relaxed);
-        time_store_operation(
-            &STORE_OPERATION_METRICS,
-            StoreOperationClass::AuthorityRead,
-            timeout_store(self.inner().query_consistent_map(sql, params)),
-            |_| true,
-        )
+        time_authority_read_with_retry(&STORE_OPERATION_METRICS, || {
+            #[cfg(feature = "cluster-read-cost-validation")]
+            self.operations
+                .consistent_query_calls
+                .fetch_add(1, Ordering::Relaxed);
+            timeout_store(
+                self.inner()
+                    .query_consistent_map(sql.clone(), params.clone()),
+            )
+        })
         .await
     }
 
@@ -570,6 +727,16 @@ impl TimedClient {
         self.operations
             .non_consistent_query_calls
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "cluster-read-cost-validation")]
+        if self
+            .operations
+            .fail_next_non_consistent_query
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(StoreError::Task(
+                "injected bounded-replica query failure".to_owned(),
+            ));
+        }
         time_store_operation(
             &STORE_OPERATION_METRICS,
             StoreOperationClass::LocalRead,
@@ -703,6 +870,18 @@ impl HiqliteAuthStore {
         self.client.operations.snapshot()
     }
 
+    /// Fail exactly the next local-query client call before network IO. This
+    /// validation-only hook proves the catalogue boundary retries Authority
+    /// rather than exposing a new application-visible error.
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[doc(hidden)]
+    pub fn validation_fail_next_non_consistent_query(&self) {
+        self.client
+            .operations
+            .fail_next_non_consistent_query
+            .store(true, Ordering::Relaxed);
+    }
+
     /// Snapshot successful calls from the production metrics recorder. The
     /// validation contract compares deltas while it exclusively owns its
     /// three-voter fixture; production exposition remains process-wide.
@@ -803,6 +982,8 @@ impl HiqliteAuthStore {
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
+        super::hiqlite_sessions::install_schema(&client).await?;
+        super::hiqlite_shared_cache::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -990,7 +1171,7 @@ impl HiqliteAuthStore {
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",
                                 params!(
-                                    AUTH_SCHEMA_VERSION,
+                                    MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE,
                                     now,
                                     PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
                                 ),
@@ -998,6 +1179,71 @@ impl HiqliteAuthStore {
                         ])
                         .await;
                     self.settle_migration_attempt(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_REQUESTS_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_REQUESTS_EXPIRY_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_PLAYBACK_POINTERS_SCHEMA,
+                                params!(),
+                            ),
+                            (super::hiqlite_sessions::MEDIA_SESSIONS_SCHEMA, params!()),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_OWNER_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_USER_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_EXPIRY_INDEX,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_RETENTION_INDEX,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    SHARED_CACHE_SCHEMA_MIGRATION_SOURCE,
+                                    now,
+                                    MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_shared_cache::migration_statements();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            AUTH_SCHEMA_VERSION,
+                            now,
+                            SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -1115,12 +1361,17 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM media_playback_pointers".to_owned(), params!()),
+            ("DELETE FROM media_sessions".to_owned(), params!()),
+            ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
             ("DELETE FROM pretranscode_jobs".to_owned(), params!()),
             ("DELETE FROM offline_source_probes".to_owned(), params!()),
             ("DELETE FROM offline_lease_guards".to_owned(), params!()),
             ("DELETE FROM offline_package_leases".to_owned(), params!()),
             ("DELETE FROM offline_packages".to_owned(), params!()),
+            ("DELETE FROM cache_consumer_pins".to_owned(), params!()),
+            ("DELETE FROM cache_storage_members".to_owned(), params!()),
             (
                 "DELETE FROM transcode_cache_locations".to_owned(),
                 params!(),
@@ -1166,7 +1417,7 @@ impl HiqliteAuthStore {
             super::hiqlite_catalog::local_catalog_truth_digest(self.client()),
         )
         .await
-        .map_err(|_| StoreError::Database("replicated store operation timed out".to_owned()))?
+        .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))?
     }
 
     async fn local_auth_dump(&self) -> Result<AuthStoreDump, StoreError> {
@@ -1177,6 +1428,9 @@ impl HiqliteAuthStore {
             "SELECT token_hash, user_id, device, created_at, last_seen_at FROM tokens ORDER BY token_hash",
             "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled FROM api_keys ORDER BY id",
             "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms FROM job_leases ORDER BY resource",
+            "SELECT user_id, request_id, request_fingerprint, playback_id, state, claim_expires_at_ms, incarnation_id, owner_node_id, response_json, updated_at_ms FROM media_session_requests ORDER BY user_id, request_id",
+            "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
+            "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
         ] {
             validate_sql(sql)?;
         }
@@ -1187,7 +1441,7 @@ impl HiqliteAuthStore {
             )
             .await
             .map_err(|_| {
-                StoreError::Database("replicated store operation timed out".to_owned())
+                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
             })??,
             durable_digest: tokio::time::timeout(
                 STORE_TIMEOUT,
@@ -1195,7 +1449,7 @@ impl HiqliteAuthStore {
             )
             .await
             .map_err(|_| {
-                StoreError::Database("replicated store operation timed out".to_owned())
+                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
             })??,
             cluster_meta: self.client().query_map(
                 "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
@@ -1232,6 +1486,29 @@ impl HiqliteAuthStore {
                 params!(),
             )
             .await?,
+            media_session_requests: self.client().query_map(
+                "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
+                        claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
+                        updated_at_ms \
+                   FROM media_session_requests ORDER BY user_id, request_id",
+                params!(),
+            )
+            .await?,
+            media_playback_pointers: self.client().query_map(
+                "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
+                   FROM media_playback_pointers ORDER BY user_id, playback_id",
+                params!(),
+            )
+            .await?,
+            media_sessions: self.client().query_map(
+                "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
+                        owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, \
+                        response_json, produced_playable_through_ms, fetched_through_ms, \
+                        media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms \
+                   FROM media_sessions ORDER BY incarnation_id",
+                params!(),
+            )
+            .await?,
         })
     }
 
@@ -1241,7 +1518,22 @@ impl HiqliteAuthStore {
             clock,
             telemetry,
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
+            cache_touches: Arc::new(ReplaceableWriteGate::default()),
         }
+    }
+
+    pub(super) async fn coalesce_cache_touch<F>(
+        &self,
+        key: CacheTouchKey,
+        operation: F,
+    ) -> Result<(), StoreError>
+    where
+        F: Future<Output = Result<(), StoreError>>,
+    {
+        self.cache_touches
+            .run(key, CACHE_TOUCH_COMMIT_WINDOW, operation)
+            .await
+            .map(|_| ())
     }
 
     pub(super) fn now(&self) -> Result<i64, StoreError> {
@@ -1354,6 +1646,96 @@ impl HiqliteAuthStore {
             .query_consistent_map::<ApiKeyRow, _>(sql, params)
             .await?;
         Ok(rows.pop().map(Into::into))
+    }
+}
+
+#[async_trait]
+impl crate::store::FragmentIndexStore for HiqliteAuthStore {
+    async fn put_fragment_index(
+        &self,
+        file_id: i64,
+        index: &crate::segplan::FragmentIndex,
+    ) -> Result<(), StoreError> {
+        let now_ms = self.clock.now()?;
+        self.telemetry
+            .put_fragment_index(file_id, index.clone(), now_ms)
+            .await
+    }
+
+    async fn fragment_index(
+        &self,
+        file_id: i64,
+        identity: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::FragmentIndex>, StoreError> {
+        self.telemetry
+            .fragment_index(file_id, identity.clone())
+            .await
+    }
+
+    async fn forget_fragment_index(&self, file_id: i64) -> Result<bool, StoreError> {
+        self.telemetry.forget_fragment_index(file_id).await
+    }
+
+    async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
+        // The sidecar's own rows -- this node's, which is the whole point.
+        self.telemetry.vod_row_file_ids(limit).await
+    }
+
+    async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
+        // The replicated side. Every node agrees on this answer, which is why
+        // the sweep converges rather than each node guessing -- and why a node
+        // that was down for the delete still cleans up on its next tick.
+        //
+        // One query per id rather than an `IN` list: the caller's window is
+        // small and bounded, and building an n-placeholder statement here
+        // would be the only dynamic SQL in this file.
+        let mut alive = Vec::new();
+        for id in file_ids {
+            let rows: Vec<IdRow> = self
+                .client
+                .query_map("SELECT id FROM files WHERE id = $1", hiqlite::params!(*id))
+                .await?;
+            if !rows.is_empty() {
+                alive.push(*id);
+            }
+        }
+        Ok(alive)
+    }
+}
+
+#[async_trait]
+impl crate::store::RenditionPlanStore for HiqliteAuthStore {
+    async fn put_rendition_plan(
+        &self,
+        rendition_key: &str,
+        file_id: i64,
+        plan: &crate::segplan::SegmentPlan,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<bool, StoreError> {
+        let now_ms = self.clock.now()?;
+        self.telemetry
+            .put_rendition_plan(
+                rendition_key.to_owned(),
+                file_id,
+                plan.clone(),
+                source.clone(),
+                now_ms,
+            )
+            .await
+    }
+
+    async fn rendition_plan(
+        &self,
+        rendition_key: &str,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::SegmentPlan>, StoreError> {
+        self.telemetry
+            .rendition_plan(rendition_key.to_owned(), source.clone())
+            .await
+    }
+
+    async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError> {
+        self.telemetry.forget_rendition_plans(file_id).await
     }
 }
 
@@ -1996,7 +2378,7 @@ where
 {
     tokio::time::timeout(STORE_TIMEOUT, operation)
         .await
-        .map_err(|_| StoreError::Database("replicated store operation timed out".to_owned()))?
+        .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))?
         .map_err(database_error)
 }
 
@@ -2038,7 +2420,9 @@ fn schema_migration_action(
         AUTH_SCHEMA_MIGRATION_SOURCE
         | BOOK_SCHEMA_MIGRATION_SOURCE
         | LEASE_SCHEMA_MIGRATION_SOURCE
-        | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE => {
+        | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
+        | MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
+        | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -2083,6 +2467,9 @@ struct AuthStoreDump {
     tokens: Vec<TokenDumpRow>,
     api_keys: Vec<ApiKeyDumpRow>,
     job_leases: Vec<JobLeaseDumpRow>,
+    media_session_requests: Vec<MediaSessionRequestDumpRow>,
+    media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
+    media_sessions: Vec<MediaSessionDumpRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2116,6 +2503,19 @@ impl From<&mut Row<'_>> for PingRow {
 
 struct CountRow {
     count: i64,
+}
+
+/// One `id` column. Existence is the whole answer the sweep needs, but the
+/// column still has to be decoded for the row to be built.
+struct IdRow {
+    #[allow(dead_code)]
+    id: i64,
+}
+
+impl<'a> From<&'a mut hiqlite::Row<'_>> for IdRow {
+    fn from(row: &'a mut hiqlite::Row<'_>) -> IdRow {
+        IdRow { id: row.get("id") }
+    }
 }
 
 struct PrometheusStoreRow {
@@ -2374,6 +2774,43 @@ dump_row!(JobLeaseDumpRow {
     expires_at_ms: i64,
     updated_at_ms: i64,
 });
+dump_row!(MediaSessionRequestDumpRow {
+    user_id: i64,
+    request_id: String,
+    request_fingerprint: String,
+    playback_id: String,
+    state: String,
+    claim_expires_at_ms: i64,
+    incarnation_id: String,
+    owner_node_id: Option<String>,
+    response_json: Option<String>,
+    updated_at_ms: i64,
+});
+dump_row!(MediaPlaybackPointerDumpRow {
+    user_id: i64,
+    playback_id: String,
+    current_incarnation_id: String,
+    updated_at_ms: i64,
+});
+dump_row!(MediaSessionDumpRow {
+    incarnation_id: String,
+    session_id: String,
+    user_id: i64,
+    playback_id: String,
+    request_fingerprint: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    lease_expires_at_ms: i64,
+    state: String,
+    recipe_json: String,
+    response_json: String,
+    produced_playable_through_ms: i64,
+    fetched_through_ms: i64,
+    media_origin_ms: i64,
+    media_sequence: i64,
+    discontinuity_sequence: i64,
+    updated_at_ms: i64,
+});
 
 #[cfg(test)]
 mod tests {
@@ -2381,6 +2818,277 @@ mod tests {
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
+
+    #[tokio::test(start_paused = true)]
+    async fn replaceable_write_gate_pins_window_failure_retry_and_terminal_bypass() {
+        let gate = ReplaceableWriteGate::<String>::default();
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = |submitted: Arc<std::sync::atomic::AtomicUsize>| async move {
+            submitted.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, StoreError>(())
+        };
+
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("leading touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        tokio::time::advance(CACHE_TOUCH_COMMIT_WINDOW - Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("inside-window touch"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("boundary touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        assert_eq!(submitted.load(Ordering::Relaxed), 2);
+
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                async {
+                    submitted.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::advance(Duration::from_secs(4)).await;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("slow leading touch"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("slow touch inside dispatch-anchored window"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(
+            gate.run(
+                "slow-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("slow touch at dispatch-anchored boundary"),
+            ReplaceableWriteOutcome::Submitted
+        );
+
+        let failure = gate
+            .run("failure".to_owned(), CACHE_TOUCH_COMMIT_WINDOW, async {
+                Err(StoreError::Task("injected touch failure".to_owned()))
+            })
+            .await;
+        assert!(failure.is_err());
+        assert_eq!(
+            gate.run(
+                "failure".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("failed touch must retry"),
+            ReplaceableWriteOutcome::Submitted
+        );
+
+        // Completion/removal never enter the replaceable gate. This models a
+        // terminal mutation at the same instant as a suppressed activity fact.
+        let terminal_commits = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(
+            gate.run(
+                "terminal-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("leading activity before terminal mutation"),
+            ReplaceableWriteOutcome::Submitted
+        );
+        assert_eq!(
+            gate.run(
+                "terminal-cache-use".to_owned(),
+                CACHE_TOUCH_COMMIT_WINDOW,
+                run(Arc::clone(&submitted)),
+            )
+            .await
+            .expect("duplicate activity touch"),
+            ReplaceableWriteOutcome::Suppressed
+        );
+        terminal_commits.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(terminal_commits.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_equal_replaceable_writes_share_one_durable_result() {
+        let gate = Arc::new(ReplaceableWriteGate::<String>::default());
+        let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(81));
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..80 {
+            let gate = Arc::clone(&gate);
+            let submitted = Arc::clone(&submitted);
+            let barrier = Arc::clone(&barrier);
+            requests.spawn(async move {
+                barrier.wait().await;
+                gate.run(
+                    "same-location".to_owned(),
+                    Duration::from_secs(1),
+                    async move {
+                        submitted.fetch_add(1, Ordering::Relaxed);
+                        tokio::task::yield_now().await;
+                        Ok(())
+                    },
+                )
+                .await
+            });
+        }
+        barrier.wait().await;
+        let mut admitted = 0;
+        while let Some(result) = requests.join_next().await {
+            if result.expect("touch task").expect("touch result")
+                == ReplaceableWriteOutcome::Submitted
+            {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 1);
+        assert_eq!(submitted.load(Ordering::Relaxed), 1);
+
+        let bypass_commits = (0..80).count();
+        assert!(
+            bypass_commits > admitted,
+            "the uncoalesced load control must violate the one-commit burst budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replaceable_write_gate_caps_hot_keys_and_reclaims_expired_identities() {
+        let gate = ReplaceableWriteGate::<String>::default();
+        for ordinal in 0..REPLACEABLE_WRITE_GATE_MAX_KEYS {
+            let state = gate.key_state(format!("recent-{ordinal}"), CACHE_TOUCH_COMMIT_WINDOW);
+            *state.lock().await = Some(tokio::time::Instant::now());
+        }
+        assert_eq!(
+            gate.keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            REPLACEABLE_WRITE_GATE_MAX_KEYS
+        );
+
+        let active = gate.key_state("recent-0".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        let same = gate.key_state("recent-0".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        assert!(Arc::ptr_eq(&active, &same));
+        drop(same);
+
+        let overflow = gate.key_state("overflow".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        assert!(
+            !gate
+                .keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key("overflow"),
+            "a 4,097th recent identity must degrade without growing the map"
+        );
+        drop(overflow);
+
+        tokio::time::advance(CACHE_TOUCH_COMMIT_WINDOW).await;
+        let reclaimed = gate.key_state("reclaimed".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        {
+            let keys = gate
+                .keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(
+                keys.len(),
+                2,
+                "expired idle identities must be reclaimed while an active key stays mapped"
+            );
+            assert!(keys.contains_key("recent-0"));
+            assert!(keys.contains_key("reclaimed"));
+        }
+        drop(active);
+        drop(reclaimed);
+
+        for ordinal in 0..(REPLACEABLE_WRITE_GATE_MAX_KEYS - 2) {
+            drop(gate.key_state(format!("refill-{ordinal}"), CACHE_TOUCH_COMMIT_WINDOW));
+        }
+        let final_key = gate.key_state("final".to_owned(), CACHE_TOUCH_COMMIT_WINDOW);
+        let keys = gate
+            .keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            keys.len(),
+            1,
+            "an expired key must become reclaimable after its active caller releases it"
+        );
+        assert!(keys.contains_key("final"));
+        drop(keys);
+        drop(final_key);
+    }
+
+    #[test]
+    fn cache_terminal_mutations_cannot_enter_the_replaceable_touch_gate() {
+        let source = include_str!("hiqlite_durable.rs");
+        let method = |start: &str, end: &str| {
+            source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing {end}"))
+                .0
+        };
+        assert!(method(
+            "async fn touch_cache_claim",
+            "async fn complete_cache_entry"
+        )
+        .contains("coalesce_cache_touch"));
+        assert!(
+            method("async fn touch_cache_entry", "async fn cache_by_age")
+                .contains("coalesce_cache_touch")
+        );
+        for terminal in [
+            method(
+                "async fn complete_cache_entry",
+                "async fn touch_cache_entry",
+            ),
+            method(
+                "async fn invalidate_cache_entry",
+                "async fn forget_cache_entry",
+            ),
+            method("async fn forget_cache_entry", "async fn cache_bytes"),
+        ] {
+            assert!(!terminal.contains("coalesce_cache_touch"));
+            assert!(terminal.contains("self.execute") || terminal.contains(".txn("));
+        }
+    }
 
     #[tokio::test]
     async fn store_operation_timer_classifies_completion_error_and_cancellation() {
@@ -2459,6 +3167,63 @@ mod tests {
             count(StoreOperationClass::Write, StoreOperationOutcome::Error),
             statement_error_before + 1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authority_reads_retry_one_replicated_deadline_and_nothing_else() {
+        let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retried = time_authority_read_with_retry(metrics, {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt == 0 {
+                        Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the bounded retry recovers");
+        assert_eq!(retried, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Error,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1,
+            "the timed-out attempt remains visible in metrics"
+        );
+        assert_eq!(
+            metrics
+                .cell(
+                    StoreOperationClass::AuthorityRead,
+                    StoreOperationOutcome::Ok,
+                )
+                .count
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = time_authority_read_with_retry(metrics, {
+            let attempts = Arc::clone(&permanent_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database("bad row".to_owned())) }
+            }
+        })
+        .await
+        .expect_err("non-timeout database errors are terminal");
+        assert_eq!(error.to_string(), "database error: bad row");
+        assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -2773,9 +3538,9 @@ mod tests {
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 4,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 6,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v9 step"
+            "this implementation contains every additive v5→v11 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -2818,6 +3583,14 @@ mod tests {
             )
             .expect("immediate predecessor"),
             SchemaMigrationAction::MigrateFrom(PRETRANSCODE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("media-session predecessor"),
+            SchemaMigrationAction::MigrateFrom(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

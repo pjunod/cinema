@@ -2429,6 +2429,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hiqlite",
+ "hiqlite-wal",
  "hmac",
  "jsonschema",
  "libc",

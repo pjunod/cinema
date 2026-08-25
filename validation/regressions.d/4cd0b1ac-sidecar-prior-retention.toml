@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "4cd0b1ac",
+]
+points = ["core.media", "persistence.upgrades"]
+checks = ["rust-gate"]
+reason = "The sidecar's prior-table rebuild is bounded by an explicit version ceiling rather than by `not current`, so a later schema bump cannot silently re-enter it. `sidecar_v3_keeps_its_network_priors_across_the_v4_upgrade` opens a sidecar at the real v3 shape, writes a prior, upgrades, and asserts the prior survives -- it fails against the pre-fix predicate. Every other upgrade test in the suite starts at v1, where the rebuild is correct, which is why nothing caught this."

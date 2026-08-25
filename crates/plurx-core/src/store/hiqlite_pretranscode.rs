@@ -917,7 +917,8 @@ impl PretranscodeJobStore for HiqliteAuthStore {
                         relative_dir = excluded.relative_dir, bytes = excluded.bytes,
                         complete = 1, manifest_digest = excluded.manifest_digest,
                         scrub_object_index = 0,
-                        last_seen_at = excluded.last_seen_at
+                        last_seen_at = MAX(transcode_cache_locations.last_seen_at,
+                                           excluded.last_seen_at)
                      WHERE transcode_cache_locations.complete = 0
                         OR (transcode_cache_locations.relative_dir = excluded.relative_dir
                             AND (($10 IS NULL

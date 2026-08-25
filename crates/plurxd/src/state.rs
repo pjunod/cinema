@@ -24,7 +24,7 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    keys, ArtworkRepairFence, PrometheusStoreSnapshot, PublicationStore, Store,
+    keys, ArtworkRepairFence, CatalogueReader, PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -296,6 +296,8 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
+    pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     /// Monotonic, Store-free authority for mutable media and readiness.
@@ -308,6 +310,8 @@ pub struct AppState {
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
+    /// Authenticated remote start/abort and streaming HLS relay transport.
+    pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -318,6 +322,9 @@ pub struct AppState {
     /// Finished content-addressed transcodes. Offline routes never join a
     /// request-controlled path directly to this root.
     pub cache_dir: PathBuf,
+    /// Optional shared-cache mount, admitted only while its all-voter canary
+    /// proof remains current.
+    pub(crate) shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     /// Where extracted subtitles are kept, keyed by file identity and source
     /// fingerprint — see `http::stream::subtitles_vtt`.
     pub subs_dir: PathBuf,
@@ -387,6 +394,7 @@ impl AppState {
         system: SystemInfo,
         logs: Arc<LogBuffer>,
     ) -> Self {
+        let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
                 server_name,
@@ -399,6 +407,10 @@ impl AppState {
                 credential_key: Arc::new(CredentialKey::generate()),
                 replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                cluster_id: String::new(),
+                shared_cache_dir: PathBuf::new(),
+                shared_cache_id: String::new(),
+                catalogue,
             },
             store,
             dirs,
@@ -426,6 +438,10 @@ impl AppState {
             credential_key,
             replication,
             membership,
+            cluster_id,
+            shared_cache_dir,
+            shared_cache_id,
+            catalogue,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -443,6 +459,14 @@ impl AppState {
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
         let progress = crate::progress::ProgressCoalescer::new(Arc::clone(&store));
+        let shared_cache = crate::shared_cache::SharedCacheCoordinator::new(
+            shared_cache_dir,
+            shared_cache_id,
+            &cluster_id,
+            node_id.clone(),
+            membership.clone(),
+            Arc::clone(&store),
+        );
         let transcode = Arc::new(
             TranscodeManager::new(
                 Arc::clone(&store),
@@ -459,7 +483,8 @@ impl AppState {
                 cache_dir.clone(),
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
-            ),
+            )
+            .with_shared_cache(Arc::clone(&shared_cache)),
         );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.
         let trakt_base = std::env::var("PLURX_TRAKT_BASE")
@@ -474,8 +499,13 @@ impl AppState {
         let offline =
             OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
+        let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
+            membership.clone(),
+            Arc::clone(&store),
+        );
         AppState {
             store,
+            catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
@@ -483,11 +513,13 @@ impl AppState {
             serving,
             membership,
             media_pool,
+            media_sessions,
             server_name,
             node_id,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
+            shared_cache,
             subs_dir,
             pgs_overlay_enabled: std::env::var("PLURX_PGS_OVERLAY").is_ok_and(|value| {
                 matches!(
@@ -579,6 +611,10 @@ pub struct AppConfig {
     /// Actual backend selected before HTTP starts; tests default to SQLite.
     pub replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    pub cluster_id: String,
+    pub shared_cache_dir: PathBuf,
+    pub shared_cache_id: String,
+    pub catalogue: CatalogueReader,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.
@@ -754,6 +790,9 @@ pub struct JobManager {
     /// the first for the same slots, and queuing one behind an encode that
     /// takes hours is worse than skipping it.
     producing: std::sync::atomic::AtomicBool,
+    /// A fragment-indexing pass is running on this node. Same shape and same
+    /// reason as `producing`: the question is "is one going", not "wait".
+    indexing: std::sync::atomic::AtomicBool,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -831,6 +870,31 @@ struct ArtworkSweepResult {
     repaired: usize,
     #[cfg(test)]
     claimed_ids: Vec<i64>,
+}
+
+/// Ceiling on one indexing pass. Small because indexing is never urgent and
+/// the next tick is a minute away: a library converts over hours, which is
+/// exactly the shape D4 wants, since a file without an index simply keeps
+/// today's presentation until it has one.
+const INDEX_MAX_PER_PASS: usize = 4;
+/// Files one pass will even look at. An already-indexed library attempts
+/// nothing, so without this the pass would query every file every minute for
+/// the life of the server.
+const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
+/// Wall clock one pass will spend, whatever it got through.
+const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// Per file, so one pathological NAS read gives the slot back rather than
+/// holding it until the process restarts.
+const INDEX_FILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Clears [`JobManager::indexing`] however the pass ends, including the ways a
+/// `?` or a panic would leave it set for the life of the process.
+struct IndexingGuard(Arc<JobManager>);
+
+impl Drop for IndexingGuard {
+    fn drop(&mut self) {
+        self.0.indexing.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Clears [`JobManager::producing`] however the pass ends — including the ways
@@ -1182,6 +1246,7 @@ impl JobManager {
             requests: Mutex::new(VecDeque::new()),
             metrics: Arc::new(IntegrationMetrics::default()),
             producing: std::sync::atomic::AtomicBool::new(false),
+            indexing: std::sync::atomic::AtomicBool::new(false),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
@@ -1284,7 +1349,12 @@ impl JobManager {
             Ok(Some(lease)) => lease,
             Ok(None) => return false,
             Err(error) => {
-                tracing::warn!(library = library_id, error = %error, "acquiring scan lease failed");
+                tracing::warn!(
+                    library = library_id,
+                    stage = "acquire_lease",
+                    error = %error,
+                    "acquiring scan lease failed"
+                );
                 return false;
             }
         };
@@ -1316,6 +1386,11 @@ impl JobManager {
             tokio::select! {
                 () = manager.run_scan(library_id, progress, force_metadata, &lease) => {}
                 () = lost.cancelled() => {
+                    tracing::warn!(
+                        library = library_id,
+                        stage = "lease",
+                        "library scan failed because its cluster lease was lost"
+                    );
                     let mut status = manager
                         .statuses
                         .lock()
@@ -2217,6 +2292,12 @@ impl JobManager {
                 return;
             }
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "load_library",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2233,6 +2314,12 @@ impl JobManager {
         {
             Ok(report) => status.last_scan = Some(report),
             Err(e) => {
+                tracing::warn!(
+                    library = library_id,
+                    stage = "catalogue_scan",
+                    error = %e,
+                    "library scan failed"
+                );
                 self.finish(library_id, error_status(&e.to_string())).await;
                 return;
             }
@@ -2267,7 +2354,12 @@ impl JobManager {
             .mark_library_scanned(library_id, force_metadata)
             .await
         {
-            tracing::warn!(error = %e, library = library_id, "recording the run time failed");
+            tracing::warn!(
+                error = %e,
+                library = library_id,
+                stage = "stamp_completion",
+                "recording the library scan completion time failed"
+            );
         }
         self.finish(library_id, status).await;
     }
@@ -2362,6 +2454,10 @@ impl JobManager {
                 .await,
             cache_produce_mins: self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await,
             last_cache_produce: self.job_stamp(keys::JOB_LAST_CACHE_PRODUCE).await,
+            vod_index_mins: self.job_interval(keys::VOD_INDEX_MINS).await,
+            last_vod_index: self
+                .job_stamp(&self.local_job_key(keys::JOB_LAST_VOD_INDEX))
+                .await,
         };
         for job in due_jobs(now(), &libraries, global) {
             match job {
@@ -2442,6 +2538,16 @@ impl JobManager {
                     if removed > 0 {
                         tracing::info!(removed, "pruned aged playback telemetry");
                     }
+                }
+                DueJob::BuildFragmentIndexes => {
+                    // Node-local work on node-local files, so the lease is
+                    // only about not running two passes on THIS node — the
+                    // single-flight guard inside does the rest.
+                    let state = Arc::clone(self);
+                    let transcode = Arc::clone(transcode);
+                    tokio::spawn(async move {
+                        state.build_fragment_indexes(transcode).await;
+                    });
                 }
                 DueJob::ProduceCache => {
                     // Candidate generation is the singleton half. It only
@@ -2898,6 +3004,175 @@ impl JobManager {
 
     /// Non-singleton half: every idle compatible node drains distinct queue
     /// rows through the existing preemptible producer.
+    /// Build fragment indexes for files that have none.
+    ///
+    /// Bounded three ways on purpose, because this reads whole files off the
+    /// same disks a playback reads from and buys a viewer nothing today:
+    /// [`INDEX_MAX_PER_PASS`] files, [`INDEX_WINDOW`] of wall clock, and
+    /// [`INDEX_FILE_BUDGET`] per file. It also declines to start while the
+    /// pre-transcode worker is busy, for the same reason that worker declines
+    /// to start while a foreground session is.
+    ///
+    /// Nothing reads an index yet. A file without one keeps today's
+    /// presentation (plan §2.2, ledger D4), which is what lets this run — or
+    /// not run — without any client noticing either way.
+    /// Forget node-local VOD rows whose file no longer exists.
+    ///
+    /// Bounded per tick rather than exhaustive: the rows are small, nothing
+    /// depends on them going promptly, and a sweep that walked a whole library
+    /// would compete with the indexing pass it runs in front of. Ordered by
+    /// file id so consecutive ticks make progress rather than re-examining the
+    /// same window.
+    ///
+    /// Failure is not worth interrupting the tick for. These rows are a leak,
+    /// not a correctness problem -- an index whose file is gone stops matching
+    /// on identity long before anyone could serve from it.
+    async fn sweep_orphaned_vod_rows(&self) {
+        const SWEEP_WINDOW: i64 = 512;
+
+        let held = match self.store.vod_row_file_ids(SWEEP_WINDOW).await {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(error = %error, "listing node-local VOD rows to sweep");
+                return;
+            }
+        };
+        let alive = match self.store.surviving_file_ids(&held).await {
+            Ok(alive) => alive,
+            Err(error) => {
+                tracing::warn!(error = %error, "checking which indexed files still exist");
+                return;
+            }
+        };
+
+        let mut indexes = 0usize;
+        let mut plans = 0usize;
+        for file_id in held.iter().filter(|id| !alive.contains(id)) {
+            match self.store.forget_fragment_index(*file_id).await {
+                Ok(true) => indexes += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting a stale index");
+                }
+            }
+            match self.store.forget_rendition_plans(*file_id).await {
+                Ok(count) => plans += count,
+                Err(error) => {
+                    tracing::warn!(file = file_id, error = %error, "forgetting stale plans");
+                }
+            }
+        }
+        if indexes > 0 || plans > 0 {
+            tracing::info!(
+                indexes,
+                plans,
+                examined = held.len(),
+                "swept node-local VOD rows for files that are gone"
+            );
+        }
+    }
+
+    async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+        if self.indexing.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let _running = IndexingGuard(Arc::clone(&self));
+        self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
+
+        // Before building anything, give back what belongs to files that are
+        // gone. Node-local rows and a replicated `files` table share no
+        // transaction, so a hook inside `delete_files` could only ever clean
+        // the node that ran the delete -- and never a node that was down at
+        // the time. Each node asking, on its own tick, converges everywhere.
+        self.sweep_orphaned_vod_rows().await;
+
+        let deadline = std::time::Instant::now() + INDEX_WINDOW;
+        let have_dovi = transcode.dv_strippable();
+        let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
+        let libraries = match self.store.list_libraries().await {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                tracing::warn!(error = %error, "fragment indexing could not list libraries");
+                return;
+            }
+        };
+
+        let mut built = 0usize;
+        let mut attempted = 0usize;
+        let mut examined = 0usize;
+        for library in libraries {
+            let paths = match self.store.library_file_paths(library.id).await {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tracing::warn!(library = library.id, error = %error, "listing files to index");
+                    continue;
+                }
+            };
+            for (file_id, _path) in paths {
+                // Both bounds, because they stop different runaways: a
+                // library that is already fully indexed attempts nothing and
+                // would otherwise walk every file every minute.
+                if attempted >= INDEX_MAX_PER_PASS
+                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                    || std::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                examined += 1;
+                if !transcode.pretranscode_worker_idle() {
+                    return;
+                }
+                let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                    continue;
+                };
+                if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                    continue;
+                }
+                let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+                match self.store.fragment_index(file_id, &identity).await {
+                    // Already current for this file and this pipeline.
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(file_id, error = %error, "reading a fragment index");
+                        continue;
+                    }
+                }
+                attempted += 1;
+                match crate::fragindex::build(
+                    &file,
+                    have_dovi,
+                    false,
+                    &runtime_cache,
+                    INDEX_FILE_BUDGET,
+                )
+                .await
+                {
+                    crate::fragindex::IndexOutcome::Built(index) => {
+                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                            tracing::warn!(file_id, error = %error, "storing a fragment index");
+                        } else {
+                            built += 1;
+                        }
+                    }
+                    // A short read is not an index — persisting one would put
+                    // every later boundary in the wrong part of the film — so
+                    // the next pass simply tries again.
+                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                        tracing::debug!(file_id, rows, "fragment index incomplete: {reason}");
+                    }
+                    crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                        tracing::debug!(file_id, "file cannot be indexed: {reason}");
+                    }
+                }
+            }
+        }
+        if attempted > 0 {
+            tracing::info!(attempted, built, "fragment indexing pass finished");
+        }
+    }
+
     async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         let Some((root, node)) = transcode.cache_location() else {
             return;

@@ -11,6 +11,7 @@
 mod apikeys;
 mod cache;
 mod coordination;
+mod fragindex;
 mod library;
 mod media;
 mod offline;
@@ -18,6 +19,8 @@ mod outbox;
 mod pretranscode;
 mod publication;
 mod reading;
+mod sessions;
+mod shared_cache;
 mod telemetry;
 mod trakt;
 mod users;
@@ -679,6 +682,143 @@ const MIGRATIONS: &[&str] = &[
                lease_expires_ms = NULL, policy_generation = '', requirements_json = '{}'
          WHERE file_id = OLD.id AND state IN ('queued', 'running');
     END;",
+    // v25: cluster-wide idempotency and owner routing for live HLS sessions.
+    // SQLite uses the same tables so one-voter and replicated behavior cannot
+    // diverge at the storage boundary.
+    "CREATE TABLE media_session_requests (
+        user_id             INTEGER NOT NULL,
+        request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),
+        request_fingerprint TEXT NOT NULL,
+        playback_id         TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
+        state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),
+        claim_expires_at_ms INTEGER NOT NULL,
+        incarnation_id      TEXT NOT NULL,
+        owner_node_id       TEXT,
+        response_json       TEXT,
+        updated_at_ms       INTEGER NOT NULL,
+        PRIMARY KEY (user_id, request_id)
+    ) STRICT;
+    CREATE INDEX media_session_requests_expiry
+        ON media_session_requests(state, claim_expires_at_ms);
+
+    CREATE TABLE media_playback_pointers (
+        user_id                INTEGER NOT NULL,
+        playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
+        current_incarnation_id TEXT NOT NULL UNIQUE,
+        updated_at_ms           INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id)
+    ) STRICT;
+
+    CREATE TABLE media_sessions (
+        incarnation_id                TEXT PRIMARY KEY,
+        session_id                    TEXT NOT NULL UNIQUE,
+        user_id                       INTEGER NOT NULL,
+        playback_id                   TEXT NOT NULL,
+        request_fingerprint           TEXT NOT NULL,
+        owner_node_id                 TEXT NOT NULL,
+        owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),
+        lease_expires_at_ms           INTEGER NOT NULL,
+        state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),
+        recipe_json                   TEXT NOT NULL,
+        response_json                 TEXT NOT NULL,
+        produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,
+        fetched_through_ms            INTEGER NOT NULL DEFAULT 0,
+        media_origin_ms               INTEGER NOT NULL DEFAULT 0,
+        media_sequence                INTEGER NOT NULL DEFAULT 0,
+        discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms                 INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX media_sessions_owner
+        ON media_sessions(owner_node_id, state, lease_expires_at_ms);
+    CREATE INDEX media_sessions_user
+        ON media_sessions(user_id, state, lease_expires_at_ms);
+    CREATE INDEX media_sessions_expiry
+        ON media_sessions(state, lease_expires_at_ms, incarnation_id);
+    CREATE INDEX media_sessions_retention
+        ON media_sessions(state, updated_at_ms, incarnation_id);",
+    // v26: storage-keyed shared-cache generations and distributed readers.
+    // Keep the producer-keyed columns and primary key for rolling binaries;
+    // new shared rows use `node_id = storage_id`, which old nodes cannot
+    // mistake for their local cache.
+    "ALTER TABLE transcode_cache_locations
+        ADD COLUMN storage_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE transcode_cache_locations
+        ADD COLUMN generation_id TEXT NOT NULL DEFAULT '';
+    UPDATE transcode_cache_locations
+       SET storage_id = 'node:' || node_id || ':cache',
+           generation_id = relative_dir
+     WHERE storage_id = '';
+    CREATE UNIQUE INDEX transcode_cache_storage_generation
+        ON transcode_cache_locations(recipe_hash, storage_id, generation_id)
+        WHERE storage_id <> '' AND generation_id <> '';
+    CREATE INDEX transcode_cache_storage_lru
+        ON transcode_cache_locations(storage_id, complete, last_used_at);
+    CREATE TRIGGER transcode_cache_location_identity_ai
+    AFTER INSERT ON transcode_cache_locations
+    WHEN new.storage_id = '' AND new.generation_id = '' BEGIN
+        UPDATE transcode_cache_locations
+           SET storage_id = 'node:' || new.node_id || ':cache',
+               generation_id = new.relative_dir
+         WHERE recipe_hash = new.recipe_hash
+           AND node_id = new.node_id
+           AND storage_class = new.storage_class;
+    END;
+    CREATE TRIGGER transcode_cache_location_identity_au
+    AFTER UPDATE OF relative_dir ON transcode_cache_locations
+    WHEN new.storage_class = 'local'
+     AND new.storage_id = 'node:' || new.node_id || ':cache'
+     AND new.generation_id = old.generation_id
+     AND new.relative_dir <> old.relative_dir BEGIN
+        UPDATE transcode_cache_locations
+           SET generation_id = new.relative_dir
+         WHERE recipe_hash = new.recipe_hash
+           AND node_id = new.node_id
+           AND storage_class = new.storage_class;
+    END;
+
+    CREATE TABLE cache_storage_members (
+        storage_id          TEXT NOT NULL,
+        node_id             TEXT NOT NULL,
+        storage_class       TEXT NOT NULL CHECK (storage_class IN ('local', 'shared')),
+        verified_at_ms      INTEGER NOT NULL,
+        verification_state TEXT NOT NULL CHECK (
+            verification_state IN ('verified', 'suspect', 'unverified')),
+        PRIMARY KEY (storage_id, node_id)
+    ) STRICT;
+    CREATE INDEX cache_storage_members_node
+        ON cache_storage_members(node_id, verification_state, storage_id);
+
+    CREATE TABLE cache_consumer_pins (
+        storage_id       TEXT NOT NULL,
+        recipe_hash      TEXT NOT NULL,
+        generation_id    TEXT NOT NULL,
+        consumer_kind    TEXT NOT NULL CHECK (consumer_kind IN (
+            'media_session', 'offline_package', 'offline_download')),
+        consumer_id      TEXT NOT NULL,
+        consumer_epoch   INTEGER NOT NULL CHECK (consumer_epoch > 0),
+        expires_at_ms    INTEGER NOT NULL,
+        PRIMARY KEY (
+            storage_id, recipe_hash, generation_id, consumer_kind, consumer_id)
+    ) STRICT;
+    CREATE INDEX cache_consumer_pins_expiry
+        ON cache_consumer_pins(storage_id, expires_at_ms);",
+    // v27: node-local fragment indexes. No foreign key to `files` on purpose:
+    // an index outlives a rescan that renumbers nothing, and its own identity
+    // columns already refuse to answer for a file that changed. The hiqlite
+    // backend carries this exact table in its per-voter sidecar rather than
+    // replicating one machine's ffmpeg output through Raft.
+    crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA,
+    // v28: node-local rendition plans. Separate from the index above because
+    // the two are kept for different reasons: an index is a measurement and
+    // may be rebuilt, a plan is a decision a client already holds a playlist
+    // for. Node-local for the same reason, and additive, so a v27 database
+    // upgrades in place.
+    crate::store::renditionplan::RENDITION_PLANS_SCHEMA,
+    // v29: the promotion inputs every generation's init is built from, and
+    // whether the film's clean fragments agree about them (plan §2.2 ruling).
+    // Additive, and `parameter_sets_constant` defaults to 0 so an index built
+    // before the check existed is rebuilt rather than trusted.
+    crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1591,7 +1731,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 24,
+            version, 29,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2200,6 +2340,210 @@ mod tests {
             )
             .expect("source trigger"),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn v25_adds_media_session_routing_without_losing_v24_state() {
+        use crate::store::SettingsStore;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(24) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.session.proof', 'survives-v24')",
+                [],
+            )
+            .expect("seed v24 row");
+            conn.pragma_update(None, "user_version", 24)
+                .expect("version");
+        }
+
+        let store = SqliteStore::open(&db).expect("migrate v24 to v25");
+        assert_eq!(
+            store
+                .get_setting("migration.session.proof")
+                .await
+                .expect("read v24 proof")
+                .as_deref(),
+            Some("survives-v24")
+        );
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        for (table, columns) in [
+            ("media_session_requests", 10),
+            ("media_playback_pointers", 4),
+            ("media_sessions", 17),
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}')"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or_else(|error| panic!("inspect {table}: {error}")),
+                columns,
+                "{table} schema"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
+                   AND name IN ('media_session_requests_expiry', 'media_sessions_owner',
+                                'media_sessions_user', 'media_sessions_expiry',
+                                'media_sessions_retention')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("inspect media-session indexes"),
+            5
+        );
+    }
+
+    #[test]
+    fn v26_backfills_storage_identity_and_repairs_rolling_legacy_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            conn.pragma_update(None, "foreign_keys", "ON").expect("fk");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(25) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute_batch(
+                "INSERT INTO settings (key, value) VALUES ('instance.id', 'migration-v26');
+                 INSERT INTO users (id, username, password_hash, is_admin)
+                    VALUES (1, 'migration', 'hash', 1);
+                 INSERT INTO libraries (id, name, kind, paths, anime)
+                    VALUES (1, 'Migration', 'movies', '[]', 0);
+                 INSERT INTO items (id, library_id, kind, title, sort_title)
+                    VALUES (1, 1, 'movie', 'Migration', 'migration');
+                 INSERT INTO files (id, item_id, path, size, mtime)
+                    VALUES (1, 1, '/migration.mkv', 10, 20);
+                 INSERT INTO transcode_cache_recipes
+                    (recipe_hash, file_id, recipe_version)
+                    VALUES ('legacy-recipe', 1, 1);
+                 INSERT INTO transcode_cache_locations
+                    (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
+                     manifest_digest, scrub_object_index, last_used_at, last_seen_at)
+                    VALUES ('legacy-recipe', 'node-a', 'local', 'legacy-generation',
+                            100, 1, NULL, 0, 30, 30);",
+            )
+            .expect("seed exact v25 location");
+            conn.pragma_update(None, "user_version", 25)
+                .expect("version");
+        }
+
+        drop(SqliteStore::open(&db).expect("migrate v25 to v26"));
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row(
+                "SELECT storage_id, generation_id FROM transcode_cache_locations
+                  WHERE recipe_hash = 'legacy-recipe'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("backfilled identity"),
+            (
+                "node:node-a:cache".to_owned(),
+                "legacy-generation".to_owned()
+            )
+        );
+        conn.execute(
+            "INSERT INTO transcode_cache_recipes (recipe_hash, file_id, recipe_version)
+             VALUES ('rolling-recipe', 1, 1)",
+            [],
+        )
+        .expect("seed rolling recipe");
+        conn.execute(
+            "INSERT INTO transcode_cache_locations
+                (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
+                 manifest_digest, scrub_object_index, last_used_at, last_seen_at)
+             VALUES ('rolling-recipe', 'node-b', 'local', 'rolling-generation',
+                     200, 1, NULL, 0, 40, 40)",
+            [],
+        )
+        .expect("legacy binary write on v26 schema");
+        assert_eq!(
+            conn.query_row(
+                "SELECT storage_id, generation_id FROM transcode_cache_locations
+                  WHERE recipe_hash = 'rolling-recipe'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("trigger repaired identity"),
+            (
+                "node:node-b:cache".to_owned(),
+                "rolling-generation".to_owned()
+            )
+        );
+        conn.execute(
+            "INSERT INTO transcode_cache_locations
+                (recipe_hash, node_id, storage_class, relative_dir, bytes, complete,
+                 manifest_digest, scrub_object_index, last_used_at, last_seen_at)
+             VALUES ('rolling-recipe', 'node-b', 'local', 'rolling-generation-2',
+                     0, 0, NULL, 0, 50, 50)
+             ON CONFLICT(recipe_hash, node_id, storage_class) DO UPDATE SET
+                relative_dir = excluded.relative_dir,
+                bytes = excluded.bytes,
+                complete = excluded.complete,
+                last_used_at = excluded.last_used_at,
+                last_seen_at = excluded.last_seen_at",
+            [],
+        )
+        .expect("legacy binary upsert on v26 schema");
+        assert_eq!(
+            conn.query_row(
+                "SELECT storage_id, generation_id FROM transcode_cache_locations
+                  WHERE recipe_hash = 'rolling-recipe'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("update trigger repaired generation identity"),
+            (
+                "node:node-b:cache".to_owned(),
+                "rolling-generation-2".to_owned(),
+            )
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+                   AND name IN ('cache_storage_members', 'cache_consumer_pins')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("shared cache tables"),
+            2
+        );
+        assert!(conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                  WHERE type = 'index' AND name = 'transcode_cache_storage_generation'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("storage generation index")
+            .contains("WHERE storage_id <> '' AND generation_id <> ''"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger'
+                   AND name IN ('transcode_cache_location_identity_ai',
+                                'transcode_cache_location_identity_au')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("rolling identity triggers"),
+            2
         );
     }
 

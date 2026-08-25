@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7afaf8ed"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`a_full_working_set_with_a_reader_waiting_makes_room_rather_than_stopping` and `a_full_working_set_with_nobody_waiting_stops_and_says_why` require the two answers to differ by whether anybody is blocked -- a scheduler that suspended in both cases parks the producer against a bound only it can clear while a reader waits, and one that made room in both cases holds bytes for nobody. `a_producer_sitting_on_the_budget_line_does_not_thrash` walks the hysteresis explicitly: under the budget and not held produces, held and above half keeps making room, held and under half is released. Deleting `WorkingSet::held` and testing `used > budget` fails the middle assertion, which is the thrash. `an_unset_budget_never_holds_anything` requires a zero budget to read as unconfigured rather than as zero bytes allowed, which would stop every producer on the node. `nothing_attached_is_still_idle_however_full_the_disk_is` keeps the reclaim path ahead of the new bound. The pre-existing suspension test now names `Hold::Ahead`, so the two holds cannot collapse into one."

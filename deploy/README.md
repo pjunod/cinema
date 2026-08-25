@@ -253,10 +253,12 @@ but does not affect Bonjour.
 
 ## TrueNAS SCALE / Kubernetes
 
-Use the Docker image with a `hostPath`/PVC for `/var/lib/plurx` and a
-read-only mount for media. A Helm chart with the 3-node HA StatefulSet lands
-in Phase 4 (see [../docs/ROADMAP.md](../docs/ROADMAP.md)); until then run a
-single replica.
+Use the Docker image with stable per-voter storage for `/var/lib/plurx` and a
+read-only mount for media. The Service/Ingress routing pattern is in
+[`cluster-routing/`](cluster-routing/); it deliberately does not pretend that
+the workload, Raft storage, GPU scheduling, or media mounts are stateless.
+Follow the cluster bootstrap and rolling-drain rules in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#cluster-ingress-drain-and-recovery).
 
 ## Ports
 
@@ -268,6 +270,11 @@ single replica.
 
 ## Observability
 
-`GET /healthz` (liveness), `GET /readyz` (storage reachable), and
-`GET /metrics` (Prometheus text: uptime, active transcode sessions, library
-and user counts).
+`GET /healthz` is liveness. `GET /readyz` is serving readiness, and the image's
+Docker health check uses it so a voter without usable quorum is not marked
+healthy. `GET /metrics` includes process, playback, cached cluster membership,
+quorum, leader, commit, and apply-lag state without performing a Store read on
+scrape. The same image also contains the read-only `plurx-cluster-check
+inspect-wal` stopped-node tool; the safe preservation and interpretation
+runbook is in
+[`docs/OPERATIONS.md`](../docs/OPERATIONS.md#inspecting-a-stopped-voter-without-changing-it).
