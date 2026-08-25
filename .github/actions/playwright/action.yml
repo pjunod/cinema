@@ -1,0 +1,30 @@
+name: Provision Playwright
+description: >-
+  Install the pinned Python Playwright package on disposable GitHub runners,
+  or verify the package baked into a persistent lab runner, then install the
+  matching Chromium bundle.
+
+inputs:
+  version:
+    description: The exact Python Playwright version required by the job.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Playwright and Chromium
+      shell: bash
+      env:
+        PLAYWRIGHT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        requirement="playwright==$PLAYWRIGHT_VERSION"
+        if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+          python3 -m pip install "$requirement"
+          python3 -m playwright install --with-deps chromium
+          exit 0
+        fi
+
+        actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+        test "$requirement" = "playwright==$actual"
+        python3 -m playwright install chromium

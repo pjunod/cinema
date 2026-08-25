@@ -180,7 +180,9 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_provisions_concrete_apple_devices_before_testing(self):
         workflow = read(".github/workflows/ci.yml")
         makefile = read("Makefile")
-        self.assertIn("DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer", workflow)
+        self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
+        self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", workflow)
+        self.assertIn("brew install xcodegen", workflow)
         self.assertIn('grep -Fxq "Xcode 26.6"', workflow)
         self.assertIn('grep -Fxq "Build version 17F113"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
@@ -358,14 +360,20 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
+        action = read(".github/actions/playwright/action.yml")
 
         # The Playwright pip pin and the browser-bundle cache key must move
         # together, or a version bump silently reuses the wrong browsers.
-        pip_pin = re.search(r"playwright==(\d+\.\d+\.\d+)", workflow)
+        action_pin = re.search(r'PLAYWRIGHT_VERSION: \$\{\{ inputs\.version \}\}', action)
+        workflow_pin = re.search(
+            r"uses: \./\.github/actions/playwright\n\s+with:\n\s+version: \"(\d+\.\d+\.\d+)\"",
+            workflow,
+        )
         cache_pin = re.search(r"playwright-\$\{\{ runner\.os \}\}-(\d+\.\d+\.\d+)", workflow)
-        self.assertIsNotNone(pip_pin)
+        self.assertIsNotNone(action_pin)
+        self.assertIsNotNone(workflow_pin)
         self.assertIsNotNone(cache_pin)
-        self.assertEqual(pip_pin.group(1), cache_pin.group(1))
+        self.assertEqual(workflow_pin.group(1), cache_pin.group(1))
 
         # Both Android jobs reuse the GHCR toolchain image keyed on the
         # Dockerfile hash, and the Makefile honors the pre-pull instead of
@@ -458,15 +466,41 @@ class OperationsContractCase(unittest.TestCase):
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
-        general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
-        high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
-        ffmpeg6 = "    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]"
-        high_cpu_ffmpeg6 = (
-            "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]"
+        def choose(hosted, labels):
+            return (
+                "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
+                + f"'[\"{hosted}\"]' || '[\"self-hosted\",{labels}]') "
+                + "}}"
+            )
+
+        general = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"general\"'
         )
-        android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
+        high_cpu = choose(
+            "ubuntu-24.04",
+            '\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"',
+        )
+        ffmpeg6 = choose(
+            "ubuntu-24.04",
+            '\"Linux\",\"X64\",\"lab\",\"general\",\"ffmpeg-6\"',
+        )
+        high_cpu_ffmpeg6 = (
+            choose(
+                "ubuntu-24.04",
+                (
+                    '\"Linux\",\"X64\",\"lab\",\"general\",'
+                    '\"high-cpu\",\"ffmpeg-6\"'
+                ),
+            )
+        )
+        android = choose(
+            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"android-kvm\"'
+        )
+        apple = choose(
+            "macos-26",
+            '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
+        )
         hosted_linux = "    runs-on: ubuntu-latest"
-        apple = "    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]"
 
         for path in (
             ".github/workflows/ci.yml",
@@ -511,6 +545,23 @@ class OperationsContractCase(unittest.TestCase):
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
                 self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
+
+    def test_ci_runner_mode_has_one_validated_operator_switch(self):
+        ci = read(".github/workflows/ci.yml")
+        script = ROOT / "scripts/ci-runner-mode"
+
+        self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
+        self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
+        self.assertTrue(script.stat().st_mode & 0o111)
+        subprocess.run(
+            [str(script), "--help"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        switch = script.read_text()
+        self.assertIn("gh variable set CI_RUNNER_MODE", switch)
+        self.assertIn("self-hosted|github", switch)
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):
         # An unpinned `apt-get install -y ffmpeg` on `ubuntu-latest` made the
