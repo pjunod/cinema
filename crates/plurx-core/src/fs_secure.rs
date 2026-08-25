@@ -2439,6 +2439,28 @@ pub fn clear_scratch_with_protected_blocking(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+
+    /// Pin the complete descriptor contract used by authenticated response
+    /// snapshots on every supported platform. This catches both a macOS
+    /// `shm_open` descriptor that is not a seekable regular file and a Linux
+    /// memfd whose sealing/readback path has regressed.
+    #[tokio::test]
+    async fn anonymous_memory_file_round_trips_after_sealing() {
+        let expected = b"authenticated response snapshot";
+        let mut file = anonymous_memory_file().expect("anonymous snapshot file");
+
+        file.write_all(expected).await.expect("write snapshot");
+        file.flush().await.expect("flush snapshot");
+        seal_anonymous_memory_file(&file).expect("seal snapshot");
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .expect("rewind snapshot");
+
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual).await.expect("read snapshot");
+        assert_eq!(actual, expected);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
