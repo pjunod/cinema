@@ -240,3 +240,15 @@ The §3 attachment, §4 init identity, §5 durability + adoption (including the
 one-`read_dir` reconcile), §6 zero refusal, and §7's create/segment/lifecycle
 contract are all in, with the four wait-pool cases and the process-state
 attachment test among the module suites.
+
+## 11. M4 resolution note (2026-08-25)
+
+[VOD-M4-HANDOFF.md](VOD-M4-HANDOFF.md) resolves the M4-bound items above:
+native WebVTT VOD sessions, a VOD-shaped `/status` response, the persisted
+30-second materialization watchdog, and VOD `session_start`/`session_end`
+telemetry on the existing playback-event stream. The transcode-rung D6 gate
+and durable-across-restart 410 distinction remain deliberately later work;
+neither was silently widened by web adoption. Wait-pool caps also remain
+internal safety constants. The audio-outrunning-video coverage check is a
+separate indexer correctness item rather than an M4 client-adoption behavior;
+until fixed, that source shape safely keeps the legacy presentation.

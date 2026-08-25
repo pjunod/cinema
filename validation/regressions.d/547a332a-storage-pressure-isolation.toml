@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["547a332a", "8834388e", "bb88545e", "2befdeee"]
+points = ["core.media", "persistence.upgrades", "server.api", "operations.packaging", "validation.framework"]
+checks = ["rust-gate", "database-upgrades", "cluster-auth", "operations-contract", "resource-bounds", "catalog-contract", "history-regressions"]
+reason = "The retained configuration and startup regressions prove omitted roots preserve every legacy path, explicit cache and transcode roots cannot alias durable data, shared cache, or credentials through canonical paths, inodes, stacked Linux mounts, or mount-source ancestry, and only an owner-claimed scratch tree may be cleared after the daemon lock is held. Descriptor-relative cleanup is bounded by device, depth, entry count, ownership, and mode; crash hooks prove an incomplete scratch claim never authorizes deletion. The mapped macOS snapshot experiment and its mapping were explicitly superseded by the ownership-reconciliation commit once active issue #550 claimed that independent correction; their net tree change is empty, and #543 retains only the shared-cache topology regression. Migration keeps storage.data_dir authoritative and the replicated startup gate exercises the bounded read pool without changing the WAL, snapshot, sync, or election defaults. Operations and resource checks retain the explicit environment, example, mount, capacity, restart, rollback, and private-image evidence contract."

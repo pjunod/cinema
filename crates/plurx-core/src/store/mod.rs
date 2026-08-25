@@ -228,6 +228,9 @@ pub mod keys {
     /// Opt-in node-local network history used to seed Auto quality. Missing
     /// and every value other than `"1"` are off.
     pub const PLAYBACK_NETWORK_PRIORS: &str = "playback.network_priors";
+    /// Opt-in web Auto controller. Missing and every value other than `"1"`
+    /// are off, leaving the server's initial Auto choice in place.
+    pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
     /// Last successful bounded telemetry-prune pass, in unix seconds.
     pub const JOB_LAST_TELEMETRY_PRUNE: &str = "jobs.last_telemetry_prune";
     pub const TELEMETRY_RETAIN_DEFAULT_DAYS: i64 = 30;
@@ -325,6 +328,11 @@ pub mod keys {
     /// Server ceiling, in seconds, for one blocking VOD segment fetch. The
     /// per-request `block_budget_secs` is clamped to this.
     pub const VOD_BLOCK_BUDGET_SECS: &str = "playback.vod_block_budget_secs";
+    /// Hard producer deadline from the first blocked request for a planned
+    /// segment until bytes or a typed `producer_failed` answer. Distinct from
+    /// the shorter per-request block deadline so clients can retry 503s while
+    /// the same bounded production attempt continues.
+    pub const VOD_MATERIALIZE_BUDGET_SECS: &str = "playback.vod_materialize_budget_secs";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not

@@ -1683,10 +1683,7 @@ async fn start_voter(
         secret_api: secrets.api.clone(),
         tls_raft: active_transport.then_some(ServerTlsConfig::TlsAutoCertificates),
         tls_api: active_transport.then_some(ServerTlsConfig::TlsAutoCertificates),
-        health_check_delay_secs: 0,
-        wal_size: HIQLITE_WAL_SIZE_BYTES,
-        raft_config: NodeConfig::default_raft_config(10_000),
-        ..Default::default()
+        ..production_hiqlite_defaults(config)
     };
     let client = hiqlite::start_node(node_config)
         .await
@@ -1732,6 +1729,19 @@ async fn start_voter(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok((client, local))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
+    NodeConfig {
+        health_check_delay_secs: 0,
+        wal_size: HIQLITE_WAL_SIZE_BYTES,
+        read_pool_size: config.cluster.read_pool_size,
+        // Snapshot, disaster-recovery retention, WAL sync, heartbeat, and
+        // election settings remain Hiqlite's established production values.
+        raft_config: NodeConfig::default_raft_config(10_000),
+        ..Default::default()
+    }
 }
 
 /// Build Hiqlite's connection roster without treating durable Raft ids as
@@ -2916,6 +2926,30 @@ mod tests {
             config.nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
             vec![1, 3],
             "the compatibility path must not duplicate a connection target"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn read_pool_tuning_leaves_raft_and_wal_safety_defaults_unchanged() {
+        let mut config = Config::default();
+        config.cluster.read_pool_size = 16;
+        let defaults = production_hiqlite_defaults(&config);
+        assert_eq!(defaults.read_pool_size, 16);
+        assert_eq!(defaults.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        assert_eq!(defaults.raft_config.heartbeat_interval, 500);
+        assert_eq!(defaults.raft_config.election_timeout_min, 1_500);
+        assert_eq!(defaults.raft_config.election_timeout_max, 3_000);
+        assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
+        assert_eq!(defaults.raft_config.purge_batch_size, 1);
+        assert!(
+            format!("{:?}", defaults.raft_config.snapshot_policy).contains("10000"),
+            "snapshot policy must stay at 10,000 entries"
+        );
+        assert_eq!(
+            format!("{:?}", defaults.wal_sync),
+            format!("{:?}", NodeConfig::default().wal_sync),
+            "read-pool tuning must not change immediate-async WAL sync"
         );
     }
 

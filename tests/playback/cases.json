@@ -109,7 +109,7 @@
           "operation": "shaped-cliff",
           "recovery": {
             "sample_interval_seconds": 1,
-            "recovery_observe_seconds": 45,
+            "recovery_observe_seconds": 60,
             "baseline_minimum_clock_rate": 0.9,
             "maximum_automatic_restarts": 1,
             "maximum_upgrades_per_60s": 1,
@@ -117,6 +117,37 @@
             "sustained_seconds": 10,
             "sustained_minimum_clock_rate": 0.9
           }
+        }
+      ]
+    },
+    "vod": {
+      "requires_vod": true,
+      "cases": [
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "steady",
+          "require_vod": true,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
+        },
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "seek-storm",
+          "require_vod": true,
+          "seeks": 20,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
+        },
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "auto",
+          "operation": "suspend-resume",
+          "require_vod": true,
+          "suspend_seconds": 8,
+          "maximum_session_creates": 1,
+          "maximum_keeper_fires": 0
         }
       ]
     }

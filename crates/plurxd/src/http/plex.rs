@@ -107,7 +107,7 @@ fn plex_machine_identifier<'a>(
 pub async fn identity(State(state): State<AppState>) -> Result<Response, ApiError> {
     let instance_id = state.store.instance_id().await?;
     let id = plex_machine_identifier(&instance_id, &state.node_id, state.cluster_advertisement);
-    Ok(xml(plex::identity_container(&id, version())))
+    Ok(xml(plex::identity_container(id, version())))
 }
 
 /// GET / for Plex clients — server capabilities.
@@ -119,7 +119,7 @@ pub async fn root(State(state): State<AppState>) -> Result<Response, ApiError> {
         .get_setting(plurx_core::store::keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
-    Ok(xml(plex::root_container(&id, &name, version())))
+    Ok(xml(plex::root_container(id, &name, version())))
 }
 
 /// GET /library — the library root container clients load before sections.

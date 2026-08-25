@@ -13,6 +13,8 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
@@ -1009,14 +1011,217 @@ fn count_directory_capability(
 
 /// Inspect one directory through a no-follow descriptor and return its inode
 /// identity for a later quarantine comparison.
+pub fn directory_identity_nofollow_blocking(path: &Path) -> io::Result<FileIdentity> {
+    let directory = open_directory_nofollow_blocking(path)?;
+    file_identity(&directory)
+}
+
+/// Return the held directory and parent inode chain through the current mount
+/// namespace. This catches ordinary path aliases; Linux bind-source ancestry
+/// additionally requires [`directory_source_ancestry_alias_blocking`].
+pub fn directory_ancestor_identities_nofollow_blocking(
+    path: &Path,
+) -> io::Result<Vec<FileIdentity>> {
+    let mut directory = open_directory_nofollow_blocking(path)?;
+    let parent_name = CString::new("..").expect("static parent component");
+    let mut identities = Vec::new();
+    for _ in 0..256 {
+        let identity = file_identity(&directory)?;
+        identities.push(identity);
+        let parent = File::from(openat_owned(
+            directory.as_raw_fd(),
+            &parent_name,
+            libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK,
+        )?);
+        let parent_identity = file_identity(&parent)?;
+        if parent_identity.same_inode(identity) {
+            return Ok(identities);
+        }
+        directory = parent;
+    }
+    Err(io::Error::other(
+        "directory ancestry exceeded the filesystem depth bound",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Eq, PartialEq)]
+struct LinuxMountCoordinate {
+    major: u64,
+    minor: u64,
+    path_within_filesystem: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(encoded: &str) -> io::Result<PathBuf> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            if index + 3 >= bytes.len()
+                || !bytes[index + 1..=index + 3]
+                    .iter()
+                    .all(|byte| matches!(byte, b'0'..=b'7'))
+            {
+                return Err(invalid_path("invalid escaped path in Linux mountinfo"));
+            }
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            decoded.push(value);
+            index += 4;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Ok(PathBuf::from(OsString::from_vec(decoded)))
+}
+
+#[cfg(target_os = "linux")]
+fn normalized_absolute_path(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(invalid_path("mount coordinate is not absolute"));
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(invalid_path("mount coordinate escapes filesystem root"));
+                }
+            }
+            Component::Prefix(_) => {
+                return Err(invalid_path("invalid Linux mount coordinate prefix"));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_coordinate_from(
+    mountinfo: &str,
+    path: &Path,
+    mount_id: u64,
+) -> io::Result<LinuxMountCoordinate> {
+    if !path.is_absolute() {
+        return Err(invalid_path("storage root is not absolute"));
+    }
+    let mut selected: Option<(u64, u64, PathBuf, PathBuf)> = None;
+    for line in mountinfo.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 || !fields.contains(&"-") {
+            return Err(invalid_path("malformed Linux mountinfo record"));
+        }
+        let record_mount_id = fields[0]
+            .parse::<u64>()
+            .map_err(|_| invalid_path("invalid Linux mountinfo mount id"))?;
+        if record_mount_id != mount_id {
+            continue;
+        }
+        let (major, minor) = fields[2]
+            .split_once(':')
+            .ok_or_else(|| invalid_path("invalid Linux mountinfo device"))?;
+        let major = major
+            .parse::<u64>()
+            .map_err(|_| invalid_path("invalid Linux mountinfo major device"))?;
+        let minor = minor
+            .parse::<u64>()
+            .map_err(|_| invalid_path("invalid Linux mountinfo minor device"))?;
+        let filesystem_root = decode_mountinfo_path(fields[3])?;
+        let mount_point = decode_mountinfo_path(fields[4])?;
+        if !path.starts_with(&mount_point) {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(io::Error::other(
+                "Linux mountinfo contains duplicate records for one mount id",
+            ));
+        }
+        selected = Some((major, minor, filesystem_root, mount_point));
+    }
+    let (major, minor, filesystem_root, mount_point) =
+        selected.ok_or_else(|| io::Error::other("storage root has no Linux mountinfo entry"))?;
+    let relative = path
+        .strip_prefix(&mount_point)
+        .map_err(|_| io::Error::other("storage root escaped its selected mount point"))?;
+    let path_within_filesystem = normalized_absolute_path(&filesystem_root.join(relative))?;
+    Ok(LinuxMountCoordinate {
+        major,
+        minor,
+        path_within_filesystem,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_directory_mount_id(path: &Path) -> io::Result<u64> {
+    // Bind the namespace record to the exact no-follow descriptor used for
+    // identity validation. This avoids selecting a hidden lower record when
+    // two mounts are stacked at one visible mount point.
+    let directory = open_directory_nofollow_blocking(path)?;
+    let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", directory.as_raw_fd()))?;
+    fdinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("mnt_id:"))
+        .map(str::trim)
+        .ok_or_else(|| io::Error::other("directory fdinfo has no Linux mount id"))?
+        .parse::<u64>()
+        .map_err(|_| io::Error::other("directory fdinfo has an invalid Linux mount id"))
+}
+
+/// Return whether two Linux directory paths name the same underlying
+/// filesystem subtree in either direction, including through bind mounts.
+/// `/proc/self/mountinfo` is the kernel's view of the current mount namespace;
+/// parse or lookup failure is returned so destructive callers fail closed.
+#[cfg(target_os = "linux")]
+pub fn directory_source_ancestry_alias_blocking(first: &Path, second: &Path) -> io::Result<bool> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let first_mount_id = linux_directory_mount_id(first)?;
+    let second_mount_id = linux_directory_mount_id(second)?;
+    let first = linux_mount_coordinate_from(&mountinfo, first, first_mount_id)?;
+    let second = linux_mount_coordinate_from(&mountinfo, second, second_mount_id)?;
+    Ok(first.major == second.major
+        && first.minor == second.minor
+        && (first
+            .path_within_filesystem
+            .starts_with(&second.path_within_filesystem)
+            || second
+                .path_within_filesystem
+                .starts_with(&first.path_within_filesystem)))
+}
+
+/// Non-Linux Unix targets do not expose Linux bind mounts or mountinfo. Their
+/// supported path aliases remain covered by canonical paths and inode-parent
+/// ancestry checks.
+#[cfg(not(target_os = "linux"))]
+pub fn directory_source_ancestry_alias_blocking(_first: &Path, _second: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// Inspect one regular file through a no-follow descriptor for use as a
+/// protected identity during descriptor-relative cleanup.
+pub fn regular_file_identity_nofollow_blocking(path: &Path) -> io::Result<FileIdentity> {
+    let file = open_read_nofollow_blocking(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("protected path is not a regular file"));
+    }
+    file_identity(&file)
+}
+
+/// Tokio wrapper for [`directory_identity_nofollow_blocking`].
 pub async fn directory_identity_nofollow(path: &Path) -> io::Result<FileIdentity> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let directory = open_directory_nofollow_blocking(&path)?;
-        file_identity(&directory)
-    })
-    .await
-    .map_err(io::Error::other)?
+    tokio::task::spawn_blocking(move || directory_identity_nofollow_blocking(&path))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Return the final path component without lossy UTF-8 conversion.
@@ -1620,9 +1825,992 @@ pub async fn restore_child_noreplace(
     .map_err(io::Error::other)?
 }
 
+const SCRATCH_CLEANUP_MAX_ENTRIES: usize = 120_100;
+const SCRATCH_CLEANUP_MAX_DEPTH: usize = 16;
+
+fn scratch_marker_identity(
+    directory: &File,
+    marker: &CString,
+    expected: &[u8],
+) -> io::Result<FileIdentity> {
+    use std::io::Read;
+
+    let mut file = File::from(openat_owned(
+        directory.as_raw_fd(),
+        marker,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+    )?);
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::Error::other(
+            "scratch ownership marker must be a daemon-owned regular file with mode 0600",
+        ));
+    }
+    let before = file_identity(&file)?;
+    let mut actual = Vec::with_capacity(expected.len().saturating_add(1));
+    std::io::Read::by_ref(&mut file)
+        .take(expected.len().saturating_add(1) as u64)
+        .read_to_end(&mut actual)?;
+    if actual != expected || file_identity(&file)? != before {
+        return Err(io::Error::other(
+            "scratch ownership marker contents or identity do not match",
+        ));
+    }
+    Ok(before)
+}
+
+fn scratch_child_identity(directory: &File, name: &CString) -> io::Result<FileIdentity> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    Ok(FileIdentity {
+        device: stat_device(&stat),
+        inode: stat.st_ino,
+        size: stat.st_size.max(0) as u64,
+        changed_seconds: stat.st_ctime,
+        changed_nanoseconds: stat.st_ctime_nsec,
+    })
+}
+
+fn validate_scratch_entry(stat: &libc::stat) -> io::Result<bool> {
+    if stat.st_uid != unsafe { libc::geteuid() } {
+        return Err(io::Error::other(
+            "scratch tree contains an entry owned by another uid",
+        ));
+    }
+    let is_directory = match stat.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => true,
+        libc::S_IFREG => false,
+        libc::S_IFLNK => Err(io::Error::other("scratch tree contains a symbolic link"))?,
+        _ => Err(io::Error::other(
+            "scratch tree contains a device or other special file",
+        ))?,
+    };
+    if stat.st_mode & 0o022 != 0 {
+        return Err(io::Error::other(
+            "scratch tree contains an entry with group/world-writable permissions",
+        ));
+    }
+    Ok(is_directory)
+}
+
+fn scratch_has_only_preserved(directory: &File, preserved: &[&CStr]) -> io::Result<bool> {
+    let entries = independent_directory_stream(directory)?;
+    let result = (|| loop {
+        let entry = unsafe { libc::readdir(entries) };
+        if entry.is_null() {
+            return Ok(true);
+        }
+        let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if child.to_bytes() == b"."
+            || child.to_bytes() == b".."
+            || preserved
+                .iter()
+                .any(|name| child.to_bytes() == name.to_bytes())
+        {
+            continue;
+        }
+        return Ok(false);
+    })();
+    unsafe { libc::closedir(entries) };
+    result
+}
+
+fn count_scratch_capability(
+    directory: &File,
+    marker: Option<&CStr>,
+    counted: &mut usize,
+    depth: usize,
+    root_device: u64,
+    protected: &[FileIdentity],
+) -> io::Result<()> {
+    let entries = independent_directory_stream(directory)?;
+    let result = (|| {
+        loop {
+            let entry = unsafe { libc::readdir(entries) };
+            if entry.is_null() {
+                break;
+            }
+            let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if child.to_bytes() == b"."
+                || child.to_bytes() == b".."
+                || (depth == 0 && marker.is_some_and(|name| name.to_bytes() == child.to_bytes()))
+            {
+                continue;
+            }
+            *counted = counted.saturating_add(1);
+            if *counted > SCRATCH_CLEANUP_MAX_ENTRIES {
+                return Err(io::Error::other(
+                    "scratch tree exceeded its cleanup entry bound",
+                ));
+            }
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    child.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let stat = unsafe { stat.assume_init() };
+            if stat_device(&stat) != root_device {
+                return Err(io::Error::other(
+                    "scratch tree crosses a filesystem mount boundary",
+                ));
+            }
+            let child_identity = FileIdentity {
+                device: stat_device(&stat),
+                inode: stat.st_ino,
+                size: stat.st_size.max(0) as u64,
+                changed_seconds: stat.st_ctime,
+                changed_nanoseconds: stat.st_ctime_nsec,
+            };
+            if protected
+                .iter()
+                .any(|identity| identity.same_inode(child_identity))
+            {
+                return Err(io::Error::other(
+                    "scratch tree overlaps a protected storage identity",
+                ));
+            }
+            if validate_scratch_entry(&stat)? {
+                if depth >= SCRATCH_CLEANUP_MAX_DEPTH {
+                    return Err(io::Error::other(
+                        "scratch tree exceeded its cleanup depth bound",
+                    ));
+                }
+                let name = CString::new(child.to_bytes())
+                    .map_err(|_| invalid_path("scratch child contains NUL"))?;
+                let child_directory = File::from(openat_owned(
+                    directory.as_raw_fd(),
+                    &name,
+                    libc::O_RDONLY
+                        | libc::O_DIRECTORY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                )?);
+                if !file_identity(&child_directory)?.same_inode(child_identity) {
+                    return Err(io::Error::other(
+                        "scratch directory child changed during cleanup preflight",
+                    ));
+                }
+                count_scratch_capability(
+                    &child_directory,
+                    None,
+                    counted,
+                    depth + 1,
+                    root_device,
+                    protected,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    unsafe { libc::closedir(entries) };
+    result
+}
+
+fn clear_scratch_capability(
+    directory: &File,
+    marker: Option<&CStr>,
+    depth: usize,
+    removed: &mut usize,
+    root_device: u64,
+    protected: &[FileIdentity],
+) -> io::Result<()> {
+    let entries = independent_directory_stream(directory)?;
+    let result = (|| {
+        loop {
+            let entry = unsafe { libc::readdir(entries) };
+            if entry.is_null() {
+                break;
+            }
+            let child = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if child.to_bytes() == b"."
+                || child.to_bytes() == b".."
+                || (depth == 0 && marker.is_some_and(|name| name.to_bytes() == child.to_bytes()))
+            {
+                continue;
+            }
+            *removed = removed.saturating_add(1);
+            if *removed > SCRATCH_CLEANUP_MAX_ENTRIES {
+                return Err(io::Error::other(
+                    "scratch tree exceeded its cleanup entry bound",
+                ));
+            }
+            let name = CString::new(child.to_bytes())
+                .map_err(|_| invalid_path("scratch child contains NUL"))?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
+                return Err(error);
+            }
+            let stat = unsafe { stat.assume_init() };
+            if stat_device(&stat) != root_device {
+                return Err(io::Error::other(
+                    "scratch tree crosses a filesystem mount boundary",
+                ));
+            }
+            let observed = FileIdentity {
+                device: stat_device(&stat),
+                inode: stat.st_ino,
+                size: stat.st_size.max(0) as u64,
+                changed_seconds: stat.st_ctime,
+                changed_nanoseconds: stat.st_ctime_nsec,
+            };
+            if protected
+                .iter()
+                .any(|identity| identity.same_inode(observed))
+            {
+                return Err(io::Error::other(
+                    "scratch tree overlaps a protected storage identity",
+                ));
+            }
+            let is_directory = validate_scratch_entry(&stat)?;
+            let quarantine = CString::new(format!(
+                ".plurx-scratch-delete-{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .expect("UUID scratch quarantine contains no NUL");
+            if unsafe {
+                libc::renameat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    directory.as_raw_fd(),
+                    quarantine.as_ptr(),
+                )
+            } != 0
+            {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
+                return Err(error);
+            }
+            let quarantined = scratch_child_identity(directory, &quarantine)?;
+            if !quarantined.same_inode(observed) {
+                return Err(io::Error::other(
+                    "scratch child changed before quarantine; replacement was not deleted",
+                ));
+            }
+            if is_directory {
+                if depth >= SCRATCH_CLEANUP_MAX_DEPTH {
+                    return Err(io::Error::other(
+                        "scratch tree exceeded its cleanup depth bound",
+                    ));
+                }
+                let child_directory = File::from(openat_owned(
+                    directory.as_raw_fd(),
+                    &quarantine,
+                    libc::O_RDONLY
+                        | libc::O_DIRECTORY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                )?);
+                if !file_identity(&child_directory)?.same_inode(quarantined) {
+                    return Err(io::Error::other(
+                        "scratch directory changed after quarantine",
+                    ));
+                }
+                clear_scratch_capability(
+                    &child_directory,
+                    None,
+                    depth + 1,
+                    removed,
+                    root_device,
+                    protected,
+                )?;
+                if !scratch_child_identity(directory, &quarantine)?.same_inode(quarantined) {
+                    return Err(io::Error::other(
+                        "scratch directory quarantine changed before removal",
+                    ));
+                }
+                if unsafe {
+                    libc::unlinkat(
+                        directory.as_raw_fd(),
+                        quarantine.as_ptr(),
+                        libc::AT_REMOVEDIR,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            } else if unsafe { libc::unlinkat(directory.as_raw_fd(), quarantine.as_ptr(), 0) } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        directory.sync_all()
+    })();
+    unsafe { libc::closedir(entries) };
+    result
+}
+
+#[derive(Clone, Copy)]
+enum ScratchHookPhase {
+    AfterPendingCreate,
+    AfterMarkerCreate,
+    BeforeCleanup,
+    AfterCleanup,
+}
+
+fn claim_and_clear_scratch_inner(
+    path: &Path,
+    marker_name: Option<&str>,
+    expected_marker: &[u8],
+    protected: &[FileIdentity],
+    hook: Option<&dyn Fn(ScratchHookPhase)>,
+) -> io::Result<()> {
+    let directory = open_directory_nofollow_blocking(path)?;
+    let root_identity = file_identity(&directory)?;
+    if protected
+        .iter()
+        .any(|identity| identity.same_inode(root_identity))
+    {
+        return Err(io::Error::other(
+            "scratch root aliases a protected storage identity",
+        ));
+    }
+    let metadata = directory.metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+        return Err(io::Error::other(
+            "scratch root must be owned by the daemon uid and not group/world-writable",
+        ));
+    }
+    let marker = marker_name.map(child_name).transpose()?;
+    let marker_identity = if let Some(marker) = marker.as_ref() {
+        let pending = child_name(&format!(
+            "{}.claiming",
+            marker_name.expect("marker CString came from marker name")
+        ))?;
+        match scratch_marker_identity(&directory, marker, expected_marker) {
+            Ok(identity) => match scratch_marker_identity(&directory, &pending, expected_marker) {
+                Ok(pending_identity) => {
+                    if !pending_identity.same_inode(identity)
+                        || !scratch_has_only_preserved(
+                            &directory,
+                            &[pending.as_c_str(), marker.as_c_str()],
+                        )?
+                    {
+                        return Err(io::Error::other(
+                            "scratch ownership claim is incomplete; refusing destructive cleanup",
+                        ));
+                    }
+                    if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) } != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    directory.sync_all()?;
+                    identity
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => identity,
+                Err(error) => return Err(error),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let pending_identity = match scratch_marker_identity(
+                    &directory,
+                    &pending,
+                    expected_marker,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // A durable pending marker is deliberately not an
+                        // ownership grant. Crash recovery may promote it only
+                        // while it remains the directory's sole entry.
+                        if !scratch_has_only_preserved(&directory, &[])? {
+                            return Err(io::Error::other(
+                                "explicit scratch root was populated before ownership could be claimed",
+                            ));
+                        }
+                        let raw = unsafe {
+                            libc::openat(
+                                directory.as_raw_fd(),
+                                pending.as_ptr(),
+                                libc::O_WRONLY
+                                    | libc::O_CREAT
+                                    | libc::O_EXCL
+                                    | libc::O_NOFOLLOW
+                                    | libc::O_CLOEXEC,
+                                0o600,
+                            )
+                        };
+                        if raw < 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        let mut file = File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+                        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        file.write_all(expected_marker)?;
+                        file.sync_all()?;
+                        directory.sync_all()?;
+                        if let Some(hook) = hook {
+                            hook(ScratchHookPhase::AfterPendingCreate);
+                        }
+                        scratch_marker_identity(&directory, &pending, expected_marker)?
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !scratch_has_only_preserved(&directory, &[pending.as_c_str()])? {
+                    return Err(io::Error::other(
+                        "explicit scratch root was populated before ownership could be claimed",
+                    ));
+                }
+                if !scratch_marker_identity(&directory, &pending, expected_marker)?
+                    .same_inode(pending_identity)
+                {
+                    return Err(io::Error::other(
+                        "scratch pending ownership marker changed before publication",
+                    ));
+                }
+                if unsafe {
+                    libc::linkat(
+                        directory.as_raw_fd(),
+                        pending.as_ptr(),
+                        directory.as_raw_fd(),
+                        marker.as_ptr(),
+                        0,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                directory.sync_all()?;
+                if let Some(hook) = hook {
+                    hook(ScratchHookPhase::AfterMarkerCreate);
+                }
+                if !scratch_has_only_preserved(
+                    &directory,
+                    &[pending.as_c_str(), marker.as_c_str()],
+                )? {
+                    return Err(io::Error::other(
+                        "explicit scratch root was populated before ownership could be finalized",
+                    ));
+                }
+                if unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                directory.sync_all()?;
+                scratch_marker_identity(&directory, marker, expected_marker)?
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        root_identity
+    };
+
+    let current = open_directory_nofollow_blocking(path)?;
+    if !file_identity(&current)?.same_inode(root_identity) {
+        return Err(io::Error::other(
+            "scratch root changed before cleanup; refusing path-based replacement",
+        ));
+    }
+    if let Some(marker) = marker.as_ref() {
+        let current_marker = scratch_marker_identity(&directory, marker, expected_marker)?;
+        if !current_marker.same_inode(marker_identity) {
+            return Err(io::Error::other(
+                "scratch ownership marker changed before cleanup",
+            ));
+        }
+    }
+    if let Some(hook) = hook {
+        hook(ScratchHookPhase::BeforeCleanup);
+    }
+    let mut counted = 0usize;
+    count_scratch_capability(
+        &directory,
+        marker.as_deref(),
+        &mut counted,
+        0,
+        root_identity.device,
+        protected,
+    )?;
+    let mut removed = 0usize;
+    clear_scratch_capability(
+        &directory,
+        marker.as_deref(),
+        0,
+        &mut removed,
+        root_identity.device,
+        protected,
+    )?;
+    if let Some(hook) = hook {
+        hook(ScratchHookPhase::AfterCleanup);
+    }
+    let only_preserved = match marker.as_deref() {
+        Some(marker) => scratch_has_only_preserved(&directory, &[marker])?,
+        None => scratch_has_only_preserved(&directory, &[])?,
+    };
+    if !only_preserved {
+        return Err(io::Error::other(
+            "scratch directory received new entries during cleanup",
+        ));
+    }
+    if let Some(marker) = marker.as_ref() {
+        let current_marker = scratch_marker_identity(&directory, marker, expected_marker)?;
+        if !current_marker.same_inode(marker_identity) {
+            return Err(io::Error::other(
+                "scratch ownership marker changed during cleanup",
+            ));
+        }
+    }
+    let current = open_directory_nofollow_blocking(path)?;
+    if !file_identity(&current)?.same_inode(root_identity) {
+        return Err(io::Error::other(
+            "scratch root changed during cleanup; replacement was not touched",
+        ));
+    }
+    Ok(())
+}
+
+/// Claim an empty explicit scratch directory and clear only the held,
+/// marker-bound inode on later boots. Every traversal stays relative to one
+/// no-follow descriptor, so path or marker replacement cannot redirect
+/// deletion into an unowned tree.
+pub fn claim_and_clear_owned_scratch_blocking(
+    path: &Path,
+    marker_name: &str,
+    expected_marker: &[u8],
+) -> io::Result<()> {
+    claim_and_clear_owned_scratch_with_protected_blocking(path, marker_name, expected_marker, &[])
+}
+
+/// Marker-bound scratch cleanup with additional authoritative/persistent
+/// inode guards. Protected identities are rejected at the root and anywhere
+/// below it, including through bind-mount aliases invisible to lexical paths.
+pub fn claim_and_clear_owned_scratch_with_protected_blocking(
+    path: &Path,
+    marker_name: &str,
+    expected_marker: &[u8],
+    protected: &[FileIdentity],
+) -> io::Result<()> {
+    if expected_marker.is_empty() || expected_marker.len() > 4_096 {
+        return Err(invalid_path("invalid scratch ownership marker"));
+    }
+    claim_and_clear_scratch_inner(path, Some(marker_name), expected_marker, protected, None)
+}
+
+/// Clear a legacy scratch directory through a retained no-follow descriptor.
+/// The caller still owns compatibility policy for whether that path may be a
+/// symlink; this helper ensures a later rename cannot redirect cleanup.
+pub fn clear_scratch_blocking(path: &Path) -> io::Result<()> {
+    clear_scratch_with_protected_blocking(path, &[])
+}
+
+/// Legacy scratch cleanup with additional authoritative/persistent inode
+/// guards for bind-alias safety.
+pub fn clear_scratch_with_protected_blocking(
+    path: &Path,
+    protected: &[FileIdentity],
+) -> io::Result<()> {
+    claim_and_clear_scratch_inner(path, None, &[], protected, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_mount_coordinates_expose_bind_source_ancestry() {
+        let mountinfo = "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                         2 1 8:1 /safe-lower /scratch rw - ext4 /dev/root rw\n\
+                         3 1 8:1 /durable/cache /scratch rw - ext4 /dev/root rw\n";
+        let durable = linux_mount_coordinate_from(mountinfo, Path::new("/durable"), 1)
+            .expect("durable coordinate");
+        let hidden_lower = linux_mount_coordinate_from(mountinfo, Path::new("/scratch"), 2)
+            .expect("hidden lower bind coordinate");
+        let scratch = linux_mount_coordinate_from(mountinfo, Path::new("/scratch"), 3)
+            .expect("visible top bind coordinate");
+        assert_eq!(
+            hidden_lower.path_within_filesystem,
+            Path::new("/safe-lower")
+        );
+        assert_eq!(durable.major, scratch.major);
+        assert_eq!(durable.minor, scratch.minor);
+        assert!(
+            scratch
+                .path_within_filesystem
+                .starts_with(&durable.path_within_filesystem),
+            "the bind target must retain its source position inside the filesystem"
+        );
+    }
+
+    /// Opt-in real mount-namespace regression for privileged Linux validation:
+    /// `PLURX_RUN_BIND_MOUNT_TEST=1 cargo test -p plurx-core real_bind`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_bind_mount_source_ancestry_is_refused() {
+        if std::env::var_os("PLURX_RUN_BIND_MOUNT_TEST").is_none() {
+            return;
+        }
+        struct Mounted(PathBuf, usize);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                for _ in 0..self.1 {
+                    let _ = std::process::Command::new("umount").arg(&self.0).status();
+                }
+            }
+        }
+
+        let root = tempfile::tempdir().expect("mount test root");
+        let durable = root.path().join("durable");
+        let source = durable.join("persistent-cache");
+        let safe_lower = root.path().join("safe-lower");
+        let scratch = root.path().join("scratch-bind");
+        std::fs::create_dir_all(&source).expect("bind source");
+        std::fs::create_dir(&safe_lower).expect("safe lower bind source");
+        std::fs::create_dir(&scratch).expect("bind target");
+        let mut mounted = Mounted(scratch.clone(), 0);
+        for source in [&safe_lower, &source] {
+            let status = std::process::Command::new("mount")
+                .arg("--bind")
+                .arg(source)
+                .arg(&scratch)
+                .status()
+                .expect("run mount --bind");
+            assert!(status.success(), "opt-in bind mount setup failed: {status}");
+            mounted.1 += 1;
+        }
+        let _mounted = mounted;
+        let durable = std::fs::canonicalize(durable).expect("canonical durable root");
+        let scratch = std::fs::canonicalize(scratch).expect("canonical scratch root");
+        assert!(
+            directory_source_ancestry_alias_blocking(&scratch, &durable)
+                .expect("read mount source ancestry"),
+            "a bind of a durable descendant must be rejected as scratch"
+        );
+    }
+
+    #[test]
+    fn scratch_claim_requires_private_daemon_owned_permissions() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        let mut permissions = std::fs::metadata(&scratch)
+            .expect("scratch metadata")
+            .permissions();
+        permissions.set_mode(0o777);
+        std::fs::set_permissions(&scratch, permissions).expect("world-writable scratch");
+        let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("world-writable scratch must fail");
+        assert!(error.to_string().contains("not group/world-writable"));
+        assert!(!scratch.join(".owner").exists());
+
+        let mut permissions = std::fs::metadata(&scratch)
+            .expect("scratch metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&scratch, permissions).expect("private scratch");
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("private scratch claim");
+        let marker = std::fs::metadata(scratch.join(".owner")).expect("marker metadata");
+        assert_eq!(marker.uid(), unsafe { libc::geteuid() });
+        assert_eq!(marker.mode() & 0o777, 0o600);
+    }
+
+    fn claimed_scratch(root: &Path) -> std::path::PathBuf {
+        let scratch = std::fs::canonicalize(root)
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("claim scratch");
+        scratch
+    }
+
+    #[test]
+    fn scratch_cleanup_refuses_symbolic_links_without_touching_their_targets() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = claimed_scratch(root.path());
+        let target = root.path().join("outside-target");
+        std::fs::write(&target, b"must survive").expect("outside target");
+        std::os::unix::fs::symlink(&target, scratch.join("link")).expect("scratch symlink");
+
+        let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("a scratch symlink must fail closed");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert!(scratch.join("link").is_symlink());
+        assert_eq!(
+            std::fs::read(target).expect("target survives"),
+            b"must survive"
+        );
+    }
+
+    #[test]
+    fn scratch_cleanup_refuses_unsafe_child_permissions_without_deleting_data() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = claimed_scratch(root.path());
+        let unsafe_child = scratch.join("group-writable-segment");
+        std::fs::write(&unsafe_child, b"must survive").expect("unsafe child");
+        let mut permissions = std::fs::metadata(&unsafe_child)
+            .expect("unsafe child metadata")
+            .permissions();
+        permissions.set_mode(0o660);
+        std::fs::set_permissions(&unsafe_child, permissions).expect("unsafe permissions");
+
+        let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("unsafe child permissions must fail closed");
+        assert!(
+            error.to_string().contains("group/world-writable"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(unsafe_child).expect("unsafe child survives"),
+            b"must survive"
+        );
+    }
+
+    #[test]
+    fn scratch_cleanup_refuses_special_files_without_unlinking_them() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = claimed_scratch(root.path());
+        let fifo = scratch.join("unexpected-fifo");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).expect("FIFO path CString");
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+
+        let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("a scratch special file must fail closed");
+        assert!(
+            error.to_string().contains("device or other special file"),
+            "{error}"
+        );
+        assert!(std::fs::symlink_metadata(fifo).is_ok(), "FIFO must survive");
+    }
+
+    #[test]
+    fn scratch_claim_linearizes_before_accepting_directory_contents() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        let intruder = scratch.join("concurrent-unowned-file");
+        let hook = |phase| {
+            if matches!(phase, ScratchHookPhase::AfterPendingCreate) {
+                std::fs::write(&intruder, b"must survive").expect("racing child");
+            }
+        };
+
+        let error = claim_and_clear_scratch_inner(
+            &scratch,
+            Some(".owner"),
+            b"exact-owner\n",
+            &[],
+            Some(&hook),
+        )
+        .expect_err("concurrent pre-claim child must refuse ownership");
+        assert!(error.to_string().contains("populated before ownership"));
+        assert_eq!(
+            std::fs::read(&intruder).expect("intruder survives"),
+            b"must survive"
+        );
+        assert!(!scratch.join(".owner").exists());
+        assert!(
+            scratch.join(".owner.claiming").exists(),
+            "the durable pending state must never authorize cleanup"
+        );
+    }
+
+    #[test]
+    fn interrupted_owner_publication_never_authorizes_raced_content() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        let unrelated = scratch.join("raced-host-data");
+        let crash_after_marker = |phase| {
+            if matches!(phase, ScratchHookPhase::AfterMarkerCreate) {
+                std::fs::write(&unrelated, b"must survive").expect("raced data");
+                panic!("simulated process crash after durable marker publication");
+            }
+        };
+
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            claim_and_clear_scratch_inner(
+                &scratch,
+                Some(".owner"),
+                b"exact-owner\n",
+                &[],
+                Some(&crash_after_marker),
+            )
+        }));
+        assert!(
+            attempt.is_err(),
+            "the failpoint must simulate death before ownership finalization"
+        );
+        assert!(scratch.join(".owner").exists());
+        assert!(scratch.join(".owner.claiming").exists());
+
+        let restart = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("an interrupted ownership grant must fail closed on restart");
+        assert!(restart.to_string().contains("claim is incomplete"));
+        assert_eq!(
+            std::fs::read(&unrelated).expect("raced data survives restart"),
+            b"must survive"
+        );
+    }
+
+    #[test]
+    fn pending_owner_claim_promotes_on_restart_only_while_empty() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        let crash_after_pending = |phase| {
+            if matches!(phase, ScratchHookPhase::AfterPendingCreate) {
+                panic!("simulated process crash with pending ownership only");
+            }
+        };
+
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            claim_and_clear_scratch_inner(
+                &scratch,
+                Some(".owner"),
+                b"exact-owner\n",
+                &[],
+                Some(&crash_after_pending),
+            )
+        }));
+        assert!(attempt.is_err());
+        assert!(!scratch.join(".owner").exists());
+        assert!(scratch.join(".owner.claiming").exists());
+
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("an otherwise-empty pending claim may finish on restart");
+        assert!(scratch.join(".owner").exists());
+        assert!(!scratch.join(".owner.claiming").exists());
+    }
+
+    #[test]
+    fn scratch_cleanup_holds_the_verified_inode_across_path_replacement() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical scratch parent");
+        let scratch = canonical_root.join("scratch");
+        let moved = canonical_root.join("verified-scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("claim scratch");
+        std::fs::write(scratch.join("owned-stale"), b"discard").expect("owned stale child");
+        let replacement = scratch.join("unowned-replacement");
+        let hook = |phase| {
+            if matches!(phase, ScratchHookPhase::BeforeCleanup) {
+                std::fs::rename(&scratch, &moved).expect("move verified root");
+                std::fs::create_dir(&scratch).expect("replacement root");
+                std::fs::write(&replacement, b"must survive").expect("replacement child");
+            }
+        };
+
+        let error = claim_and_clear_scratch_inner(
+            &scratch,
+            Some(".owner"),
+            b"exact-owner\n",
+            &[],
+            Some(&hook),
+        )
+        .expect_err("path replacement must fail startup");
+        assert!(error.to_string().contains("replacement was not touched"));
+        assert_eq!(
+            std::fs::read(&replacement).expect("replacement survives"),
+            b"must survive"
+        );
+        assert!(!moved.join("owned-stale").exists());
+        assert!(moved.join(".owner").exists());
+    }
+
+    #[test]
+    fn scratch_cleanup_refuses_success_when_a_late_child_survives() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("claim scratch");
+        std::fs::write(scratch.join("stale"), b"discard").expect("stale child");
+        let late = scratch.join("late-child");
+        let hook = |phase| {
+            if matches!(phase, ScratchHookPhase::AfterCleanup) {
+                std::fs::write(&late, b"must force failure").expect("late child");
+            }
+        };
+
+        let error = claim_and_clear_scratch_inner(
+            &scratch,
+            Some(".owner"),
+            b"exact-owner\n",
+            &[],
+            Some(&hook),
+        )
+        .expect_err("surviving late child must fail startup");
+        assert!(error.to_string().contains("new entries during cleanup"));
+        assert!(late.exists());
+        assert!(!scratch.join("stale").exists());
+    }
+
+    #[test]
+    fn scratch_cleanup_preflights_protected_identities_at_any_depth() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = std::fs::canonicalize(root.path())
+            .expect("canonical scratch parent")
+            .join("scratch");
+        std::fs::create_dir(&scratch).expect("scratch directory");
+        claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect("claim scratch");
+        let protected = scratch.join("nested/persistent-cache");
+        std::fs::create_dir_all(&protected).expect("protected nested directory");
+        std::fs::write(protected.join("offline-package"), b"must survive")
+            .expect("protected bytes");
+        let identity =
+            directory_identity_nofollow_blocking(&protected).expect("protected directory identity");
+
+        let error = claim_and_clear_owned_scratch_with_protected_blocking(
+            &scratch,
+            ".owner",
+            b"exact-owner\n",
+            &[identity],
+        )
+        .expect_err("protected identity inside scratch must fail");
+        assert!(error.to_string().contains("protected storage identity"));
+        assert_eq!(
+            std::fs::read(protected.join("offline-package")).expect("protected bytes survive"),
+            b"must survive"
+        );
+    }
 
     #[tokio::test]
     async fn bounded_tree_removal_preflights_before_unlinking_any_entry() {

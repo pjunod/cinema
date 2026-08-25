@@ -108,8 +108,8 @@ function usage() {
 Usage:
   scripts/playback-lab doctor [--browser chrome|safari|edge|firefox]
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
-  scripts/playback-lab plan [--suite smoke|full|stall-recovery] [--case TEXT]
-  scripts/playback-lab run [--suite smoke|full|stall-recovery]
+  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod] [--case TEXT]
+  scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
                              [--browser chrome|safari|edge|firefox]
                              [--case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
@@ -138,7 +138,9 @@ Commands:
 The smoke suite covers each verdict plus the high-risk 4K transport forks and
 seek/audio/subtitle restarts. The full suite adds every fixture x quality mode.
 The stall-recovery suite drives a shaped link through a bandwidth cliff and
-records how the session answers it.
+records how the session answers it. The VOD suite enables the server flag and
+indexer, then proves immutable-session steady play, native seek storms, and a
+suspend/resume surrogate before the physical-device protocol.
 Reports are written below target/playback-lab/reports/ as JSON and JUnit XML.
 
 Network profiles (--network-profile), applied by a local loopback shaper:
@@ -195,7 +197,7 @@ function caseName(testCase) {
 
 function expandCases(manifest, suiteName, filter) {
   const suite = manifest.suites[suiteName];
-  if (!suite) throw new Error(`unknown suite ${suiteName}; choose smoke or full`);
+  if (!suite) throw new Error(`unknown suite ${suiteName}; choose smoke, full, stall-recovery, or vod`);
   const fixtures = fixtureMap(manifest);
   const cases = [];
   if (suite.cross_product) {
@@ -1365,6 +1367,21 @@ async function waitFor(check, timeoutMs, label, intervalMs = 250) {
   throw new Error(`timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
+// Content ids are signed 64-bit values, not JavaScript numbers. Node 22's
+// JSON reviver context retains the exact token text, so keep an unsafe id as
+// that decimal string before interpolation into a later API URL. Ordinary
+// file/library ids remain numbers and report arithmetic remains unchanged.
+function parseApiJson(text) {
+  return JSON.parse(text, (key, value, context) => {
+    const identity = key === "id" || key.endsWith("_id");
+    if (identity && typeof value === "number" && !Number.isSafeInteger(value)
+        && context && context.source) {
+      return context.source;
+    }
+    return value;
+  });
+}
+
 async function api(baseUrl, route, { token, method = "GET", body, timeout = 30_000 } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
@@ -1378,7 +1395,7 @@ async function api(baseUrl, route, { token, method = "GET", body, timeout = 30_0
   const text = await response.text();
   let value = null;
   if (text) {
-    try { value = JSON.parse(text); } catch (_) { value = text; }
+    try { value = parseApiJson(text); } catch (_) { value = text; }
   }
   if (!response.ok) {
     const message = value && typeof value === "object" ? value.error : text;
@@ -1444,6 +1461,25 @@ async function startServer(options, fixtureDirectory) {
     const detail = await api(baseUrl, `/items/${item.id}`, { token });
     for (const file of detail.files || []) files.set(file.filename, { ...file, item_id: item.id, title: item.title });
   }
+  if (options.enable_vod) {
+    process.stdout.write("INDEX   enable VOD and wait for the node-local fragment pass\n");
+    await api(baseUrl, "/settings", {
+      token,
+      method: "PUT",
+      body: {
+        vod_presentation: true,
+        vod_index_mins: 15,
+        vod_block_budget_secs: "8",
+        vod_materialize_budget_secs: "30",
+      },
+    });
+    await waitFor(async () => {
+      const logs = await api(baseUrl, "/system/logs?level=debug&limit=500", { token });
+      return logs.find((entry) =>
+        String(entry.message || "").includes("fragment indexing pass finished"),
+      ) || null;
+    }, 180_000, "VOD fragment indexing pass", 1_000);
+  }
   return {
     runtime, dataDir, baseUrl, token, library, files, child, log, logFile,
     async close(keep) {
@@ -1461,6 +1497,32 @@ async function startServer(options, fixtureDirectory) {
     else await fsp.rm(runtime, { recursive: true, force: true });
     throw new Error(`${error.message}${tail ? `\n${tail}` : ""}`);
   }
+}
+
+function cdpBrowserArgs(options, baseUrl, profile) {
+  return [
+    options.headed ? "" : "--headless=new",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--autoplay-policy=no-user-gesture-required",
+    // The self-hosted runners are unprivileged Incus containers. Chromium's
+    // namespace sandbox aborts before DevTools there, and /dev/shm is sized
+    // for the container rather than long-lived media playback. These are the
+    // same container launch flags used by scripts/ui-baseline.
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    // Fixtures intentionally contain synthetic tones for audio-path checks;
+    // decode them in the browser without routing them to the host speakers.
+    "--mute-audio",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    // Test playback must not claim the host's media keys or macOS Now Playing.
+    "--disable-features=Translate,MediaRouter,HardwareMediaKeyHandling",
+    baseUrl,
+  ].filter(Boolean);
 }
 
 class CdpDriver {
@@ -1483,23 +1545,7 @@ class CdpDriver {
     }
     const profile = path.join(this.runtime, `${this.browserName}-profile`);
     await fsp.mkdir(profile, { recursive: true });
-    const args = [
-      this.options.headed ? "" : "--headless=new",
-      "--remote-debugging-port=0",
-      `--user-data-dir=${profile}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--autoplay-policy=no-user-gesture-required",
-      // Fixtures intentionally contain synthetic tones for audio-path checks;
-      // decode them in the browser without routing them to the host speakers.
-      "--mute-audio",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      // Test playback must not claim the host's media keys or macOS Now Playing.
-      "--disable-features=Translate,MediaRouter,HardwareMediaKeyHandling",
-      this.baseUrl,
-    ].filter(Boolean);
+    const args = cdpBrowserArgs(this.options, this.baseUrl, profile);
     const logPath = path.join(this.runtime, "browser.log");
     this.log = fs.createWriteStream(logPath, { flags: "a" });
     this.child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -1513,7 +1559,13 @@ class CdpDriver {
     this.child.on("exit", (code, signal) => { exited = { code, signal }; });
     this.child.on("error", (error) => { exited = { error }; });
     const devtools = await waitFor(async () => {
-      if (exited) throw exited.error || new Error(`browser exited ${exited.code ?? exited.signal}`);
+      if (exited) {
+        if (exited.error) throw exited.error;
+        const detail = sanitizedText(stderr.trim().slice(-2_000));
+        throw new Error(
+          `browser exited ${exited.code ?? exited.signal}${detail ? `: ${detail}` : ""}`,
+        );
+      }
       const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
       return match ? match[1] : null;
     }, 30_000, `${this.browserName} DevTools`, 100);
@@ -1788,6 +1840,7 @@ function playerSnapshotExpression() {
       method:p.method||null, copy_hls:!!p.copyHls, tried_fallback:!!p.triedFallback,
       encoder:p.encoder||null, vod:!!p.vod, attempt_id:p.attemptId||null,
       attempt_reason:p.attemptReason||null, player_generation:playerGeneration,
+      session_id:p.sessionId||null, keeper_fires:p._keeperFires||0,
       play_started_at:p.playStartedAt==null?null:p.playStartedAt,
       offset:Number(p.offset||0),
       ttff_ms:p.ttffMs==null?null:p.ttffMs, stalls:p.stalls||0,
@@ -1861,6 +1914,64 @@ async function performOperation(driver, testCase, start) {
         state.video.current_time > 0.1 && state.video.absolute_time >= target - 0.25) ? state : null;
     }, 30_000, `seek to ${target.toFixed(1)}s`);
     return { target_seconds: target };
+  }
+  if (testCase.operation === "seek-storm") {
+    const count = Number(testCase.seeks || 20);
+    const duration = Number(start.source?.duration_ms || 0) / 1000;
+    const low = Math.min(2, Math.max(0.25, duration * 0.15));
+    const high = Math.max(low, duration > 0 ? duration - Math.max(1, duration * 0.15) : 10);
+    const span = Math.max(0, high - low);
+    const targets = Array.from({ length: count }, (_, index) =>
+      low + span * (((index * 7) % count) / Math.max(1, count - 1)));
+    const before = await driver.eval(playerSnapshotExpression());
+    const landings = [];
+    for (const target of targets) {
+      // Returning the promise works in CDP and follows WebDriver's execute
+      // script promise-unwrapping rules. A top-level `await` is only valid in
+      // the CDP driver's async wrapper and makes the same suite fail to parse
+      // in Safari/Firefox execute-script bodies.
+      await driver.exec(`return seekTo(${target});`);
+      const landed = await waitFor(async () => {
+        const state = await driver.eval(playerSnapshotExpression());
+        if (state.video.error) return state;
+        return !state.video.seeking && state.video.ready_state >= 2
+          && Math.abs(state.video.absolute_time - target) <= 0.5 ? state : null;
+      }, 15_000, `native VOD seek ${landings.length + 1}/${count}`);
+      landings.push({ target_seconds: target, landed_seconds: landed.video.absolute_time });
+    }
+    const after = await driver.eval(playerSnapshotExpression());
+    return {
+      seek_count: count,
+      landed_count: landings.length,
+      landings,
+      before_session_id: before.session_id,
+      after_session_id: after.session_id,
+      before_player_generation: before.player_generation,
+      after_player_generation: after.player_generation,
+      keeper_fires: after.keeper_fires - before.keeper_fires,
+    };
+  }
+  if (testCase.operation === "suspend-resume") {
+    const seconds = Number(testCase.suspend_seconds || 8);
+    const before = await driver.eval(playerSnapshotExpression());
+    await driver.exec(`document.getElementById('video').pause(); return true;`);
+    await sleep(seconds * 1_000);
+    await driver.exec(`return document.getElementById('video').play();`);
+    const after = await waitFor(async () => {
+      const state = await driver.eval(playerSnapshotExpression());
+      if (state.video.error) return state;
+      return state.started && !state.video.paused && state.video.ready_state >= 2
+        && state.video.absolute_time > before.video.absolute_time ? state : null;
+    }, 30_000, "VOD playback after suspension surrogate");
+    return {
+      suspend_seconds: seconds,
+      surrogate: "paused-media-element",
+      before_session_id: before.session_id,
+      after_session_id: after.session_id,
+      before_player_generation: before.player_generation,
+      after_player_generation: after.player_generation,
+      keeper_fires: after.keeper_fires - before.keeper_fires,
+    };
   }
   if (testCase.operation === "audio-switch") {
     if (start.audio_count < 2) throw new Error("fixture has fewer than two audio tracks");
@@ -1977,7 +2088,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   return { observation, score, cliffAtMs, end: afterCliff };
 }
 
-function scoreCase(manifest, testCase, decision, start, end, elapsedSeconds) {
+function scoreCase(manifest, testCase, decision, start, end, elapsedSeconds, operation = null) {
   const thresholds = manifest.thresholds;
   const errors = [];
   const warnings = [];
@@ -1997,6 +2108,26 @@ function scoreCase(manifest, testCase, decision, start, end, elapsedSeconds) {
   const stalls = Math.max(0, (end.stalls || 0) - (start.stalls || 0));
   if (stalls > thresholds.maximum_stalls) errors.push(`${stalls} stalls, want <= ${thresholds.maximum_stalls}`);
   if (testCase.quality === "nomse" && end.copy_hls) errors.push("Original · one stream unexpectedly used copy-HLS");
+  if (testCase.require_vod) {
+    if (!start.vod || !end.vod) errors.push("the server fell back instead of serving the VOD presentation");
+    const beforeSession = operation?.before_session_id ?? start.session_id;
+    const afterSession = operation?.after_session_id ?? end.session_id;
+    if (!beforeSession || beforeSession !== afterSession) {
+      errors.push(`VOD session reopened (${beforeSession || "none"} -> ${afterSession || "none"})`);
+    }
+    const beforeGeneration = operation?.before_player_generation ?? start.player_generation;
+    const afterGeneration = operation?.after_player_generation ?? end.player_generation;
+    if (beforeGeneration !== afterGeneration) {
+      errors.push(`player generation changed during VOD playback (${beforeGeneration} -> ${afterGeneration})`);
+    }
+    const keeperFires = operation?.keeper_fires ?? Math.max(0, (end.keeper_fires || 0) - (start.keeper_fires || 0));
+    if (keeperFires > Number(testCase.maximum_keeper_fires || 0)) {
+      errors.push(`${keeperFires} live-playlist keeper fires during immutable VOD playback`);
+    }
+    if (testCase.operation === "seek-storm" && operation?.landed_count !== Number(testCase.seeks)) {
+      errors.push(`${operation?.landed_count || 0}/${testCase.seeks} native VOD seeks landed`);
+    }
+  }
   if (["1080", "720", "480"].includes(testCase.quality)) {
     const rung = Number(testCase.quality);
     if (end.decided_method !== "transcode") errors.push(`${rung}p quality did not select a transcode verdict`);
@@ -2028,6 +2159,10 @@ function scoreCase(manifest, testCase, decision, start, end, elapsedSeconds) {
       total_frames: end.video.total,
       decode: end.decode,
       server_health: end.health,
+      vod: !!end.vod,
+      session_id: end.session_id || null,
+      keeper_fires: operation?.keeper_fires
+        ?? Math.max(0, (end.keeper_fires || 0) - (start.keeper_fires || 0)),
     },
   };
 }
@@ -2540,7 +2675,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
   await new Promise((resolve) => setTimeout(resolve, observeSeconds * 1000));
   const elapsedSeconds = (performance.now() - wallStart) / 1000;
   const end = await driver.eval(playerSnapshotExpression());
-  const score = scoreCase(manifest, testCase, decision, start, end, elapsedSeconds);
+  const score = scoreCase(manifest, testCase, decision, start, end, elapsedSeconds, operation);
   return {
     name: testCase.name,
     fixture: fixture.id,
@@ -2658,6 +2793,7 @@ async function runSuite(manifest, options, dependencies = {}) {
   // second, not the 195 MB fixture build and a server boot.
   const profile = parseNetworkProfile(options.network_profile);
   const plan = printPlan(manifest, suite, options.case);
+  const requiresVod = manifest.suites[suite]?.requires_vod === true;
   const shapedCases = plan.cases.filter((testCase) => testCase.operation === "shaped-cliff");
   if ((shapedCases.length || manifest.suites[suite]?.requires_network_profile) && !profile) {
     throw new Error(`suite ${suite} has shaped-cliff cases; pass --network-profile, e.g. 8mbps-to-1.5mbps`);
@@ -2666,7 +2802,8 @@ async function runSuite(manifest, options, dependencies = {}) {
   const wanted = new Set(plan.cases.map((testCase) => testCase.fixture));
   const corpus = await (dependencies.buildFixtures || buildFixtures)(manifest, options, wanted);
   process.stdout.write("\nSTART   isolated plurx server\n");
-  const server = await (dependencies.startServer || startServer)(options, corpus.directory);
+  const serverOptions = requiresVod ? { ...options, enable_vod: true } : options;
+  const server = await (dependencies.startServer || startServer)(serverOptions, corpus.directory);
   const missing = manifest.fixtures
     .filter((fixture) => wanted.has(fixture.id))
     .filter((fixture) => !server.files.has(fixture.filename));
@@ -2756,6 +2893,21 @@ async function runSuite(manifest, options, dependencies = {}) {
       } catch (_) {
         result.server_logs = [];
         result.diagnostics = [];
+      }
+      if (testCase.require_vod) {
+        const creates = result.server_logs.filter((entry) =>
+          String(entry.message || "").includes("vod session attached"),
+        ).length;
+        result.metrics = result.metrics || {};
+        result.metrics.session_creates = creates;
+        const allowed = Number(testCase.maximum_session_creates ?? 1);
+        if (creates !== allowed) {
+          result.status = "failed";
+          result.errors = result.errors || [];
+          result.errors.push(
+            `${creates} VOD session creates in server log, want exactly ${allowed}`,
+          );
+        }
       }
       results.push(result);
       if (result.status === "passed" && result.operation === "shaped-cliff") {
@@ -3128,6 +3280,7 @@ module.exports = {
   SHAPER_SLICE_BYTES,
   ShapingProxy,
   TokenBucket,
+  cdpBrowserArgs,
   diagnosticPath,
   deviceRunCommand,
   deviceProxyCommand,
@@ -3138,6 +3291,7 @@ module.exports = {
   loadArtifact,
   loadManifest,
   normalizeTrace,
+  parseApiJson,
   parseNetworkProfile,
   peakUpgradeRate,
   rungHistory,

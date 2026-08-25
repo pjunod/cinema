@@ -1,6 +1,6 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P4 implementation and deterministic acceptance delivered; M4 singleton and serving-partition proofs delivered; P0c/P2f physical evidence and P5–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+**Status:** P0–P5 implementation and deterministic acceptance delivered; M4 singleton and serving-partition proofs delivered; P0c/P2f/P5 physical evidence and P6–P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -615,6 +615,29 @@ recovery.
 restart tests preserve cache/offline content and discard only declared scratch;
 disk-pressure tests on the cache/scratch device do not corrupt or relocate the
 durable target. The chosen read-pool value has a retained benchmark artifact.
+
+The delivered path contract keeps `storage.data_dir` authoritative for the
+Hiqlite database and every durable migration marker. `storage.cache_dir` moves
+only persistent cache, artwork, subtitle, and offline bytes, while
+`storage.transcode_dir` names disposable live-transcode scratch. Omitting both
+new roots preserves every legacy path byte-for-byte. Explicit roots are
+canonicalized and rejected when they overlap a protected durable identity,
+credential key, another configured root, or a Linux mount-source ancestor.
+Scratch cleanup begins only after the daemon lock is held, uses descriptor-
+relative bounded traversal, refuses foreign owners, devices, links, and unsafe
+permissions, and publishes a crash-safe ownership claim before deleting
+anything. Cache and offline content are never restart cleanup targets. An
+available shared-cache mount is a separately protected persistent root; a
+missing mount keeps the existing node-local fallback and is not created by this
+preflight.
+
+`cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
+setting with the previous value, `4`, as its default. The code and deterministic
+configuration/storage proofs are delivered, but the retained physical
+`4 · 8 · 16` named-host artifact is not: it remains grouped with P0c/P2f and
+requires operator authorization to transfer the private runner image to the
+four named machines. Until that artifact exists, production keeps `4`; this
+milestone does not claim that a larger pool improves the measured workload.
 
 ### 6.7 P6 — make the fourth machine useful without adding a vote
 

@@ -104,6 +104,98 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
+asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
+  const requests = [];
+  let requestId = 0;
+  const build = new Function(
+    "api",
+    "newRequestId",
+    "vodClientContract",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("openSession"),
+      "return {openSession};",
+    ].join("\n"),
+  );
+  const { openSession } = build(
+    async (url, options) => { requests.push({ url, options }); return {}; },
+    () => `request-${++requestId}`,
+    () => ({
+      session: { presentation: "vod", block_budget_secs: 8 },
+      fragLoadPolicy: {},
+    }),
+  );
+
+  await Promise.all([
+    openSession(7, { start: 12, height: null }),
+    // Callers cannot silently turn the central presentation contract off.
+    openSession(8, { presentation: "live", block_budget_secs: 60 }),
+  ]);
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.options.body.presentation, "vod");
+    assert.equal(request.options.body.block_budget_secs, 8);
+    assert.match(request.options.body.request_id, /^request-/);
+  }
+  assert.equal("height" in requests[0].options.body, false);
+});
+
+test("the VOD fetch contract stays below hls.js and beyond the producer watchdog", () => {
+  const contract = new Function(
+    `${shippedSource("vodClientContract")}\nreturn vodClientContract();`,
+  )();
+  assert.equal(contract.session.presentation, "vod");
+  assert.equal(contract.session.block_budget_secs, 8);
+  assert.equal(contract.fragLoadPolicy.default.maxTimeToFirstByteMs, 10_000);
+  assert.equal(contract.fragLoadPolicy.default.maxLoadTimeMs, 120_000);
+  assert.ok(
+    contract.session.block_budget_secs * 1000
+      <= contract.fragLoadPolicy.default.maxTimeToFirstByteMs - 2_000,
+    "the server must answer before the browser aborts the request",
+  );
+  assert.ok(
+    contract.fragLoadPolicy.default.errorRetry.maxNumRetry >= 7,
+    "503 backoff must outlive the 30-second producer watchdog with margin",
+  );
+  assert.match(
+    shippedSource("attachHls"),
+    /PLAYER&&PLAYER\.vod\?\{fragLoadPolicy:vodClientContract\(\)\.fragLoadPolicy\}/,
+    "the measured policy must be installed only for a VOD response",
+  );
+});
+
+test("VOD diagnostics describe materialization instead of claiming a cache hit", () => {
+  const status = new Function(
+    "health",
+    `${shippedSource("vodServerState")}\nreturn vodServerState(health);`,
+  );
+  assert.equal(status(null), "VOD · Waiting for demand");
+  assert.equal(status({ producer_state: "running" }), "VOD · Materializing");
+  assert.equal(
+    status({ producer_state: "held", producer_hold: "working_set" }),
+    "VOD · Holding working set",
+  );
+  assert.equal(
+    status({ producer_state: "held", producer_hold: "ahead" }),
+    "VOD · Holding ahead window",
+  );
+  assert.equal(status({ producer_state: "complete" }), "VOD · Complete");
+  assert.doesNotMatch(status({ producer_state: "complete" }), /cache/i);
+});
+
+test("an operator can enable and provision VOD from Playback settings", () => {
+  const panel = shippedSource("playbackPanel");
+  const save = shippedSource("savePlayback");
+  assert.match(panel, /id="pvod"/);
+  assert.match(panel, /id="pvi"/);
+  assert.match(panel, /id="pvws"/);
+  assert.match(panel, /id="pvmb"/);
+  assert.match(save, /vod_presentation:/);
+  assert.match(save, /vod_index_mins:/);
+  assert.match(save, /vod_materialize_budget_secs:/);
+  assert.match(save, /vod_block_budget_secs:"8"/);
+});
+
 test("estimated skip markers are hedged without rebuilding each tick", () => {
   let writes = 0;
   const skip = {
@@ -746,7 +838,7 @@ test("every shipped stall report carries the wait's start as its identity", () =
 // session-open that stays pending until the test releases it — the ordering the
 // browser actually produces, where the cheap health GET returns before the
 // session-create POST.
-function autoRescueHarness(player) {
+function autoRescueHarness(player, autoAbr = true) {
   const opened = [];
   let releaseOpen = null;
   let openFails = false;
@@ -764,6 +856,7 @@ function autoRescueHarness(player) {
   const noop = () => {};
   const build = new Function(
     "PLAYER",
+    "SERVER",
     "document",
     "performance",
     "PlaybackPolicy",
@@ -800,6 +893,7 @@ function autoRescueHarness(player) {
 
   const shipped = build(
     player,
+    { playback_auto_abr: autoAbr },
     { getElementById: () => video },
     { now: () => 90_000 },
     policy,
@@ -846,6 +940,98 @@ function autoRescueHarness(player) {
     },
   };
 }
+
+async function autoRungTick(autoAbr) {
+  const switches = [];
+  let polls = 0;
+  const player = {
+    method: "transcode",
+    started: true,
+    offset: 0,
+    ladder: serverLadder,
+    autoHeight: 720,
+    health: { target_height: 720, recent_speed: 2 },
+    hls: { bandwidthEstimate: 1_000_000 },
+    abr: {
+      switching: false,
+      stallEvents: { supply: [], decode: [] },
+      recentEstimateKbps: null,
+      recentEstimateAtMs: null,
+      lastStallAtMs: null,
+      lastSwitchAtMs: 0,
+      mildSamples: 0,
+      upgradeSinceMs: null,
+      previousRunway: null,
+      stableSinceMs: 0,
+      failedHeights: new Set(),
+    },
+  };
+  const tick = new Function(
+    "PLAYER",
+    "SERVER",
+    "document",
+    "performance",
+    "PlaybackPolicy",
+    "qualityForce",
+    "SUPPLY_RUNWAY_SECS",
+    "pollSessionHealth",
+    "rescueAutoSupply",
+    "bufferRunway",
+    "playerPixelHeight",
+    "switchAutoRung",
+    "rememberAutoRung",
+    `${shippedSource("autoControllerTick")}\nreturn autoControllerTick;`,
+  )(
+    player,
+    { playback_auto_abr: autoAbr },
+    { getElementById: () => ({ currentTime: 12, paused: false, videoHeight: 720 }) },
+    { now: () => 90_000 },
+    policy,
+    () => "auto",
+    6,
+    async () => { polls += 1; },
+    async () => {},
+    () => 1,
+    () => 720,
+    async (from, decision) => { switches.push([from, decision.height]); },
+    () => {},
+  );
+
+  await tick();
+  return { polls, switches };
+}
+
+asyncTest("the Auto switch gates an automatic rung change", async () => {
+  const enabled = await autoRungTick(true);
+  assert.deepEqual(enabled.switches, [[720, 360]], "the enabled controller still acts");
+
+  const disabled = await autoRungTick(false);
+  assert.equal(disabled.polls, 0, "off must return before sampling controller health");
+  assert.deepEqual(disabled.switches, [], "off must not change the playback rung");
+});
+
+test("the disabled Auto controller leaves every manual ladder rung available", () => {
+  const build = new Function(
+    "PLAYER",
+    "SERVER",
+    "PlaybackPolicy",
+    [
+      shippedBinding("const", "QUALITY_MODES"),
+      shippedSource("qualityOptions"),
+      "return qualityOptions();",
+    ].join("\n"),
+  );
+  const options = build(
+    { ladder: serverLadder },
+    { playback_auto_abr: false },
+    policy,
+  );
+
+  assert.deepEqual(
+    options.map(([value]) => value),
+    ["auto", "original", "nomse", "1080", "720", "480", "360"],
+  );
+});
 
 function pressuredRemuxPlayer() {
   return {
@@ -1454,6 +1640,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     "qualityForce",
     "sessionHeight",
     "newRequestId",
+    "vodClientContract",
     "logout",
     [
       'const API="/api/v1"; let TOKEN="token", AUTH_GENERATION=0;',
@@ -1503,6 +1690,7 @@ asyncTest("a burn session-open refusal reaches the persistent overlay", async ()
     () => "auto",
     () => null,
     () => "request-1",
+    () => ({session:{presentation:"vod",block_budget_secs:8}}),
     () => {},
   );
 

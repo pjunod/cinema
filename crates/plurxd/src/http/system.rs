@@ -43,6 +43,10 @@ pub struct ServerInfo {
     /// True when an Android APK is published (so the web UI shows the download
     /// link on Android). See `web::android_apk_path`.
     pub android_app: bool,
+    /// Whether the web client's Auto controller may change rungs after the
+    /// server's initial playback decision. Public because every signed-in web
+    /// viewer needs the same node-wide playback policy.
+    pub playback_auto_abr: bool,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -60,6 +64,11 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .unwrap_or_else(|| state.server_name.clone());
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
+    let playback_auto_abr = state
+        .store
+        .get_setting(keys::PLAYBACK_AUTO_ABR)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
         name,
         version: crate::version::SEMVER,
@@ -71,6 +80,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
+        playback_auto_abr,
     }))
 }
 
@@ -1169,6 +1179,10 @@ pub struct SettingsDto {
     pub vod_working_set_bytes: String,
     /// Server ceiling on one blocking VOD segment fetch, seconds.
     pub vod_block_budget_secs: String,
+    /// Producer watchdog from first blocked demand to bytes or typed failure.
+    pub vod_materialize_budget_secs: String,
+    /// Node-local fragment-index pass interval. 0 is off.
+    pub vod_index_mins: i64,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1199,6 +1213,9 @@ pub struct SettingsDto {
     /// Use coarse, node-local playback history to seed Auto quality.
     /// Explicit opt-in; missing is false.
     pub playback_network_priors: bool,
+    /// Let the web client's Auto controller change rungs after playback starts.
+    /// Explicit opt-in; missing is false.
+    pub playback_auto_abr: bool,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -1313,6 +1330,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         .max(0);
     let playback_network_priors =
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
+    let playback_auto_abr =
+        setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
     let offline_enabled = !matches!(
         setting(keys::OFFLINE_ENABLED).as_deref(),
         Some("0" | "false" | "off" | "no")
@@ -1372,6 +1391,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() == Some("1"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
+        vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
+        vod_index_mins: mins(setting(keys::VOD_INDEX_MINS)),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1383,6 +1404,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cache_used_bytes,
         telemetry_retain_days,
         playback_network_priors,
+        playback_auto_abr,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -1417,11 +1439,13 @@ pub struct UpdateSettings {
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
-    /// VOD presentation opt-in and its two serving knobs; absent leaves each
-    /// as-is. `vod_working_set_bytes` refuses 0 — see the handler.
+    /// VOD presentation opt-in, serving budgets, and index cadence; absent
+    /// leaves each as-is. `vod_working_set_bytes` refuses 0 — see the handler.
     pub vod_presentation: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
+    pub vod_materialize_budget_secs: Option<String>,
+    pub vod_index_mins: Option<i64>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1460,6 +1484,7 @@ pub struct UpdateSettings {
     pub cache_max_gb: Option<i64>,
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
+    pub playback_auto_abr: Option<bool>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -1663,6 +1688,34 @@ pub async fn update_settings(
             .put_setting(keys::VOD_BLOCK_BUDGET_SECS, "")
             .await?;
     }
+    if let Some(raw) = req
+        .vod_materialize_budget_secs
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        let parsed: f64 = raw.trim().parse().map_err(|_| {
+            ApiError::BadRequest("vod_materialize_budget_secs must be a number".into())
+        })?;
+        if !(10.0..=300.0).contains(&parsed) {
+            return Err(ApiError::BadRequest(
+                "vod_materialize_budget_secs must be between 10 and 300".into(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, &parsed.to_string())
+            .await?;
+    }
+    if req
+        .vod_materialize_budget_secs
+        .as_deref()
+        .is_some_and(|raw| raw.trim().is_empty())
+    {
+        state
+            .store
+            .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, "")
+            .await?;
+    }
     if let Some(on) = req.cluster_media_pool_enabled {
         state
             .store
@@ -1798,6 +1851,7 @@ pub async fn update_settings(
             "cache_produce_mins",
             req.cache_produce_mins,
         ),
+        (keys::VOD_INDEX_MINS, "vod_index_mins", req.vod_index_mins),
     ] {
         if let Some(value) = value {
             if value < 0 || (value > 0 && value < 15) {
@@ -1840,6 +1894,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_NETWORK_PRIORS,
                 if enabled { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(enabled) = req.playback_auto_abr {
+        state
+            .store
+            .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
     for (key, label, value) in [
