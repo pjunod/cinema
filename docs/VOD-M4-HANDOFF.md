@@ -1,7 +1,8 @@
 # VOD M4 — web adoption and release acceptance
 
-**Status:** BUILT 2026-08-25 on `codex/vod-m4`; browser and nynuc evidence below
-must be filled from the exact commit that ships
+**Status:** MERGED + DEPLOYED 2026-08-25 — feature tip `50380267`, merge
+`3d6f492d`, fleet build `v0.2.7-1551-g3d6f492d`; physical evidence remains
+below
 **Executes:** [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) §8, M4
 **Predecessor:** [VOD-M3-HANDOFF.md](VOD-M3-HANDOFF.md)
 **Operator workflow:** [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md#film-addressed-vod--enable-it-and-prove-the-client-contract)
@@ -153,9 +154,10 @@ start/end times, and artifact paths in the evidence table below.
 
 | Evidence | Result |
 |---|---|
-| Automated VOD suite | Pending exact-commit run |
-| Automated stall-recovery suite | Pending exact-commit run |
-| Linux self-hosted CI | Pending pushed commit |
+| Automated VOD suite | **PASS** — 3/3 on `50380267`: steady, 20 seeks, suspend/resume; [runner job](https://github.com/pjunod/plurx/actions/runs/32871768220/job/97880727670) |
+| Automated stall-recovery suite | **PASS** — 1/1 on `50380267` with the 60 s evidence window; same runner job |
+| Linux self-hosted CI | **PASS, executable gates** — functionality 12/12, storage contracts, both release compiles, lint, layout, Android, and container smoke passed. Hosted-Apple billing and exhausted artifact storage prevented wrapper checks from turning green; [exact exceptions](https://github.com/pjunod/plurx/pull/563#issuecomment-5413811009). |
+| Fleet server deploy | **PASS** — Ansible deployed merge `3d6f492d`; nynuc and nuc3 rebuilt and health-checked, m6 and nuc4 were already on the exact stamped build; zero failed or unreachable tasks |
 | Nynuc 2 h 4K | Pending |
 | Nynuc 20 seeks | Pending |
 | Nynuc sleep/wake | Pending |

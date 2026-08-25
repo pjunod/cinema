@@ -2433,6 +2433,7 @@ dependencies = [
  "hmac",
  "jsonschema",
  "libc",
+ "plurx-compat-plex",
  "plurx-core",
  "reqwest 0.12.28",
  "rusqlite",

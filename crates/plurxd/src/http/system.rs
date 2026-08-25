@@ -33,12 +33,20 @@ pub struct ServerInfo {
     /// Compile time, always present — the fallback when `build` is "unknown".
     pub built_at: &'static str,
     pub instance_id: String,
+    /// Stable local identity used to distinguish this node's LAN records.
+    pub node_id: String,
+    /// True when discovery publishes one record per configured cluster node.
+    pub cluster_advertisement: bool,
     pub uptime_seconds: u64,
     /// True when no users exist yet — the web app shows first-run setup.
     pub setup_required: bool,
     /// True when an Android APK is published (so the web UI shows the download
     /// link on Android). See `web::android_apk_path`.
     pub android_app: bool,
+    /// Whether the web client's Auto controller may change rungs after the
+    /// server's initial playback decision. Public because every signed-in web
+    /// viewer needs the same node-wide playback policy.
+    pub playback_auto_abr: bool,
 }
 
 /// GET /api/v1/server — public; drives the client's setup-vs-login decision.
@@ -49,17 +57,30 @@ pub struct ServerInfo {
 /// are therefore not here — see `GET /api/v1/cluster/ingress`.
 pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
     let instance_id = state.store.instance_id().await?;
+    let name = state
+        .store
+        .get_setting(keys::SERVER_NAME)
+        .await?
+        .unwrap_or_else(|| state.server_name.clone());
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
+    let playback_auto_abr = state
+        .store
+        .get_setting(keys::PLAYBACK_AUTO_ABR)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
-        name: state.server_name.clone(),
+        name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
         built_at: crate::version::BUILT_AT,
         instance_id,
+        node_id: state.node_id.clone(),
+        cluster_advertisement: state.cluster_advertisement,
         uptime_seconds: state.started_at.elapsed().as_secs(),
         setup_required,
         android_app,
+        playback_auto_abr,
     }))
 }
 
@@ -171,8 +192,13 @@ pub async fn system_info(
     let (by_trigger, notifications) = state.jobs.metrics().snapshot();
     let (hw_in_use, hw_max) = state.transcode.hardware_slots().await;
     let replication = state.replication.status().await;
+    let name = state
+        .store
+        .get_setting(keys::SERVER_NAME)
+        .await?
+        .unwrap_or_else(|| state.server_name.clone());
     Ok(Json(SystemDto {
-        name: state.server_name.clone(),
+        name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
         built_at: crate::version::BUILT_AT,
@@ -1087,6 +1113,8 @@ fn client_log_line(ev: &ClientLog, suppressed: u64) -> String {
 
 #[derive(Serialize)]
 pub struct SettingsDto {
+    /// Replicated logical name shared by every voter.
+    pub server_name: String,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -1185,6 +1213,9 @@ pub struct SettingsDto {
     /// Use coarse, node-local playback history to seed Auto quality.
     /// Explicit opt-in; missing is false.
     pub playback_network_priors: bool,
+    /// Let the web client's Auto controller change rungs after playback starts.
+    /// Explicit opt-in; missing is false.
+    pub playback_auto_abr: bool,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -1218,6 +1249,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // for this node's cache ownership when a cache location is configured.
     let settings = state.store.settings_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
+    let server_name = setting(keys::SERVER_NAME).unwrap_or_else(|| state.server_name.clone());
     let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
     let omdb_api_key = setting(keys::OMDB_API_KEY).unwrap_or_default();
     let monarr_url = setting(keys::MONARR_URL).unwrap_or_default();
@@ -1298,6 +1330,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         .max(0);
     let playback_network_priors =
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
+    let playback_auto_abr =
+        setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
     let offline_enabled = !matches!(
         setting(keys::OFFLINE_ENABLED).as_deref(),
         Some("0" | "false" | "off" | "no")
@@ -1329,6 +1363,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
     Ok(SettingsDto {
+        server_name,
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
         omdb_configured: !omdb_api_key.is_empty(),
@@ -1369,6 +1404,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cache_used_bytes,
         telemetry_retain_days,
         playback_network_priors,
+        playback_auto_abr,
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -1389,6 +1425,9 @@ pub async fn get_settings(
 
 #[derive(Deserialize)]
 pub struct UpdateSettings {
+    /// Rename the logical server on every voter. Configuration is only the
+    /// bootstrap seed and is not edited by this operation.
+    pub server_name: Option<String>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
     /// Set the OMDb API key. Empty string clears it. Absent leaves it as-is.
@@ -1445,6 +1484,7 @@ pub struct UpdateSettings {
     pub cache_max_gb: Option<i64>,
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
+    pub playback_auto_abr: Option<bool>,
     pub offline_enabled: Option<bool>,
     pub offline_max_gb: Option<i64>,
     pub offline_max_gb_per_user: Option<i64>,
@@ -1471,6 +1511,13 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettings>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    if let Some(name) = &req.server_name {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ApiError::BadRequest("server_name must not be empty".into()));
+        }
+        state.store.put_setting(keys::SERVER_NAME, name).await?;
+    }
     if req.cluster_media_pool_enabled == Some(true)
         && !state.media_pool.remote_rollout_ready().await
     {
@@ -1847,6 +1894,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_NETWORK_PRIORS,
                 if enabled { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(enabled) = req.playback_auto_abr {
+        state
+            .store
+            .put_setting(keys::PLAYBACK_AUTO_ABR, if enabled { "1" } else { "0" })
             .await?;
     }
     for (key, label, value) in [

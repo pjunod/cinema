@@ -87,20 +87,39 @@ pub fn looks_like_plex(headers: &HeaderMap) -> bool {
             .unwrap_or(false)
 }
 
+fn plex_machine_identifier<'a>(
+    instance_id: &'a str,
+    node_id: &'a str,
+    cluster_advertisement: bool,
+) -> &'a str {
+    if cluster_advertisement {
+        node_id
+    } else {
+        instance_id
+    }
+}
+
 /// GET /identity — unauthenticated identity probe.
+///
+/// Clustered GDM exposes one Plex-compatible record per node, so this facade
+/// must echo the same node identifier that record advertised. The native API
+/// remains authoritative for the replicated logical `instance_id`.
 pub async fn identity(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let id = state.store.instance_id().await?;
-    Ok(xml(plex::identity_container(&id, version())))
+    let instance_id = state.store.instance_id().await?;
+    let id = plex_machine_identifier(&instance_id, &state.node_id, state.cluster_advertisement);
+    Ok(xml(plex::identity_container(id, version())))
 }
 
 /// GET / for Plex clients — server capabilities.
 pub async fn root(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let id = state.store.instance_id().await?;
-    Ok(xml(plex::root_container(
-        &id,
-        &state.server_name,
-        version(),
-    )))
+    let instance_id = state.store.instance_id().await?;
+    let id = plex_machine_identifier(&instance_id, &state.node_id, state.cluster_advertisement);
+    let name = state
+        .store
+        .get_setting(plurx_core::store::keys::SERVER_NAME)
+        .await?
+        .unwrap_or_else(|| state.server_name.clone());
+    Ok(xml(plex::root_container(id, &name, version())))
 }
 
 /// GET /library — the library root container clients load before sections.
@@ -463,5 +482,14 @@ mod tests {
     fn urldecodes() {
         assert_eq!(urldecode("the%20matrix"), "the matrix");
         assert_eq!(urldecode("a+b"), "a b");
+    }
+
+    #[test]
+    fn plex_identity_is_logical_for_legacy_and_node_specific_for_a_cluster() {
+        assert_eq!(
+            plex_machine_identifier("logical", "node-b", false),
+            "logical"
+        );
+        assert_eq!(plex_machine_identifier("logical", "node-b", true), "node-b");
     }
 }

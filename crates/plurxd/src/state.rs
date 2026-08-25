@@ -322,6 +322,8 @@ pub struct AppState {
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
+    /// Whether LAN discovery must distinguish this node from cluster peers.
+    pub cluster_advertisement: bool,
     pub artwork_dir: PathBuf,
     /// Shared peer-artwork HTTP client, per-filename singleflight, and global
     /// response-buffer bound for request and background reconciliation paths.
@@ -406,6 +408,7 @@ impl AppState {
             AppConfig {
                 server_name,
                 node_id,
+                cluster_advertisement: false,
                 scan_prune_percent: plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
                 // Process-lifetime key. Production resolves one from disk in
                 // `open_store`; this constructor is for callers that have no
@@ -441,6 +444,7 @@ impl AppState {
         let AppConfig {
             server_name,
             node_id,
+            cluster_advertisement,
             scan_prune_percent,
             credential_key,
             replication,
@@ -528,6 +532,7 @@ impl AppState {
             media_sessions,
             server_name,
             node_id,
+            cluster_advertisement,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
@@ -615,6 +620,7 @@ impl AppState {
 pub struct AppConfig {
     pub server_name: String,
     pub node_id: String,
+    pub cluster_advertisement: bool,
     pub scan_prune_percent: u8,
     /// Node-local key for durable credentials plurx replays rather than
     /// verifies. Resolved by `open_store` so a boot that cannot open the
