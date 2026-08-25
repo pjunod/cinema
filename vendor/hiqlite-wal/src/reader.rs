@@ -11,11 +11,17 @@ pub enum Action {
     Logs {
         from: u64,
         until: u64,
-        ack: oneshot::Sender<Result<Vec<Vec<u8>>, Error>>,
+        ack: flume::Sender<LogReadResponse>,
     },
     LogState(oneshot::Sender<Result<LogState, Error>>),
     Vote(oneshot::Sender<Result<Option<Vec<u8>>, Error>>),
     Shutdown,
+}
+
+#[derive(Debug)]
+pub enum LogReadResponse {
+    Record(Vec<u8>),
+    Done(Result<(), Error>),
 }
 
 #[derive(Debug)]
@@ -68,27 +74,25 @@ fn run(
         match action {
             Action::Logs { from, until, ack } => {
                 debug!("WAL Reader - Action::Logs - read from {from} until {until}");
-                {
+                let result = {
                     let wal_upd = wal_locked.read().unwrap();
                     wal.refresh_from_no_mmap(&wal_upd);
-                }
-
-                let result = read_requested_logs(
-                    &mut wal, from, until, &mut memo, &mut buf,
-                );
-                if let Err(err) = &result {
-                    error!("Error reading logs: {err:?}");
-                }
-                let _ = ack.send(result);
+                    // Keep the shared layout guard through mmap creation and
+                    // the complete read. Remove/truncate takes the exclusive
+                    // guard before changing any path or record layout.
+                    read_requested_logs(
+                        &mut wal, from, until, &mut memo, &mut buf, &ack,
+                    )
+                };
+                complete_log_read(ack, result);
             }
             Action::LogState(ack) => {
                 debug!("WAL Reader - Action::LogState");
-                {
+                let result = {
                     let wal_upd = wal_locked.read().unwrap();
                     wal.refresh_from_no_mmap(&wal_upd);
-                }
-
-                let result = read_log_state(&meta, &mut wal, &mut memo, &mut buf);
+                    read_log_state(&meta, &mut wal, &mut memo, &mut buf)
+                };
                 if let Err(err) = &result {
                     error!("Error reading WAL log state: {err:?}");
                 }
@@ -109,20 +113,38 @@ fn run(
     debug!("Logs Reader exiting");
 }
 
+fn complete_log_read(
+    ack: flume::Sender<LogReadResponse>,
+    result: Result<bool, Error>,
+) {
+    match result {
+        Ok(true) => {
+            let _ = ack.send(LogReadResponse::Done(Ok(())));
+        }
+        Ok(false) => {
+            debug!("WAL log response receiver closed before completion");
+        }
+        Err(err) => {
+            error!("Error reading logs: {err:?}");
+            let _ = ack.send(LogReadResponse::Done(Err(err)));
+        }
+    }
+}
+
 fn read_requested_logs(
     wal: &mut WalFileSet,
     from: u64,
     until: u64,
     memo: &mut Option<LogReadMemo>,
     buf: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<Vec<Vec<u8>>, Error> {
+    ack: &flume::Sender<LogReadResponse>,
+) -> Result<bool, Error> {
     if until < from {
         return Err(Error::Generic(
             "requested WAL range ends before it starts".into(),
         ));
     }
 
-    let mut result = Vec::new();
     let mut from_next = from;
     let mut read_any = false;
 
@@ -155,7 +177,11 @@ fn read_requested_logs(
         buf.clear();
         log.read_logs(file_from, file_until, memo, buf)?;
         read_any = true;
-        result.extend(buf.drain(..).map(|(_id, data)| data));
+        for (_id, data) in buf.drain(..) {
+            if ack.send(LogReadResponse::Record(data)).is_err() {
+                return Ok(false);
+            }
+        }
 
         if file_until == until {
             break;
@@ -169,7 +195,7 @@ fn read_requested_logs(
         })?;
     }
 
-    Ok(result)
+    Ok(true)
 }
 
 fn read_log_state(
@@ -240,6 +266,7 @@ fn read_log_state(
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{Duration, Instant};
 
     const WAL_SIZE: u32 = 2 * 1024 * 1024;
 
@@ -264,29 +291,35 @@ mod tests {
         let thread_wal = wal_locked.clone();
         let handle = thread::spawn(move || run(meta, thread_wal, rx));
 
-        let (ack, result) = oneshot::channel();
+        let (ack, result) = flume::bounded(1);
         tx.send(Action::Logs {
             from: 1,
             until: 2,
             ack,
         })
         .unwrap();
-        let error = result
-            .blocking_recv()
-            .unwrap()
-            .expect_err("metadata claiming an absent second record must fail");
+        let error = match result.recv().unwrap() {
+            LogReadResponse::Done(Err(error)) => error,
+            response => panic!("claimed range must return one terminal error, got {response:?}"),
+        };
         assert!(matches!(error, Error::Integrity(_)));
 
         wal_locked.write().unwrap().refresh_from_no_mmap(&writer);
-        let (ack, result) = oneshot::channel();
+        let (ack, result) = flume::bounded(1);
         tx.send(Action::Logs {
             from: 1,
             until: 1,
             ack,
         })
         .unwrap();
-        let records = result.blocking_recv().unwrap()?;
-        assert_eq!(records, vec![b"one".to_vec()]);
+        assert!(matches!(
+            result.recv().unwrap(),
+            LogReadResponse::Record(data) if data == b"one"
+        ));
+        assert!(matches!(
+            result.recv().unwrap(),
+            LogReadResponse::Done(Ok(()))
+        ));
 
         tx.send(Action::Shutdown).unwrap();
         handle.join().unwrap();
@@ -309,10 +342,138 @@ mod tests {
 
         let mut memo = None;
         let mut buf = Vec::with_capacity(1);
-        let records = read_requested_logs(&mut wal, 1, 9, &mut memo, &mut buf)?;
-        assert!(records.is_empty());
+        let (ack, records) = flume::bounded(1);
+        assert!(read_requested_logs(
+            &mut wal, 1, 9, &mut memo, &mut buf, &ack
+        )?);
+        assert!(records.try_recv().is_err());
 
         drop(wal);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn range_spanning_the_retained_floor_streams_only_retained_records(
+    ) -> Result<(), Error> {
+        let base_path = "test_data/reader_spanning_retained_floor".to_owned();
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut wal = WalFileSet::read(base_path.clone(), WAL_SIZE)?;
+        wal.active().mmap_mut()?;
+        let mut header = Vec::with_capacity(32);
+        wal.active().append_log(10, b"ten", &mut header)?;
+
+        let mut memo = None;
+        let mut buf = Vec::with_capacity(1);
+        let (ack, responses) = flume::bounded(2);
+        let result = read_requested_logs(
+            &mut wal, 1, 10, &mut memo, &mut buf, &ack,
+        );
+        complete_log_read(ack, result);
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Record(data) if data == b"ten"
+        ));
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Done(Ok(()))
+        ));
+
+        drop(wal);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn internal_retained_gap_is_a_terminal_error_after_any_prior_records(
+    ) -> Result<(), Error> {
+        let base_path = "test_data/reader_internal_gap".to_owned();
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut wal = WalFileSet::read(base_path.clone(), WAL_SIZE)?;
+        wal.active().mmap_mut()?;
+        let mut header = Vec::with_capacity(32);
+        wal.active().append_log(1, b"one", &mut header)?;
+        header.clear();
+        wal.roll_over(WAL_SIZE, &mut header)?;
+        header.clear();
+        wal.active().append_log(3, b"three", &mut header)?;
+
+        let mut memo = None;
+        let mut buf = Vec::with_capacity(2);
+        let (ack, responses) = flume::bounded(2);
+        let result = read_requested_logs(
+            &mut wal, 1, 3, &mut memo, &mut buf, &ack,
+        );
+        complete_log_read(ack, result);
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Record(data) if data == b"one"
+        ));
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Done(Err(Error::Integrity(_)))
+        ));
+
+        drop(wal);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn log_responses_apply_capacity_one_backpressure_before_the_terminal_result(
+    ) -> Result<(), Error> {
+        let base_path = "test_data/reader_bounded_stream".to_owned();
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut wal = WalFileSet::read(base_path.clone(), WAL_SIZE)?;
+        wal.active().mmap_mut()?;
+        let mut header = Vec::with_capacity(32);
+        wal.active().append_log(1, b"one", &mut header)?;
+        header.clear();
+        wal.active().append_log(2, b"two", &mut header)?;
+
+        let (ack, responses) = flume::bounded(1);
+        let (finished, completion) = flume::bounded(1);
+        let handle = thread::spawn(move || {
+            let mut memo = None;
+            let mut buf = Vec::with_capacity(2);
+            let result = read_requested_logs(
+                &mut wal, 1, 2, &mut memo, &mut buf, &ack,
+            );
+            complete_log_read(ack, result);
+            finished.send(()).unwrap();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while responses.is_empty() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(responses.len(), 1, "the first record must reach the bounded channel");
+        assert!(
+            completion.try_recv().is_err(),
+            "the producer must block before it can queue the second record and terminal result"
+        );
+
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Record(data) if data == b"one"
+        ));
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Record(data) if data == b"two"
+        ));
+        assert!(matches!(
+            responses.recv().unwrap(),
+            LogReadResponse::Done(Ok(()))
+        ));
+        completion.recv().unwrap();
+        handle.join().unwrap();
+
         fs::remove_dir_all(base_path)?;
         Ok(())
     }

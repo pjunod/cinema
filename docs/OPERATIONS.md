@@ -795,7 +795,9 @@ restarted a 72 MiB snapshot after about 50 MiB on the production LAN; 120
 seconds completed the same transfer. Keep the value identical on every voter
 so leadership changes do not change catch-up behavior. Snapshot frequency,
 WAL size/sync, disaster-recovery log retention, heartbeat, and election timers
-remain unchanged.
+remain unchanged. During a rolling upgrade, an old-binary leader keeps its
+fixed 10-second deadline until that voter is upgraded; do not treat the new
+deadline as effective cluster-wide until every possible leader is current.
 
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and

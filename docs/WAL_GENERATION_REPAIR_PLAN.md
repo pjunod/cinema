@@ -66,20 +66,20 @@ reader:    mmap generation A ── match `wal_no` ────┘
                 └── new B boundaries + old A bytes ──▶ false missing log
 ```
 
-### 2.1 This repair names file incarnation, not every concurrent layout mutation
+### 2.1 Layout replacement and reads share one serialization boundary
 
 Truncating a suffix and appending differently sized conflicting records can
-also invalidate offsets while keeping the same inode. A generation change
-published after that mutation would invalidate the next reader action, but it
-would not serialize a read already in progress. Solving that broader race needs
-an action-level shared/exclusive layout guard or copy-on-write replacement.
+also invalidate offsets while keeping the same inode. The writer therefore
+takes the file-set write guard before any delete, recreate, or truncate and
+holds it through metadata publication. Readers hold the shared guard from
+refresh through mmap creation and the complete read. A reader that captured an
+old identity can neither open a replacement pathname nor overlap an in-place
+layout rewrite.
 
-This PR stays tied to the reproduced incident: a full purge unlinks the mapped
-inode and creates a different file under the same WAL number. `incarnation`
-therefore means one `WalFile::new` or `WalFile::read_from_file` object lineage.
-The existing retained-range guard continues to cover an in-place front purge.
-General read-versus-suffix-rewrite serialization is an explicit non-goal in
-§7, not a safety property claimed without coordination.
+A suffix rewrite also renews the retained file's incarnation before
+publication, invalidating memos whose offsets belonged to the removed suffix.
+The existing retained-range guard continues to cover an in-place front purge,
+which advances `data_start` without moving retained records.
 
 ### 2.2 The current error path hides the storage failure
 
@@ -129,6 +129,12 @@ An incarnation mismatch drops the whole old `WalFile`, which unmaps the
 deleted inode. Ordinary append-only refreshes keep the mmap and copy the
 expanded boundary fields as they do now.
 
+Every remove/truncate action takes the writer side of the layout guard before
+physical mutation; reader actions retain the shared side through refresh,
+mmap, and read. An in-place conflicting suffix rewrite renews the incarnation
+before publication because later record offsets may change even though the
+inode and WAL number do not.
+
 `LogReadMemo` records the incarnation that produced its byte offset. A memo is
 eligible only when all of these hold:
 
@@ -143,12 +149,12 @@ A failed check is a cache miss. Reading restarts at the authoritative
 
 ### 3.3 Every contradictory WAL read is one explicit storage result
 
-Replace the bounded `Option<Result<...>>` stream with a one-shot
-`Result<Vec<Vec<u8>>, Error>`. OpenRaft requests at most a bounded log batch,
-and the reader already buffers a file range before publication. One result
-eliminates the invalid `Err`-then-terminator sequence: the current consumer
-returns and drops its receiver as soon as it sees `Err`, so a second send would
-panic or block the producer. A cancelled response send is not unwrapped.
+Replace the ambiguous `Option<Result<...>>` stream with an explicit
+capacity-one protocol: zero or more `Record(Vec<u8>)` messages followed by one
+`Done(Result<(), Error>)`. The consumer deserializes incrementally and returns
+only after the terminal result. This preserves bounded raw-data staging while
+eliminating the invalid `Err`-then-terminator sequence. A cancelled response
+send is not unwrapped and leaves the reader thread usable.
 
 Within one `WalFile`, metadata has already asserted that the requested subrange
 exists. `read_logs` replaces its release-only count assertion with an
@@ -224,11 +230,13 @@ cargo test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml
 
 ### 4.3 Make storage failures observable to OpenRaft
 
-Return range and log-state errors through one-shot result channels and turn a
-short read inside a WAL's claimed subrange into an integrity error in release
-builds. Add reader-thread tests that inject an invalid claimed range and assert
-the receiver obtains `Err`, then successfully processes a second action. Keep a
-separate test proving a request outside the retained set may remain absent.
+Return range errors through an explicit bounded record/terminal protocol and
+log-state errors through their one-shot result channel. Turn a short or
+wrong-ID read inside a WAL's claimed subrange into an integrity error in
+release builds. Add reader-thread tests that inject an invalid claimed range
+and assert the receiver obtains a terminal `Err`, then successfully processes a
+second action. Keep a separate test proving a request outside the retained set
+may remain absent.
 
 Harden record-header/data arithmetic and mmap slice access along the same error
 path. No `mmap`, `read_logs`, buffer-index, or response-send failure in the
@@ -306,10 +314,10 @@ a healthy quorum. Never edit `meta.hql` or synthesize WAL entries by hand.
 - **Do not disable mmap or memo reuse globally.** Full reconstruction on every
   read is a safe emergency fallback, but it is unnecessary once invalidation
   follows layout generations.
-- **Do not claim general read/truncate serialization.** In-place conflicting
-  suffix rewrites need an action-level coordination or copy-on-write design.
-  This PR repairs the observed unlinked-inode recreation ABA and leaves that
-  broader concurrency contract for a separately reproduced change.
+- **Do not serialize ordinary append-only publication.** Existing file bytes
+  below the published boundary remain immutable. The shared/exclusive layout
+  guard is reserved for remove/truncate mutations that delete a pathname or
+  invalidate existing record offsets.
 - **Do not call the clean forensic copy corrupt.** The diagnosis depends on the
   disk/process disagreement; erasing that distinction would send recovery in
   the wrong direction.

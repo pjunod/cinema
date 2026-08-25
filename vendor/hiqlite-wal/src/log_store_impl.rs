@@ -75,24 +75,31 @@ async fn try_get_log_entries<
 
     let mut res: Vec<T::Entry> = Vec::new();
 
-    let (ack, rx) = oneshot::channel();
+    let (ack, rx) = flume::bounded(1);
     tx.send_async(reader::Action::Logs { from, until, ack })
         .await
         .map_err(|err| StorageError::IO {
             source: StorageIOError::read_logs(&err),
         })?;
 
-    let records = rx.await.map_err(|err| StorageError::IO {
-        source: StorageIOError::read_logs(&err),
-    })?;
-    for data in records.map_err(|err| StorageError::IO {
+    loop {
+        let response = rx.recv_async().await.map_err(|err| StorageError::IO {
             source: StorageIOError::read_logs(&err),
-        })?
-    {
-        let entry = deserialize::<T::Entry>(&data).map_err(|err| StorageError::IO {
-            source: StorageIOError::<T::NodeId>::read_logs(&err),
         })?;
-        res.push(entry);
+        match response {
+            reader::LogReadResponse::Record(data) => {
+                let entry = deserialize::<T::Entry>(&data).map_err(|err| StorageError::IO {
+                    source: StorageIOError::<T::NodeId>::read_logs(&err),
+                })?;
+                res.push(entry);
+            }
+            reader::LogReadResponse::Done(result) => {
+                result.map_err(|err| StorageError::IO {
+                    source: StorageIOError::read_logs(&err),
+                })?;
+                break;
+            }
+        }
     }
 
     Ok(res)

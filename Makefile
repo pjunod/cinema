@@ -127,6 +127,24 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
 	  reader::tests::failed_claimed_range_does_not_poison_the_next_reader_action \
 	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  reader::tests::log_responses_apply_capacity_one_backpressure_before_the_terminal_result \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  writer::tests::full_purge_waits_for_an_unmapped_reader_before_reusing_the_wal_path \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  wal::tests::duplicate_outer_log_id_is_rejected_even_when_the_record_count_matches \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  wal::tests::suffix_rewrite_renews_the_incarnation_before_memo_reuse \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  reader::tests::range_spanning_the_retained_floor_streams_only_retained_records \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite-wal/Cargo.toml \
+	  reader::tests::internal_retained_gap_is_a_terminal_error_after_any_prior_records \
+	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
 	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \

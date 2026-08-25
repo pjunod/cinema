@@ -51,10 +51,13 @@ The current response channel has capacity one. Its consumer returns through
 `?` immediately after receiving `Err`, dropping the receiver. A producer that
 then sends `None` blocks or receives cancellation and panics on `unwrap()`.
 
-**Required and accepted:** return one
-`Result<Vec<Vec<u8>>, Error>` over a one-shot channel. Do not unwrap a cancelled
-response send. Test a failed action followed by a successful action on the same
-reader thread.
+**Required and initially accepted:** make `Err` terminal, do not unwrap a
+cancelled response send, and test a failed action followed by a successful
+action on the same reader thread. The post-PR adversarial review then rejected
+whole-batch one-shot staging because a valid 128-entry range can exceed 2 GiB
+of raw payload. The final protocol is a capacity-one stream of `Record`
+messages followed by exactly one `Done(Result<(), Error>)`; it retains terminal
+error semantics without the raw-memory amplification.
 
 ## 3. P1 findings — keep corruption claims and concurrency claims exact
 
@@ -65,10 +68,13 @@ mutates physical files before publishing their new headers through that lock.
 An incarnation change would therefore affect the next reader action, not one
 already scanning while a conflicting suffix is rewritten.
 
-**Required and accepted:** narrow this PR to the reproduced full-purge path,
-where a mapped inode is unlinked and a different file reuses its number. A
-general suffix-rewrite repair needs a shared/exclusive action guard or
-copy-on-write files and its own interleaving proof.
+**Required and initially accepted:** narrow the claim to the reproduced
+full-purge path. The post-PR adversarial review found a remaining interleaving:
+an unmapped old reader could refresh, the writer could recreate the pathname,
+and that reader could then map the replacement inode before publication. The
+final repair therefore holds a shared layout guard through refresh/mmap/read,
+takes the exclusive guard before remove/truncate physical mutation, and renews
+the incarnation for in-place suffix rewrites.
 
 ### 3.2 Absence outside retained WAL metadata is not automatically corruption
 
@@ -99,3 +105,20 @@ causes OpenRaft to apply the install timeout across snapshot transfer work.
 
 Older binaries tolerate unknown `[cluster]` keys, so the new timeout setting
 does not break config parsing during rollback. No WAL header change is needed.
+
+## 5. Post-PR adversarial review — three P1 findings repaired
+
+A fresh agent reviewed PR #574 after implementation and requested changes for
+three P1 issues: physical replacement could still race an unmapped reader,
+count validation did not prove the exact outer log-ID sequence, and the
+one-shot response duplicated up to roughly 2 GiB of valid raw payload. The
+final implementation adds the shared/exclusive layout boundary and a
+barrier-driven full-purge test, validates every selected outer ID in optimized
+builds, and restores capacity-one incremental delivery with an explicit
+terminal result. Its follow-up tests also cover suffix-incarnation renewal,
+bounded backpressure, a request spanning the retained floor, and an internal
+gap that fails after an earlier record was streamed.
+
+The review reported no P0 findings. Its P2 history-scope concern is resolved by
+the validation commit and PR body explicitly naming the unrelated Darwin
+mapping required to restore `main`'s history audit.

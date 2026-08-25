@@ -370,6 +370,11 @@ impl WalFile {
         self.data_end = other.data_end;
     }
 
+    #[inline]
+    fn renew_incarnation(&mut self) {
+        self.incarnation = next_wal_incarnation();
+    }
+
     /// Reads the logs into the given buffer. Returns `Ok(offset)` of the first log.
     #[tracing::instrument(level = "debug", skip_all)]
     #[inline]
@@ -407,6 +412,7 @@ impl WalFile {
         let data_end = self.data_end.unwrap();
         let mut idx = data_start;
         let mut offset = 0;
+        let mut expected_log_id = id_from;
 
         if let Some(memo) = memo
             && memo.wal_incarnation == self.incarnation
@@ -441,6 +447,15 @@ impl WalFile {
             }
             if record.log_id >= id_from {
                 if record.log_id <= id_until {
+                    if record.log_id != expected_log_id {
+                        return Err(Error::Integrity(
+                            format!(
+                                "WAL metadata claims range {id_from}..={id_until}, but expected log {expected_log_id} and found {}\n{self:?}",
+                                record.log_id
+                            )
+                            .into(),
+                        ));
+                    }
                     if record_end > data_end {
                         return Err(Error::Integrity(
                             format!(
@@ -453,7 +468,12 @@ impl WalFile {
                     if record.crc != crc!(record.data) {
                         return Err(Error::Integrity("Invalid CRC for WAL Record".into()));
                     }
-                    buf.push((record.log_id, record.data.to_vec()))
+                    buf.push((record.log_id, record.data.to_vec()));
+                    if expected_log_id < id_until {
+                        expected_log_id = expected_log_id.checked_add(1).ok_or_else(|| {
+                            Error::Integrity("expected WAL log id overflow".into())
+                        })?;
+                    }
                 } else {
                     break;
                 }
@@ -1092,6 +1112,9 @@ impl WalFileSet {
 
             let back = self.files.back_mut().unwrap();
             if back.id_from == id_from {
+                if back.data_start.is_some() {
+                    back.renew_incarnation();
+                }
                 back.id_until = id_from;
                 back.data_start = None;
                 back.data_end = None;
@@ -1101,6 +1124,7 @@ impl WalFileSet {
                 }
                 // offset always goes forwards
                 let offset = back.read_logs(id_from, id_from, &mut memo, buf_logs)?;
+                back.renew_incarnation();
                 back.id_until = id_from - 1;
                 // data_end is inclusive
                 back.data_end = Some(offset - 1);
@@ -1727,6 +1751,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn full_purge_replaces_stale_mmap_and_memo_across_reused_wal_numbers() -> Result<(), Error> {
         let base_path = format!("{}/full_purge_replaces_reader_generation", PATH);
@@ -1853,6 +1878,95 @@ mod tests {
         assert!(matches!(error, Error::Integrity(_)));
 
         drop(wal);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_outer_log_id_is_rejected_even_when_the_record_count_matches(
+    ) -> Result<(), Error> {
+        let base_path = format!("{}/duplicate_outer_log_id", PATH);
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut header = Vec::with_capacity(32);
+        let mut wal = WalFile::new(1, &base_path, 0, 0, MB2)?;
+        wal.create_file(&mut header)?;
+        wal.mmap_mut()?;
+        header.clear();
+        wal.append_log(1, b"one", &mut header)?;
+        let second_start = wal.data_end.unwrap() as usize + 1;
+        header.clear();
+        wal.append_log(2, b"two", &mut header)?;
+        header.clear();
+        wal.append_log(3, b"three", &mut header)?;
+
+        // The record CRC covers the payload, not this outer WAL id. Preserve
+        // both payloads and their CRCs while duplicating id 1 in the slot that
+        // the header claims is id 2. A count-only check accepted [1, 1].
+        header.clear();
+        u64_to_bin(1, &mut header)?;
+        wal.mmap_mut.as_mut().unwrap()[second_start..second_start + 8]
+            .copy_from_slice(&header);
+
+        let mut memo = None;
+        let mut records = Vec::with_capacity(2);
+        let error = wal
+            .read_logs(1, 2, &mut memo, &mut records)
+            .expect_err("the selected records must have the exact requested ids");
+        assert!(matches!(error, Error::Integrity(_)));
+        assert!(error.to_string().contains("expected log 2"), "{error}");
+
+        drop(wal);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn suffix_rewrite_renews_the_incarnation_before_memo_reuse() -> Result<(), Error> {
+        let base_path = format!("{}/suffix_rewrite_incarnation", PATH);
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+
+        let mut writer = WalFileSet::read(base_path.clone(), MB2)?;
+        writer.active().mmap_mut()?;
+        let mut header = Vec::with_capacity(32);
+        writer.active().append_log(1, b"one", &mut header)?;
+        header.clear();
+        writer.active().append_log(2, b"old-two", &mut header)?;
+
+        let mut reader = writer.clone_no_map();
+        reader.active().mmap()?;
+        let mut memo = None;
+        let mut records = Vec::with_capacity(1);
+        reader
+            .active()
+            .read_logs(2, 2, &mut memo, &mut records)?;
+        let old_incarnation = reader.active().incarnation;
+
+        header.clear();
+        records.clear();
+        writer.shift_delete_logs(2, u64::MAX, MB2, &mut header, &mut records)?;
+        header.clear();
+        writer.active().append_log(
+            2,
+            b"replacement-two-is-deliberately-longer",
+            &mut header,
+        )?;
+        header.clear();
+        writer.active().append_log(3, b"three", &mut header)?;
+
+        reader.refresh_from_no_mmap(&writer);
+        assert_ne!(reader.active().incarnation, old_incarnation);
+        reader.active().mmap()?;
+        records.clear();
+        reader
+            .active()
+            .read_logs(3, 3, &mut memo, &mut records)?;
+        assert_eq!(records, vec![(3, b"three".to_vec())]);
+
+        drop(reader);
+        drop(writer);
         fs::remove_dir_all(base_path)?;
         Ok(())
     }
