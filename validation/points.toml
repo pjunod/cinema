@@ -447,6 +447,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
+  "crates/plurxd/tests/cluster_activity.rs",
   "crates/plurxd/src/http/browse.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",

@@ -133,6 +133,7 @@ cluster-check: ## Run WAL recovery plus M1b-M4 durable-state, growth, and failur
 	  topology::tests::topology_artifact -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  named_runner::tests --lib -- --nocapture
+	$(CARGO) test --locked -p plurxd --test cluster_activity -- --nocapture
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
