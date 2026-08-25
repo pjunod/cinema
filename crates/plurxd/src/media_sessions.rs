@@ -3,8 +3,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{header, HeaderName, Response, StatusCode};
@@ -112,6 +113,46 @@ impl TakeoverSettlementGuard {
     }
 }
 
+const TAKEOVER_BUCKETS_MS: [u64; 7] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000];
+/// Index into the metric arrays. Named because "2" appearing on four
+/// unrelated return paths is how an operator ends up reading a histogram that
+/// counts the wrong thing.
+const TAKEOVER_METHOD_COPY: usize = 0;
+const TAKEOVER_METHOD_TRANSCODE: usize = 1;
+const TAKEOVER_METHOD_UNKNOWN: usize = 2;
+const TAKEOVER_WON: usize = 0;
+const TAKEOVER_LOST: usize = 1;
+const TAKEOVER_SKIPPED: usize = 2;
+const TAKEOVER_FAILED: usize = 3;
+
+struct TakeoverMetrics {
+    outcomes: [[AtomicU64; 4]; 3],
+    buckets: [[AtomicU64; 8]; 3],
+    duration_micros: [AtomicU64; 3],
+}
+
+static TAKEOVER_METRICS: LazyLock<TakeoverMetrics> = LazyLock::new(|| TakeoverMetrics {
+    outcomes: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+    buckets: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+    duration_micros: std::array::from_fn(|_| AtomicU64::new(0)),
+});
+
+struct TakeoverMetricGuard {
+    method: usize,
+    outcome: usize,
+    started: Instant,
+}
+
+impl TakeoverMetricGuard {
+    fn new() -> Self {
+        Self {
+            method: TAKEOVER_METHOD_UNKNOWN,
+            outcome: TAKEOVER_FAILED,
+            started: Instant::now(),
+        }
+    }
+}
+
 impl Drop for TakeoverSettlementGuard {
     fn drop(&mut self) {
         let mut settling = TAKEOVER_SETTLING
@@ -133,6 +174,67 @@ fn settling_takeover_ids() -> HashSet<String> {
         .keys()
         .cloned()
         .collect()
+}
+
+impl Drop for TakeoverMetricGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        TAKEOVER_METRICS.outcomes[self.method][self.outcome].fetch_add(1, Ordering::Relaxed);
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let bucket = TAKEOVER_BUCKETS_MS
+            .iter()
+            .position(|bound| elapsed_ms <= *bound)
+            .unwrap_or(TAKEOVER_BUCKETS_MS.len());
+        TAKEOVER_METRICS.buckets[self.method][bucket].fetch_add(1, Ordering::Relaxed);
+        TAKEOVER_METRICS.duration_micros[self.method].fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+pub(crate) fn prometheus() -> String {
+    let mut out = String::from(
+        "# HELP plurx_media_session_takeovers_total Expired media-session takeover decisions.\n\
+         # TYPE plurx_media_session_takeovers_total counter\n",
+    );
+    for (method_index, method) in ["copy", "transcode", "unknown"].iter().enumerate() {
+        for (outcome_index, outcome) in ["won", "lost", "skipped", "failed"].iter().enumerate() {
+            let count =
+                TAKEOVER_METRICS.outcomes[method_index][outcome_index].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "plurx_media_session_takeovers_total{{method=\"{method}\",outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+    }
+    out.push_str(
+        "# HELP plurx_media_session_takeover_seconds Time spent deciding and settling a takeover.\n\
+         # TYPE plurx_media_session_takeover_seconds histogram\n",
+    );
+    for (method_index, method) in ["copy", "transcode", "unknown"].iter().enumerate() {
+        let mut cumulative = 0_u64;
+        for (bucket_index, bound_ms) in TAKEOVER_BUCKETS_MS.iter().enumerate() {
+            cumulative = cumulative.saturating_add(
+                TAKEOVER_METRICS.buckets[method_index][bucket_index].load(Ordering::Relaxed),
+            );
+            out.push_str(&format!(
+                "plurx_media_session_takeover_seconds_bucket{{method=\"{method}\",le=\"{}\"}} {cumulative}\n",
+                *bound_ms as f64 / 1_000.0
+            ));
+        }
+        cumulative = cumulative.saturating_add(
+            TAKEOVER_METRICS.buckets[method_index][TAKEOVER_BUCKETS_MS.len()]
+                .load(Ordering::Relaxed),
+        );
+        let sum = TAKEOVER_METRICS.duration_micros[method_index].load(Ordering::Relaxed) as f64
+            / 1_000_000.0;
+        out.push_str(&format!(
+            "plurx_media_session_takeover_seconds_bucket{{method=\"{method}\",le=\"+Inf\"}} {cumulative}\n\
+             plurx_media_session_takeover_seconds_sum{{method=\"{method}\"}} {sum}\n\
+             plurx_media_session_takeover_seconds_count{{method=\"{method}\"}} {cumulative}\n"
+        ));
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1127,7 +1229,9 @@ pub(crate) async fn takeover_loop(state: AppState) {
 
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + TAKEOVER_DEADLINE;
+    let mut metric = TakeoverMetricGuard::new();
     if route.owner_node_id == state.node_id {
+        metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
     // Settle the successor's numbering before spending any store read on it.
@@ -1145,8 +1249,16 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         || envelope.incarnation_id != route.incarnation_id
         || envelope.user_id != route.user_id
     {
+        // A route whose recipe no longer describes it is stale, not broken —
+        // this node declines it. Counting it as a failure pages an operator
+        // for ordinary rollout skew.
+        metric.outcome = TAKEOVER_SKIPPED;
         return Err("persisted takeover recipe no longer matches its route".to_owned());
     }
+    metric.method = match envelope.request.kind {
+        SessionKind::Copy { .. } => TAKEOVER_METHOD_COPY,
+        SessionKind::Transcode { .. } => TAKEOVER_METHOD_TRANSCODE,
+    };
     // The rollout OPERATIONS.md prescribes turns this gate on while sessions
     // are already playing. Those sessions were created before the gate and
     // are serving `EXT-X-PLAYLIST-TYPE:EVENT`; a replacement generation
@@ -1163,6 +1275,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         return Err("takeover cannot replace a VOD-presented session".to_owned());
     }
     if !envelope.typeless_playlist {
+        metric.outcome = TAKEOVER_SKIPPED;
         return Err("takeover cannot replace a session serving an EVENT playlist".to_owned());
     }
     let file = tokio::time::timeout_at(deadline, state.store.get_file(envelope.request.file_id))
@@ -1171,6 +1284,9 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "takeover source is missing".to_owned())?;
     if !takeover_source_matches(&envelope, file.size, file.mtime) {
+        // The library was rescanned under the session. Refusing is the
+        // correct behaviour, so it is a skip and not a failure.
+        metric.outcome = TAKEOVER_SKIPPED;
         return Err("takeover source revision changed".to_owned());
     }
     let (frontier_offset_ms, restart_ms) = takeover_resume(&route, &envelope.request.kind);
@@ -1196,6 +1312,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?;
     if offers.selected_node_id.as_deref() != Some(state.node_id.as_str()) {
+        metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
     let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
@@ -1285,6 +1402,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
                 started.replacement,
             )
             .await;
+        metric.outcome = TAKEOVER_LOST;
         return Ok(());
     };
     let adopted = tokio::time::timeout_at(
@@ -1395,6 +1513,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     state.media_sessions.cache_route(claimed.clone()).await;
     state.media_sessions.seed_owned_lease(&claimed).await;
     drop(started.replacement);
+    metric.outcome = TAKEOVER_WON;
     Ok(())
 }
 

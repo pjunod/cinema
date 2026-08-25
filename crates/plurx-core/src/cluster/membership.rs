@@ -2099,9 +2099,15 @@ impl MembershipManager {
         trigger_election(&inner.local.api_address, &inner.secrets.api).await
     }
 
-    /// Public HTTP bases for currently reachable peers, used only to recover
-    /// node-local materialized bytes such as artwork. The ordinary membership
-    /// status deliberately continues to omit addresses.
+    /// Public HTTP bases for currently reachable peers.
+    ///
+    /// Originally node-to-node only, for recovering materialized bytes such as
+    /// artwork. Since the media pool's client failover it is also what
+    /// `GET /api/v1/cluster/ingress` hands to a **signed-in** client, so these
+    /// values are no longer purely internal — an operator's
+    /// `cluster.artwork_url` must name an address a household client can
+    /// actually reach. The ordinary membership status still omits addresses,
+    /// and no unauthenticated route exposes them.
     pub async fn reachable_peer_http_urls(&self) -> Result<Vec<String>, MembershipError> {
         let Some(inner) = self.inner.as_ref() else {
             return Ok(Vec::new());

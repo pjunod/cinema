@@ -476,3 +476,27 @@ source = "clients/apple/Sources/ReaderView.swift"
 source_anchor = "IDs are quoted deliberately"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testNativeReaderHandoffKeepsTheBearerOutOfTheURLAndEscapesTheScript"
+
+[[fixes]]
+id = "clients.media-failover-origin-validation"
+commits = ["f5fb37af"]
+source = "clients/apple/Sources/Session.swift"
+source_anchor = "static func canonicalOrigin("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyAPlainHTTPOriginIsAcceptedAsAFailoverCandidate"
+
+[[fixes]]
+id = "apple.media-failover-transport-only"
+commits = ["1415ce13", "b8f11bc6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isTransportPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testOnlyATransportFailureMovesToAnotherNode"
+
+[[fixes]]
+id = "apple.media-failover-recovery-disjoint"
+commits = ["19e2d818"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "static func isCompatibilityPlaybackFailure("
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testNoFailureIsBothAMediaVerdictAndANodeFault"
