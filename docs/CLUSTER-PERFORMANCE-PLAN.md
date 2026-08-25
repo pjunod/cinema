@@ -1,12 +1,13 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P5 implementation and deterministic acceptance delivered; M4
+**Status:** P0–P7 implementation and deterministic acceptance delivered; M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
 revised after adversarial review (§6.6), with four of its storage guards still
 design intent rather than pinned behavior; P6 delivered across two stacked
 changes — admission/protocol safety first, then useful traffic, readiness,
 promotion, removal, capacity reporting, and full real-process lifecycle
-acceptance (§6.7); P0c/P2f/P5 physical evidence and P7 remain · **Extends:**
+acceptance (§6.7); P7's vendor-neutral proxy/failure evidence is delivered;
+P0c/P2f/P5 named physical evidence remains · **Extends:**
 [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
@@ -942,6 +943,17 @@ lagged-worker runs. Lock absolute SLOs only from those artifacts.
 leader loss recovers inside the accepted election budget, a lagged learner
 leaves rotation, and an HLS session survives one backend loss with the existing
 documented discontinuity behavior.
+
+| Acceptance clause | P7 result |
+|---|---|
+| Product-neutral routing contract | met — `/readyz`, HLS/segment affinity, 2 s connect, 75 s drain, and safe-method-only retry behavior are specified independently of example proxy syntax |
+| Executable local proxy fixture | met — two real local HTTP backends and a proxy prove sticky HLS/segments, backend ejection, one discontinuity, and no replay of a failing `POST` |
+| Three voters and three voters plus learner | met — the same separate-process harness records the three-voter quorum and admitted non-voting replica |
+| Follower loss preserves writes | met — 64 quorum-acknowledged writes split around process loss complete with zero request errors and replicated-state parity |
+| Leader loss meets the accepted election budget | met — readiness plus the first post-loss acknowledged write is measured and rejected above 10 seconds |
+| Lagged learner leaves rotation | met — the real learner apply path pauses, commits fall beyond it, `ready_read_workers` reaches zero, and catch-up restores eligibility |
+| HLS survives backend loss | met — the sticky session moves to the ready survivor and its replacement playlist carries exactly one discontinuity |
+| Retained evidence | met — CI uploads `cluster-failure-drills.json`, validated by a closed Draft 2020-12 schema; it makes no named-hardware performance claim |
 
 ## 7. Pull-request sequence — small diffs, explicit dependencies
 

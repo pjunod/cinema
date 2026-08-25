@@ -1332,6 +1332,30 @@ fine; stickiness is an optimization, not an availability dependency. If that
 backend becomes unready, the next request may move to a survivor and the
 client-visible recovery contract still applies.
 
+The proxy contract is independent of Caddy, nginx, Traefik, HAProxy, or a
+managed load balancer. Use a 2-second backend connection bound and a 75-second
+maximum connection drain. Retry `GET` and `HEAD` only; never automatically
+replay `POST`, `PUT`, `PATCH`, or `DELETE`, because a lost response does not
+prove the authority mutation was uncommitted. The exact contract and
+ready-to-adapt examples live in
+[`deploy/cluster-routing/`](../deploy/cluster-routing/).
+
+Before rollout, run the product-neutral fixture and inspect its evidence:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- proxy-fixture
+make cluster-check
+jq '{follower_loss,leader_loss,three_voter_plus_learner,hls_backend_loss,accepted_budgets}' \
+  target/validation/cluster-failure-drills.json
+```
+
+The retained semantic artifact proves zero-error split-loss writes, leader
+recovery inside the accepted 10-second election transition budget, lagged
+learner rotation, HLS backend takeover with one discontinuity, and zero proxy
+replays of an unsafe mutation. It is not a hardware latency benchmark. Preserve
+the CI artifact for the build being deployed; do not infer a tighter absolute
+SLO from local stopwatch output.
+
 ### Cluster ingress, drain, and recovery
 
 Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
