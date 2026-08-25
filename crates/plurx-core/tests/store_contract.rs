@@ -3723,9 +3723,27 @@ async fn open_contract_hiqlite_store(cluster: &ContractCluster) -> HiqliteAuthSt
     .await
     .expect("connect contract client to three voters");
     let telemetry_path = cluster._root.path().join("contract-client-telemetry.db");
-    HiqliteAuthStore::bootstrap(client, CONTRACT_INSTANCE_ID, &telemetry_path)
-        .await
-        .expect("bootstrap contract store")
+    for attempt in 1..=REPLICATED_DEADLINE_ATTEMPTS {
+        match classify_replicated(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry_path)
+                .await,
+        ) {
+            ReplicatedOutcome::Ready(store) => return store,
+            ReplicatedOutcome::Fault(error) => panic!("bootstrap contract store: {error}"),
+            ReplicatedOutcome::Deadline if attempt < REPLICATED_DEADLINE_ATTEMPTS => {
+                // Bootstrap is intentionally idempotent: every schema statement
+                // and identity seed tolerates an already-committed predecessor.
+                // A cancelled client future can therefore be retried without
+                // weakening production's three-second operation deadline.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            ReplicatedOutcome::Deadline => break,
+        }
+    }
+    panic!(
+        "{}",
+        replicated_deadline_diagnosis("bootstrap contract store", REPLICATED_DEADLINE_ATTEMPTS,)
+    )
 }
 
 #[cfg(feature = "hiqlite-store")]

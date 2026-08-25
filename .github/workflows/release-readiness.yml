@@ -16,7 +16,7 @@ jobs:
     name: current version is ready to tag
     # Readiness answers "would the gate pass if we tagged now", so it has to run
     # the gate's ffmpeg rather than the week's. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ubuntu-24.04]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +29,8 @@ jobs:
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
-      - name: Verify Playwright and install its pinned browser
-        run: |
-          requirement=playwright==1.62.0
-          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
-          test "$requirement" = "playwright==$actual"
-          python3 -m playwright install chromium
+      - uses: ./.github/actions/playwright
+        with:
+          version: "1.62.0"
       - name: Verify release readiness
         run: make release-check

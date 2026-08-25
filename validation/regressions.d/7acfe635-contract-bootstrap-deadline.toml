@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7acfe635"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The retained three-voter Store contract factory now re-attempts only the production replicated-store deadline while bootstrapping its fresh, idempotent schema. The cluster-auth gate exercises that factory for every backend-neutral contract, including reading_state_contract_runs_through_dyn_store, which exposed the failure after a ready lab cluster lost one three-second scheduling window. A real Store error still fails immediately, five consecutive deadlines keep the load-sensitive diagnosis, and production's three-second operation bound is unchanged."
