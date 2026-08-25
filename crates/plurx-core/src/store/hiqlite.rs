@@ -708,7 +708,7 @@ async fn time_store_operation<T>(
             successful,
             validation_store_operation_instrumentation_enabled(),
         )
-        .await;
+        .await
     }
     #[cfg(not(feature = "cluster-read-cost-validation"))]
     {
