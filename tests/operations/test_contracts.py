@@ -460,6 +460,10 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
         high_cpu = "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
+        ffmpeg6 = "    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]"
+        high_cpu_ffmpeg6 = (
+            "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]"
+        )
         android = "    runs-on: [self-hosted, Linux, X64, lab, android-kvm]"
         hosted_linux = "    runs-on: ubuntu-latest"
         apple = "    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]"
@@ -479,7 +483,18 @@ class OperationsContractCase(unittest.TestCase):
                 expected = general
                 if path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name == "docker":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
+                    "vod_web",
+                    "coverage",
+                }:
+                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name == "web_layout":
+                    expected = ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_auth",
+                    "docker",
+                }:
                     expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",

@@ -126,7 +126,7 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     # The fleet image is fixed by the runner playbook, and this job's playback
     # assertions also pin the ffmpeg major. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -185,6 +185,9 @@ jobs:
           fi
       - name: Upload validation evidence
         if: always()
+        # Diagnostic retention is best-effort. A full repository artifact
+        # quota must not turn a completed test verdict into a failed test job.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: validation-evidence
@@ -198,7 +201,7 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # The first cold lab run reached the final three-voter proof but crossed
     # the old 25-minute guard while building the command-profile dependency
     # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
@@ -222,6 +225,7 @@ jobs:
         run: make cluster-check
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: cluster-topology-semantic
@@ -241,7 +245,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -272,7 +276,7 @@ jobs:
     name: film-addressed VOD browser acceptance
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -492,6 +496,7 @@ jobs:
           script: PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
       - name: Upload Android test reports
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: android-instrumentation-reports
@@ -505,7 +510,7 @@ jobs:
     name: coverage
     # Same suite as `check`, so the same pinned ffmpeg. See
     # .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     needs: check
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
