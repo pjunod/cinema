@@ -423,6 +423,8 @@ android-instrumentation-build: android-image ## Build app + test APKs for an emu
 android-instrumentation-run: ## Install and run instrumented tests (set PLURX_ANDROID_SERIAL)
 	@test -n "$${PLURX_ANDROID_SERIAL:-}" || { echo "set PLURX_ANDROID_SERIAL to a disposable emulator/device serial"; exit 1; }
 	adb -s "$${PLURX_ANDROID_SERIAL}" wait-for-device
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app.test >/dev/null 2>&1 || true
+	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app >/dev/null 2>&1 || true
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/debug/app-debug.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" shell am instrument -w \
