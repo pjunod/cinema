@@ -9389,7 +9389,15 @@ async function stopOfflinePackage(id){
 }
 
 // ---- settings -------------------------------------------------------------
-function statusText(st){
+function currentScanStatus(st,lastScanAt){
+  if(!st||st.running||!st.error||st.finished_at==null||lastScanAt==null) return st;
+  // Scan status is node-local, while last_scan_at is replicated. If another
+  // node completed this library after the local failure, the failure is old
+  // news and must not remain as the cluster's apparent current state.
+  return Number(lastScanAt)>=Number(st.finished_at)?null:st;
+}
+function statusText(st,lastScanAt){
+  st=currentScanStatus(st,lastScanAt);
   if(!st) return "idle";
   if(st.running){
     if(st.phase==="enriching") return "fetching metadata…";
@@ -9745,7 +9753,7 @@ function libRow(l,status){
   const paths=(l.paths||[]).map(p=>`<span class="pathchip">${esc(p)}</span>`).join(" ")||'<span class="muted">—</span>';
   return `<tr id="librow-${l.id}"><td class="libname"><b>${esc(l.name)}</b></td><td data-label="Kind">${esc(l.anime?'anime':l.kind)}</td>
       <td data-label="Paths"><div class="paths">${paths}</div></td>
-      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id])}</div>${schedRow(l)}</td>
+      <td class="muted" data-label="Status"><div id="st-${l.id}">${statusText(status[l.id],l.last_scan_at)}</div>${schedRow(l)}</td>
       <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end;gap:5px">
         <button class="ghost sm" onclick="scanLib(${l.id})">Scan</button>
         <button class="ghost sm" onclick="refreshLib(${l.id})" title="Re-fetch all metadata & artwork (incl. season posters)">Refresh art</button>
@@ -10438,9 +10446,10 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       const status=await api("/scan/status");
       if(!settingsCurrent(generation,tab)) return;
       SETTINGS_DATA.status=status; SETTINGS_LOADED.add("status");
+      const lastScans=new Map((SETTINGS_DATA.libs||[]).map(l=>[String(l.id),l.last_scan_at]));
       for(const [id,st] of Object.entries(status)){
         const el=document.getElementById("st-"+id);
-        if(el) el.innerHTML=statusText(st);
+        if(el) el.innerHTML=statusText(st,lastScans.get(String(id)));
       }
     }
     const secondary=[];
