@@ -399,13 +399,14 @@ const NODE_REMOVAL_FENCED_JSON: &str = r#"{"code":"node_removal_fenced","message
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
-        || path.starts_with("/assets/")
-        || path.starts_with("/icons/")
-        || matches!(
-            path,
-            "/manifest.webmanifest" | "/connect.svg" | "/identity" | "/library"
-        )
+    if method == Method::GET
+        && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
+            || path.starts_with("/assets/")
+            || path.starts_with("/icons/")
+            || matches!(
+                path,
+                "/manifest.webmanifest" | "/connect.svg" | "/identity" | "/library"
+            ))
     {
         return true;
     }
@@ -417,15 +418,17 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         // membership mutation a learner may originate locally.
         return true;
     }
-    if matches!(
-        path,
-        crate::media_pool::SNAPSHOT_PATH
-            | crate::media_pool::OFFERS_PATH
-            | crate::shared_cache::CANARY_PATH
-            | crate::media_sessions::START_PATH
-            | crate::media_sessions::ABORT_PATH
-            | crate::media_sessions::RELAY_PATH
-    ) {
+    if (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
+        || (method == Method::POST
+            && matches!(
+                path,
+                crate::media_pool::OFFERS_PATH
+                    | crate::shared_cache::CANARY_PATH
+                    | crate::media_sessions::START_PATH
+                    | crate::media_sessions::ABORT_PATH
+                    | crate::media_sessions::RELAY_PATH
+            ))
+    {
         return true;
     }
     if method == Method::GET {
@@ -448,8 +451,58 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             return true;
         }
     }
-    let media_path = path.strip_prefix("/api/v1").unwrap_or(path);
-    crate::serving_fence::ServingFence::requires_authority(media_path)
+    let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let node_local_get = method == Method::GET
+        && (matches!(
+            segments.as_slice(),
+            [
+                "api",
+                "v1",
+                "files",
+                _,
+                "decision" | "offline-options" | "direct" | "content" | "stream.mp4" | "photo"
+            ] | ["api", "v1", "stream", _, "status"]
+                | ["api", "v1", "offline", "packages", _]
+                | ["api", "v1", "images", _]
+                | ["api", "v1", "items", _, "photo"]
+                | ["library", "parts", _, _, _]
+                | ["photo", ":", "transcode"]
+        ) || matches!(
+            segments.as_slice(),
+            ["api", "v1", "files", _, "subs", _]
+                | ["api", "v1", "files", _, "subs", _, "overlay.json"]
+                | [
+                    "api",
+                    "v1",
+                    "files",
+                    _,
+                    "subs",
+                    _,
+                    "overlay",
+                    _,
+                    "objects",
+                    _
+                ]
+                | ["api", "v1", "files", _, "hls", "start"]
+                | ["api", "v1", "hls", _, _]
+                | ["api", "v1", "hls", _, "subs", _, _]
+                | ["api", "v1", "offline", "media", _, _]
+                | ["api", "v1", "offline", "media", _, _, _]
+                | ["api", "v1", "offline", "media", _, "subs", _, _]
+                | ["api", "v1", "publication", _, _]
+        ) || (segments.len() >= 6
+            && segments[0..3] == ["api", "v1", "publication"]));
+    let node_local_create = method == Method::POST
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "files", _, "hls", "sessions"] | ["api", "v1", "files", _, "publication"]
+        );
+    let node_local_close = method == Method::DELETE
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+        );
+    node_local_get || node_local_create || node_local_close
 }
 
 async fn cluster_capacity_gate(
@@ -619,8 +672,21 @@ mod tests {
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/trakt/sync"),
             (Method::POST, "/api/v1/system/search-index/rebuild"),
+            (Method::PUT, "/api/v1/files/8/audio-offset"),
+            (Method::POST, "/api/v1/files/8/offline-packages"),
+            (Method::DELETE, "/api/v1/offline/packages/pkg-8"),
+            (Method::PUT, "/api/v1/offline/packages/pkg-8/lease"),
+            (Method::POST, "/api/v1/offline/packages/pkg-8/complete"),
         ] {
             assert!(!learner_route_eligible(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::DELETE, "/api/v1/hls/session-8"),
+            (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ABORT_PATH),
+        ] {
+            assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
     }
 

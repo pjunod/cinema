@@ -1016,6 +1016,16 @@ learner is admitted the protocol rollback is unavailable until every learner is
 either safely removed or promoted after readiness/storage preflight; only a
 zero-non-voter roster may deactivate protocol 5.
 
+P6's complete lifecycle makes those two verbs crash-safe. Promotion refreshes
+the durability probe periodically, crosses a new target-local apply barrier on
+every indeterminate retry, and does not change the replicated admission role
+until the promoted target has fsynced downgrade-readable voter records in both
+`membership.json` and `hiqlite/activation.json`. Learner removal applies the
+same route/placement/job-owner fence as voter removal, ends active media
+ownership using the session schema's terminal `ended` state, then removes the
+non-voting member without voter-quorum arithmetic. The real-process drill
+restarts the promoted node before allowing protocol deactivation.
+
 **Acceptance:** `make cluster-check` exercises the failure harness; a fresh
 operator reaches three healthy nodes in under 10 minutes; backup, destroy, and
 restore preserves the content hashes from M2; rolling upgrade never elects an

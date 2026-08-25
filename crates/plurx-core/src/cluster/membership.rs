@@ -12,7 +12,7 @@ use std::future::Future;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -107,6 +107,10 @@ const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 /// A promotion barrier waits for the target's own heartbeat to prove that its
 /// local state machine applied through the quorum-confirmed barrier index.
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
+/// Re-probe durable voter storage at least once inside the readiness window.
+/// The fsync work runs on Tokio's blocking pool, never on an async worker.
+const STORAGE_DURABILITY_PROBE_INTERVAL: Duration = Duration::from_secs(20);
+const STORAGE_DURABILITY_PROBE_MAX_AGE_MS: i64 = NODE_REACHABLE_WINDOW_MS;
 
 /// Whether this process must heartbeat the way a binary that predates the
 /// learner protocol does: it advances `cluster_nodes.last_seen_at` like any
@@ -156,6 +160,26 @@ pub enum LocalServingRole {
     Voter,
     Learner,
     Fenced,
+}
+
+impl LocalServingRole {
+    const fn encoded(self) -> u8 {
+        match self {
+            Self::Unclustered => 0,
+            Self::Voter => 1,
+            Self::Learner => 2,
+            Self::Fenced => 3,
+        }
+    }
+
+    fn from_encoded(value: u8) -> Self {
+        match value {
+            0 => Self::Unclustered,
+            1 => Self::Voter,
+            2 => Self::Learner,
+            _ => Self::Fenced,
+        }
+    }
 }
 
 impl ClusterRole {
@@ -302,6 +326,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          bounded_read_ready INTEGER NOT NULL CHECK (bounded_read_ready IN (0, 1)), \
          voter_storage_ready INTEGER NOT NULL CHECK (voter_storage_ready IN (0, 1)), \
          storage_headroom_bytes INTEGER, \
+         storage_probe_observed_at INTEGER, \
+         voter_role_persisted INTEGER NOT NULL CHECK (voter_role_persisted IN (0, 1)), \
          observed_at INTEGER NOT NULL) STRICT",
     // A durable, retryable audit record for the interval between the blocking
     // apply barrier and Hiqlite's joint/uniform voter-set transition.
@@ -1205,7 +1231,7 @@ const BEGIN_REMOVAL_JOB_FENCE_SQL: &str = "UPDATE job_leases SET \
        SELECT 1 FROM cluster_node_removal_attempts \
        WHERE node_id = $2 AND attempt_id = $3)";
 const BEGIN_REMOVAL_MEDIA_FENCE_SQL: &str = "UPDATE media_sessions SET \
-       state = 'superseded', lease_expires_at_ms = $1, updated_at_ms = $1 \
+       state = 'ended', lease_expires_at_ms = $1, updated_at_ms = $1 \
      WHERE owner_node_id = $2 AND state = 'active' AND EXISTS (\
        SELECT 1 FROM cluster_node_removal_attempts \
        WHERE node_id = $2 AND attempt_id = $3)";
@@ -1647,7 +1673,8 @@ struct ReplicatedMembership {
     /// nothing that decides leadership or singleton work.
     role: ClusterRole,
     storage_root: PathBuf,
-    voter_storage_durable: bool,
+    voter_storage_probe: tokio::sync::Mutex<StorageDurabilityObservation>,
+    local_voter_role_persisted: AtomicBool,
     local: ClusterPeer,
     local_hostname: String,
     bootstrap_http: String,
@@ -1667,16 +1694,22 @@ struct ReplicatedMembership {
     replication: ReplicationMonitor,
     membership_metrics: PassiveMembershipMetrics,
     heartbeat_writes: HeartbeatWriteGate,
-    /// Fast request-path projection of the local replicated route fence.
-    /// Heartbeats refresh it from local applied SQL before publishing their
-    /// progress row, so learner removal cannot cross its apply barrier while
-    /// the target still admits work. HTTP requests read only this atomic and
-    /// the in-memory Raft metrics watch.
-    local_route_active: AtomicBool,
+    /// Fast request-path projection of committed role plus the local route
+    /// fence. Heartbeats refresh it from local applied SQL and Raft metrics
+    /// before publishing progress, so removal cannot cross its barrier while
+    /// the target still admits work. HTTP requests read only this atomic.
+    local_serving_role: AtomicU8,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
+}
+
+#[derive(Clone, Copy)]
+struct StorageDurabilityObservation {
+    successful: bool,
+    observed_at: i64,
+    checked_at: tokio::time::Instant,
 }
 
 #[derive(Default)]
@@ -1710,6 +1743,10 @@ fn reachable_after(now: i64) -> i64 {
 
 fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
     now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
+}
+
+fn counts_as_ready_read_worker(role: &NodeRole, is_voter: bool, ready: bool) -> bool {
+    *role == NodeRole::Learner && !is_voter && ready
 }
 
 struct ActivityAuthAdmission {
@@ -2018,7 +2055,11 @@ impl MembershipManager {
         let local_metrics = client
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
-        let voter_storage_durable = voter_storage_durability_probe(&storage_root);
+        let voter_storage_probe = StorageDurabilityObservation {
+            successful: voter_storage_durability_probe(&storage_root),
+            observed_at: unix_ms()?,
+            checked_at: tokio::time::Instant::now(),
+        };
         let local_hostname = membership_hostname(
             system_short_hostname().as_deref().unwrap_or_default(),
             &local.api_address,
@@ -2032,7 +2073,8 @@ impl MembershipManager {
                 identity,
                 role,
                 storage_root,
-                voter_storage_durable,
+                voter_storage_probe: tokio::sync::Mutex::new(voter_storage_probe),
+                local_voter_role_persisted: AtomicBool::new(!role.is_learner()),
                 local,
                 local_hostname,
                 bootstrap_http,
@@ -2061,7 +2103,7 @@ impl MembershipManager {
                 replication,
                 membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
-                local_route_active: AtomicBool::new(false),
+                local_serving_role: AtomicU8::new(LocalServingRole::Fenced.encoded()),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
@@ -2984,7 +3026,10 @@ impl MembershipManager {
         // barrier. It happens before sampling and publishing last_applied, so
         // a coordinator that observes the barrier knows this process has
         // already fenced its HTTP request path.
-        self.refresh_local_route_admission(inner).await?;
+        let serving_role = self.refresh_local_route_admission(inner).await?;
+        if serving_role == LocalServingRole::Voter && inner.role.is_learner() {
+            self.persist_local_promoted_voter_role(inner).await?;
+        }
         let now = unix_ms()?;
         let local = inner.local_metrics.snapshot();
         let passive = inner.replication.metrics_handle().snapshot();
@@ -2994,8 +3039,13 @@ impl MembershipManager {
             && passive.watermark_local_reads_supported
             && watermark.is_some_and(|sample| sample.apply_lag_entries == Some(0));
         let storage_headroom = available_storage_headroom_bytes(&inner.storage_root);
-        let voter_storage_ready = inner.voter_storage_durable
+        let storage_probe = self.refresh_voter_storage_probe(inner).await?;
+        let storage_probe_fresh =
+            now.saturating_sub(storage_probe.observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS;
+        let voter_storage_ready = storage_probe.successful
+            && storage_probe_fresh
             && storage_headroom.is_some_and(|bytes| bytes >= MIN_VOTER_STORAGE_HEADROOM_BYTES);
+        let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
             (
@@ -3030,8 +3080,9 @@ impl MembershipManager {
                 "INSERT INTO cluster_node_progress \
                      (node_id, current_term, last_applied_index, quorum_committed_index, \
                       apply_lag_entries, bounded_read_ready, voter_storage_ready, \
-                      storage_headroom_bytes, observed_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                      storage_headroom_bytes, storage_probe_observed_at, \
+                      voter_role_persisted, observed_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
                      ON CONFLICT(node_id) DO UPDATE SET \
                        current_term = excluded.current_term, \
                        last_applied_index = excluded.last_applied_index, \
@@ -3040,6 +3091,8 @@ impl MembershipManager {
                        bounded_read_ready = excluded.bounded_read_ready, \
                        voter_storage_ready = excluded.voter_storage_ready, \
                        storage_headroom_bytes = excluded.storage_headroom_bytes, \
+                       storage_probe_observed_at = excluded.storage_probe_observed_at, \
+                       voter_role_persisted = excluded.voter_role_persisted, \
                        observed_at = excluded.observed_at"
                     .to_owned(),
                 params!(
@@ -3053,6 +3106,8 @@ impl MembershipManager {
                     bounded_read_ready,
                     voter_storage_ready,
                     storage_headroom.map(to_sql),
+                    storage_probe.observed_at,
+                    voter_role_persisted,
                     now
                 ),
             ),
@@ -3121,16 +3176,18 @@ impl MembershipManager {
         // Initial bootstrap may create the active node row in this very
         // transaction. Refresh once more so HTTP starts with an authoritative
         // answer instead of waiting one heartbeat interval.
-        self.refresh_local_route_admission(inner).await
+        self.refresh_local_route_admission(inner).await.map(|_| ())
     }
 
     async fn refresh_local_route_admission(
         &self,
         inner: &ReplicatedMembership,
-    ) -> Result<(), MembershipError> {
+    ) -> Result<LocalServingRole, MembershipError> {
         // Fail closed before touching the database. If the local read fails,
         // the request path stays fenced until a later heartbeat succeeds.
-        inner.local_route_active.store(false, Ordering::Release);
+        inner
+            .local_serving_role
+            .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
         let active = inner
             .client
             .query_map::<CountRow, _>(
@@ -3143,7 +3200,75 @@ impl MembershipManager {
             .await?
             .first()
             .is_some_and(|row| row.count == 1);
-        inner.local_route_active.store(active, Ordering::Release);
+        let role = if !active || !inner.local_metrics.snapshot().running {
+            LocalServingRole::Fenced
+        } else {
+            let metrics = inner.client.metrics_db().await?;
+            let is_member = metrics
+                .membership_config
+                .nodes()
+                .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
+            let is_voter = metrics
+                .membership_config
+                .voter_ids()
+                .any(|raft_id| raft_id == inner.identity.raft_id);
+            match (is_member, is_voter) {
+                (true, true) => LocalServingRole::Voter,
+                (true, false) => LocalServingRole::Learner,
+                _ => LocalServingRole::Fenced,
+            }
+        };
+        let published_role = if role == LocalServingRole::Voter
+            && inner.role.is_learner()
+            && !inner.local_voter_role_persisted.load(Ordering::Acquire)
+        {
+            LocalServingRole::Fenced
+        } else {
+            role
+        };
+        inner
+            .local_serving_role
+            .store(published_role.encoded(), Ordering::Release);
+        Ok(role)
+    }
+
+    async fn refresh_voter_storage_probe(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<StorageDurabilityObservation, MembershipError> {
+        let mut observation = inner.voter_storage_probe.lock().await;
+        if observation.checked_at.elapsed() >= STORAGE_DURABILITY_PROBE_INTERVAL {
+            let root = inner.storage_root.clone();
+            let successful =
+                tokio::task::spawn_blocking(move || voter_storage_durability_probe(&root))
+                    .await
+                    .map_err(|error| MembershipError::Internal(error.to_string()))?;
+            *observation = StorageDurabilityObservation {
+                successful,
+                observed_at: unix_ms()?,
+                checked_at: tokio::time::Instant::now(),
+            };
+        }
+        Ok(*observation)
+    }
+
+    async fn persist_local_promoted_voter_role(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<(), MembershipError> {
+        if inner.local_voter_role_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let data_dir = inner.storage_root.clone();
+        tokio::task::spawn_blocking(move || {
+            super::migration::persist_promoted_voter_role(&data_dir)
+        })
+        .await
+        .map_err(|error| MembershipError::Internal(error.to_string()))?
+        .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        inner
+            .local_voter_role_persisted
+            .store(true, Ordering::Release);
         Ok(())
     }
 
@@ -3586,34 +3711,16 @@ impl MembershipManager {
         Ok(is_member)
     }
 
-    /// Effective role for request admission, using only the in-memory local
-    /// Raft metrics watch and the heartbeat-refreshed route-fence atomic. It
-    /// never performs SQL or forwards an HTTP request on the request path.
+    /// Effective role for request admission from the heartbeat-refreshed
+    /// atomic projection. Membership metrics, local SQL, and promotion-role
+    /// persistence all happen before publication, never on the HTTP path.
     pub async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(LocalServingRole::Unclustered);
         };
-        let local = inner.local_metrics.snapshot();
-        let metrics = inner.client.metrics_db().await?;
-        let committed_member = metrics
-            .membership_config
-            .nodes()
-            .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
-        if !committed_member {
-            return Ok(LocalServingRole::Fenced);
-        }
-        if !inner.local_route_active.load(Ordering::Acquire) || !local.running {
-            return Ok(LocalServingRole::Fenced);
-        }
-        if metrics
-            .membership_config
-            .voter_ids()
-            .any(|raft_id| raft_id == inner.identity.raft_id)
-        {
-            Ok(LocalServingRole::Voter)
-        } else {
-            Ok(LocalServingRole::Learner)
-        }
+        Ok(LocalServingRole::from_encoded(
+            inner.local_serving_role.load(Ordering::Acquire),
+        ))
     }
 
     /// Retire one completed or timed-out provider repair generation. The
@@ -4425,6 +4532,7 @@ impl MembershipManager {
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
                         progress.storage_headroom_bytes, \
+                        progress.storage_probe_observed_at, \
                         progress.observed_at AS progress_observed_at, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
@@ -4472,7 +4580,10 @@ impl MembershipManager {
                         .storage_headroom_bytes
                         .and_then(|value| u64::try_from(value).ok()),
                     voter_storage_ready: row.voter_storage_ready
-                        && node_is_reachable(now, row.progress_observed_at.unwrap_or_default()),
+                        && node_is_reachable(
+                            now,
+                            row.storage_probe_observed_at.unwrap_or_default(),
+                        ),
                 })
             })
             .collect::<Result<Vec<_>, MembershipError>>()?;
@@ -4482,10 +4593,15 @@ impl MembershipManager {
             _ => ClusterAvailability::HighAvailability,
         };
         let voting_quorum = voters.len() / 2 + 1;
-        let non_voting_replicas = members.difference(&voters).count();
+        let non_voting_replicas = nodes
+            .iter()
+            .filter(|node| node.role == NodeRole::Learner && !node.is_voter)
+            .count();
         let ready_read_workers = nodes
             .iter()
-            .filter(|node| !node.is_voter && node.bounded_read_ready)
+            .filter(|node| {
+                counts_as_ready_read_worker(&node.role, node.is_voter, node.bounded_read_ready)
+            })
             .count();
         Ok(MembershipStatus {
             local_node_id: inner.identity.node_id.clone(),
@@ -4534,6 +4650,7 @@ impl MembershipManager {
                     node_id.to_owned(),
                 ));
             }
+            self.wait_for_promoted_voter_reconciliation(node_id).await?;
             self.finish_learner_promotion(node_id).await?;
             return self.status().await;
         }
@@ -4553,21 +4670,38 @@ impl MembershipManager {
         let existing = inner
             .client
             .query_consistent_map::<PromotionAttemptRow, _>(
-                "SELECT attempt_id, barrier_index \
+                "SELECT attempt_id \
                  FROM cluster_node_promotions WHERE node_id = $1",
                 params!(node_id),
             )
             .await?
             .into_iter()
             .next();
-        let (attempt_id, existing_barrier, new_attempt) = if let Some(existing) = existing {
-            (
-                existing.attempt_id,
-                existing
-                    .barrier_index
-                    .and_then(|value| u64::try_from(value).ok()),
-                false,
-            )
+        if existing.is_some() {
+            let membership_nodes = initial_metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+                .collect::<Vec<_>>();
+            match reconcile_promotion_change(&inner.secrets.api, target_raft_id, &membership_nodes)
+                .await
+            {
+                MembershipChangeOutcome::Promoted => {
+                    self.wait_for_promoted_voter_reconciliation(node_id).await?;
+                    self.finish_learner_promotion(node_id).await?;
+                    return self.status().await;
+                }
+                MembershipChangeOutcome::Removed => {
+                    return Err(MembershipError::PromotionRequiresLearner(
+                        node_id.to_owned(),
+                    ));
+                }
+                MembershipChangeOutcome::Indeterminate => {}
+            }
+        }
+        let (attempt_id, new_attempt) = if let Some(existing) = existing {
+            (existing.attempt_id, false)
         } else {
             let attempt_id = uuid::Uuid::new_v4().to_string();
             let started_at = unix_ms()?;
@@ -4585,34 +4719,33 @@ impl MembershipManager {
             if inserted != 1 {
                 return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
             }
-            (attempt_id, None, true)
+            (attempt_id, true)
         };
-        let barrier = if let Some(barrier) = existing_barrier {
-            barrier
-        } else {
-            let barrier = match inner.client.db_quorum_watermark().await {
-                Ok(watermark) => watermark.committed_index,
-                Err(error) => {
-                    if new_attempt {
-                        self.clear_learner_promotion(node_id, &attempt_id).await;
-                    }
-                    return Err(error.into());
+        // Every submission, including an ambiguous retry, crosses a new
+        // target-local barrier. Reusing the first request's watermark would
+        // let a learner go offline and still be added to the voter set from a
+        // stale progress row during the freshness window.
+        let barrier = match inner.client.db_quorum_watermark().await {
+            Ok(watermark) => watermark.committed_index,
+            Err(error) => {
+                if new_attempt {
+                    self.clear_learner_promotion(node_id, &attempt_id).await;
                 }
-            };
-            inner
-                .client
-                .execute(
-                    "UPDATE cluster_node_promotions SET barrier_index = $1 \
-                     WHERE node_id = $2 AND attempt_id = $3",
-                    params!(
-                        i64::try_from(barrier).unwrap_or(i64::MAX),
-                        node_id,
-                        attempt_id.as_str()
-                    ),
-                )
-                .await?;
-            barrier
+                return Err(error.into());
+            }
         };
+        inner
+            .client
+            .execute(
+                "UPDATE cluster_node_promotions SET barrier_index = $1 \
+                     WHERE node_id = $2 AND attempt_id = $3",
+                params!(
+                    i64::try_from(barrier).unwrap_or(i64::MAX),
+                    node_id,
+                    attempt_id.as_str()
+                ),
+            )
+            .await?;
         if let Err(error) = self.wait_for_promotion_barrier(node_id, barrier).await {
             if new_attempt {
                 self.clear_learner_promotion(node_id, &attempt_id).await;
@@ -4671,6 +4804,7 @@ impl MembershipManager {
                 }
             }
         }
+        self.wait_for_promoted_voter_reconciliation(node_id).await?;
         self.finish_learner_promotion(node_id).await?;
         self.status().await
     }
@@ -4686,7 +4820,9 @@ impl MembershipManager {
                         progress.last_applied_index, progress.apply_lag_entries, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.observed_at \
+                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+                        progress.observed_at \
                  FROM cluster_nodes node \
                  LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
                  WHERE node.node_id = $1 AND node.removed_at IS NULL",
@@ -4713,6 +4849,9 @@ impl MembershipManager {
             return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
         }
         if !target.voter_storage_ready
+            || !target.storage_probe_observed_at.is_some_and(|observed_at| {
+                now.saturating_sub(observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS
+            })
             || target.storage_headroom_bytes.unwrap_or_default()
                 < i64::try_from(MIN_VOTER_STORAGE_HEADROOM_BYTES).unwrap_or(i64::MAX)
         {
@@ -4746,6 +4885,29 @@ impl MembershipManager {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn wait_for_promoted_voter_reconciliation(
+        &self,
+        node_id: &str,
+    ) -> Result<(), MembershipError> {
+        let deadline = tokio::time::Instant::now() + PROMOTION_BARRIER_WAIT;
+        loop {
+            let target = self.promotion_target(node_id).await?;
+            let now = unix_ms()?;
+            if target.voter_role_persisted
+                && node_is_reachable(now, target.last_seen_at)
+                && node_is_reachable(now, target.observed_at.unwrap_or_default())
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MembershipError::LearnerLifecyclePending(format!(
+                    "{node_id}: committed voter has not persisted its restart role"
+                )));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -4807,7 +4969,9 @@ impl MembershipManager {
                         progress.last_applied_index, progress.apply_lag_entries, \
                         COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
                         COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.observed_at \
+                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+                        progress.observed_at \
                  FROM cluster_nodes node \
                  LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
                  WHERE node.node_id = $1",
@@ -6969,6 +7133,8 @@ struct PromotionTargetRow {
     bounded_read_ready: bool,
     voter_storage_ready: bool,
     storage_headroom_bytes: Option<i64>,
+    storage_probe_observed_at: Option<i64>,
+    voter_role_persisted: bool,
     observed_at: Option<i64>,
 }
 
@@ -6978,7 +7144,6 @@ struct RemovalAttemptRow {
 
 struct PromotionAttemptRow {
     attempt_id: String,
-    barrier_index: Option<i64>,
 }
 
 struct MembershipNodeRow {
@@ -6993,6 +7158,7 @@ struct MembershipNodeRow {
     bounded_read_ready: bool,
     voter_storage_ready: bool,
     storage_headroom_bytes: Option<i64>,
+    storage_probe_observed_at: Option<i64>,
     progress_observed_at: Option<i64>,
 }
 
@@ -7247,6 +7413,8 @@ impl From<&mut Row<'_>> for PromotionTargetRow {
             bounded_read_ready: row.get("bounded_read_ready"),
             voter_storage_ready: row.get("voter_storage_ready"),
             storage_headroom_bytes: row.get("storage_headroom_bytes"),
+            storage_probe_observed_at: row.get("storage_probe_observed_at"),
+            voter_role_persisted: row.get("voter_role_persisted"),
             observed_at: row.get("observed_at"),
         }
     }
@@ -7264,7 +7432,6 @@ impl From<&mut Row<'_>> for PromotionAttemptRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             attempt_id: row.get("attempt_id"),
-            barrier_index: row.get("barrier_index"),
         }
     }
 }
@@ -7283,6 +7450,7 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             bounded_read_ready: row.get("bounded_read_ready"),
             voter_storage_ready: row.get("voter_storage_ready"),
             storage_headroom_bytes: row.get("storage_headroom_bytes"),
+            storage_probe_observed_at: row.get("storage_probe_observed_at"),
             progress_observed_at: row.get("progress_observed_at"),
         }
     }
@@ -8505,6 +8673,16 @@ mod tests {
             !role_is_admitted(ClusterRole::Learner, true, true),
             "a node in the voter set was not admitted by the learner protocol"
         );
+    }
+
+    #[test]
+    fn a_transient_joining_voter_is_not_reported_as_read_worker_capacity() {
+        assert!(counts_as_ready_read_worker(&NodeRole::Learner, false, true));
+        assert!(
+            !counts_as_ready_read_worker(&NodeRole::Voter, false, true),
+            "a voter-token join is only transiently non-voting"
+        );
+        assert!(!counts_as_ready_read_worker(&NodeRole::Learner, true, true));
     }
 
     /// The learner operations act on the learner protocol, named as itself.

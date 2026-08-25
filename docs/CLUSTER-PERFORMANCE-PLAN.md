@@ -877,11 +877,16 @@ cluster job gate re-derives the live committed role on every acquisition so a
 promotion takes effect without restarting the daemon.
 
 Promotion creates a durable intent, checks a fresh zero-lag target-local proof
-and a 512 MiB durable voter-filesystem headroom preflight, records a
-quorum-confirmed barrier, and waits for a later target heartbeat to prove that
-barrier applied before asking Hiqlite for the voter transition. A retry either
-resumes the intent or reconciles an already-committed voter configuration; it
-does not guess from an HTTP timeout. Learner removal reuses the reference-owned
+and a 512 MiB durable voter-filesystem headroom preflight. The durability probe
+runs periodically off the async executor and carries its own bounded-age
+timestamp; a stale startup-time success is not promotion evidence. The
+coordinator records a quorum-confirmed barrier and waits for a later target
+heartbeat to prove that barrier applied before asking Hiqlite for the voter
+transition. An ambiguous retry reconciles first and, if the vote did not
+commit, records a new barrier that requires a new target heartbeat. After the
+vote commits, the target rewrites and fsyncs both local boot-role records as a
+downgrade-readable voter before the replicated admission role changes or the
+operation succeeds. Learner removal reuses the reference-owned
 durable removal fence, ejects routing and placement, expires job ownership,
 supersedes active media ownership, waits for a reachable target to apply the
 route fence, settles owned work, removes only the non-voting member, and leaves
@@ -894,11 +899,13 @@ promotion only after both readiness and storage proof, and renders typed
 refusals without describing a learner as a transient join state.
 
 **Acceptance:** a real separate-process three-voter-plus-learner cluster
-preserves quorum size three, distributes only bounded reads to the learner,
-refuses learner leadership and singleton work, catches up after restart and
-snapshot install, removes/drains safely, and promotes only after catch-up and
-storage preflight. Mixed-version tests prove an old voter blocks activation and
-cannot reinterpret v2 admission as a voter. The UI and operations text
+preserves quorum size three, refuses learner leadership and singleton work,
+catches up after restart and snapshot install, removes/drains safely, and
+promotes only after catch-up and storage preflight. Production server route
+tests separately pin the exact method-and-shape learner matrix, including the
+authority mutations it must refuse. Mixed-version tests prove an old voter
+blocks activation, cannot reinterpret v2 admission as a voter, and can parse a
+promoted node's rewritten version-1 voter record. The UI and operations text
 distinguish compute/read capacity, a non-quorum replicated copy, and voting
 redundancy.
 
@@ -907,9 +914,9 @@ redundancy.
 | Real separate-process three-voter-plus-learner cluster preserves quorum size three | met |
 | Refuses learner leadership and singleton work | met through committed non-voter membership, the production `learner_only` startup hint, and plurxd's production `acquire_cluster_job` path |
 | Catches up after restart and snapshot install | met — the harness stops the learner, commits state, compacts and purges past its last log, restarts it, and reads the snapshot-only marker locally |
-| Distributes only eligible work to the learner | met — media peer selection includes only a fresh ready member, and the server route matrix admits bounded catalogue reads plus declared node-local media while refusing authority surfaces |
-| Removes/drains safely | met — the real learner applies its durable fence, is tombstoned, leaves committed membership, and does not change the three-voter quorum |
-| Promotes only after catch-up and storage preflight | met — a fresh replacement publishes both proofs, crosses the promotion barrier, becomes the fourth voter, and acquires a previously refused singleton job without restart |
+| Distributes only eligible work to the learner | met — media peer selection includes only a fresh ready member; the production server's method-and-route matrix admits bounded catalogue reads plus declared node-local media and explicitly refuses replicated audio-offset and offline-package mutations |
+| Removes/drains safely | met — the real learner applies its durable fence, ends seeded active media ownership, is tombstoned, leaves committed membership, and does not change the three-voter quorum |
+| Promotes only after catch-up and storage preflight | met — a fresh replacement publishes fresh proofs, crosses a new barrier, becomes the fourth voter, acquires a previously refused singleton job live, restarts as a voter, and takes another singleton job |
 | Mixed-version: an old voter blocks activation | met, against a second real process |
 | Mixed-version: an old joiner cannot reinterpret v2 admission as a voter | met, against a transcription of the shipped v1 decoder rather than a v1 binary |
 | UI and operations text distinguish compute/read capacity, non-voting copies, and voter redundancy | met |

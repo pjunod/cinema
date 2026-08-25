@@ -597,7 +597,7 @@ learner_route_ineligible` before its handler runs.
 | Liveness, readiness, metrics, app assets, and `GET /api/v1/cluster/nodes` | Allowed. `/readyz` still returns 503 whenever the serving fence has no fresh quorum proof. |
 | Native catalogue | GET libraries, library items, item detail, hubs, and home previews only; each bounded read still enforces its quorum/apply watermark. |
 | Plex catalogue | GET sections, section contents, and metadata shapes only, under the same bounded-read policy. |
-| Node-local media | Existing HLS, stream, image, publication, subtitle, and cluster-internal media/session routes only; the serving fence and peer proof remain mandatory. |
+| Node-local media | Exact method-and-route shapes only: GET media bytes/status/playlists/images/subtitles, POST the declared HLS/publication and authenticated internal session starts, and DELETE those node-local sessions. The serving fence and peer proof remain mandatory. PUT audio offsets and every offline-package create/delete/lease/complete mutation are refused. |
 | Self leave | `POST /api/v1/cluster/leave`, with the body bound to this backend's `local_node_id`. |
 | Authority and mutations | Refused: settings, searches outside the bounded inventory, library/user/API-key mutations, providers, scans, Trakt, scheduler and repair jobs, protocol changes, token issuance, promotion, and remote-node removal. |
 
@@ -607,8 +607,10 @@ infer it from a green heartbeat:
 - `bounded_read_ready` is true only when the target's own passive quorum sample
   is current and its local applied index has zero gap;
 - `apply_lag_entries` is that target-local gap;
-- `voter_storage_ready` combines a durable create/fsync/remove probe with at
-  least 512 MiB of current filesystem headroom;
+- `voter_storage_ready` combines a periodically refreshed durable
+  create/fsync/remove/directory-fsync probe with at least 512 MiB of current
+  filesystem headroom. The probe runs on the blocking pool, publishes its own
+  observation time, and expires after 30 seconds;
 - `storage_headroom_bytes` is the current unreserved filesystem capacity; and
 - `capacity` reports voter count, quorum, voter failure tolerance, non-voting
   replicas, and ready read workers separately.
@@ -671,8 +673,15 @@ The coordinator records a durable intent, obtains a quorum-confirmed commit
 barrier, and waits for a later heartbeat from the target to prove its own
 applied index crossed that barrier. It then asks Hiqlite for the voter
 transition and reconciles ambiguous HTTP outcomes from a quorum of membership
-observations. A successful response changes the roster role to `voter` and the
-process may take singleton work immediately without restart. Promotion refuses
+observations. A retry whose outcome is not already committed records a **new**
+barrier and requires a new target heartbeat; an old progress row can never
+promote an offline learner. After the vote commits, the target atomically
+rewrites and fsyncs `membership.json` and `hiqlite/activation.json` as voter
+records. Only then does the coordinator publish role `voter` and clear the
+intent. A crash between those two local writes resumes the second write on
+startup, and the final version-1 membership record remains readable by the
+previous release. The process may take singleton work immediately and retains
+that authority after restart. Promotion refuses
 with `learner_not_ready` for a stale/non-zero-lag proof and
 `voter_storage_preflight_failed` when the durability probe or 512 MiB headroom
 threshold is not satisfied.

@@ -4740,7 +4740,8 @@ async fn offline_summary(
 ///   tombstone;
 /// - a newly admitted learner can be promoted only after its own readiness
 ///   and storage proofs cross a committed barrier; promotion immediately
-///   grants voter job authority without restarting the process;
+///   grants voter job authority, and the promoted voter restarts with the
+///   same authority from its durable role;
 /// - the capacity projection never confuses a non-voting copy with voter
 ///   failure tolerance, and protocol rollback becomes safe after promotion.
 async fn run_learner_membership_case() -> Result<()> {
@@ -4763,6 +4764,7 @@ async fn run_learner_membership_case() -> Result<()> {
     /// A second, never-contended resource, so the post-restart gate is proved
     /// against an unheld row rather than against the first job's owner.
     const SECOND_JOB: &str = "repair:probe";
+    const POST_RESTART_JOB: &str = "repair:post-promotion-restart";
 
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("learner membership data root")?;
@@ -5138,6 +5140,18 @@ async fn run_learner_membership_case() -> Result<()> {
         &format!("node-{LEARNER}"),
     )?;
 
+    const LEARNER_MEDIA_SESSION: &str = "p6-learner-active-media";
+    cluster
+        .request(
+            leader,
+            Request::SeedActiveMediaSession {
+                node_id: format!("node-{LEARNER}"),
+                session_id: LEARNER_MEDIA_SESSION.to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+
     // Removal is a learner lifecycle operation, not a voter resize. The
     // target's production heartbeat crosses the durable route-fence barrier
     // before the leader asks Hiqlite to remove it from the member set.
@@ -5153,6 +5167,20 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .wait_for_members(leader, &[1, 2, 3], &[1, 2, 3])
         .await?;
+    match cluster
+        .request(
+            leader,
+            Request::ReadMediaSessionState {
+                session_id: LEARNER_MEDIA_SESSION.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::Setting { value: Some(state) } if state == "ended" => {}
+        response => {
+            bail!("learner removal did not supersede its active media ownership: {response:?}")
+        }
+    }
     cluster
         .request(
             LEARNER,
@@ -5305,6 +5333,44 @@ async fn run_learner_membership_case() -> Result<()> {
         || promoted_status.capacity.ready_read_workers != 0
     {
         bail!("promotion did not become four-voter capacity: {promoted_status:?}");
+    }
+
+    // Production rewrites the promoted node's two local boot records only
+    // after it observes the committed vote. Restart it as the resulting voter
+    // record dictates and prove both Raft admission and singleton authority
+    // survive the process boundary before declaring protocol rollback safe.
+    cluster.kill(PROMOTED).await?;
+    cluster
+        .spawn_node(
+            &executable,
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()),
+        )
+        .await?;
+    cluster
+        .request(PROMOTED, Request::Open)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(PROMOTED, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
+    cluster
+        .wait_for_members(PROMOTED, &[1, 2, 3, PROMOTED], &[1, 2, 3, PROMOTED])
+        .await?;
+    match cluster
+        .request(
+            PROMOTED,
+            Request::AcquireClusterJob {
+                resource: POST_RESTART_JOB.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::ClusterJobAttempt {
+            acquired: true,
+            lease: Some(lease),
+        } if lease.owner_node_id == format!("node-{PROMOTED}") => {}
+        response => bail!("a restarted promoted voter did not retain job authority: {response:?}"),
     }
 
     let deactivated = match cluster
@@ -6502,6 +6568,13 @@ pub enum Request {
     },
     PromoteLearner {
         node_id: String,
+    },
+    SeedActiveMediaSession {
+        node_id: String,
+        session_id: String,
+    },
+    ReadMediaSessionState {
+        session_id: String,
     },
     LeaveVoter,
     SeedOfflineRemovalWork {
@@ -9146,6 +9219,35 @@ async fn handle_request(
             .await
             .map(|_| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::SeedActiveMediaSession {
+            ref node_id,
+            ref session_id,
+        } => {
+            let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+            client
+                .execute(
+                    "INSERT INTO media_sessions \
+                     (incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
+                      owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, \
+                      response_json, updated_at_ms) \
+                     VALUES ($1, $1, 1, $1, $1, $2, 1, $3, 'active', '{}', '{}', $4)",
+                    params!(session_id, node_id, now + 60_000, now),
+                )
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::ReadMediaSessionState { ref session_id } => {
+            let value = client
+                .query_map::<SingletonSettingRow, _>(
+                    "SELECT state AS value FROM media_sessions WHERE session_id = $1",
+                    params!(session_id),
+                )
+                .await?
+                .into_iter()
+                .next()
+                .map(|row| row.value);
+            Ok(Response::Setting { value })
+        }
         Request::LeaveVoter => membership_ref(membership)?
             .leave_voter()
             .await
