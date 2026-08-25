@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f993d48a"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract retains the replicated-storage workflow assertion that every Make recipe uses the explicitly pinned Rust 1.97.1 cargo instead of falling back to an older persistent-runner default between commands."
