@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["53c91efd", "91fab1d0"]
+points = ["cluster.auth", "cluster.membership", "cluster.media-observation", "operations.packaging", "validation.framework"]
+checks = ["rust-gate", "cluster-auth", "security-boundaries", "operations-contract", "container-runtime", "resource-bounds", "catalog-contract", "history-regressions"]
+reason = "P7 and its one whole-change adversarial correction close one failure-routing boundary. The separate-process harness keeps a fixed-cadence 64-write workload active through follower and leader loss, records real attempts, errors, and latencies, verifies every acknowledged value on equal surviving replicas, and rejects leader recovery beyond the retained budget. A real learner apply pause removes it from read rotation until catch-up. The local HTTP fixture proves readiness-based HLS and segment affinity, a response longer than the connect budget completing during bounded graceful shutdown, takeover from an actually stopped backend with one discontinuity, and zero replay of a failing POST. The exported artifact validator compiles the checked-in closed schema and enforces cross-field leader/follower identities. The HAProxy example mechanically separates retry-safe methods from zero-retry mutations, while CI retains both topology and failure artifacts."
