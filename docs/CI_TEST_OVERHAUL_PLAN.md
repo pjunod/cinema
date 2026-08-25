@@ -298,8 +298,9 @@ runner-minutes.
 
 For Apple changes, T1 begins on the private-repository lab runner selected by
 `[self-hosted, macOS, ARM64, lab, apple, xcode-26]`. It verifies Xcode 26.6
-build 17F113, the iOS/tvOS 26.5 SDKs and simulator runtimes, and XcodeGen
-2.46.0 before restoring DerivedData or booting a simulator. That makes
+build 17F113, iOS 26.5 runtime build 23F77, tvOS 26.5 runtime build 23L470,
+the matching SDK versions, and XcodeGen 2.46.0 before restoring DerivedData or
+booting a simulator. That makes
 toolchain drift fail in seconds instead of paying for a partial build. The
 runner creates uniquely named iPhone, iPad, and Apple TV devices for each run
 and deletes them in an `always()` cleanup step; persistent runner state is not

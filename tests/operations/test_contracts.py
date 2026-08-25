@@ -184,6 +184,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('grep -Fxq "Xcode 26.6"', workflow)
         self.assertIn('grep -Fxq "Build version 17F113"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
+        self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
+        self.assertIn('tvOS 26.5 (26.5 - 23L470)', workflow)
         self.assertNotIn("sudo xcode", workflow)
         self.assertEqual(workflow.count("xcrun simctl create"), 3)
         self.assertIn("SimDeviceType.iPhone-17-Pro", workflow)

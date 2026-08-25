@@ -369,8 +369,8 @@ jobs:
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "26.5"
           test "$(xcodegen --version)" = "Version: 2.46.0"
           simulator_runtimes="$(xcrun simctl list runtimes)"
-          grep -Fq "iOS 26.5" <<< "$simulator_runtimes"
-          grep -Fq "tvOS 26.5" <<< "$simulator_runtimes"
+          grep -Fq "iOS 26.5 (26.5 - 23F77)" <<< "$simulator_runtimes"
+          grep -Fq "tvOS 26.5 (26.5 - 23L470)" <<< "$simulator_runtimes"
       # Warm Swift incrementals: the Makefile builds into
       # clients/apple/build/DerivedData precisely so this cache can restore it.
       # restore-keys accepts the newest prior entry when sources moved — an
