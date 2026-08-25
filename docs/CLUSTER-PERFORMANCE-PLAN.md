@@ -677,8 +677,8 @@ mount-point, bind-source-ancestry, and cross-device refusals, while
 `make storage-pressure-check` fills a bounded tmpfs and proves cache and scratch
 `ENOSPC` cannot relocate or create authority. The last two targets require root
 and CAP_SYS_ADMIN on Linux and remain deliberately outside `check` and ordinary
-CI; their retained run record is physical evidence, not a claim about an
-unprivileged runner.
+CI; the [retained run record](../benchmarks/evidence/p5-storage-pressure-838f20cc.json)
+is physical evidence, not a claim about an unprivileged runner.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the

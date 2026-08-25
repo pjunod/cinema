@@ -1093,7 +1093,8 @@ The second target exhausts a bounded tmpfs until the kernel returns `ENOSPC`,
 then proves both cache and scratch startup failures preserve the authority bytes
 and create no database on either failed device. These targets fail when their
 requested mount capability is unavailable; they do not silently count a skip as
-evidence.
+evidence. The P5 implementation run is retained in
+[`benchmarks/evidence/p5-storage-pressure-838f20cc.json`](../benchmarks/evidence/p5-storage-pressure-838f20cc.json).
 
 Setting `storage.cache_dir` migrates nothing. The legacy trees stay where they
 are; the daemon logs a warning while they still hold bytes and starts anyway.
