@@ -215,6 +215,26 @@ following, each deferred on a recorded reason rather than dropped:
   route. The client-visible invariant (a terminal session never comes back)
   holds; only the status code after a restart differs from B6's letter.
 - **Wait caps as settings.** Global 64 / per-session 4 are consts.
+- **Audio-outrunning-video titles may not index at all.** `fragindex::build`
+  bounds its coverage check against the duration it is handed — the
+  container's, which such a title's video-only pipe can never reach — so it
+  answers `Truncated` and stores nothing, and the title keeps the legacy
+  presentation forever (safe, silent, and worth fixing: the check should
+  bound against the video track). Found by the M3 review round; the serving
+  side is already correct for these titles once an index exists.
+
+A three-lens adversarial review ran over the finished milestone
+(2026-08-25) and its findings — the lease loop settling every VOD route as
+stale, takeover building a live successor under a VOD URL, the audio-tail
+plan/segmenter disagreement, the missing-init adoption dead-end, stale
+generation writes, and the eviction/wait races — are fixed in the three
+`fix(...)` commits and mapped in
+`validation/regressions.d/d241dbc9-vod-serving-review.toml`. Two earlier
+deferral lines are now stale and corrected here: the admin kill endpoint
+DOES resolve VOD sessions, and a stall reopen against a VOD predecessor
+normalizes instead of failing. Still true: no `session_start`/`session_end`
+playback events are emitted for VOD sessions (activity history shows
+nothing for them) — M4 should decide what a VOD session's event stream is.
 
 The §3 attachment, §4 init identity, §5 durability + adoption (including the
 one-`read_dir` reconcile), §6 zero refusal, and §7's create/segment/lifecycle
