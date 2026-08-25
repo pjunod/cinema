@@ -2752,8 +2752,10 @@ mod startup_tests {
         let alias = initial.transcode.join("credential-key-alias");
         std::fs::hard_link(&key, &alias).expect("same-inode scratch alias");
 
-        let mut config = Config::default();
-        config.storage = storage;
+        let mut config = Config {
+            storage,
+            ..Default::default()
+        };
         config.cluster.credential_key_file = key.clone();
         let error = format!(
             "{:#}",

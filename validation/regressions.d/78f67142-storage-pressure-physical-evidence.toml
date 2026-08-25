@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["78f67142"]
+points = ["cluster.auth", "playback.benchmark"]
+checks = ["cluster-auth", "benchmark-contract", "history-regressions"]
+reason = "The schema-validated P5 physical-evidence artifact retains the exact build, immutable runner image, machine class, privileged bind-mount isolation results, and real-ENOSPC storage-pressure result. The cluster contract validator rejects provenance drift, malformed pass counts, and evidence that was not collected by the Linux root-only gates, while the benchmark contract owns the closed evidence schema under benchmarks/."
