@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f85a37a9"]
+points = ["core.media", "server.api", "validation.framework"]
+checks = ["rust-gate", "catalog-contract", "history-regressions"]
+reason = "The retained Rust gate creates and seals an anonymous macOS snapshot, rewinds and reads it through the same descriptor, places secure-path fixtures below Darwin's canonical temporary root, anchors child publication to the held output-directory descriptor, closes APFS directory cursors before deletion, and reruns the affected prefix so directory compaction cannot skip siblings. The corrected real-media, artwork, process-state, cache, and HTTP fixtures exercise those production paths on macOS while preserving Linux descriptor-backed ffmpeg output. The corrective-history audit pins the merged Darwin correction to that current cross-platform evidence."
