@@ -5405,7 +5405,6 @@ async fn wait_for_learner_ready(
     learner: u64,
 ) -> Result<MembershipStatus> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
-    let mut last_status = None;
     loop {
         cluster
             .request(learner, Request::ForceHeartbeat)
@@ -5428,9 +5427,8 @@ async fn wait_for_learner_ready(
         if ready {
             return Ok(status);
         }
-        last_status = Some(status);
         if Instant::now() >= deadline {
-            bail!("learner node {learner} never published a ready proof: {last_status:?}");
+            bail!("learner node {learner} never published a ready proof: {status:?}");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
