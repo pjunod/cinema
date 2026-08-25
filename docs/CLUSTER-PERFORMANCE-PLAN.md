@@ -373,10 +373,11 @@ slices:
   patch documentation; and
 - **P2f — named-runner overhead evidence:** the before/after artifact enforcing
   the P0 instrumentation budget. The runner now supplies a validation-only
-  control switch in the same exact image, counterbalances control/instrumented
-  state independently from topology order, retains ordinary topology-v2 raw
-  artifacts for both arms, and rejects a precise CPU or wall estimate above
-  the registered 2% geometric-mean budget. The physical campaign itself
+  control switch in the same exact image, crosses control/instrumented state
+  order with topology order in complete four-sequence blocks, retains
+  topology-v2 raw data plus every node's observed switch/count attestation for
+  both arms, and requires every CPU and wall upper confidence bound to remain
+  below the registered 2% budget. The physical campaign itself
   remains outstanding until the named machines are idle and the image is
   transferred.
 

@@ -102,9 +102,10 @@ pub use failure_drills::{
 };
 pub use named_runner::{
     claim_named_output, validate_named_campaign, validate_named_instrumentation_campaign,
-    InstrumentationMetric, InstrumentationPairReference, NamedInstrumentationCampaign,
-    NamedRunnerConfig, NamedTopologyCampaign, NamedVoter, INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION,
-    NAMED_CAMPAIGN_SCHEMA_VERSION,
+    InstrumentationMetric, InstrumentationNodeAttestation, InstrumentationPairReference,
+    InstrumentationTopologyAttestation, NamedInstrumentationArmArtifact,
+    NamedInstrumentationCampaign, NamedRunnerConfig, NamedTopologyCampaign, NamedVoter,
+    INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION, NAMED_CAMPAIGN_SCHEMA_VERSION,
 };
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
@@ -7025,6 +7026,7 @@ pub enum Response {
     },
     StoreInstrumentationStatus {
         enabled: bool,
+        recorded_operations_total: u64,
     },
     TopologyCatalogueSeeded {
         item_ids: Vec<i64>,
@@ -9762,6 +9764,7 @@ async fn handle_request(
         }),
         Request::StoreInstrumentationStatus => Ok(Response::StoreInstrumentationStatus {
             enabled: plurx_core::store::validation_store_operation_instrumentation_enabled(),
+            recorded_operations_total: plurx_core::store::validation_store_operation_metric_count(),
         }),
         Request::PostLossWrite {
             target,

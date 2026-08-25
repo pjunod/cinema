@@ -354,6 +354,7 @@ contract = "The shared Store suite passes on SQLite and three voters; backend-ne
 paths = [
   "benchmarks/cluster-named-runner.Dockerfile",
   "benchmarks/cluster-named-runner.example.json",
+  "benchmarks/cluster-instrumentation-arm.schema.json",
   "benchmarks/cluster-instrumentation-campaign.schema.json",
   "benchmarks/cluster-topology-campaign.schema.json",
   "benchmarks/cluster-topology.schema.json",

@@ -966,11 +966,16 @@ cargo run --locked -p plurx-cluster-check -- \
   target/cluster-instrumentation-named/instrumentation-campaign.json
 ```
 
-The P2f result is `accepted` only after all four paired estimates reach the
-same registered precision rule and their geometric-mean instrumented/control
-ratios remain at or below 1.02. A precise over-budget campaign is `rejected`;
-seven pairs without precision are `inconclusive`. Retain the campaign file and
-all hash-bound control and instrumented artifacts together.
+P2f evaluates only after complete four-sequence counterbalance blocks: state
+order alternates within each topology-order pair, then topology order reverses.
+It starts at eight pairs, continues at 12 and 16 while any two-sided 95%
+interval has more than a 1% multiplicative half-width, and never stops on an
+unbalanced prefix. The result is `accepted` only when every CPU and wall-time
+upper confidence bound is at or below 1.02. A precise over-budget campaign is
+`rejected`; 16 pairs without precision are `inconclusive`. Every raw arm records
+each node's observed switch state and operation count: control nodes must stay
+at zero while instrumented nodes must record work. Retain the campaign file and
+all hash-bound control and instrumented arm artifacts together.
 
 The output directory must not exist. `collect` generates a per-invocation
 256-bit owner and must win one atomic directory claim before it arms its cleanup

@@ -34,16 +34,16 @@
       "items": { "type": "string", "minLength": 1, "maxLength": 256 }
     },
     "read_pool_size": { "type": "integer", "minimum": 1, "maximum": 16 },
-    "min_pairs": { "const": 3 },
-    "max_pairs": { "const": 7 },
-    "confidence_half_width_percent": { "const": 5.0 },
+    "min_pairs": { "const": 8 },
+    "max_pairs": { "const": 16 },
+    "confidence_half_width_percent": { "const": 1.0 },
     "overhead_budget_percent": { "const": 2.0 },
     "started_at_unix_ms": { "type": "integer", "minimum": 0 },
     "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
     "stop_reason": { "enum": ["precision_reached", "max_pairs_reached"] },
     "result": { "enum": ["accepted", "rejected", "inconclusive"] },
     "raw_pairs": {
-      "type": "array", "minItems": 3, "maxItems": 7,
+      "type": "array", "minItems": 8, "maxItems": 16,
       "items": { "$ref": "#/$defs/raw_pair" }
     },
     "metrics": {
@@ -67,7 +67,7 @@
         "instrumented_artifact_sha256"
       ],
       "properties": {
-        "pair_index": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "pair_index": { "type": "integer", "minimum": 1, "maximum": 16 },
         "state_order": {
           "oneOf": [
             { "const": ["control", "instrumented"] },
@@ -134,7 +134,7 @@
       ]
     },
     "positive_samples": {
-      "type": "array", "minItems": 3, "maxItems": 7,
+      "type": "array", "minItems": 8, "maxItems": 16,
       "items": { "type": "number", "exclusiveMinimum": 0 }
     }
   }

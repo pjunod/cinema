@@ -11,10 +11,14 @@ ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p plurxd -p plurx-cluster-check \
-    && cp target/release/plurxd /plurxd \
-    && cp target/release/plurx-cluster-check /plurx-cluster-check
+    --mount=type=cache,target=/src/target-plurxd \
+    --mount=type=cache,target=/src/target-cluster-check \
+    ! cargo tree --locked -p plurxd -e features \
+        | grep -q 'cluster-read-cost-validation' \
+    && CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd \
+    && cp target-plurxd/release/plurxd /plurxd \
+    && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check \
+    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
 
 FROM debian:bookworm-slim
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS

@@ -60,7 +60,8 @@ pub use self::hiqlite::{
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::{
     validation_set_store_operation_instrumentation,
-    validation_store_operation_instrumentation_enabled, HiqliteOperationCounts,
+    validation_store_operation_instrumentation_enabled, validation_store_operation_metric_count,
+    HiqliteOperationCounts,
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
