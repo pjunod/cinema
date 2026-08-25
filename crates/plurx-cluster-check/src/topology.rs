@@ -266,7 +266,7 @@ pub(super) struct RunEvidence<'a> {
 impl RunEvidence<'static> {
     fn semantic() -> Self {
         Self {
-            read_pool_size: super::default_read_pool_size(),
+            read_pool_size: crate::default_read_pool_size(),
             controller_host: if std::env::var_os("GITHUB_ACTIONS").is_some() {
                 "github-hosted-ephemeral"
             } else {
@@ -1100,7 +1100,7 @@ mod tests {
             )
             .expect("fixture p99"),
             raw_acknowledged_write_round_trip_us,
-            read_pool_size: super::default_read_pool_size(),
+            read_pool_size: crate::default_read_pool_size(),
             catalogue_read_target: 2,
             catalogue_read_errors: 0,
             catalogue_read_consistent_query_calls: 0,
