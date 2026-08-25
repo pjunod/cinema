@@ -7960,7 +7960,11 @@ async function seekTo(targetSec, forceReopen=false){
   if(forceReopen) resetMediaSource(v); // native HLS has no PLAYER.hls to destroy
   [...v.querySelectorAll("track")].forEach(t=>t.remove());
   if(PLAYER.method==='transcode'){
-    let info; try{ info=await openSession(PLAYER.fileId,transcodeOpts(targetSec,aidx));}catch(e){ return failed(e); }
+    const opts=PlaybackPolicy.stallReopenSessionOptions({
+      options:transcodeOpts(targetSec,aidx),forceReopen,
+      method:PLAYER.method,sessionId:PLAYER.sessionId
+    });
+    let info; try{ info=await openSession(PLAYER.fileId,opts);}catch(e){ return failed(e); }
     if(!live()) return;   // a newer seek superseded this one
     armStall(attachSession(v, PLAYER, info, targetSec), 20000);
   } else if(PLAYER.copyHls){
