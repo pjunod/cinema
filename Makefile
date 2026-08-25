@@ -76,11 +76,15 @@ ci-rust-gate: fmt-check ## CI Rust gate: format + fast workspace tests
 # this on a privileged Linux host before shipping a change to fs_secure.
 .PHONY: bind-mount-check
 bind-mount-check: ## Privileged Linux: run the opt-in mount-namespace scratch tests
+	@test "$$(uname -s)" = Linux || { echo >&2 "bind-mount-check requires Linux"; exit 1; }
+	@test "$$(id -u)" -eq 0 || { echo >&2 "bind-mount-check requires root and CAP_SYS_ADMIN"; exit 1; }
 	PLURX_RUN_BIND_MOUNT_TEST=1 $(CARGO) test --locked -p plurx-core \
 	  fs_secure::tests:: -- --nocapture
 
 .PHONY: storage-pressure-check
 storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device preserves authority
+	@test "$$(uname -s)" = Linux || { echo >&2 "storage-pressure-check requires Linux"; exit 1; }
+	@test "$$(id -u)" -eq 0 || { echo >&2 "storage-pressure-check requires root and CAP_SYS_ADMIN"; exit 1; }
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
@@ -178,6 +182,9 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 	  failure_drills::tests --lib -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  named_runner::tests --lib -- --nocapture
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  storage_evidence::retained_p5_privileged_storage_evidence_matches_the_closed_schema \
+	  --lib -- --exact
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
