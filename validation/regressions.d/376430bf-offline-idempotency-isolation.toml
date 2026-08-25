@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["376430bf"]
+points = ["offline.viewing"]
+checks = ["rust-gate-ci", "offline-contract"]
+reason = "The offline idempotency regression still changes both the durable and effective rate-control policy before retrying the same request, but no longer invokes the public idle-only behavior probe after it has deliberately queued encoder work. The retained assertions continue to require the retry to recover the original package and its first-write VBR snapshot under the later QVBR policy without racing the package worker."
