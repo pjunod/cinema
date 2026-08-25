@@ -4935,14 +4935,10 @@ async fn run_learner_membership_case() -> Result<()> {
     if status.nodes.len() != 4
         || status.availability != ClusterAvailability::HighAvailability
         || learner_record.role != NodeRole::Learner
+        || learner_record.is_voter
         || learner_record.is_leader
         || !learner_record.reachable
-        || status
-            .nodes
-            .iter()
-            .filter(|node| node.role == NodeRole::Voter)
-            .count()
-            != 3
+        || status.nodes.iter().filter(|node| node.is_voter).count() != 3
     {
         bail!("the roster did not describe a three-voter cluster with one learner: {status:?}");
     }
@@ -9586,6 +9582,7 @@ async fn membership_manager_with_identity_artwork_url(
             replicated_schema_version: AUTH_SCHEMA_VERSION,
             imported_rows: 0,
             table_hashes: Vec::new(),
+            admitted_role: Some(launch.role),
         },
         launch.role,
     )

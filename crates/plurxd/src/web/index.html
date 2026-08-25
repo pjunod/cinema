@@ -10192,8 +10192,9 @@ function clusterStateView(cluster){
         "cluster. Keep the available nodes running and retry the roster; if it still fails, read the "+
         "replication status on the System tab and inspect the server logs before restarting anything."};
   const nodes=cluster.nodes||[];
-  const voters=nodes.filter(n=>n.role==="voter").length;
+  const voters=nodes.filter(n=>n.is_voter).length;
   const learners=nodes.filter(n=>n.role==="learner").length;
+  const joiningVoters=nodes.filter(n=>n.role==="voter"&&!n.is_voter).length;
   // A learner is a permanent non-voting role, not a stage of joining: it
   // changes none of the arithmetic below and nothing promotes it later.
   // Saying so stops it reading as a voter that went missing.
@@ -10201,24 +10202,28 @@ function clusterStateView(cluster){
     `${learners===1?"a learner":"learners"}: ${learners===1?"it receives":"they receive"} `+
     `replication, ${learners===1?"holds":"hold"} no vote, and ${learners===1?"is":"are"} `+
     `not counted toward quorum.`:"";
+  const joining=joiningVoters?` ${joiningVoters===1?"One voter is":`${joiningVoters} voters are`} `+
+    `joining and catching up: ${joiningVoters===1?"it has":"they have"} no committed vote yet and `+
+    `${joiningVoters===1?"is":"are"} not counted toward quorum until Raft promotes `+
+    `${joiningVoters===1?"it":"them"}.`:"";
   if(cluster.availability==="degraded_reconfiguration")
     return {tone:"warn", title:"Reconfiguration in progress — not redundant",
       body:"Two voters is a waypoint while a node is being added or removed, never a redundant pair. "+
         "Both machines must be running and must agree on every write and every membership change, so "+
         "this cluster survives no failure — it is less resilient than a single server, not more. "+
         "Add a third node to finish the reconfiguration, and keep both of these running until three "+
-        "are present and in sync."+catching};
+        "are present and in sync."+catching+joining};
   if(cluster.availability==="high_availability"){
     const q=clusterQuorum(voters);
     return {tone:"good", title:`Redundant — ${voters} voters`,
       body:`${q.majority} of the ${voters} voters must agree on every write, so the cluster keeps serving `+
         `and recording watch state while ${q.tolerates===1?"one node is":`${q.tolerates} nodes are`} down. `+
-        "Removing a node is accepted only while enough voters remain to keep that majority."+catching};
+        "Removing a node is accepted only while enough voters remain to keep that majority."+catching+joining};
   }
   return {tone:"calm", title:"One node",
     body:"This is the only node in this cluster. Watch state is durable here, and one node is a complete, "+
       "supported configuration rather than a half-finished cluster. Add a second and a third node only "+
-      "if you want another machine carrying the same watch state."+catching};
+      "if you want another machine carrying the same watch state."+catching+joining};
 }
 // The refusals DELETE /cluster/nodes/{id} can return, as sentences that say
 // what to do next. `node_owns_offline_work` is expected to be the common one
@@ -10266,10 +10271,13 @@ function membershipRefusalText(code,message){
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
 function clusterNodeRow(n,localNodeId){
-  const voter=n.role==="voter";
+  const voter=n.is_voter;
+  const admittedVoter=n.role==="voter";
   const role=voter
     ? `<span class="pill" style="color:var(--accent);border-color:var(--accent)">voter</span>`
-    : `<span class="pill" title="A permanent non-voting role. A learner receives replication, does not vote, and is not counted toward quorum.">learner</span>`;
+    : admittedVoter
+      ? `<span class="pill" title="Admitted as a voter and currently joining or catching up. It is not counted toward quorum until Raft commits its vote.">joining voter</span>`
+      : `<span class="pill" title="A permanent non-voting role. A learner receives replication, does not vote, and is not counted toward quorum.">learner</span>`;
   const heartbeat=n.reachable
     ? `<span style="color:var(--good)">fresh</span>`
     : `<span style="color:var(--bad)">stale</span>`;

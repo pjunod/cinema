@@ -123,6 +123,7 @@ function node(id, raftId, role, extra = {}) {
     advertised_host: `${id}.lan`,
     raft_id: raftId,
     role,
+    is_voter: role === "voter",
     is_leader: false,
     reachable: true,
     last_seen_at: Date.now(),
@@ -333,6 +334,26 @@ test("the learner role pill says what the banner says", () => {
   const voter = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
   assert.match(voter, />voter</);
   assert.doesNotMatch(voter, /non-voting/i);
+});
+
+test("a voter catching up is not rendered as a permanent learner", () => {
+  const ui = sandbox();
+  const joining = node("node-d", 4, "voter", { is_voter: false });
+  const view = ui.clusterStateView(
+    status("high_availability", [
+      node("node-a", 1, "voter"),
+      node("node-b", 2, "voter"),
+      node("node-c", 3, "voter"),
+      joining,
+    ]),
+  );
+  assert.match(view.body, /voter is joining and catching up/i);
+  assert.match(view.body, /no committed vote yet/i);
+  assert.doesNotMatch(view.body, /node is a learner/i);
+
+  const row = ui.clusterNodeRow(joining, "node-a");
+  assert.match(row, /joining voter/i);
+  assert.doesNotMatch(row, /permanent non-voting role/i);
 });
 
 // ---- every refusal is a sentence with a next step -------------------------

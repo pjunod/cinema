@@ -334,6 +334,9 @@ const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
 const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
 const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
+const MAX_JOIN_SOCKET_ADDRESS_BYTES: usize = 512;
+const MAX_JOIN_HTTP_ORIGIN_BYTES: usize = 2_048;
+const MAX_JOIN_HOSTNAME_BYTES: usize = 253;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
@@ -661,6 +664,61 @@ impl RedeemJoinRequest {
     }
 }
 
+/// Reject untrusted redemption fields before they can cause any replicated
+/// read. The public route is intentionally unauthenticated because possession
+/// of the token is its credential; malformed JSON must not become a cheap way
+/// to force leader/quorum traffic.
+fn validate_redeem_join_request(
+    request: &RedeemJoinRequest,
+) -> Result<Option<String>, MembershipError> {
+    let invalid_identity = !is_join_token_digest(&request.token_digest)
+        || request.raft_id == 0
+        || request.node_id.is_empty()
+        || request.node_id.len() > MAX_PEER_NODE_ID_BYTES
+        || request.node_id.chars().any(char::is_control)
+        || request.hostname.len() > MAX_JOIN_HOSTNAME_BYTES
+        || request.hostname.chars().any(char::is_control)
+        || !is_bounded_join_socket_address(&request.raft_address)
+        || !is_bounded_join_socket_address(&request.api_address);
+    if invalid_identity {
+        return Err(MembershipError::InvalidToken);
+    }
+    let (protocol_min, protocol_max) = request.declared_protocol_range();
+    if protocol_min <= 0 || protocol_max < protocol_min {
+        return Err(MembershipError::Incompatible);
+    }
+    if request.http_base.is_empty() {
+        return Ok(None);
+    }
+    if request.http_base.len() > MAX_JOIN_HTTP_ORIGIN_BYTES
+        || request.http_base.chars().any(char::is_control)
+    {
+        return Err(MembershipError::InvalidHttpEndpoint);
+    }
+    normalize_internal_http_base(&request.http_base)
+        .map(Some)
+        .ok_or(MembershipError::InvalidHttpEndpoint)
+}
+
+fn is_bounded_join_socket_address(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > MAX_JOIN_SOCKET_ADDRESS_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("http://{value}")) else {
+        return false;
+    };
+    url.host_str().is_some()
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/"
+}
+
 impl std::fmt::Debug for RedeemJoinRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -730,7 +788,14 @@ pub struct ClusterNodeRecord {
     /// still private; loopback is rendered as `localhost`, not a raw IP.
     pub advertised_host: String,
     pub raft_id: u64,
+    /// Durable admission role. A voter keeps this role while Raft temporarily
+    /// carries it as a non-voting learner during catch-up.
     pub role: NodeRole,
+    /// Whether committed Raft membership currently grants this node a vote.
+    /// Kept separate from `role` so a joining voter is not mislabeled as a
+    /// permanent learner.
+    #[serde(default)]
+    pub is_voter: bool,
     pub is_leader: bool,
     pub reachable: bool,
     pub last_seen_at: i64,
@@ -1154,33 +1219,24 @@ fn is_duplicate_column_error(error: &hiqlite::Error) -> bool {
 /// invalidated by a learner being admitted before the write commits.
 ///
 /// `redeem` commits the `role = 'learner'` row before the joiner has joined
-/// Raft at all, so a redemption the operator aborted — a port conflict, a
-/// crash, ^C — leaves a row for a node that was never a member. PR-1 ships no
-/// learner removal, so without the exclusion below that phantom blocks
-/// rollback permanently and the refusal names a node that does not exist.
+/// Raft at all, so a redemption interrupted by a port conflict, crash, or ^C
+/// may leave a row for a process that has not started Raft yet. It has already
+/// received authority and may resume, which is why the row remains protected.
 ///
-/// `cluster_node_join_staging` marks exactly the admissions that have not
-/// finished: the joiner's first heartbeat clears the row, and so does
-/// finalizing its token. Abandoning a join leaves it. But a staging row alone
-/// is not proof of abandonment — a healthy learner carries one for the couple
-/// of seconds between redemption and its first heartbeat — so the row has to
-/// be *stale* as well, on the same wall-clock absence argument
-/// [`no_absent_node_predicate`] makes. `$3` is that cutoff.
+/// A staging row and an old timestamp are not proof of abandonment. The
+/// authorized process may be paused after redemption and resume later, so the
+/// durable learner row blocks rollback until an explicit removal protocol can
+/// tombstone it. PR-1 deliberately chooses a forward-only recovery over
+/// stranding a process that already holds cluster credentials.
 fn no_admitted_learner_predicate() -> &'static str {
     "NOT EXISTS (SELECT 1 FROM cluster_nodes AS learner \
-       WHERE learner.role = 'learner' AND learner.removed_at IS NULL \
-         AND NOT (learner.last_seen_at < $3 \
-           AND EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
-             WHERE staged.node_id = learner.node_id)))"
+       WHERE learner.role = 'learner' AND learner.removed_at IS NULL)"
 }
 
 /// The same rule as a roster, so a refusal can name what has to be removed.
 fn admitted_learner_nodes_sql() -> &'static str {
     "SELECT learner.node_id FROM cluster_nodes AS learner \
      WHERE learner.role = 'learner' AND learner.removed_at IS NULL \
-       AND NOT (learner.last_seen_at < $1 \
-         AND EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
-           WHERE staged.node_id = learner.node_id)) \
      ORDER BY learner.node_id"
 }
 
@@ -2179,6 +2235,19 @@ impl MembershipManager {
         if request.schema_version != AUTH_SCHEMA_VERSION {
             return Err(MembershipError::Incompatible);
         }
+        let http_base = validate_redeem_join_request(request)?;
+        // Possession is checked before the cluster-wide protocol projection.
+        // An unknown digest pays for one indexed token lookup, not an
+        // otherwise-valid quorum range read on behalf of an unauthenticated
+        // caller.
+        let record = self.token_record(&request.token_digest).await?;
+        if record.raft_id != request.raft_id as i64 {
+            return Err(MembershipError::InvalidToken);
+        }
+        // The role is *derived*, never accepted. `RedeemJoinRequest` carries
+        // no role field precisely so that a joining process cannot ask to be
+        // something other than what the operator's token was minted for.
+        let role = record.role()?;
         // The same rule the boot-time guard applies, from the coordinator's
         // side: the joiner has to implement every protocol this cluster is
         // actively using. Comparing against a constant instead would admit a
@@ -2197,26 +2266,7 @@ impl MembershipManager {
             );
             return Err(MembershipError::Incompatible);
         }
-        if !is_join_token_digest(&request.token_digest) {
-            return Err(MembershipError::InvalidToken);
-        }
-        let http_base = if request.http_base.is_empty() {
-            None
-        } else {
-            Some(
-                normalize_internal_http_base(&request.http_base)
-                    .ok_or(MembershipError::InvalidHttpEndpoint)?,
-            )
-        };
         let now = unix_ms()?;
-        let record = self.token_record(&request.token_digest).await?;
-        if record.raft_id != request.raft_id as i64 {
-            return Err(MembershipError::InvalidToken);
-        }
-        // The role is *derived*, never accepted. `RedeemJoinRequest` carries
-        // no role field precisely so that a joining process cannot ask to be
-        // something other than what the operator's token was minted for.
-        let role = record.role()?;
         if role.is_learner() && !(cluster_min..=cluster_max).contains(&AUTH_LEARNER_PROTOCOL) {
             tracing::warn!(
                 cluster_min,
@@ -3988,7 +4038,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MembershipNodeRow, _>(
-                "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, \
+                "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, n.role, \
                         COALESCE(h.hostname, '') AS hostname, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
@@ -4007,23 +4057,27 @@ impl MembershipManager {
         let nodes = rows
             .into_iter()
             .filter(|row| members.contains(&(row.raft_id as u64)))
-            .map(|row| ClusterNodeRecord {
-                learner_protocol_ready: !pending.contains(&row.node_id),
-                node_id: row.node_id,
-                hostname: membership_hostname(&row.hostname, &row.api_address),
-                advertised_host: advertised_host(&row.api_address),
-                raft_id: row.raft_id as u64,
-                role: if voters.contains(&(row.raft_id as u64)) {
-                    NodeRole::Voter
-                } else {
-                    NodeRole::Learner
-                },
-                is_leader: metrics.current_leader == Some(row.raft_id as u64),
-                reachable: node_is_reachable(now, row.last_seen_at),
-                last_seen_at: row.last_seen_at,
-                removal_pending: row.removal_pending,
+            .map(|row| {
+                let admitted_role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
+                let raft_id = row.raft_id as u64;
+                Ok(ClusterNodeRecord {
+                    learner_protocol_ready: !pending.contains(&row.node_id),
+                    node_id: row.node_id,
+                    hostname: membership_hostname(&row.hostname, &row.api_address),
+                    advertised_host: advertised_host(&row.api_address),
+                    raft_id,
+                    role: match admitted_role {
+                        ClusterRole::Voter => NodeRole::Voter,
+                        ClusterRole::Learner => NodeRole::Learner,
+                    },
+                    is_voter: voters.contains(&raft_id),
+                    is_leader: metrics.current_leader == Some(raft_id),
+                    reachable: node_is_reachable(now, row.last_seen_at),
+                    last_seen_at: row.last_seen_at,
+                    removal_pending: row.removal_pending,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, MembershipError>>()?;
         let availability = match voters.len() {
             0 | 1 => ClusterAvailability::SingleNode,
             2 => ClusterAvailability::DegradedReconfiguration,
@@ -4706,21 +4760,19 @@ impl MembershipManager {
                  {AUTH_LEARNER_PROTOCOL}..={AUTH_LEARNER_PROTOCOL}; refusing to widen it"
             )));
         }
-        let abandoned_cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-        self.refuse_stranding_deactivation(abandoned_cutoff).await?;
+        self.refuse_stranding_deactivation().await?;
         let changed = inner
             .client
             .execute(
                 narrow_protocol_range_sql(Some(no_admitted_learner_predicate().to_owned())),
-                params!(AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL, abandoned_cutoff),
+                params!(AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL),
             )
             .await?;
         let protocol = self.protocol_projection(Read::Quorum).await?;
         if changed == 0 && protocol.learner_protocol_active {
             // The embedded predicate rejected the write after the read-only
             // pass admitted it: a learner was admitted in between.
-            let cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-            self.refuse_stranding_deactivation(cutoff).await?;
+            self.refuse_stranding_deactivation().await?;
             return Err(MembershipError::ProtocolRangeChanged);
         }
         Ok(ProtocolChange {
@@ -4743,8 +4795,8 @@ impl MembershipManager {
     /// and then `become_member`, so an ordinary voter that is mid-join is a
     /// committed non-voter for a moment — true, and worth refusing on, but it
     /// is not a learner and telling an operator to "remove it" would be wrong.
-    async fn refuse_stranding_deactivation(&self, cutoff: i64) -> Result<(), MembershipError> {
-        let admitted = self.admitted_learner_nodes(cutoff).await?;
+    async fn refuse_stranding_deactivation(&self) -> Result<(), MembershipError> {
+        let admitted = self.admitted_learner_nodes().await?;
         let non_voting = self
             .committed_non_voters()
             .await?
@@ -4760,14 +4812,12 @@ impl MembershipManager {
         })
     }
 
-    /// Nodes whose durable membership row says they were admitted as learners
-    /// and whose admission actually got somewhere. See
-    /// [`no_admitted_learner_predicate`] for why `cutoff` is needed.
-    async fn admitted_learner_nodes(&self, cutoff: i64) -> Result<Vec<String>, MembershipError> {
+    /// Nodes whose durable membership row says they were admitted as learners.
+    async fn admitted_learner_nodes(&self) -> Result<Vec<String>, MembershipError> {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<NodeIdRow, _>(admitted_learner_nodes_sql(), params!(cutoff))
+            .query_consistent_map::<NodeIdRow, _>(admitted_learner_nodes_sql(), params!())
             .await?;
         Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
@@ -5667,6 +5717,7 @@ struct MembershipNodeRow {
     raft_id: i64,
     api_address: String,
     hostname: String,
+    admitted_role: Option<String>,
     last_seen_at: i64,
     removal_pending: bool,
 }
@@ -5880,6 +5931,7 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             raft_id: row.get("raft_id"),
             api_address: row.get("api_address"),
             hostname: row.get("hostname"),
+            admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
             removal_pending: row.get("removal_pending"),
         }
@@ -6482,17 +6534,13 @@ mod tests {
         activate_at(connection, FIXTURE_PRESENT_CUTOFF)
     }
 
-    fn deactivate_at(connection: &rusqlite::Connection, cutoff: i64) -> usize {
+    fn deactivate(connection: &rusqlite::Connection) -> usize {
         connection
             .execute(
                 &narrow_protocol_range_sql(Some(no_admitted_learner_predicate().to_owned())),
-                rusqlite::params![AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL, cutoff],
+                rusqlite::params![AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL],
             )
             .expect("run the deactivation statement")
-    }
-
-    fn deactivate(connection: &rusqlite::Connection) -> usize {
-        deactivate_at(connection, FIXTURE_PRESENT_CUTOFF)
     }
 
     fn absent_nodes(connection: &rusqlite::Connection, cutoff: i64) -> Vec<String> {
@@ -6519,20 +6567,16 @@ mod tests {
         rows
     }
 
-    fn admitted_learners_at(connection: &rusqlite::Connection, cutoff: i64) -> Vec<String> {
+    fn admitted_learners(connection: &rusqlite::Connection) -> Vec<String> {
         let mut statement = connection
             .prepare(admitted_learner_nodes_sql())
             .expect("prepare the learner roster");
         let rows = statement
-            .query_map(rusqlite::params![cutoff], |row| row.get::<_, String>(0))
+            .query_map([], |row| row.get::<_, String>(0))
             .expect("run the learner roster")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect the learner roster");
         rows
-    }
-
-    fn admitted_learners(connection: &rusqlite::Connection) -> Vec<String> {
-        admitted_learners_at(connection, FIXTURE_PRESENT_CUTOFF)
     }
 
     /// The role column is additive and nullable, so every row an older
@@ -6889,7 +6933,7 @@ mod tests {
         }
     }
 
-    /// An abandoned learner redemption must not block rollback forever.
+    /// An old staged learner redemption still blocks rollback.
     ///
     /// `redeem` commits `role = 'learner'` before the joiner has joined Raft
     /// at all, so a redemption that then failed — port conflict, crash,
@@ -6898,12 +6942,12 @@ mod tests {
     /// on protocol 5 permanently, with a refusal naming a node that does not
     /// exist.
     ///
-    /// A staging row alone is not proof of abandonment: a healthy learner
-    /// carries one for the couple of seconds between redemption and its first
-    /// heartbeat, and deactivating in that window would strand a real node. It
-    /// has to be stale as well.
+    /// A staging row plus age is not proof of abandonment: the authorized
+    /// process may be paused after redemption and resume after any wall-clock
+    /// cutoff. Until learner removal can atomically cancel the admission,
+    /// rollback must fail closed.
     #[test]
-    fn an_abandoned_learner_redemption_stops_blocking_rollback_once_it_is_stale() {
+    fn a_staged_learner_redemption_blocks_rollback_regardless_of_age() {
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
         assert_eq!(activate(&connection), 1);
 
@@ -6914,26 +6958,24 @@ mod tests {
             )
             .expect("redeem a learner token for a node that never arrives");
 
-        // Fresh: this could still be a learner two seconds into its join.
         assert_eq!(
-            admitted_learners_at(&connection, 400),
+            admitted_learners(&connection),
             vec!["node-abandoned".to_owned()],
-            "a redemption still inside the window is protected"
+            "the durable admission is protected"
         );
-        assert_eq!(deactivate_at(&connection, 400), 0);
+        assert_eq!(deactivate(&connection), 0);
         assert_eq!(active_range(&connection), (5, 5));
 
-        // Stale: nothing ever heartbeated, so nothing was ever admitted.
-        assert!(
-            admitted_learners_at(&connection, 401).is_empty(),
-            "an abandoned admission strands nothing and must not be named"
-        );
-        assert_eq!(
-            deactivate_at(&connection, 401),
-            1,
-            "rollback is possible again"
-        );
-        assert_eq!(active_range(&connection), (4, 4));
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = -999999999 \
+                 WHERE node_id = 'node-abandoned'",
+                [],
+            )
+            .expect("make the staged admission arbitrarily old");
+        assert_eq!(admitted_learners(&connection), vec!["node-abandoned"]);
+        assert_eq!(deactivate(&connection), 0);
+        assert_eq!(active_range(&connection), (5, 5));
     }
 
     /// A learner that actually joined keeps blocking rollback however long it
@@ -6949,11 +6991,11 @@ mod tests {
             )
             .expect("admit a learner whose first heartbeat cleared its staging row");
         assert_eq!(
-            admitted_learners_at(&connection, i64::MAX),
+            admitted_learners(&connection),
             vec!["node-learner".to_owned()],
             "no staging row means the admission finished; staleness is irrelevant"
         );
-        assert_eq!(deactivate_at(&connection, i64::MAX), 0);
+        assert_eq!(deactivate(&connection), 0);
         assert_eq!(active_range(&connection), (5, 5));
     }
 
@@ -8257,6 +8299,7 @@ mod tests {
                     row_count: 1,
                     sha256: "e".repeat(64),
                 }],
+                admitted_role: None,
             },
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_MIN,
@@ -8662,6 +8705,76 @@ mod tests {
         assert_eq!(short_hostname("192.0.2.40"), None);
         assert_eq!(membership_hostname("", "plurx-a.lan:32402"), "plurx-a");
         assert_eq!(membership_hostname("", "127.0.0.1:32402"), "unknown-host");
+    }
+
+    #[test]
+    fn malformed_redeem_fields_are_rejected_before_any_cluster_lookup() {
+        let valid = RedeemJoinRequest {
+            token_digest: "a".repeat(64),
+            raft_id: 4,
+            node_id: "node-d".to_owned(),
+            hostname: "node-d.example.net".to_owned(),
+            raft_address: "node-d:32401".to_owned(),
+            api_address: "node-d:32402".to_owned(),
+            http_base: "http://node-d:32400".to_owned(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: AUTH_PROTOCOL_MIN,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
+        };
+        assert_eq!(
+            validate_redeem_join_request(&valid).expect("valid request"),
+            Some("http://node-d:32400".to_owned())
+        );
+        for malformed in [
+            RedeemJoinRequest {
+                token_digest: "not-a-digest".to_owned(),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                node_id: "x".repeat(MAX_PEER_NODE_ID_BYTES + 1),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                raft_address: "node-d-without-a-port".to_owned(),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                api_address: format!("node-d:{}", "9".repeat(MAX_JOIN_SOCKET_ADDRESS_BYTES)),
+                ..valid.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_redeem_join_request(&malformed),
+                Err(MembershipError::InvalidToken)
+            ));
+        }
+        assert!(matches!(
+            validate_redeem_join_request(&RedeemJoinRequest {
+                http_base: format!("http://node-d/{}", "x".repeat(MAX_JOIN_HTTP_ORIGIN_BYTES)),
+                ..valid
+            }),
+            Err(MembershipError::InvalidHttpEndpoint)
+        ));
+
+        let source = production_source();
+        let redeem = source
+            .split_once("pub async fn redeem(")
+            .expect("redeem method")
+            .1
+            .split_once("async fn upsert_hostname(")
+            .expect("method after redeem")
+            .0;
+        let cheap = redeem
+            .find("validate_redeem_join_request(request)")
+            .expect("cheap validation");
+        let possession = redeem
+            .find("token_record(&request.token_digest)")
+            .expect("token lookup");
+        let protocol = redeem
+            .find("active_protocol_range()")
+            .expect("protocol range lookup");
+        assert!(cheap < possession && possession < protocol);
     }
 
     #[test]

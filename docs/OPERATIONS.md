@@ -570,11 +570,13 @@ moment — the join adds it as a Raft learner before promoting it — and settle
 its own; it is not a learner and must not be removed. Wait for the join to
 finish and retry.
 
-An admission that was abandoned before the joiner ever started — a port
-conflict, a crash, a `^C` — leaves a `role='learner'` row for a node that never
-became a member. That row stops blocking rollback once it has been stale for the
-same two minutes the absence rule uses, so an aborted `plurxd join` does not
-permanently remove the rollback.
+An admission interrupted after redemption — a port conflict, a crash, a `^C`
+— leaves a `role='learner'` row and **continues to block rollback regardless of
+age**. Age is not proof that the authorized process cannot resume. This release
+has no learner-removal transaction that can cancel and tombstone that admission
+atomically, so the safe recovery is forward: restart the joiner or upgrade/fix
+it. Plan as though copying a learner token into place and reaching redemption
+makes protocol 5 permanent for this release.
 
 The refusal is decided twice — once as a read that names what is in the way, and
 again inside the committing statement — so a learner admitted between the two

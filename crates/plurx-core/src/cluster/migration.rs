@@ -143,6 +143,15 @@ pub struct ActivationMarker {
     pub replicated_schema_version: i64,
     pub imported_rows: u64,
     pub table_hashes: Vec<SqliteImportTableDigest>,
+    /// The role this particular data directory was admitted with.
+    ///
+    /// Old one-voter markers omit this field and are therefore the only
+    /// markers for which a missing `membership.json` can still be upgraded as
+    /// a voter. Every joined node writes it before the activation marker
+    /// becomes authoritative, so losing the membership record can never turn
+    /// a learner into a campaigning process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_role: Option<ClusterRole>,
 }
 
 /// Crash-recovery record for the one-voter loopback-to-advertised transition.
@@ -544,11 +553,16 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     .await?;
     let store = HiqliteAuthStore::open(client.clone(), &active.join("telemetry.db")).await?;
     verify_store_identity(&store, payload.cluster_id()).await?;
-    write_activation_marker(&active, payload.activation_marker())?;
-    write_local_membership(&config.storage.data_dir, &membership)?;
-    sync_directory(&active)?;
-    sync_directory(&config.storage.data_dir)?;
-    ensure_activated_source_record(&config.storage.data_dir, payload.activation_marker())?;
+    let mut activation_marker = payload.activation_marker().clone();
+    activation_marker.admitted_role = Some(role);
+    publish_join_activation(
+        &config.storage.data_dir,
+        &active,
+        &activation_marker,
+        &membership,
+        JoinActivationFailpoint::None,
+    )?;
+    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
 
     // Keep the caught-up voter alive. Fully-TLS Hiqlite listeners have no
     // graceful-shutdown handle, and no stop/rebind boundary is needed because
@@ -579,7 +593,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             )?,
         },
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        payload.activation_marker().clone(),
+        activation_marker,
         role,
     )
     .await
@@ -597,6 +611,44 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     };
     finalize_pending_join_best_effort(config, &selected).await;
     Ok(selected)
+}
+
+/// Publish a joined node's local role before making its active store
+/// authoritative.
+///
+/// The ordering is the safety property. A retry after the failpoint sees the
+/// role record and no activation marker, re-enters the idempotent join path,
+/// and can never default a learner to voter. The private failpoint is used by
+/// the crash-restart regression below; it is not configurable in production.
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinActivationFailpoint {
+    None,
+    #[cfg(test)]
+    AfterMembership,
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn publish_join_activation(
+    data_dir: &Path,
+    active: &Path,
+    marker: &ActivationMarker,
+    membership: &LocalMembership,
+    failpoint: JoinActivationFailpoint,
+) -> Result<(), StoreError> {
+    write_local_membership(data_dir, membership)?;
+    sync_directory(data_dir)?;
+    #[cfg(test)]
+    if failpoint == JoinActivationFailpoint::AfterMembership {
+        return Err(StoreError::Migration(
+            "join activation failpoint after durable membership".to_owned(),
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = failpoint;
+    write_activation_marker(active, marker)?;
+    sync_directory(active)?;
+    sync_directory(data_dir)
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -915,6 +967,7 @@ impl ActivationMarker {
             replicated_schema_version: AUTH_SCHEMA_VERSION,
             imported_rows: report.imported_rows,
             table_hashes: report.tables,
+            admitted_role: None,
         }
     }
 
@@ -1306,6 +1359,7 @@ async fn open_active_store_with_key(
     require_real_directory(&active)?;
     let mut marker = read_activation_marker(&active)?;
     let mut local_membership = read_local_membership(&config.storage.data_dir)?;
+    let role = active_store_role(&marker, local_membership.as_ref(), &config.storage.data_dir)?;
     let mut identity = super::initialize_identity(&config.storage.data_dir, &marker.cluster_id)?;
     if let Some(membership) = &local_membership {
         if membership.cluster_id != marker.cluster_id || membership.node_id != identity.node_id {
@@ -1315,7 +1369,6 @@ async fn open_active_store_with_key(
         }
         identity.raft_id = membership.raft_id;
     }
-    let role = boot_cluster_role(local_membership.as_ref());
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     let force_loopback = should_force_loopback(config, local_membership.as_ref());
     let (client, local) = start_voter(
@@ -1674,6 +1727,36 @@ fn boot_cluster_role(local_membership: Option<&LocalMembership>) -> ClusterRole 
     local_membership
         .map(|membership| membership.role)
         .unwrap_or_default()
+}
+
+/// Resolve an active store's boot role without granting authority from a
+/// missing joined-node record.
+#[cfg(feature = "hiqlite-store")]
+fn active_store_role(
+    marker: &ActivationMarker,
+    local_membership: Option<&LocalMembership>,
+    data_dir: &Path,
+) -> Result<ClusterRole, StoreError> {
+    match local_membership {
+        Some(membership)
+            if marker
+                .admitted_role
+                .is_some_and(|admitted_role| admitted_role != membership.role) =>
+        {
+            Err(StoreError::Identity(
+                "membership.json role does not match activation.json admitted role".to_owned(),
+            ))
+        }
+        Some(membership) => Ok(membership.role),
+        None if marker.admitted_role.is_some() => Err(StoreError::Identity(format!(
+            "activation.json records this joined node's admitted role but {} is missing; restore \
+             the durable membership record before startup rather than guessing that this node may vote",
+            data_dir.join(LOCAL_MEMBERSHIP_FILENAME).display()
+        ))),
+        // Markers written before role-aware joins describe only the original
+        // one-voter activation. Preserve that upgrade path.
+        None => Ok(ClusterRole::Voter),
+    }
 }
 
 /// Open the replicated store the way this node's role is allowed to.
@@ -3151,6 +3234,7 @@ mod tests {
                 row_count: 0,
                 sha256: "0".repeat(64),
             }],
+            admitted_role: None,
         };
         marker(AUTH_SCHEMA_MIGRATION_SOURCE)
             .validate()
@@ -3182,6 +3266,7 @@ mod tests {
                     row_count: 0,
                     sha256: "0".repeat(64),
                 }],
+                admitted_role: None,
             };
             let error = zero
                 .validate()
@@ -3426,6 +3511,7 @@ mod tests {
                     row_count: 0,
                     sha256: "0".repeat(64),
                 }],
+                admitted_role: Some(membership.role),
             },
         )
         .expect("activation marker");
@@ -4651,6 +4737,85 @@ mod tests {
         assert!(
             refused.contains(LOCAL_MEMBERSHIP_FILENAME),
             "the refusal must name the missing file: {refused}"
+        );
+    }
+
+    /// A joined role is durable before `activation.json` becomes the commit
+    /// bit, and a retry after a crash at that boundary resumes the same role.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_activation_crash_after_membership_never_restarts_a_learner_as_a_voter() {
+        let dir = tempfile::tempdir().expect("joined data dir");
+        let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("active target");
+        let peer = ClusterPeer {
+            raft_id: 4,
+            raft_address: "localhost:33401".to_owned(),
+            api_address: "localhost:33402".to_owned(),
+        };
+        let membership = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "44444444-4444-4444-8444-444444444444".to_owned(),
+            raft_id: 4,
+            local: peer.clone(),
+            bootstrap: vec![peer],
+            join_token_digest: Some("a".repeat(64)),
+            role: ClusterRole::Learner,
+        };
+        let marker = ActivationMarker {
+            marker_version: ACTIVATION_MARKER_VERSION,
+            cluster_id: membership.cluster_id.clone(),
+            source_backup_sha256: "0".repeat(64),
+            source_schema_version: AUTH_SCHEMA_VERSION,
+            replicated_schema_version: AUTH_SCHEMA_VERSION,
+            imported_rows: 0,
+            table_hashes: vec![SqliteImportTableDigest {
+                table: "settings".to_owned(),
+                row_count: 0,
+                sha256: "0".repeat(64),
+            }],
+            admitted_role: Some(ClusterRole::Learner),
+        };
+
+        let interrupted = publish_join_activation(
+            dir.path(),
+            &active,
+            &marker,
+            &membership,
+            JoinActivationFailpoint::AfterMembership,
+        )
+        .expect_err("failpoint interrupts before activation marker");
+        assert!(interrupted.to_string().contains("failpoint"));
+        assert_eq!(
+            read_local_membership(dir.path())
+                .expect("read durable membership")
+                .expect("membership was published")
+                .role,
+            ClusterRole::Learner
+        );
+        assert!(!active.join(ACTIVATION_MARKER_FILENAME).exists());
+
+        publish_join_activation(
+            dir.path(),
+            &active,
+            &marker,
+            &membership,
+            JoinActivationFailpoint::None,
+        )
+        .expect("retry publishes the marker");
+        let resumed_marker = read_activation_marker(&active).expect("read activation marker");
+        assert_eq!(
+            active_store_role(&resumed_marker, Some(&membership), dir.path())
+                .expect("resume the admitted role"),
+            ClusterRole::Learner
+        );
+
+        std::fs::remove_file(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
+            .expect("simulate later membership loss");
+        assert!(
+            active_store_role(&resumed_marker, None, dir.path()).is_err(),
+            "an activated learner with a missing role record must fail closed"
         );
     }
 
