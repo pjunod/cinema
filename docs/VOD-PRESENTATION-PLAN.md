@@ -717,8 +717,9 @@ resurrect → ENDLIST-complete) goes in docs/PLAYBACK-TESTING.md.
 
 ### M4 — web adoption (M)
 
-**Implementation status (2026-08-25):** built on `codex/vod-m4`; exact-commit
-automated and nynuc release evidence is tracked in
+**Implementation status (2026-08-25):** merged at `3d6f492d` and deployed as
+`v0.2.7-1551-g3d6f492d`. Exact-commit automated gates passed; the three
+physical nynuc observations remain tracked in
 [VOD-M4-HANDOFF.md](VOD-M4-HANDOFF.md).
 
 Send the flag; VOD-path handling; timeout configs from P3. No deletions.
