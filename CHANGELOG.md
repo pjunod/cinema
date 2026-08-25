@@ -21,9 +21,9 @@ bump may break compatibility and a **patch** bump never does.
   paused browser, expose materialization/working-set health through the normal
   HLS status URL, and can carry native WebVTT renditions through the existing
   multivariant HLS path. Settings → Playback now owns the server opt-in, index
-  interval, working-set budget, and producer deadline; the opt-in remains off
-  by default, and files without a current index, subtitle burns, and transcode
-  rungs still fall back to the live presentation. The named `playback-lab`
+  interval, working-set budget, and producer deadline. The later VOD-only
+  cutover supersedes this milestone's original default-off fallback behavior.
+  The named `playback-lab`
   `vod` suite makes steady playback, a 20-seek same-session storm, zero keeper
   fires, zero replacement creates, and suspend/resume executable contracts.
 
@@ -49,13 +49,20 @@ bump may break compatibility and a **patch** bump never does.
   reaped session resurrects from its durable route while that route is live,
   and every terminal cause (DELETE, supersession, admin stop, revocation,
   file replacement) answers a typed 410 and never resurrects. Everything is
-  double-opt-in: a transcode rung (gated on the open D6 device measurement), a
-  subtitle burn, a missing fragment index, varying in-band parameter sets, or
-  the setting being off all keep today's live presentation byte for byte, with
-  one log line naming why. Off by default; no shipped client sends the flag
-  yet (web lands in M4).
+  initially shipped double-opt-in. The later VOD-only cutover replaces that
+  rollout seam with typed refusals and a default-on session-creation contract.
 
 ### Changed
+
+- **HLS is VOD-only and fails closed.** Omitted or explicit VOD presentation
+  now enters the immutable film-addressed engine; an explicit live request is
+  gone, and every VOD prerequisite failure is returned as a stable typed
+  refusal rather than starting a growing EVENT/sliding playlist. The setting
+  defaults on and is now a maintenance kill switch, fragment indexing defaults
+  to 15 minutes, cluster workers accept and return only VOD sessions, and web,
+  Apple, and Android all send and verify the VOD contract. Progressive direct
+  play/remux is unchanged. The former live-start implementation remains only
+  in its regression-test build so existing short-SHA history anchors survive.
 
 - **Playback info is a top-right ledger on every client.** The panel anchored
   to a different place in each mode and laid its sections out by measured

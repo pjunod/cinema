@@ -1,8 +1,9 @@
 //! The VOD serving runtime: sessions as handles on shared renditions.
 //!
-//! This is the object the transcode manager delegates to once a create
-//! opts into `presentation: "vod"` (plan §2.5, VOD-M3-HANDOFF §7). Everything
-//! M2 built dark is wired here, live:
+//! This is the object the transcode manager delegates every public HLS create
+//! to. `presentation: "vod"` is explicit capability confirmation, while an
+//! omitted presentation also means VOD; the removed live engine is never a
+//! fallback. Everything M2 built dark is wired here:
 //!
 //! - **A `Rendition`** — one per (file identity, copy recipe) key, shared by
 //!   every session on that recipe — owns a [`RenditionDir`], a [`Manifest`],
@@ -422,12 +423,11 @@ impl VodServe {
     /// The VOD arm of session create, called by the manager AFTER it has
     /// decided the request opts in (`presentation=="vod" && settings.enabled`).
     ///
-    /// Answers `None` — with exactly one `tracing::info!` line naming why —
-    /// when this file/request cannot be VOD-presented, and the manager falls
-    /// back to the legacy presentation. `Ok(Some(..))` registers a live
-    /// session handle attached to a (created or resurrected) rendition and
-    /// kicks its producer driver. `start_seconds` positions the first demand
-    /// (the entry containing it), not the plan.
+    /// Registers a live session handle attached to a (created or resurrected)
+    /// rendition and kicks its producer driver. A request that cannot be
+    /// VOD-presented returns a stable refusal; it never changes presentation.
+    /// `start_seconds` positions the first demand (the entry containing it),
+    /// not the plan.
     pub async fn try_create(
         &self,
         req: &SessionRequest,
@@ -435,32 +435,31 @@ impl VodServe {
         settings: &VodSettings,
         supersession_user: &str,
         session_id: String,
-    ) -> Result<Option<VodStart>, String> {
+    ) -> Result<VodStart, String> {
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
         } = req.kind
         else {
-            not_vod(
-                &session_id,
-                file.id,
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_transcode_unavailable",
                 "transcode serving is gated on the D6 device measurement",
-            );
-            return Ok(None);
+            ));
         };
         if req.subtitle_burn.is_some() {
-            not_vod(
-                &session_id,
-                file.id,
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_subtitle_burn_unavailable",
                 "a subtitle burn changes the video pipeline",
-            );
-            return Ok(None);
+            ));
         }
-        // Plan §2.6: a NULL/unprobed duration cannot be planned and keeps the
-        // legacy live presentation end to end.
+        // A NULL/unprobed duration cannot be described by a closed film-time
+        // playlist. Refuse it honestly; the removed live presentation is not
+        // a substitute.
         let Some(duration_ms) = file.duration_ms.filter(|ms| *ms > 0) else {
-            not_vod(&session_id, file.id, "no probed duration, so no plan");
-            return Ok(None);
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "the file has no probed duration, so no immutable plan can be built",
+            ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
         let identity = crate::fragindex::identity_for(file, have_dovi, preserve_dolby_vision);
@@ -471,23 +470,19 @@ impl VodServe {
             .await
             .map_err(|error| format!("reading the fragment index: {error}"))?;
         let Some(index) = index else {
-            not_vod(
-                &session_id,
-                file.id,
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_index_pending",
                 "no fragment index stored for the file's current identity",
-            );
-            return Ok(None);
+            ));
         };
         // The §2 ruling: a single immutable init cannot describe a film whose
         // clean fragments carry varying parameter sets, so the verdict is a
         // scan-time fallback here, never a producer_failed mid-playback.
         if !index.parameter_sets_constant {
-            not_vod(
-                &session_id,
-                file.id,
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
                 "its parameter sets vary mid-film (the §2 ruling)",
-            );
-            return Ok(None);
+            ));
         }
         let recipe = Recipe {
             file: file.clone(),
@@ -497,14 +492,16 @@ impl VodServe {
             have_dovi,
         };
         let key = rendition_key(&recipe, &identity);
-        let Some(rendition) = self
+        let rendition = self
             .shared
             .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
             .await?
-        else {
-            not_vod(&session_id, file.id, "the plan is empty");
-            return Ok(None);
-        };
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "the fragment index produced an empty VOD plan",
+                )
+            })?;
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
         rendition.attach_reader(&session_id, start_entry).await;
@@ -537,10 +534,10 @@ impl VodServe {
             "session_start",
             None,
         );
-        Ok(Some(VodStart {
+        Ok(VodStart {
             session_id,
             duration_ms,
-        }))
+        })
     }
 
     /// Immutable playlist bytes: the same bytes for the session's whole life.
@@ -1244,7 +1241,7 @@ impl Shared {
     }
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
-    /// means the plan came out empty and the caller falls back.
+    /// means the plan came out empty and the caller returns a typed refusal.
     async fn attach_rendition(
         self: &Arc<Shared>,
         key: &str,
@@ -2152,14 +2149,6 @@ impl vodgen::Sink for RenditionSink {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn not_vod(session_id: &str, file_id: i64, why: &str) {
-    tracing::info!(
-        session = %session_log_id(session_id),
-        file = file_id,
-        "not VOD-presentable, keeping the legacy presentation: {why}"
-    );
-}
-
 /// The CutPolicy the plans were derived from and every generation cuts with.
 fn shipped_policy(timescale: u32) -> CutPolicy {
     CutPolicy::new(
@@ -2672,7 +2661,6 @@ mod tests {
                 session_id.to_string(),
             )
             .await
-            .expect("try_create")
             .expect("the fixture is VOD-presentable")
     }
 
@@ -3073,7 +3061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn varying_parameter_sets_keep_the_legacy_presentation() {
+    async fn varying_parameter_sets_are_refused_instead_of_changing_presentation() {
         testfixtures::require_ffmpeg();
         let file = fixture_file();
         let (store, mut index) = store_with_index(&file).await;
@@ -3085,7 +3073,7 @@ mod tests {
         let base = tempfile::tempdir().expect("base");
         let serve = VodServe::new(base.path().to_path_buf(), store);
 
-        let answer = serve
+        let error = serve
             .try_create(
                 &request("play-a", 0.0),
                 &file,
@@ -3094,63 +3082,63 @@ mod tests {
                 "sess-a".into(),
             )
             .await
-            .expect("try_create");
+            .expect_err("varying parameter sets cannot make one immutable init");
         assert!(
-            answer.is_none(),
-            "varying parameter sets must fall back (the §2 ruling)"
+            error.contains("vod_source_unsupported"),
+            "the refusal must be typed: {error}"
         );
         assert!(!serve.owns("sess-a").await);
     }
 
     #[tokio::test]
-    async fn requests_the_vod_presentation_cannot_serve_answer_none() {
+    async fn requests_the_vod_presentation_cannot_serve_fail_typed() {
         let base = tempfile::tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
 
         // A transcode recipe: gated on the D6 device measurement.
         let mut transcode = request("play-a", 0.0);
         transcode.kind = SessionKind::Transcode { height: 720 };
-        assert!(serve
+        let transcode_error = serve
             .try_create(
                 &transcode,
                 &file,
                 &settings(),
                 "[\"user_id\",1]",
-                "sess-t".into()
+                "sess-t".into(),
             )
             .await
-            .expect("try_create")
-            .is_none());
+            .expect_err("transcode VOD is not implemented");
+        assert!(transcode_error.contains("vod_transcode_unavailable"));
 
         // A subtitle burn changes the video pipeline.
         let mut burn = request("play-a", 0.0);
         burn.subtitle_burn = Some(0);
-        assert!(serve
+        let burn_error = serve
             .try_create(
                 &burn,
                 &file,
                 &settings(),
                 "[\"user_id\",1]",
-                "sess-s".into()
+                "sess-s".into(),
             )
             .await
-            .expect("try_create")
-            .is_none());
+            .expect_err("burn VOD is not implemented");
+        assert!(burn_error.contains("vod_subtitle_burn_unavailable"));
 
         // No index stored for the current identity.
         let empty_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let bare = VodServe::new(base.path().join("bare"), empty_store);
-        assert!(bare
+        let index_error = bare
             .try_create(
                 &request("play-a", 0.0),
                 &file,
                 &settings(),
                 "[\"user_id\",1]",
-                "sess-n".into()
+                "sess-n".into(),
             )
             .await
-            .expect("try_create")
-            .is_none());
+            .expect_err("an unindexed file must not change presentation");
+        assert!(index_error.contains("vod_index_pending"));
     }
 
     #[tokio::test]
@@ -3442,7 +3430,6 @@ mod tests {
                 "sess-a".to_string(),
             )
             .await
-            .expect("try_create")
             .expect("the audiotail source is VOD-presentable");
         let rendition = rendition_of(&serve, "sess-a").await;
         let tail = rendition

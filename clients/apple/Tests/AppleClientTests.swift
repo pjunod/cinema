@@ -4426,6 +4426,7 @@ final class AppleClientTests: XCTestCase {
 
         XCTAssertEqual(json["playback_id"] as? String, "player-1")
         XCTAssertEqual(json["start"] as? Double, 12.5)
+        XCTAssertEqual(json["presentation"] as? String, "vod")
         XCTAssertNotNil(json["request_id"] as? String)
         XCTAssertNil(json["height"])
         XCTAssertEqual(PlurxAPI.playbackPreparationTimeout, 180)

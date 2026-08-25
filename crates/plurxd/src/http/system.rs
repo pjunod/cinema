@@ -1170,8 +1170,8 @@ pub struct SettingsDto {
     /// Opt-in physical-device experiment: serve new live sessions as typeless
     /// sliding playlists from their first response. Off by default.
     pub hls_typeless_sliding: bool,
-    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
-    /// default; a client must also send `presentation:"vod"` per session.
+    /// VOD availability kill switch. On by default; turning it off refuses
+    /// HLS session creation and never restores the removed live presentation.
     pub vod_presentation: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
@@ -1181,7 +1181,8 @@ pub struct SettingsDto {
     pub vod_block_budget_secs: String,
     /// Producer watchdog from first blocked demand to bytes or typed failure.
     pub vod_materialize_budget_secs: String,
-    /// Node-local fragment-index pass interval. 0 is off.
+    /// Node-local fragment-index pass interval. Defaults to 15 minutes; 0 is
+    /// an explicit pause, in which case an unindexed title is refused.
     pub vod_index_mins: i64,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
@@ -1388,11 +1389,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_scratch_max_bytes,
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
-        vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() == Some("1"),
+        vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
-        vod_index_mins: mins(setting(keys::VOD_INDEX_MINS)),
+        vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1439,8 +1440,9 @@ pub struct UpdateSettings {
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
-    /// VOD presentation opt-in, serving budgets, and index cadence; absent
-    /// leaves each as-is. `vod_working_set_bytes` refuses 0 — see the handler.
+    /// VOD session-creation kill switch, serving budgets, and index cadence;
+    /// absent leaves each as-is. Disabling refuses HLS rather than restoring
+    /// the removed live engine. `vod_working_set_bytes` refuses 0.
     pub vod_presentation: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
@@ -1632,8 +1634,9 @@ pub async fn update_settings(
         // default (M3 handoff §6).
         if parsed == 0 {
             return Err(ApiError::BadRequest(
-                "vod_working_set_bytes cannot be 0: to stop VOD production turn \
-                 vod_presentation off; the smallest accepted working set is 268435456 (256 MiB)"
+                "vod_working_set_bytes cannot be 0: the smallest accepted working set is \
+                 268435456 (256 MiB); disabling VOD refuses HLS playback and does not restore \
+                 the removed live presentation"
                     .into(),
             ));
         }

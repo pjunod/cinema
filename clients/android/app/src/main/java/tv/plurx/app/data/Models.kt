@@ -1,5 +1,7 @@
 package tv.plurx.app.data
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 
 /**
@@ -631,6 +633,7 @@ enum class ReopenReason {
  * `explicitNulls = false`, so nulls are genuinely absent on the wire.)
  */
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class CreateSessionReq(
     /** Stable for one player instance; supersession is keyed by it. */
     val playback_id: String,
@@ -689,6 +692,11 @@ data class CreateSessionReq(
      * never step that session down.
      */
     val quality_auto: Boolean? = null,
+    /** Immutable film-addressed HLS is the only supported presentation. */
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+    val presentation: String = "vod",
+    /** Media3's measured first-byte budget will replace the server default. */
+    val block_budget_secs: Double? = null,
 )
 
 @Serializable
