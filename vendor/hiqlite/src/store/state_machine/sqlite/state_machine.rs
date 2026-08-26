@@ -161,6 +161,10 @@ pub struct StateMachineSqlite {
     #[cfg(feature = "backup")]
     path_backups: String,
     path_lock_file: String,
+    path_db: String,
+    filename_db: String,
+    prepared_statement_cache_capacity: usize,
+    read_pool_size: usize,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
     snapshot_recovery_pending: Arc<AtomicBool>,
 
@@ -237,6 +241,10 @@ impl StateMachineSqlite {
             #[cfg(feature = "backup")]
             path_backups,
             path_lock_file,
+            path_db: path_db.clone(),
+            filename_db: filename_db.to_owned(),
+            prepared_statement_cache_capacity,
+            read_pool_size,
             snapshot_files: Arc::new(Mutex::new(SnapshotFileState::default())),
             snapshot_recovery_pending: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "s3")]
@@ -419,6 +427,42 @@ impl StateMachineSqlite {
         Ok(pool)
     }
 
+    async fn reconnect_read_pool(
+        read_pool: &SqlitePool,
+        path_db: &str,
+        filename_db: &str,
+        prepared_statement_cache_capacity: usize,
+        read_pool_size: usize,
+    ) -> Result<(), StorageError<NodeId>> {
+        let mut retired = Vec::with_capacity(read_pool_size);
+        for _ in 0..read_pool_size {
+            retired.push(read_pool.remove().await.map_err(|error| StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            })?);
+        }
+        drop(retired);
+
+        for _ in 0..read_pool_size {
+            let connection = Self::connect(
+                path_db.to_owned(),
+                filename_db.to_owned(),
+                true,
+                prepared_statement_cache_capacity,
+            )
+            .await
+            .map_err(|error| StorageError::IO {
+                source: StorageIOError::read_state_machine(&error),
+            })?;
+            if let Err((connection, error)) = read_pool.add(connection).await {
+                drop(connection);
+                return Err(StorageError::IO {
+                    source: StorageIOError::read_state_machine(&error),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn apply_pragmas(
         conn: &rusqlite::Connection,
         read_only: bool,
@@ -582,7 +626,15 @@ impl StateMachineSqlite {
             .await
             .expect("SQLite Writer rx to always be listening");
 
-        rx.await.expect("snapshot writer to return an apply result")
+        rx.await.expect("snapshot writer to return an apply result")?;
+        Self::reconnect_read_pool(
+            &self.read_pool,
+            &self.path_db,
+            &self.filename_db,
+            self.prepared_statement_cache_capacity,
+            self.read_pool_size,
+        )
+        .await
     }
 
     async fn initialize_snapshot_pointer(&mut self, db_exists: bool) -> StorageResult<()> {
@@ -1211,6 +1263,11 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         // intermediate state, and the pointer advances only after restore has
         // accepted the candidate.
         let write_tx = self.write_tx.clone();
+        let read_pool = self.read_pool.clone();
+        let path_db = self.path_db.clone();
+        let filename_db = self.filename_db.clone();
+        let prepared_statement_cache_capacity = self.prepared_statement_cache_capacity;
+        let read_pool_size = self.read_pool_size;
         let path_snapshots = self.path_snapshots.clone();
         let snapshot_recovery_pending = self.snapshot_recovery_pending.clone();
         #[cfg(feature = "backup")]
@@ -1241,6 +1298,14 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 .expect("SQLite Writer rx to always be listening");
             rx.await
                 .expect("snapshot writer to return an apply result")?;
+            StateMachineSqlite::reconnect_read_pool(
+                &read_pool,
+                &path_db,
+                &filename_db,
+                prepared_statement_cache_capacity,
+                read_pool_size,
+            )
+            .await?;
             publish_current_snapshot(&path_snapshots, Some(&snapshot_id)).await?;
             snapshot_files_guard.current_id = Some(snapshot_id);
             clear_pending_snapshot(&path_snapshots).await?;

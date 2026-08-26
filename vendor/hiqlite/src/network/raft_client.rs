@@ -175,6 +175,11 @@ enum RaftRequest {
     StreamResponse(RaftStreamResponse),
 
     ReaderExit,
+    /// Cancel every in-flight request and reconnect the stream. OpenRaft may
+    /// drop an RPC future at its hard TTL; without this signal the WebSocket
+    /// manager can retain that abandoned request forever on a half-open
+    /// connection and prevent snapshot retry from making progress.
+    Reset,
     Shutdown,
 }
 
@@ -262,6 +267,7 @@ impl NetworkStreaming {
                                         RaftRequest::ReaderExit => {
                                             continue;
                                         }
+                                        RaftRequest::Reset => continue,
                                         RaftRequest::Shutdown => {
                                             break 'outer;
                                         }
@@ -367,6 +373,10 @@ impl NetworkStreaming {
                         debug!(
                             "ReaderExit - Client Stream reader exited - initiating shutdown + reconnect"
                         );
+                        break;
+                    }
+                    RaftRequest::Reset => {
+                        debug!("RPC future was cancelled - reconnecting Raft stream");
                         break;
                     }
                     RaftRequest::Shutdown => {
@@ -485,6 +495,30 @@ pub struct NetworkConnectionStreaming {
     task: Option<JoinHandle<()>>,
 }
 
+struct ConnectionResetGuard {
+    sender: Option<flume::Sender<RaftRequest>>,
+}
+
+impl ConnectionResetGuard {
+    fn new(sender: flume::Sender<RaftRequest>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.sender = None;
+    }
+}
+
+impl Drop for ConnectionResetGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.try_send(RaftRequest::Reset);
+        }
+    }
+}
+
 impl Drop for NetworkConnectionStreaming {
     fn drop(&mut self) {
         let _ = self.sender.try_send(RaftRequest::Shutdown);
@@ -503,6 +537,7 @@ impl NetworkConnectionStreaming {
         &mut self,
         req: RaftRequest,
         rx: oneshot::Receiver<Result<RaftStreamResponsePayload, Error>>,
+        soft_ttl: Duration,
     ) -> Result<RaftStreamResponsePayload, RPCError<NodeId, Node, Err>>
     where
         Err: std::error::Error + 'static + Clone,
@@ -521,18 +556,33 @@ impl NetworkConnectionStreaming {
             self.node.addr_raft
         );
 
-        self.sender.send_async(req).await.map_err(|err| {
-            error!(
-                "NetworkConnectionStreaming::send to node {}: {}",
-                self.node.id,
-                err.to_string()
-            );
-            RPCError::Unreachable(Unreachable::new(&err))
-        })?;
+        // OpenRaft enforces `RPCOption::hard_ttl()` by dropping this future.
+        // Keep a cancellation guard alive across both enqueue and response so
+        // that drop also tears down a half-open WebSocket and lets the next
+        // snapshot/append attempt establish a clean stream.
+        let mut reset = ConnectionResetGuard::new(self.sender.clone());
+        let result = tokio::time::timeout(soft_ttl, async {
+            self.sender.send_async(req).await.map_err(|err| {
+                error!(
+                    "NetworkConnectionStreaming::send to node {}: {}",
+                    self.node.id,
+                    err.to_string()
+                );
+                RPCError::Unreachable(Unreachable::new(&err))
+            })?;
 
-        rx.await
-            .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
-            .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
+            rx.await
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))?
+                .map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
+        })
+        .await;
+        match result {
+            Ok(result) => {
+                reset.disarm();
+                result
+            }
+            Err(error) => Err(RPCError::Unreachable(Unreachable::new(&error))),
+        }
     }
 }
 
@@ -542,10 +592,13 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
     async fn append_entries(
         &mut self,
         req: AppendEntriesRequest<TypeConfigSqlite>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let (ack, rx) = oneshot::channel();
-        match self.send(RaftRequest::AppendDB((ack, req)), rx).await? {
+        match self
+            .send(RaftRequest::AppendDB((ack, req)), rx, option.soft_ttl())
+            .await?
+        {
             RaftStreamResponsePayload::AppendDB(resp) => {
                 resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
             }
@@ -557,13 +610,16 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
     async fn install_snapshot(
         &mut self,
         req: InstallSnapshotRequest<TypeConfigSqlite>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
         let (ack, rx) = oneshot::channel();
-        match self.send(RaftRequest::SnapshotDB((ack, req)), rx).await? {
+        match self
+            .send(RaftRequest::SnapshotDB((ack, req)), rx, option.soft_ttl())
+            .await?
+        {
             RaftStreamResponsePayload::SnapshotDB(resp) => {
                 resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
             }
@@ -575,10 +631,13 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
     async fn vote(
         &mut self,
         req: VoteRequest<NodeId>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let (ack, rx) = oneshot::channel();
-        match self.send(RaftRequest::VoteDB((ack, req)), rx).await? {
+        match self
+            .send(RaftRequest::VoteDB((ack, req)), rx, option.soft_ttl())
+            .await?
+        {
             RaftStreamResponsePayload::VoteDB(resp) => {
                 resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
             }
@@ -593,10 +652,17 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
     async fn append_entries(
         &mut self,
         req: AppendEntriesRequest<TypeConfigKV>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let (ack, rx) = oneshot::channel();
-        match self.send(RaftRequest::AppendCache((ack, req)), rx).await? {
+        match self
+            .send(
+                RaftRequest::AppendCache((ack, req)),
+                rx,
+                option.soft_ttl(),
+            )
+            .await?
+        {
             RaftStreamResponsePayload::AppendCache(resp) => {
                 resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
             }
@@ -608,14 +674,18 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
     async fn install_snapshot(
         &mut self,
         req: InstallSnapshotRequest<TypeConfigKV>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
         let (ack, rx) = oneshot::channel();
         match self
-            .send(RaftRequest::SnapshotCache((ack, req)), rx)
+            .send(
+                RaftRequest::SnapshotCache((ack, req)),
+                rx,
+                option.soft_ttl(),
+            )
             .await?
         {
             RaftStreamResponsePayload::SnapshotCache(resp) => {
@@ -629,10 +699,13 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
     async fn vote(
         &mut self,
         req: VoteRequest<NodeId>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let (ack, rx) = oneshot::channel();
-        match self.send(RaftRequest::VoteCache((ack, req)), rx).await? {
+        match self
+            .send(RaftRequest::VoteCache((ack, req)), rx, option.soft_ttl())
+            .await?
+        {
             RaftStreamResponsePayload::VoteCache(resp) => {
                 resp.map_err(|err| RPCError::Unreachable(Unreachable::new(&err)))
             }
@@ -679,5 +752,15 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), stopped.notified())
             .await
             .expect("the detached handler must consume shutdown and exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn dropping_rpc_wait_requests_stream_reset() {
+        let (sender, receiver) = flume::bounded(1);
+        let guard = ConnectionResetGuard::new(sender);
+
+        drop(guard);
+
+        assert!(matches!(receiver.recv_async().await, Ok(RaftRequest::Reset)));
     }
 }
