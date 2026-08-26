@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fb2128e5", "df99ede6", "ca145db4"]
+points = ["web.experience", "validation.framework"]
+checks = ["web-layout", "operations-contract"]
+reason = "The retained operations contract loads the UI baseline's pure retry decision and proves a non-player route-root attachment gets exactly one fresh-context retry, an ordinary semantic failure gets none, and the pre-existing player retry stays bounded to one. It also requires captured console or page errors to win over a simultaneous root timeout. The full web-layout sweep continues to exercise the real disposable server and every registered layout without being claimed as a deterministic trigger for the rare retry branch. Reverting the correction restores the observed CI failure mode where one dead disposable renderer loses the entire 60-capture gate even though the following contexts and all semantic assertions are healthy."

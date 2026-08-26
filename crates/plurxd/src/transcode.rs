@@ -274,6 +274,11 @@ pub(crate) const HLS_BURST_SECS_DEFAULT: f64 = 90.0;
 /// a low-bitrate stream of the reserve it could afford.
 pub(crate) const HLS_AHEAD_MAX_SECS_DEFAULT: i64 = 180;
 pub(crate) const HLS_AHEAD_MAX_BYTES_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
+/// Extra published media kept beyond the runway an explicit client already
+/// reports. Scale it by playback rate so the reserve represents thirty
+/// seconds of wall-clock protection at every supported rate; the configured
+/// ahead ceiling remains the absolute media-time bound.
+const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
 /// Ceiling on scratch across *all* live sessions. A per-session cap bounds one
 /// runaway; it does nothing about four healthy 4K sessions filling the disk
 /// between them.
@@ -858,6 +863,7 @@ struct AheadLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AheadHoldReason {
+    Demand,
     Time,
     Bytes,
     Global,
@@ -867,6 +873,186 @@ pub enum AheadHoldReason {
 struct AheadHold {
     reason: AheadHoldReason,
     release_value: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowEvaluation {
+    hold: Option<AheadHold>,
+    policy: &'static str,
+    production_ahead_seconds: Option<i64>,
+    production_target_seconds: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct FlowInputs<'a> {
+    physical_ahead: Option<Ahead>,
+    published_end_ms: Option<i64>,
+    media_origin_ms: i64,
+    lease_mode: crate::playback_control::RollingLeaseMode,
+    demand: Option<&'a crate::playback_control::PlaybackDemandSnapshot>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    limits: AheadLimits,
+    currently_suspended: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuspendedAt {
+    since: Instant,
+    hold: AheadHold,
+}
+
+fn flow_event_extra(
+    evaluation: FlowEvaluation,
+    lease: &crate::playback_control::RollingLeaseSnapshot,
+    ahead: Option<Ahead>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    previous_hold_reason: Option<AheadHoldReason>,
+) -> String {
+    let lease_mode = match lease.mode {
+        crate::playback_control::RollingLeaseMode::Legacy => "legacy",
+        crate::playback_control::RollingLeaseMode::Explicit => "explicit",
+    };
+    let lease_state = if lease.expiration_claimed {
+        "expired"
+    } else if lease.retired {
+        "retired"
+    } else {
+        "active"
+    };
+    let demand = lease.demand.as_ref();
+    serde_json::json!({
+        "lease_mode": lease_mode,
+        "lease_state": lease_state,
+        "lease_timeout_ms": lease.timeout_ms(),
+        "control_demand": demand.map(|demand| demand.demand),
+        "reported_position_ms": demand.map(|demand| demand.position_ms),
+        "client_runway_ms": demand.map(|demand| demand.runway_ms()),
+        "production_policy": evaluation.policy,
+        "production_ahead_seconds": evaluation.production_ahead_seconds,
+        "production_target_seconds": evaluation.production_target_seconds,
+        "physical_ahead_seconds": ahead.map(|ahead| ahead.seconds),
+        "physical_ahead_bytes": ahead.map(|ahead| ahead.bytes),
+        "global_live_bytes": global_live_bytes,
+        "global_ahead_bytes": global_ahead_bytes,
+        "previous_hold_reason": previous_hold_reason,
+    })
+    .to_string()
+}
+
+fn explicit_production_target_seconds(
+    demand: &crate::playback_control::PlaybackDemandSnapshot,
+    configured_max_secs: i64,
+) -> i64 {
+    if configured_max_secs <= 0 {
+        return 0;
+    }
+    let runway_seconds = demand.runway_ms().saturating_add(999) / 1_000;
+    let reserve_seconds =
+        (demand.playback_rate * EXPLICIT_PRODUCTION_RESERVE_WALL_SECS).ceil() as i64;
+    runway_seconds
+        .saturating_add(reserve_seconds)
+        .clamp(1, configured_max_secs)
+}
+
+fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
+    let FlowInputs {
+        physical_ahead,
+        published_end_ms,
+        media_origin_ms,
+        lease_mode,
+        demand,
+        global_live_bytes,
+        global_ahead_bytes,
+        limits,
+        currently_suspended,
+    } = inputs;
+    if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
+        return FlowEvaluation {
+            hold: physical_ahead.and_then(|ahead| {
+                ahead_hold(
+                    ahead,
+                    global_live_bytes,
+                    global_ahead_bytes,
+                    limits,
+                    currently_suspended,
+                )
+            }),
+            policy: "legacy_fetch_frontier",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    }
+
+    let Some(demand) = demand else {
+        // Explicit mode is entered by the same actor command that stores the
+        // demand snapshot. If that invariant is ever broken, stop production
+        // instead of silently returning to inference.
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_missing_demand",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    };
+
+    if matches!(
+        demand.demand,
+        crate::playback_control::PlaybackDemand::Hold
+            | crate::playback_control::PlaybackDemand::End
+    ) {
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_demand",
+            production_ahead_seconds: published_end_ms.map(|published_end_ms| {
+                media_origin_ms
+                    .saturating_add(published_end_ms)
+                    .saturating_sub(demand.buffer_anchor_ms())
+                    / 1_000
+            }),
+            production_target_seconds: Some(0),
+        };
+    }
+
+    let production_target_seconds = explicit_production_target_seconds(demand, limits.max_secs);
+    let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
+        media_origin_ms
+            .saturating_add(published_end_ms)
+            .saturating_sub(demand.buffer_anchor_ms())
+            / 1_000
+    });
+    let hold = physical_ahead.and_then(|physical_ahead| {
+        let ahead = Ahead {
+            seconds: production_ahead_seconds.unwrap_or(physical_ahead.seconds),
+            bytes: physical_ahead.bytes,
+        };
+        ahead_hold(
+            ahead,
+            global_live_bytes,
+            global_ahead_bytes,
+            AheadLimits {
+                max_secs: production_target_seconds,
+                ..limits
+            },
+            currently_suspended,
+        )
+    });
+    FlowEvaluation {
+        hold,
+        policy: "explicit_demand",
+        production_ahead_seconds,
+        // Zero disables only the time limiter. Reporting `target: 0` for an
+        // active producer says the opposite, so expose no finite target while
+        // still passing zero through to `ahead_hold`'s disabled-limit rule.
+        production_target_seconds: (limits.max_secs > 0).then_some(production_target_seconds),
+    }
 }
 
 /// Whether a session should be held, given how far ahead it is, how much
@@ -1565,6 +1751,14 @@ struct Session {
     /// the manager registry lock was released before telemetry can wait.
     #[cfg(test)]
     activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after the control actor has accepted and ticketed a
+    /// command while the HTTP-owned transition guard is still held.
+    #[cfg(test)]
+    control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after producer policy is applied but before the flow
+    /// ticket is completed back to a waiting control response.
+    #[cfg(test)]
+    flow_completion_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -1599,6 +1793,10 @@ struct Session {
     /// binds the full demand snapshot without creating a second liveness
     /// clock.
     control: crate::playback_control::RollingControlHandle,
+    /// One detached, cancellation-safe consumer applies every actor-owned
+    /// producer-policy wake. HTTP response futures may disappear after the
+    /// actor accepts a command; this worker must not disappear with them.
+    flow_worker_started: AtomicBool,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -1736,7 +1934,7 @@ struct Session {
     /// suspended encoder makes no progress *on purpose*.
     suspended: AtomicBool,
     /// When the current held interval began, for the resume event's duration.
-    suspended_at: Mutex<Option<(Instant, AheadHoldReason)>>,
+    suspended_at: Mutex<Option<SuspendedAt>>,
     /// Successful running→held transitions during this session. A counter,
     /// rather than only the current boolean, exposes flapping after it has
     /// already resumed.
@@ -1817,6 +2015,8 @@ impl Session {
                 crate::playback_control::ControlAction,
                 crate::playback_control::ClientPlatform,
                 i64,
+                u32,
+                u64,
             ),
             crate::playback_control::ControlStateError,
         >,
@@ -1834,6 +2034,8 @@ impl Session {
             outcome.action,
             outcome.platform,
             outcome.lease.expires_at_unix_ms(),
+            outcome.lease.timeout_ms(),
+            outcome.flow_ticket,
         )))
     }
 
@@ -2134,6 +2336,12 @@ async fn session_info(
         Some(crate::playback_control::RollingLeaseMode::Legacy) => "legacy",
         None => "unavailable",
     };
+    let lease_state = match lease.as_ref() {
+        Some(lease) if lease.expiration_claimed => "expired",
+        Some(lease) if lease.retired => "retired",
+        Some(_) => "active",
+        None => "unavailable",
+    };
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
@@ -2150,6 +2358,24 @@ async fn session_info(
         crate::playback_control::RenderState::Failed => "failed",
     });
     let suspended = s.suspended.load(Relaxed);
+    let flow = lease.as_ref().map(|lease| {
+        evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
+            published_end_ms,
+            media_origin_ms: (s.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
+            global_live_bytes,
+            global_ahead_bytes,
+            limits,
+            currently_suspended: suspended,
+        })
+    });
+    let active_hold = if suspended {
+        (*s.suspended_at.lock().await).map(|held| held.hold)
+    } else {
+        None
+    };
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
     } else if s.cached {
@@ -2160,13 +2386,6 @@ async fn session_info(
         "running"
     } else {
         "complete"
-    };
-    let hold = if suspended {
-        ahead.and_then(|ahead| {
-            ahead_hold(ahead, global_live_bytes, global_ahead_bytes, limits, true)
-        })
-    } else {
-        None
     };
     SessionInfo {
         id: id.to_owned(),
@@ -2181,14 +2400,15 @@ async fn session_info(
         idle_seconds,
         last_request: last_request_kind,
         lease_mode,
+        lease_state,
+        lease_timeout_ms: lease.as_ref().map(|lease| lease.timeout_ms()),
         control_demand,
         reported_position_ms: demand.map(|demand| demand.position_ms),
-        client_runway_ms: demand.map(|demand| {
-            demand
-                .buffered_through_ms
-                .saturating_sub(demand.position_ms)
-        }),
+        client_runway_ms: demand.map(|demand| demand.runway_ms()),
         render_state,
+        production_policy: flow.map_or("unavailable", |flow| flow.policy),
+        production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
+        production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
         producer_state,
         speed: s.progress.speed(),
         recent_speed: s.progress.recent_speed(),
@@ -2206,12 +2426,17 @@ async fn session_info(
             "event"
         },
         ahead_seconds: ahead.map(|a| a.seconds),
-        hold_reason: hold.map(|hold| hold.reason),
-        resume_below_seconds: hold
+        hold_reason: active_hold.map(|hold| hold.reason),
+        resume_below_seconds: active_hold
             .filter(|hold| hold.reason == AheadHoldReason::Time)
             .map(|hold| hold.release_value),
-        resume_below_bytes: hold
-            .filter(|hold| hold.reason != AheadHoldReason::Time)
+        resume_below_bytes: active_hold
+            .filter(|hold| {
+                matches!(
+                    hold.reason,
+                    AheadHoldReason::Bytes | AheadHoldReason::Global
+                )
+            })
             .map(|hold| hold.release_value),
         ahead_bytes: ahead.map(|a| a.bytes),
         delivered_bytes: s.delivery.total_bytes(),
@@ -2237,10 +2462,15 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         idle_seconds: info.idle_seconds,
         last_request: "vod",
         lease_mode: "vod",
+        lease_state: "active",
+        lease_timeout_ms: Some(crate::playback_control::VOD_LEASE_TIMEOUT_MS),
         control_demand: None,
         reported_position_ms: None,
         client_runway_ms: None,
         render_state: None,
+        production_policy: "immutable_vod",
+        production_ahead_seconds: None,
+        production_target_seconds: None,
         producer_state: "vod",
         speed: None,
         recent_speed: None,
@@ -2271,6 +2501,27 @@ pub struct SegmentFile {
     pub file: tokio::fs::File,
     pub len: u64,
     pub(crate) delivery: SegmentDelivery,
+}
+
+impl SegmentFile {
+    pub(crate) fn response_owner(&self) -> MediaResponseOwner {
+        MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(
+            &self.delivery.session,
+        )))
+    }
+}
+
+/// Opaque engine/incarnation identity carried from resource resolution to the
+/// HTTP response commit. Session ids are durable routing keys; they are not
+/// sufficient proof that the bytes still belong to the currently live
+/// rolling actor or resurrected VOD attachment.
+#[derive(Clone)]
+pub(crate) struct MediaResponseOwner(MediaResponseOwnerKind);
+
+#[derive(Clone)]
+enum MediaResponseOwnerKind {
+    Rolling(Arc<Session>),
+    Vod(crate::vodserve::ResponseOwner),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2460,13 +2711,16 @@ impl SegmentDelivery {
         );
     }
 
-    pub(crate) fn finish(&mut self) {
+    /// Finish delivery and report whether every advertised byte was read.
+    /// This completion bit is the only authorization to move the consumed
+    /// frontier for a streamed response.
+    pub(crate) fn finish(&mut self) -> bool {
         if self.terminal {
-            return;
+            return self.delivered_bytes >= self.expected_bytes;
         }
         self.terminal = true;
         if self.delivered_bytes >= self.expected_bytes {
-            return;
+            return true;
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
@@ -2486,6 +2740,7 @@ impl SegmentDelivery {
                 "expected_bytes": self.expected_bytes
             }),
         );
+        false
     }
 
     pub(crate) fn fail(&mut self, error: &std::io::Error) {
@@ -2954,12 +3209,25 @@ pub struct SessionInfo {
     /// begins only after a newly accepted control sequence carries a complete
     /// demand snapshot; media-only viewers remain visible during rollout.
     pub lease_mode: &'static str,
+    /// Actor lifecycle verdict. Expiry may be visible briefly while the repair
+    /// pass performs process and scratch teardown; serving is already fenced.
+    pub lease_state: &'static str,
+    /// The timeout currently enforced by the actor. Legacy viewers retain the
+    /// rollout-compatible lifetime; explicit viewers receive the shorter
+    /// deadline renewed by control or authenticated media consumption.
+    pub lease_timeout_ms: Option<u32>,
     /// Last accepted viewer intent and render facts. These are observations,
     /// not inferred recovery decisions.
     pub control_demand: Option<&'static str>,
     pub reported_position_ms: Option<i64>,
     pub client_runway_ms: Option<i64>,
     pub render_state: Option<&'static str>,
+    /// The pacing authority and its measured high-water coordinates. The
+    /// legacy policy is download-frontier inference; explicit policy is
+    /// actor-owned demand plus reported playhead/runway.
+    pub production_policy: &'static str,
+    pub production_ahead_seconds: Option<i64>,
+    pub production_target_seconds: Option<i64>,
     /// Honest current producer verdict. Additive to the legacy status shape;
     /// control uses it instead of inferring health from suspension alone.
     pub producer_state: &'static str,
@@ -6794,6 +7062,10 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: cache_reader,
@@ -6801,6 +7073,7 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -8608,8 +8881,15 @@ impl TranscodeManager {
     pub async fn vod_playlist(
         &self,
         session_id: &str,
-    ) -> Option<Result<Vec<u8>, crate::vodserve::VodError>> {
-        self.vod.playlist(session_id).await
+    ) -> Option<Result<(Vec<u8>, MediaResponseOwner), crate::vodserve::VodError>> {
+        self.vod.playlist(session_id).await.map(|answer| {
+            answer.map(|(bytes, owner)| {
+                (
+                    bytes,
+                    MediaResponseOwner(MediaResponseOwnerKind::Vod(owner)),
+                )
+            })
+        })
     }
 
     /// The VOD dispatch half of [`Self::segment`]: `None` when the id is not
@@ -8618,8 +8898,22 @@ impl TranscodeManager {
         &self,
         session_id: &str,
         name: &str,
-    ) -> Option<Result<Option<crate::vodserve::SegmentReady>, crate::vodserve::VodError>> {
-        self.vod.segment(session_id, name).await
+    ) -> Option<
+        Result<
+            Option<(crate::vodserve::SegmentReady, MediaResponseOwner)>,
+            crate::vodserve::VodError,
+        >,
+    > {
+        self.vod.segment(session_id, name).await.map(|answer| {
+            answer.map(|ready| {
+                ready.map(|(ready, owner)| {
+                    (
+                        ready,
+                        MediaResponseOwner(MediaResponseOwnerKind::Vod(owner)),
+                    )
+                })
+            })
+        })
     }
 
     /// The file a live VOD session serves, for response-time source facts.
@@ -10037,6 +10331,10 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -10044,6 +10342,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10628,6 +10927,10 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -10635,6 +10938,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -11137,7 +11441,7 @@ impl TranscodeManager {
     /// accepted sequence renews the selected engine's established activity
     /// clock with the explicit `control` reason; replay and rejection do not.
     pub(crate) async fn hls_session_control(
-        &self,
+        self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
     ) -> Option<
         Result<
@@ -11154,7 +11458,7 @@ impl TranscodeManager {
             .await
             .get(control.session_id)
             .cloned()?;
-        let _transition = session.child_transition.lock().await;
+        let transition = session.child_transition.lock().await;
         if session.control.is_retired()
             || !self
                 .sessions
@@ -11177,13 +11481,61 @@ impl TranscodeManager {
             return Some(Err(error));
         }
         let session_id = control.session_id.to_owned();
-        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
-            match session.accept_control(control).await? {
-                Ok(outcome) => outcome,
-                Err(error) => return Some(Err(error)),
-            };
+        // Start the detached consumer before sending the actor command. If
+        // the request future is cancelled after mailbox admission, the actor
+        // can still publish a ticket that this session-owned worker applies.
+        self.ensure_flow_worker(&session_id, Arc::clone(&session));
+        let (
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms,
+            flow_ticket,
+        ) = match session.accept_control(control).await? {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        #[cfg(test)]
+        let control_pause = session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        if let Some(pause) = control_pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+        drop(transition);
+        // The actor also tickets replayed sequences. A caller whose first
+        // response was lost can therefore wait for physical convergence
+        // without relying on the periodic repair pass.
+        session.control.wait_for_flow(flow_ticket).await;
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+        // Convergence is not enough if retirement or replacement won while
+        // this response waited. Re-enter the exact physical-transition gate,
+        // revalidate this Arc against the registry, and keep the gate through
+        // the status join so an active success cannot describe a stale child.
+        let _final_transition = session.child_transition.lock().await;
+        if session.control.is_retired() {
+            return Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded,
+            ));
+        }
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return Some(Err(
+                crate::playback_control::ControlStateError::OwnerTransition,
+            ));
+        }
         let status = session_info(
             &session_id,
             &session,
@@ -11192,12 +11544,28 @@ impl TranscodeManager {
             global_ahead_bytes,
         )
         .await;
+        if session.control.is_retired() {
+            return Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded,
+            ));
+        }
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return Some(Err(
+                crate::playback_control::ControlStateError::OwnerTransition,
+            ));
+        }
         Some(Ok(crate::playback_control::LocalControlResult {
             disposition,
             accepted_sequence,
             action,
             lease_expires_at_unix_ms,
-            lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            lease_timeout_ms,
             status: HlsSessionInfo::Live(Box::new(status)),
             platform,
         }))
@@ -11218,16 +11586,13 @@ impl TranscodeManager {
         let hold_reason = if let Some(reason) = fields.hold_reason {
             Some(reason)
         } else if session.suspended.load(Relaxed) {
-            let limits = self.ahead_limits().await;
-            let (global_live, global_ahead) = self.global_flow_bytes().await;
-            session.ahead().await.and_then(|ahead| {
-                ahead_hold(ahead, global_live, global_ahead, limits, true).map(|hold| hold.reason)
-            })
+            (*session.suspended_at.lock().await).map(|held| held.hold.reason)
         } else {
             None
         }
         .map(|reason| {
             match reason {
+                AheadHoldReason::Demand => "demand",
                 AheadHoldReason::Time => "time",
                 AheadHoldReason::Bytes => "bytes",
                 AheadHoldReason::Global => "global",
@@ -11579,16 +11944,97 @@ impl TranscodeManager {
         }
     }
 
-    async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
+    /// Resolve a rolling capability without extending its lease.
+    ///
+    /// Object readers call this before publication/integrity/wait checks and
+    /// renew only after they have a concrete response to serve. Keeping those
+    /// operations separate prevents repeated misses from becoming synthetic
+    /// playback activity.
+    async fn live_session(&self, session_id: &str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if !session.touch_if_active(kind).await {
-            return None;
+        (!session.control.is_retired()).then_some(session)
+    }
+
+    /// Commit a completed response against its resolved incarnation.
+    ///
+    /// The rolling actor or immutable registry must still own the capability
+    /// when response completion linearizes. Partial objects may renew demand,
+    /// but only a complete object moves the consumed frontier.
+    pub(crate) async fn commit_resolved_media(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        kind: &'static str,
+        object_name: Option<&str>,
+        complete_object: bool,
+    ) -> bool {
+        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            if !session.touch_if_active(kind).await {
+                return false;
+            }
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            if let Some(index) = complete_object
+                .then(|| object_name.and_then(segment_index))
+                .flatten()
+            {
+                let previous = session.high_segment.fetch_max(index, Relaxed);
+                if index > previous {
+                    if let Some(end) = session.segments.lock().await.end_ms_of(index) {
+                        session.fetched_end_ms.fetch_max(end, Relaxed);
+                    }
+                }
+            }
+            return true;
         }
-        Some(session)
+        let vod_index = complete_object
+            .then(|| object_name.and_then(segment_index))
+            .flatten()
+            .and_then(|index| u32::try_from(index).ok());
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        self.vod
+            .commit_resolved_media(session_id, owner, vod_index)
+            .await
+    }
+
+    /// Verify response ownership without renewing the lease or moving the
+    /// consumed frontier. This is the publication fence for streamed bodies;
+    /// their mutating commit happens only after the advertised bytes reach
+    /// EOF, so an abandoned response cannot masquerade as client progress.
+    pub(crate) async fn response_owner_is_live(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+    ) -> bool {
+        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            return current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+                && !session.control.is_retired();
+        }
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        self.vod.response_owner_is_live(session_id, owner).await
     }
 
     /// Resolve the source and resume base attached to a live HLS capability.
-    pub async fn hls_context(&self, session_id: &str) -> Option<HlsContext> {
+    pub async fn hls_context(&self, session_id: &str) -> Option<(HlsContext, MediaResponseOwner)> {
         if let Some(facts) = self.vod.hls_facts(session_id).await {
             let probe_json = self.store.get_file_probe_json(facts.file.id).await.ok()?;
             let (codecs, supplemental_codecs) = copied_hls_codecs(
@@ -11600,24 +12046,30 @@ impl TranscodeManager {
                 },
                 probe_json.as_deref(),
             );
-            return Some(HlsContext {
-                file_id: facts.file.id,
-                start_seconds: 0.0,
-                media_origin_seconds: 0.0,
-                codecs,
-                supplemental_codecs,
-                frame_rate: None,
-            });
+            return Some((
+                HlsContext {
+                    file_id: facts.file.id,
+                    start_seconds: 0.0,
+                    media_origin_seconds: 0.0,
+                    codecs,
+                    supplemental_codecs,
+                    frame_rate: None,
+                },
+                MediaResponseOwner(MediaResponseOwnerKind::Vod(facts.response_owner)),
+            ));
         }
-        let session = self.touch(session_id, "hls-context").await?;
-        Some(HlsContext {
-            file_id: session.file_id,
-            start_seconds: session.start_seconds,
-            media_origin_seconds: session.media_origin_seconds,
-            codecs: session.hls_codecs.clone(),
-            supplemental_codecs: session.hls_supplemental_codecs.clone(),
-            frame_rate: None,
-        })
+        let session = self.live_session(session_id).await?;
+        Some((
+            HlsContext {
+                file_id: session.file_id,
+                start_seconds: session.start_seconds,
+                media_origin_seconds: session.media_origin_seconds,
+                codecs: session.hls_codecs.clone(),
+                supplemental_codecs: session.hls_supplemental_codecs.clone(),
+                frame_rate: None,
+            },
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling(session)),
+        ))
     }
 
     /// Share a producer's terminal startup verdict with every playlist reader.
@@ -11691,7 +12143,7 @@ impl TranscodeManager {
     /// [`PlaylistError`] for why an anonymous `None` was not survivable
     /// downstream.
     pub async fn playlist(&self, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
-        let Some(session) = self.touch(session_id, "playlist").await else {
+        let Some(session) = self.live_session(session_id).await else {
             return Err(PlaylistError::SessionGone);
         };
         // Hold the request until the playlist exists. On the transcode path
@@ -11789,6 +12241,9 @@ impl TranscodeManager {
                         return Err(PlaylistError::SessionGone);
                     }
                     if session.cached {
+                        if !session.touch_if_active("playlist").await {
+                            return Err(PlaylistError::SessionGone);
+                        }
                         return Ok(bytes);
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
@@ -11834,12 +12289,16 @@ impl TranscodeManager {
                     if session.control.is_retired() {
                         return Err(PlaylistError::SessionGone);
                     }
-                    return Ok(served_live_playlist(
+                    let served = served_live_playlist(
                         bytes,
                         first_retained,
                         session.typeless_sliding,
                         session.takeover.as_ref(),
-                    ));
+                    );
+                    if !session.touch_if_active("playlist").await {
+                        return Err(PlaylistError::SessionGone);
+                    }
+                    return Ok(served);
                 }
             }
             if session.cached {
@@ -11910,7 +12369,7 @@ impl TranscodeManager {
         if let Some(window) = self.vod.segment_window(session_id, segment_index).await {
             return Some(window);
         }
-        let session = self.touch(session_id, "segment-window").await?;
+        let session = self.live_session(session_id).await?;
         self.flow_control(&session, session_id).await;
         let (start_ms, end_ms) = session.segments.lock().await.window_ms_of(segment_index)?;
         Some((start_ms as f64 / 1000.0, end_ms as f64 / 1000.0))
@@ -11936,7 +12395,7 @@ impl TranscodeManager {
         if !is_safe_segment(name) {
             return Ok(None);
         }
-        let Some(session) = self.touch(session_id, "segment").await else {
+        let Some(session) = self.live_session(session_id).await else {
             return Ok(None);
         };
         let path = session.dir.join(name);
@@ -12096,20 +12555,6 @@ impl TranscodeManager {
                         },
                     )
                     .await;
-                }
-                // The client's download frontier just advanced. Resolve it
-                // against the index's real EXTINF bounds — the fetched
-                // segment's own end time, not an index times a nominal
-                // duration — and re-run flow control, since a frontier that
-                // moved may have earned the encoder its slot back.
-                if let Some(i) = idx {
-                    let previous = session.high_segment.fetch_max(i, Relaxed);
-                    if i > previous {
-                        if let Some(end) = session.segments.lock().await.end_ms_of(i) {
-                            session.fetched_end_ms.fetch_max(end, Relaxed);
-                        }
-                        self.flow_control(&session, session_id).await;
-                    }
                 }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
                 let delivery = SegmentDelivery::new(
@@ -12287,19 +12732,84 @@ impl TranscodeManager {
         global_live_bytes: i64,
         global_ahead_bytes: i64,
     ) {
-        let Some(ahead) = session.ahead().await else {
-            return; // nothing published yet — nothing to hold
+        // Control acceptance, expiry, retirement, child replacement, and
+        // producer signals all cross this gate. The actor remains the state
+        // authority; the gate only ensures that a flow decision made from one
+        // actor snapshot cannot signal a child after a newer lifecycle
+        // transition has already won.
+        let transition = session.child_transition.lock().await;
+        if session.control.is_retired() {
+            return;
+        }
+        let Some(lease) = session.control.snapshot().await else {
+            session.control.fence_unavailable();
+            return;
+        };
+        if lease.retired {
+            return;
+        }
+        let (ahead, published_end_ms) = {
+            let index = session.segments.lock().await;
+            (
+                ahead_of(&index, session.fetched_end_ms.load(Relaxed).max(0)),
+                index.produced_playable_end_ms(),
+            )
         };
         let suspended = session.suspended.load(Relaxed);
-        let hold = ahead_hold(
-            ahead,
+        let evaluation = evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
+            published_end_ms,
+            media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
             global_live_bytes,
             global_ahead_bytes,
             limits,
-            suspended,
-        );
+            currently_suspended: suspended,
+        });
+        let hold = evaluation.hold;
         let want_suspend = hold.is_some();
         if want_suspend == suspended {
+            if let Some(hold) = hold {
+                let mut suspended_at = session.suspended_at.lock().await;
+                if let Some(previous) = suspended_at.as_mut() {
+                    if previous.hold != hold {
+                        let previous_reason = previous.hold.reason;
+                        previous.hold = hold;
+                        drop(suspended_at);
+                        drop(transition);
+                        tracing::info!(
+                            session = %session_log_id(session_id),
+                            previous_hold_reason = ?previous_reason,
+                            hold_reason = ?hold.reason,
+                            release_value = hold.release_value,
+                            production_policy = evaluation.policy,
+                            production_ahead_seconds = evaluation.production_ahead_seconds,
+                            production_target_seconds = evaluation.production_target_seconds,
+                            "transcode hold authority changed without resuming the producer"
+                        );
+                        self.emit_session_event(
+                            session_id,
+                            session,
+                            "hold_change",
+                            SessionEventFields {
+                                reason: Some("policy_change"),
+                                hold_reason: Some(hold.reason),
+                                extra: Some(flow_event_extra(
+                                    evaluation,
+                                    &lease,
+                                    ahead,
+                                    global_live_bytes,
+                                    global_ahead_bytes,
+                                    Some(previous_reason),
+                                )),
+                                ..SessionEventFields::default()
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
             return;
         }
         let signal = if want_suspend {
@@ -12309,6 +12819,19 @@ impl TranscodeManager {
         };
         let sent = {
             let child = session.child.lock().await;
+            // The actor's exact timer can fire without entering the async
+            // compatibility gate. Its short synchronous transition fence
+            // makes the expiry/control/retirement verdict and this one
+            // kill(2) call strictly ordered without holding it across an
+            // await. A signal that wins is before the fence; a fence that
+            // wins makes this decision a no-op.
+            let producer_transition = session.control.lock_producer_transition();
+            if !session
+                .control
+                .producer_transition_is_live(&producer_transition)
+            {
+                return;
+            }
             match child.as_ref().and_then(|c| c.id()) {
                 // SAFETY: `kill(2)` with a pid this process owns and a signal
                 // constant. The child is alive as far as we know; a race with
@@ -12327,42 +12850,67 @@ impl TranscodeManager {
             // resume, before ffmpeg has emitted a single post-SIGCONT block.
             session.progress.touch();
         }
-        session.suspended.store(want_suspend, Relaxed);
         if want_suspend {
-            let hold_reason = hold
-                .expect("a requested suspension has a hold reason")
-                .reason;
-            *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
+            let hold = hold.expect("a requested suspension has a hold reason");
+            *session.suspended_at.lock().await = Some(SuspendedAt {
+                since: Instant::now(),
+                hold,
+            });
+            session.suspended.store(true, Relaxed);
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
+            crate::playback_control::record_producer_hold(hold.reason);
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count,
-                hold_reason = ?hold.map(|hold| hold.reason),
-                release_value = hold.map(|hold| hold.release_value),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
+                hold_reason = ?hold.reason,
+                release_value = hold.release_value,
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
                 global_live_bytes, global_ahead_bytes,
                 max_secs = limits.max_secs, max_bytes = limits.max_bytes,
-                "suspending transcode: far enough ahead of the client"
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "holding transcode producer"
             );
             self.emit_session_event(
                 session_id,
                 session,
                 "suspend",
                 SessionEventFields {
-                    hold_reason: Some(hold_reason),
+                    hold_reason: Some(hold.reason),
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        None,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
             .await;
         } else {
+            session.suspended.store(false, Relaxed);
             let held = session.suspended_at.lock().await.take();
-            let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
-            let hold_reason = held.map(|(_, reason)| reason);
+            let held_ms =
+                held.map(|held| held.since.elapsed().as_millis().min(i64::MAX as u128) as i64);
+            let hold_reason = held.map(|held| held.hold.reason);
+            if let Some(hold_reason) = hold_reason {
+                crate::playback_control::record_producer_resume(hold_reason);
+            }
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
-                "resuming transcode: the client caught up"
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "resuming transcode producer"
             );
             self.emit_session_event(
                 session_id,
@@ -12371,6 +12919,14 @@ impl TranscodeManager {
                 SessionEventFields {
                     hold_reason,
                     ms: held_ms,
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        hold_reason,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
@@ -12422,6 +12978,29 @@ impl TranscodeManager {
             .insert(session_id.to_owned(), session);
     }
 
+    #[cfg(test)]
+    pub(crate) async fn install_vod_http_test_session(
+        &self,
+        session_id: &str,
+        file_id: i64,
+        base: &std::path::Path,
+    ) {
+        let file = self
+            .store
+            .get_file(file_id)
+            .await
+            .expect("HTTP VOD fixture file lookup")
+            .expect("HTTP VOD fixture file");
+        self.vod
+            .install_http_test_session(session_id, file, base)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn vod_last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
+        self.vod.last_touch_for_test(session_id).await
+    }
+
     /// Both byte views across every live session, from their cached figures —
     /// summing these must not cost a directory walk per session, or the flow
     /// controller could not run on every segment fetch.
@@ -12442,6 +13021,72 @@ impl TranscodeManager {
                     ahead + session.ahead_bytes.load(Relaxed),
                 )
             })
+    }
+
+    /// Ensure this rolling incarnation has exactly one detached consumer for
+    /// actor-owned flow tickets. The task is intentionally rooted in the
+    /// session, not in any HTTP request: accepted control remains effective
+    /// after cancellation, and response-body EOF never waits on a child
+    /// signal before it can publish END_STREAM.
+    fn ensure_flow_worker(self: &Arc<Self>, session_id: &str, session: Arc<Session>) {
+        if session.flow_worker_started.swap(true, AcqRel) {
+            return;
+        }
+        let manager = Arc::clone(self);
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            let mut handled = 0_u64;
+            loop {
+                let ticket = session.control.next_flow_request(handled).await;
+                let is_current = manager
+                    .sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session));
+                if session.control.is_retired() || !is_current {
+                    // Release any response already waiting on this generation;
+                    // it will observe retirement or replacement in status.
+                    session.control.complete_flow(ticket);
+                    break;
+                }
+                manager.flow_control(&session, &session_id).await;
+                #[cfg(test)]
+                let flow_pause = session
+                    .flow_completion_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                #[cfg(test)]
+                if let Some(pause) = flow_pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+                handled = ticket;
+                session.control.complete_flow(ticket);
+            }
+            session.flow_worker_started.store(false, Release);
+        });
+    }
+
+    /// Queue policy re-evaluation after a completed rolling media object.
+    /// VOD has no producer to pace, and partial objects do not advance the
+    /// client's download frontier.
+    pub(crate) fn request_response_flow(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        object_name: Option<&str>,
+        complete_object: bool,
+    ) {
+        let MediaResponseOwnerKind::Rolling(session) = &owner.0 else {
+            return;
+        };
+        if !complete_object || object_name.and_then(segment_index).is_none() {
+            return;
+        }
+        self.ensure_flow_worker(session_id, Arc::clone(session));
+        session.control.request_flow();
     }
 
     /// Re-evaluate one session after a client request refreshes the published
@@ -12476,7 +13121,14 @@ impl TranscodeManager {
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
-                match session.control.claim_expiry().await {
+                // Serialize the actor's expiry fence with every producer
+                // signal and child transition. After a claim wins, no stale
+                // flow snapshot can resume the child before teardown takes
+                // this gate again.
+                let transition = session.child_transition.lock().await;
+                let claim = session.control.claim_expiry().await;
+                drop(transition);
+                match claim {
                     Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
                         // The actor publishes the shared process-local fence
                         // before replying, so this claim owns ordinary idle
@@ -12493,12 +13145,17 @@ impl TranscodeManager {
                         // A prior explicit retirement or expiry claimant died
                         // before process teardown. Preserve that distinction
                         // instead of inventing a second idle verdict.
+                        let reason = if lease.expiration_claimed {
+                            "idle"
+                        } else {
+                            "retired_recovery"
+                        };
                         expired.push((
                             id,
                             session,
                             lease.idle_for.as_secs(),
                             lease.last_renewal_kind,
-                            "retired_recovery",
+                            reason,
                         ));
                     }
                     Ok(crate::playback_control::RollingExpiryClaim::Live) => {
@@ -13100,6 +13757,27 @@ impl HlsDeliveryFixture {
         self.session.delivery.total_bytes()
     }
 
+    pub(crate) fn file_id(&self) -> i64 {
+        self.session.file_id
+    }
+
+    pub(crate) async fn last_renewal_kind(&self) -> &'static str {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
+            .last_renewal_kind
+    }
+
+    pub(crate) fn fetched_segment(&self) -> i64 {
+        self.session.high_segment.load(Relaxed)
+    }
+
+    pub(crate) async fn hold_child_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.session.child_transition.lock().await
+    }
+
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
@@ -13171,6 +13849,8 @@ fn test_session(dir: PathBuf) -> Session {
         #[cfg(any(test, feature = "live-hls-recovery"))]
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
+        control_applied_pause: std::sync::Mutex::new(None),
+        flow_completion_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
         cached: false,
@@ -13179,6 +13859,7 @@ fn test_session(dir: PathBuf) -> Session {
         cache_manifest: None,
         cache_location: None,
         control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+        flow_worker_started: AtomicBool::new(false),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -13315,15 +13996,25 @@ mod tests {
             accepted.disposition,
             crate::playback_control::ControlDisposition::Accepted
         );
+        assert_eq!(
+            accepted.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
         let assert_explicit_status = |status: &HlsSessionInfo| {
             let HlsSessionInfo::Live(status) = status else {
                 panic!("rolling control returned VOD status");
             };
             assert_eq!(status.lease_mode, "explicit");
+            assert_eq!(status.lease_state, "active");
+            assert_eq!(
+                status.lease_timeout_ms,
+                Some(crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS)
+            );
             assert_eq!(status.control_demand, Some("active"));
             assert_eq!(status.reported_position_ms, Some(10_000));
             assert_eq!(status.client_runway_ms, Some(15_000));
             assert_eq!(status.render_state, Some("rendering"));
+            assert_eq!(status.production_policy, "explicit_demand");
         };
         assert_explicit_status(&accepted.status);
         let live_status = fixture
@@ -13447,6 +14138,274 @@ mod tests {
             .snapshot()
             .await
             .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn accepted_hold_and_active_control_signal_the_real_producer_immediately() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, demand| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = demand;
+            if demand != crate::playback_control::PlaybackDemand::Active {
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+            }
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+
+        let hold = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, crate::playback_control::PlaybackDemand::Hold))
+            .await
+            .expect("local worker")
+            .expect("hold accepted");
+        assert_eq!(
+            hold.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
+        let HlsSessionInfo::Live(hold_status) = hold.status else {
+            panic!("rolling hold returned VOD status");
+        };
+        assert!(hold_status.suspended);
+        assert_eq!(hold_status.control_demand, Some("hold"));
+        assert_eq!(hold_status.hold_reason, Some(AheadHoldReason::Demand));
+        assert_eq!(hold_status.production_target_seconds, Some(0));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let active = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, crate::playback_control::PlaybackDemand::Active))
+            .await
+            .expect("local worker")
+            .expect("active accepted");
+        let HlsSessionInfo::Live(active_status) = active.status else {
+            panic!("rolling active returned VOD status");
+        };
+        assert!(!active_status.suspended);
+        assert_eq!(active_status.control_demand, Some("active"));
+        assert_eq!(active_status.hold_reason, None);
+        assert_eq!(active_status.production_policy, "explicit_demand");
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: None,
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("flow events");
+                if events.iter().any(|event| event.event == "suspend")
+                    && events.iter().any(|event| event.event == "resume")
+                {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("demand hold/resume events persisted");
+        let suspend = events
+            .iter()
+            .find(|event| event.event == "suspend")
+            .expect("demand suspend event");
+        assert_eq!(suspend.hold_reason.as_deref(), Some("demand"));
+        let extra: serde_json::Value = serde_json::from_str(
+            suspend
+                .extra
+                .as_deref()
+                .expect("demand suspend policy snapshot"),
+        )
+        .expect("valid demand suspend policy snapshot");
+        assert_eq!(extra["lease_mode"], "explicit");
+        assert_eq!(extra["lease_state"], "active");
+        assert_eq!(extra["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["control_demand"], "hold");
+        assert_eq!(extra["production_policy"], "explicit_demand");
+        assert_eq!(extra["production_target_seconds"], 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_response_cannot_cancel_an_accepted_producer_transition() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+
+        // The actor has accepted, renewed, retained demand, and issued its
+        // flow ticket, but the request still owns the child transition gate.
+        pause.wait().await;
+        request.abort();
+        let request_error = match request.await {
+            Ok(_) => panic!("request unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert!(request_error.is_cancelled());
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.suspended.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached flow worker applied accepted hold after cancellation");
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+        snapshot.playback_rate = 0.0;
+        snapshot.render_state = crate::playback_control::RenderState::Waiting;
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 1,
+                snapshot,
+            })
+            .await
+            .expect("live session")
+            .expect("replayed control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        let HlsSessionInfo::Live(status) = replay.status else {
+            panic!("rolling replay returned VOD status");
+        };
+        assert!(status.suspended);
+        assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
+    }
+
+    #[tokio::test]
+    async fn retirement_before_flow_completion_cannot_escape_as_active_control() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .flow_completion_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let control = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                            crate::playback_control::ClientPlatform::Web,
+                        ),
+                    })
+                    .await
+            })
+        };
+
+        // The actor accepted and producer policy ran, but the ticket has not
+        // yet released the HTTP response. Retirement wins in that interval.
+        pause.wait().await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session(&session_id, "test-retirement")
+                .await
+        );
+        pause.wait().await;
+        assert!(matches!(
+            control.await.expect("control task"),
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+                    | crate::playback_control::ControlStateError::OwnerTransition
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -15518,12 +16477,17 @@ mod tests {
             "idle time must keep running while status is polled"
         );
 
-        // A real fetch DOES reset it — the contrast that keeps the assertion
-        // above from passing vacuously on a session whose clock never moved.
-        // (`touch` is the shared front half of the playlist and segment
-        // readers; calling those here would long-poll for output this fixture
-        // can never produce.)
-        assert!(mgr.touch(&info.session_id, "test-fetch").await.is_some());
+        // A successfully resolved fetch DOES reset it — the contrast that
+        // keeps the assertion above from passing vacuously on a session whose
+        // clock never moved. This is the shared response commit point; the
+        // actual readers would long-poll for output this fixture cannot make.
+        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(
+            mgr.live_session(&info.session_id).await.expect("session"),
+        ));
+        assert!(
+            mgr.commit_resolved_media(&info.session_id, &owner, "test-fetch", None, true)
+                .await
+        );
         assert_eq!(
             mgr.session_status(&info.session_id)
                 .await
@@ -16127,6 +17091,174 @@ mod tests {
     }
 
     #[test]
+    fn explicit_flow_uses_reported_runway_and_preserves_capacity_bounds() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        demand.position_ms = 120_000;
+        demand.buffered_through_ms = 140_000;
+        demand.playback_rate = 1.0;
+        let physical = Ahead {
+            seconds: 5,
+            bytes: 1_000,
+        };
+
+        let active = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(active.policy, "explicit_demand");
+        assert_eq!(active.production_ahead_seconds, Some(60));
+        assert_eq!(active.production_target_seconds, Some(50));
+        assert_eq!(
+            active.hold,
+            Some(AheadHold {
+                reason: AheadHoldReason::Time,
+                release_value: 50,
+            })
+        );
+
+        demand.playback_rate = 2.0;
+        let faster = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            faster.production_target_seconds,
+            Some(80),
+            "thirty seconds of wall-clock reserve becomes sixty media seconds at 2x"
+        );
+        assert_eq!(faster.hold, None);
+
+        demand.buffered_through_ms = 1_000_000;
+        assert_eq!(
+            explicit_production_target_seconds(&demand, limits.max_secs),
+            limits.max_secs,
+            "untrusted client runway cannot raise the configured time ceiling"
+        );
+
+        demand.buffered_through_ms = 140_000;
+        let capacity = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 0,
+                bytes: 2_001,
+            }),
+            published_end_ms: Some(120_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            capacity.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Bytes),
+            "explicit observations cannot bypass the physical scratch bound"
+        );
+
+        let unbounded_time = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 10_000,
+                bytes: 0,
+            }),
+            published_end_ms: Some(10_000_000),
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits: AheadLimits {
+                max_secs: 0,
+                max_bytes: 2_000,
+                global_max_bytes: 8_000,
+            },
+            currently_suspended: false,
+        });
+        assert_eq!(unbounded_time.production_target_seconds, None);
+        assert_eq!(
+            unbounded_time.hold, None,
+            "a zero configured time limit is disabled, not a target of zero"
+        );
+    }
+
+    #[test]
+    fn explicit_hold_stops_even_before_publication_and_seek_uses_its_target() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        demand.demand = crate::playback_control::PlaybackDemand::Hold;
+        let holding = evaluate_flow(FlowInputs {
+            physical_ahead: None,
+            published_end_ms: None,
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            holding.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Demand)
+        );
+        assert_eq!(holding.production_target_seconds, Some(0));
+
+        demand.demand = crate::playback_control::PlaybackDemand::Active;
+        demand.position_ms = 10_000;
+        demand.seek_target_ms = Some(100_000);
+        demand.buffered_through_ms = 130_000;
+        demand.playback_rate = 1.0;
+        let seeking = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 10,
+                bytes: 0,
+            }),
+            published_end_ms: Some(65_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(seeking.production_ahead_seconds, Some(65));
+        assert_eq!(seeking.production_target_seconds, Some(60));
+        assert_eq!(
+            seeking.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Time),
+            "the old pre-seek playhead must not inflate demand by ninety seconds"
+        );
+    }
+
+    #[test]
     fn suspend_holds_on_any_limit_and_releases_on_all() {
         let limits = AheadLimits {
             max_secs: 180,
@@ -16663,6 +17795,11 @@ mod tests {
             "it must have actually waited rather than found the playlist already there"
         );
         publish.await.expect("publisher");
+        assert!(session
+            .control
+            .snapshot()
+            .await
+            .is_some_and(|lease| lease.last_renewal_kind == "playlist"));
 
         // Never published. Refused at the deadline — and as a retryable
         // "still starting", never as a session that failed or went away.
@@ -16692,6 +17829,14 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "and it must actually end at the budget"
+        );
+        assert!(
+            stuck
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "a timed-out playlist miss must not renew the playback lease"
         );
     }
 
@@ -16956,21 +18101,19 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist("retired-session").await }
         });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if session
-                    .control
-                    .snapshot()
-                    .await
-                    .is_some_and(|lease| lease.last_renewal_kind == "playlist")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("playlist request must acquire the live session");
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
+        assert!(
+            !playlist.is_finished(),
+            "the playlist request acquired the session and is waiting for publication"
+        );
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "waiting itself must not renew the lease"
+        );
         assert!(
             mgr.retire_session("retired-session", &session).await,
             "the production retirement path must own this live session"
@@ -17160,6 +18303,20 @@ mod tests {
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
+
+        assert!(mgr
+            .segment("retained-window", "seg00029.ts")
+            .await
+            .expect("pruned request")
+            .is_none());
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "playlist"),
+            "a pruned media miss must not renew the playback lease"
+        );
 
         // Subtitle timing still sees the discarded prefix through the full
         // internal index: segment 30 begins at 120 seconds, not at zero.
@@ -17390,6 +18547,18 @@ mod tests {
                 .await
                 .expect("segment admission")
                 .is_some());
+            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(&session)));
+            assert!(
+                mgr.commit_resolved_media(
+                    &info.session_id,
+                    &owner,
+                    "test-segment",
+                    Some(&newest),
+                    true,
+                )
+                .await
+            );
+            mgr.flow_control(&session, &info.session_id).await;
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
@@ -18021,6 +19190,8 @@ mod tests {
             #[cfg(any(test, feature = "live-hls-recovery"))]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
+            control_applied_pause: std::sync::Mutex::new(None),
+            flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
             cached,
@@ -18029,6 +19200,7 @@ mod tests {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),

@@ -69,8 +69,15 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertLess(pinned, libraries)
 
-    def test_ui_baseline_releases_and_retries_real_player_captures(self):
+    def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_contract"
+        )
+        should_retry = contract["should_retry_capture"]
+        classify_root = contract["root_attach_failure"]
+        fail = contract["Fail"]
+        root_attach = contract["RetryableRootAttach"]
 
         self.assertIn("releaseSession(PLAYER.sessionId);", script)
         self.assertIn(
@@ -81,8 +88,25 @@ class OperationsContractCase(unittest.TestCase):
             "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
         )
         self.assertNotIn("closePlayer();", script[cleanup : cleanup + 500])
-        self.assertIn('attempts = 2 if route.get("player") else 1', script)
+        self.assertIn("class RetryableRootAttach(Fail):", script)
+        self.assertIn("except PlaywrightTimeoutError as error:", script)
+        self.assertIn("attempts = 2", script)
+        self.assertIn(
+            "if should_retry_capture(route, e, attempt, attempts):",
+            script,
+        )
         self.assertIn('print(f"RETRY   {key}: {e}"', script)
+        self.assertIn('print(f"FAIL    {key}: {e}"', script)
+        semantic_root = classify_root("library", "#main", ["pageerror: boot failed"])
+        transient_root = classify_root("library", "#main", [])
+        self.assertIs(type(semantic_root), fail)
+        self.assertIs(type(transient_root), root_attach)
+        self.assertFalse(should_retry({}, semantic_root, 0, 2))
+        self.assertTrue(should_retry({}, root_attach("root"), 0, 2))
+        self.assertFalse(should_retry({}, root_attach("root"), 1, 2))
+        self.assertFalse(should_retry({}, fail("semantic"), 0, 2))
+        self.assertTrue(should_retry({"player": True}, fail("legacy player"), 0, 2))
+        self.assertFalse(should_retry({"player": True}, fail("legacy player"), 1, 2))
         self.assertLess(
             cleanup,
             script.index("page.close()", script.index("def capture_route")),

@@ -9365,6 +9365,19 @@ function updateStats(){
       srv.push({l:"Server ahead",c:statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended)),
         v:`${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}`});
     }
+    if(h.production_policy==='explicit_demand'){
+      const produced=h.production_ahead_seconds==null?'waiting for publication'
+        :h.production_ahead_seconds<0
+          ?`${Math.abs(h.production_ahead_seconds)} s production deficit`
+          :`${h.production_ahead_seconds} s produced ahead`;
+      const target=h.production_target_seconds==null?'':` · target ${Math.max(0,h.production_target_seconds)} s`;
+      const demand=h.control_demand?` · ${h.control_demand}`:'';
+      const held=h.suspended?` · held (${esc(h.hold_reason||'policy')})`:'';
+      const demandTone=h.lease_state&&h.lease_state!=='active'?'warn'
+        :h.suspended&&h.hold_reason!=='demand'?'warn':'good';
+      srv.push({l:"Demand window",c:statsToneClass(demandTone),
+        v:`${produced}${target}${demand}${held}`});
+    }
     if(h.out_time_ms!=null && h.ahead_seconds==null){
       // A progressive stream has no published-media frontier to report; what
       // it can say is how much content ffmpeg has produced, which is the same
@@ -9391,14 +9404,20 @@ function updateStats(){
     srv.push({l:"Stalls",c:statsToneClass(stallTone),
       v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
   }
-  // The control protocol is deliberately passive in M2, but it must not be
-  // invisible. This is the join point an operator needs during shadow mode:
+  // Control remains passive for recovery actions, but an explicit rolling
+  // session now owns liveness and producer demand. This is the join point an
+  // operator needs during the staged cutover:
   // whether the client is exchanging, the last sequence the owner accepted,
   // whether an event arrived while the previous exchange was in flight, and
   // the advertised cadence/lease rather than another inferred idle clock.
   const controlReporter=PLAYER.controlReporter;
   const controlStatus=controlReporter&&controlReporter.status();
   if(controlStatus){
+    const controlHealth=PLAYER.health||null;
+    const leaseMode=PlaybackPolicy.controlLeaseMode(
+      controlHealth&&controlHealth.lease_mode,PLAYER.vod,controlStatus.accepted_sequence);
+    const leasePresentation=PlaybackPolicy.controlLeasePresentation(leaseMode);
+    const leaseState=controlHealth&&controlHealth.lease_state?controlHealth.lease_state:'active';
     const phase=controlStatus.stopped?"stopped"
       :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
       :controlStatus.retrying?"retry scheduled"
@@ -9407,11 +9426,13 @@ function updateStats(){
       ?`accepted #${controlStatus.accepted_sequence}`:"awaiting first acceptance";
     const acceptedAge=PLAYER.controlLastExchangeAt
       ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
-    srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError?"warn":"good"),
-      v:`passive · ${accepted}${acceptedAge} · ${phase}`});
+    srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError||leaseState!=='active'?"warn":"good"),
+      v:`${leasePresentation.ownership} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
+    const enforcedLease=controlHealth&&Number.isSafeInteger(controlHealth.lease_timeout_ms)
+      ?controlHealth.lease_timeout_ms:controlStatus.lease_timeout_ms;
     srv.push({l:"Control timing",c:"stat-muted",
       v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
-        `${Math.round(controlStatus.lease_timeout_ms/1000)} s legacy lease`});
+        `${Math.round(enforcedLease/1000)} s ${leasePresentation.label} lease`});
   }
   if(PLAYER.controlLastError){
     const age=Math.max(0,Math.round((Date.now()-PLAYER.controlLastError.at)/1000));
@@ -9707,6 +9728,9 @@ function updateStats(){
   // layout to hold in your head and half again the height for the same eleven
   // facts. Its "Playing" card is debug's "Now decoding" section under the name
   // debug already used; one name for one thing, in both sizes.
+  const standardLeasePresentation=PlaybackPolicy.controlLeasePresentation(
+    PlaybackPolicy.controlLeaseMode(health&&health.lease_mode,PLAYER.vod,
+      controlStatus&&controlStatus.accepted_sequence));
   const standardHtml=panelHtml([
     {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
     {t:"Source",rows:[
@@ -9725,7 +9749,8 @@ function updateStats(){
       presentation?cardRow("Presentation",esc(presentation),PLAYER.vod?"good":"warn"):null,
       cardRow("Status",esc(serverState),serverTone),
       controlStatus?cardRow("Control",controlStatus.accepted_sequence
-        ?`Passive · accepted #${controlStatus.accepted_sequence}`:"Passive · connecting",
+        ?`${standardLeasePresentation.ownership} · accepted #${controlStatus.accepted_sequence}`
+        :`${standardLeasePresentation.ownership} · connecting`,
         PLAYER.controlLastError?"warn":"good"):null,
       (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
       serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
@@ -9996,6 +10021,30 @@ function detailActivitySummary(d,deliveries){
   if(d.trakt&&d.trakt.syncing) acts.push({label:"Syncing Trakt"});
   return acts;
 }
+function activitySessionControlText(session){
+  if(!session) return "";
+  const facts=[];
+  if(session.lease_mode){
+    const timeout=Number.isSafeInteger(session.lease_timeout_ms)
+      ?` ${Math.round(session.lease_timeout_ms/1000)}s`:"";
+    const state=session.lease_state&&session.lease_state!=="active"
+      ?` (${session.lease_state})`:"";
+    facts.push(`${session.lease_mode} lease${timeout}${state}`);
+  }
+  if(session.control_demand) facts.push(`demand ${session.control_demand}`);
+  if(Number.isSafeInteger(session.reported_position_ms))
+    facts.push(`position ${Math.round(session.reported_position_ms/1000)}s`);
+  if(Number.isSafeInteger(session.client_runway_ms))
+    facts.push(`client runway ${Math.round(session.client_runway_ms/1000)}s`);
+  if(session.production_policy) facts.push(`production ${session.production_policy}`);
+  if(Number.isSafeInteger(session.production_ahead_seconds))
+    facts.push(session.production_ahead_seconds<0
+      ?`production deficit ${Math.abs(session.production_ahead_seconds)}s`
+      :`produced ahead ${session.production_ahead_seconds}s`);
+  if(Number.isSafeInteger(session.production_target_seconds))
+    facts.push(`target ${session.production_target_seconds}s`);
+  return facts.join(" · ");
+}
 async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
   ACTIVITY_DETAIL_BUSY=generation;
@@ -10043,15 +10092,16 @@ function paintActivityBody(d){
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   const rows=dels.map(de=>{
     const se=de.session_id?sessionsById[de.session_id]:null;
+    const control=activitySessionControlText(se);
     const flow=!se?'':se.suspended
-      ?` · held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
+      ?` · ${se.control_demand?`${esc(se.control_demand)} · `:''}held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
       :se.suspend_count?` · ${se.suspend_count} suspend${se.suspend_count===1?'':'s'} · running`:'';
     const presentation=de.presentation==="vod"?"VOD":de.presentation==="live-recovery"?"Live recovery":"";
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
       ${attributed?`<td><span class="clid">${esc(de.node_id||"Unknown")}</span></td>`:""}
-      <td>${presentation?`<b>${esc(presentation)}</b> · `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${flow}</td>
+      <td>${presentation?`<b>${esc(presentation)}</b> · `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
       <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
   }).join("");

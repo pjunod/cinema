@@ -31,8 +31,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plurx_core::domain::MediaFile;
@@ -140,6 +140,27 @@ pub struct VodHlsFacts {
     pub audio_index: Option<i64>,
     pub aac: bool,
     pub preserve_dolby_vision: bool,
+    pub(crate) response_owner: ResponseOwner,
+}
+
+/// Opaque identity of one VOD session incarnation. A response resolved from
+/// an old rendition cannot commit liveness or frontier state to a resurrected
+/// session that reused the durable session id.
+#[derive(Clone)]
+pub(crate) struct ResponseOwner {
+    lifecycle: Arc<Mutex<()>>,
+    incarnation: Arc<()>,
+    rendition: Arc<Rendition>,
+}
+
+impl std::fmt::Debug for ResponseOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResponseOwner")
+            .field("incarnation", &Arc::as_ptr(&self.incarnation))
+            .field("rendition_key", &self.rendition.key)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Live diagnostics for one VOD session. This is intentionally not the live
@@ -382,6 +403,9 @@ struct Session {
     /// this session only. Keeping the gate on the session avoids making an
     /// unrelated rolling or VOD control wait behind node-wide Store I/O.
     lifecycle: Arc<Mutex<()>>,
+    /// Unique identity of this attachment while `lifecycle` is deliberately
+    /// stable across same-id idle reap and resurrection.
+    incarnation: Arc<()>,
     last_touch: StdMutex<Instant>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
@@ -397,6 +421,10 @@ struct Shared {
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Per-session-id transition gates survive the remove/reattach gap via a
+    /// weak registry. A reaper holds the strong gate through reader detach;
+    /// resurrection upgrades the same gate before it can attach a successor.
+    session_lifecycles: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
@@ -414,6 +442,133 @@ impl VodServe {
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
         Self::new_configured(base, store, None, None, None)
+    }
+
+    /// Publish a producer-less VOD attachment for HTTP response-finalization
+    /// tests. The fixture uses the real session/reader/incarnation machinery;
+    /// only materialization and the producer driver are bypassed.
+    #[cfg(test)]
+    pub(crate) async fn install_http_test_session(
+        &self,
+        session_id: &str,
+        file: MediaFile,
+        base: &Path,
+    ) {
+        use plurx_core::fmp4::CutClass;
+        use plurx_core::segplan::IndexRow;
+
+        let mut rows = Vec::new();
+        let mut dts = 0_u64;
+        for index in 0..240 {
+            let duration = if index % 2 == 0 { 28_016 } else { 28_032 };
+            rows.push(IndexRow {
+                dts,
+                duration,
+                bytes: 100_000,
+                video_bytes: 99_400,
+                class: CutClass::CleanIdr,
+            });
+            dts += duration;
+        }
+        let source_identity = SourceIdentity::new(
+            u64::try_from(file.size).unwrap_or_default(),
+            file.mtime,
+            "http-test",
+        );
+        let index = FragmentIndex::new(16_000, rows, "http-test", source_identity);
+        let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
+        let duration_ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: duration_ms,
+                audio_ms: duration_ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let dir = RenditionDir::new(base.join(format!("http-test-{}", uuid::Uuid::new_v4())));
+        dir.create().await.expect("create HTTP VOD test rendition");
+        let rendition = Arc::new(Rendition {
+            key: format!("http-test-{}", uuid::Uuid::new_v4()),
+            dir,
+            recipe: Recipe {
+                file: file.clone(),
+                audio_index: None,
+                aac: true,
+                video: CopyVideoOptions::new(false, false),
+                source_object_version: None,
+                cluster_cache_key: None,
+            },
+            source: None,
+            playlist: plan.playlist().into_bytes(),
+            timescale: plan.timescale,
+            seconds_per_segment: plan.duration_ticks() as f64
+                / f64::from(plan.timescale)
+                / plan.len() as f64,
+            index,
+            policy,
+            working_set_budget: 8 << 30,
+            completed_cache_budget: 50 << 30,
+            materialize_budget: Duration::from_secs(30),
+            manifest: Mutex::new(Manifest::new(plan.clone())),
+            plan,
+            identity: Mutex::new(IdentityState::default()),
+            slot: ProducerSlot::new(),
+            readers: Mutex::new(HashMap::new()),
+            failed: StdMutex::new(None),
+            init_notify: Notify::new(),
+            wake: Notify::new(),
+            gen_epoch: AtomicU64::new(0),
+            last_child_pid: AtomicU32::new(0),
+            dormant_since: StdMutex::new(None),
+            closed: AtomicBool::new(false),
+            warned_admission: AtomicBool::new(false),
+            demand_since: StdMutex::new(HashMap::new()),
+        });
+
+        let lifecycle = self.shared.session_lifecycle(session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let previous = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| Arc::clone(&session.rendition));
+        if let Some(previous) = previous {
+            previous.detach_reader(session_id).await;
+        }
+        rendition.attach_reader(session_id, 0).await;
+        self.shared.sessions.lock().await.insert(
+            session_id.to_owned(),
+            Session {
+                rendition,
+                playback_id: "http-vod-test".to_owned(),
+                user_name: "test".to_owned(),
+                item_title: "HTTP VOD fixture".to_owned(),
+                started_unix: 1,
+                target_height: file.height.unwrap_or(0),
+                kind: SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: false,
+                },
+                supersession_user: "[\"user_id\",1]".to_owned(),
+                block_budget: Duration::from_secs(1),
+                lifecycle: Arc::clone(&lifecycle),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                tombstone: None,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
+        let sessions = self.shared.sessions.lock().await;
+        let touch = sessions.get(session_id)?.last_touch.lock().ok()?;
+        Some(*touch)
     }
 
     pub(crate) fn new_cluster(
@@ -447,6 +602,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                session_lifecycles: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
@@ -720,6 +876,21 @@ impl VodServe {
             })?;
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let lifecycle = self.shared.session_lifecycle(&session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let previous_rendition = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .map(|session| Arc::clone(&session.rendition));
+        if let Some(previous) = previous_rendition
+            .as_ref()
+            .filter(|previous| !Arc::ptr_eq(previous, &rendition))
+        {
+            previous.detach_reader(&session_id).await;
+        }
         rendition.attach_reader(&session_id, start_entry).await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         self.shared.sessions.lock().await.insert(
@@ -737,7 +908,8 @@ impl VodServe {
                 kind: req.kind,
                 supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: Arc::clone(&lifecycle),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -815,13 +987,69 @@ impl VodServe {
             .count()
     }
 
+    /// Renew one immutable session only after its caller has a concrete
+    /// playlist, subtitle, or media response ready. Kept separate from
+    /// lookup so a vanished/tombstoned capability cannot be mistaken for a
+    /// successful rolling-to-VOD fallthrough.
+    pub async fn commit_resolved_media(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        segment_index: Option<u32>,
+    ) -> bool {
+        // End/reattach uses this same per-incarnation gate. Whichever enters
+        // first finishes its whole transition before the other can inspect
+        // the registry, so a served frontier cannot reappear after a
+        // tombstone detached its reader.
+        let _lifecycle = owner.lifecycle.lock().await;
+        let rendition = {
+            let sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions.get(session_id) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            if !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+                || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+                || !Arc::ptr_eq(&session.rendition, &owner.rendition)
+            {
+                return false;
+            }
+            *session.last_touch.lock().expect("touch lock") = Instant::now();
+            Arc::clone(&session.rendition)
+        };
+        if let Some(index) = segment_index {
+            self.note_served(&rendition, session_id, index).await;
+        }
+        true
+    }
+
+    /// Confirm that a response token still names the live attachment without
+    /// extending its lease. Streamed bodies use this immediately before
+    /// publishing headers, then perform the mutating commit only after EOF.
+    pub async fn response_owner_is_live(&self, session_id: &str, owner: &ResponseOwner) -> bool {
+        let _lifecycle = owner.lifecycle.lock().await;
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        session.tombstone.is_none()
+            && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            && Arc::ptr_eq(&session.rendition, &owner.rendition)
+    }
+
     /// Immutable playlist bytes: the same bytes for the session's whole life.
-    pub async fn playlist(&self, session_id: &str) -> Option<Result<Vec<u8>, VodError>> {
-        let rendition = match self.session_rendition(session_id).await? {
-            Ok((rendition, _)) => rendition,
+    pub async fn playlist(
+        &self,
+        session_id: &str,
+    ) -> Option<Result<(Vec<u8>, ResponseOwner), VodError>> {
+        let (rendition, owner) = match self.session_rendition(session_id).await? {
+            Ok((rendition, _, owner)) => (rendition, owner),
             Err(error) => return Some(Err(error)),
         };
-        Some(Ok(rendition.playlist.clone()))
+        Some(Ok((rendition.playlist.clone(), owner)))
     }
 
     /// The three-outcome segment GET (plan §2.3). `None` = not a VOD session;
@@ -830,13 +1058,17 @@ impl VodServe {
         &self,
         session_id: &str,
         name: &str,
-    ) -> Option<Result<Option<SegmentReady>, VodError>> {
-        let (rendition, budget) = match self.session_rendition(session_id).await? {
+    ) -> Option<Result<Option<(SegmentReady, ResponseOwner)>, VodError>> {
+        let (rendition, budget, owner) = match self.session_rendition(session_id).await? {
             Ok(found) => found,
             Err(error) => return Some(Err(error)),
         };
         if name == INIT_NAME {
-            return Some(self.serve_init(&rendition, budget).await.map(Some));
+            return Some(
+                self.serve_init(&rendition, budget)
+                    .await
+                    .map(|ready| Some((ready, owner))),
+            );
         }
         let Some(index) = planned_index(name) else {
             // Traversal names and everything else that is not `segNNNNN.m4s`
@@ -849,7 +1081,7 @@ impl VodServe {
         Some(
             self.serve_segment(&rendition, session_id, index, budget)
                 .await
-                .map(Some),
+                .map(|ready| Some((ready, owner))),
         )
     }
 
@@ -857,12 +1089,15 @@ impl VodServe {
     /// Idempotent — the first call writes the tombstone and detaches, every
     /// later one only confirms ownership.
     pub async fn end(&self, session_id: &str, cause: Terminal) -> bool {
-        let lifecycle = {
+        let (lifecycle, incarnation) = {
             let sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions.get(session_id) else {
                 return false;
             };
-            Arc::clone(&session.lifecycle)
+            (
+                Arc::clone(&session.lifecycle),
+                Arc::clone(&session.incarnation),
+            )
         };
         let _lifecycle = lifecycle.lock().await;
         let (rendition, file_id, height, kind) = {
@@ -870,7 +1105,9 @@ impl VodServe {
             let Some(session) = sessions.get_mut(session_id) else {
                 return false;
             };
-            if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
+            if !Arc::ptr_eq(&session.lifecycle, &lifecycle)
+                || !Arc::ptr_eq(&session.incarnation, &incarnation)
+            {
                 return false;
             }
             if session.tombstone.is_some() {
@@ -1212,12 +1449,12 @@ impl VodServe {
         Some(session.rendition.recipe.file.id)
     }
 
-    /// Exact copy-recipe facts for native HLS wrappers. This is a media
-    /// capability read, so it touches the same sliding TTL as playlist and
-    /// segment GETs.
+    /// Exact copy-recipe facts for native HLS wrappers. Lookup alone does not
+    /// touch the sliding TTL; the HTTP response commit does that after every
+    /// playlist and init-object check succeeds.
     pub async fn hls_facts(&self, session_id: &str) -> Option<VodHlsFacts> {
-        let (rendition, _) = match self.session_rendition(session_id).await {
-            Some(Ok(value)) => value,
+        let (rendition, response_owner) = match self.session_rendition(session_id).await {
+            Some(Ok((rendition, _, owner))) => (rendition, owner),
             _ => return None,
         };
         Some(VodHlsFacts {
@@ -1225,13 +1462,14 @@ impl VodServe {
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
+            response_owner,
         })
     }
 
     /// One immutable plan entry's film-time window for WebVTT children.
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         let index = u32::try_from(segment_index).ok()?;
-        let (rendition, _) = match self.session_rendition(session_id).await {
+        let (rendition, _, _) = match self.session_rendition(session_id).await {
             Some(Ok(value)) => value,
             _ => return None,
         };
@@ -1281,7 +1519,6 @@ impl VodServe {
                 .map(|(id, session)| (id.clone(), Arc::clone(&session.lifecycle)))
                 .collect()
         };
-        let mut reaped = Vec::new();
         for (id, lifecycle) in expired {
             let _lifecycle = lifecycle.lock().await;
             let rendition = {
@@ -1301,16 +1538,16 @@ impl VodServe {
                 }
             };
             if let Some(rendition) = rendition {
-                reaped.push((id, rendition));
+                // Keep the per-id gate through detach. A resurrection for the
+                // same durable id must attach only after this old reader is
+                // gone, never between registry removal and detach.
+                rendition.detach_reader(&id).await;
+                tracing::info!(
+                    session = %session_log_id(&id),
+                    rendition = %rendition.key,
+                    "vod session idle-reaped (sliding TTL)"
+                );
             }
-        }
-        for (id, rendition) in &reaped {
-            rendition.detach_reader(id).await;
-            tracing::info!(
-                session = %session_log_id(id),
-                rendition = %rendition.key,
-                "vod session idle-reaped (sliding TTL)"
-            );
         }
 
         // Purge un-admitted renditions dormant past their TTL. The collection
@@ -1350,23 +1587,32 @@ impl VodServe {
         for rendition in renditions {
             rendition.kick();
         }
+        self.shared.prune_session_lifecycles();
     }
 
     // ---- serving internals -------------------------------------------------
 
     /// The session's rendition and block budget, or the typed reason there
-    /// isn't one. Touches the sliding TTL — every authorized GET is life.
+    /// isn't one. This is lookup only; response commit owns liveness.
     async fn session_rendition(
         &self,
         session_id: &str,
-    ) -> Option<Result<(Arc<Rendition>, Duration), VodError>> {
+    ) -> Option<Result<(Arc<Rendition>, Duration, ResponseOwner), VodError>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
         if let Some(cause) = session.tombstone {
             return Some(Err(VodError::Gone(cause)));
         }
-        *session.last_touch.lock().expect("touch lock") = Instant::now();
-        Some(Ok((Arc::clone(&session.rendition), session.block_budget)))
+        let rendition = Arc::clone(&session.rendition);
+        Some(Ok((
+            Arc::clone(&rendition),
+            session.block_budget,
+            ResponseOwner {
+                lifecycle: Arc::clone(&session.lifecycle),
+                incarnation: Arc::clone(&session.incarnation),
+                rendition,
+            },
+        )))
     }
 
     async fn serve_init(
@@ -1432,7 +1678,6 @@ impl VodServe {
     ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case.
         if let Some(ready) = self.open_materialized(rendition, index).await? {
-            self.note_served(rendition, session_id, index).await;
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure() {
@@ -1486,7 +1731,6 @@ impl VodServe {
                 // registering, before sleeping, closes it; dropping `wait`
                 // deregisters synchronously.
                 if let Some(ready) = self.open_materialized(rendition, index).await? {
-                    self.note_served(rendition, session_id, index).await;
                     return Ok(ready);
                 }
                 if let Some(cause) = rendition.failure() {
@@ -1498,10 +1742,7 @@ impl VodServe {
         match outcome {
             Err(_refused) => Err(VodError::Busy),
             Ok(WaitOutcome::Ready) => match self.open_materialized(rendition, index).await? {
-                Some(ready) => {
-                    self.note_served(rendition, session_id, index).await;
-                    Ok(ready)
-                }
+                Some(ready) => Ok(ready),
                 // Evicted in the instant between satisfy and open — rare, and
                 // a retryable pending is the honest answer.
                 None => Err(VodError::Pending {
@@ -1567,6 +1808,26 @@ impl VodServe {
 }
 
 impl Shared {
+    fn session_lifecycle(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut lifecycles = self
+            .session_lifecycles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(lifecycle) = lifecycles.get(session_id).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+        let lifecycle = Arc::new(Mutex::new(()));
+        lifecycles.insert(session_id.to_owned(), Arc::downgrade(&lifecycle));
+        lifecycle
+    }
+
+    fn prune_session_lifecycles(&self) {
+        self.session_lifecycles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, lifecycle| lifecycle.strong_count() > 0);
+    }
+
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
     /// timestamp survives shorter HTTP block deadlines and their 503 retries.
     fn arm_materialize_watchdog(self: &Arc<Self>, rendition: &Arc<Rendition>, index: u32) {
@@ -3174,7 +3435,8 @@ mod tests {
                 kind: request("vod-control", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle(session_id),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -3291,7 +3553,11 @@ mod tests {
         // that is the protocol working, so retry the way a client would.
         for _ in 0..20 {
             match serve.segment(session, name).await {
-                Some(Ok(Some(ready))) => return ready,
+                Some(Ok(Some((ready, owner)))) => {
+                    let index = planned_index(name);
+                    assert!(serve.commit_resolved_media(session, &owner, index).await);
+                    return ready;
+                }
                 Some(Err(VodError::Pending { .. })) => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -3301,11 +3567,11 @@ mod tests {
         panic!("fetching {name} never materialized");
     }
 
-    fn describe(answer: Option<Result<Option<SegmentReady>, VodError>>) -> String {
+    fn describe(answer: Option<Result<Option<(SegmentReady, ResponseOwner)>, VodError>>) -> String {
         match answer {
             None => "None".into(),
             Some(Ok(None)) => "Ok(None)".into(),
-            Some(Ok(Some(ready))) => format!("Ok(Some(len {}))", ready.len),
+            Some(Ok(Some((ready, _)))) => format!("Ok(Some(len {}))", ready.len),
             Some(Err(error)) => format!("Err({error:?})"),
         }
     }
@@ -3349,7 +3615,8 @@ mod tests {
             .playlist("sess-a")
             .await
             .expect("a vod session")
-            .expect("playlist bytes");
+            .expect("playlist bytes")
+            .0;
         let text = String::from_utf8(first.clone()).expect("utf8 playlist");
         assert!(text.contains("#EXT-X-PLAYLIST-TYPE:VOD\n"), "{text}");
         assert!(text.ends_with("#EXT-X-ENDLIST\n"), "{text}");
@@ -3363,7 +3630,8 @@ mod tests {
             .playlist("sess-a")
             .await
             .expect("a vod session")
-            .expect("playlist bytes");
+            .expect("playlist bytes")
+            .0;
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
     }
 
@@ -3384,7 +3652,7 @@ mod tests {
 
         // The init the map names is served with its own strong etag.
         let init = match serve.segment("sess-a", "init.mp4").await {
-            Some(Ok(Some(ready))) => ready,
+            Some(Ok(Some((ready, _)))) => ready,
             other => panic!("init.mp4: {}", describe(other)),
         };
         assert!(init.etag.contains("-init-"), "{}", init.etag);
@@ -3401,6 +3669,10 @@ mod tests {
         };
         create(&serve, &file, "sess-a", "play-a", &tight).await;
         let last = plan_len(&serve, "sess-a").await - 1;
+        let touched = *serve.shared.sessions.lock().await["sess-a"]
+            .last_touch
+            .lock()
+            .expect("touch lock");
 
         // The producer cannot possibly reach the last entry inside a
         // millisecond, so the hard deadline fires and the answer is the typed
@@ -3415,6 +3687,14 @@ mod tests {
             }
             other => panic!("expected Pending, got {:?}", describe(Some(other))),
         }
+        assert_eq!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            touched,
+            "a timed-out VOD materialization must not renew the session",
+        );
     }
 
     #[tokio::test]
@@ -3608,7 +3888,7 @@ mod tests {
                 .await
                 .expect("a vod session")
             {
-                Ok(Some(ready)) => assert!(ready.len > 0),
+                Ok(Some((ready, _))) => assert!(ready.len > 0),
                 other => panic!(
                     "segment {segment} must serve instantly: {:?}",
                     describe(Some(other))
@@ -3639,7 +3919,8 @@ mod tests {
             .playlist("sess-a")
             .await
             .expect("ours")
-            .expect("bytes");
+            .expect("bytes")
+            .0;
         // Wait for the generation to finish so nothing writes under the
         // successor.
         let rendition = rendition_of(&first, "sess-a").await;
@@ -3656,7 +3937,8 @@ mod tests {
             .playlist("sess-b")
             .await
             .expect("ours")
-            .expect("bytes");
+            .expect("bytes")
+            .0;
         assert_eq!(
             playlist_before, playlist_after,
             "a resurrected rendition serves the identical playlist"
@@ -3668,7 +3950,7 @@ mod tests {
                 .await
                 .expect("a vod session")
             {
-                Ok(Some(ready)) => assert!(ready.len > 0),
+                Ok(Some((ready, _))) => assert!(ready.len > 0),
                 other => panic!(
                     "adopted segment {segment} must serve instantly: {:?}",
                     describe(Some(other))
@@ -3784,6 +4066,10 @@ mod tests {
         let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let touched = *serve.shared.sessions.lock().await["sess-a"]
+            .last_touch
+            .lock()
+            .expect("touch lock");
 
         for name in [
             "seg99999.m4s",  // past the plan's end
@@ -3805,6 +4091,14 @@ mod tests {
         assert!(serve.segment("sess-x", "seg00000.m4s").await.is_none());
         assert!(serve.playlist("sess-x").await.is_none());
         assert!(!serve.owns("sess-x").await);
+        assert_eq!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            touched,
+            "invalid names and indexes never renew the VOD attachment",
+        );
     }
 
     #[tokio::test]
@@ -3826,7 +4120,8 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -3843,13 +4138,31 @@ mod tests {
         assert_eq!(status.materialized_segments, 0);
         assert!(status.planned_segments > 1);
         assert_eq!(status.working_set_budget_bytes, 8 << 30);
+        assert!(matches!(
+            serve.segment("sess-a", "notes.txt").await,
+            Some(Ok(None))
+        ));
+        let (_, owner) = serve
+            .playlist("sess-a")
+            .await
+            .expect("ours")
+            .expect("playlist");
         assert_eq!(
             *serve.shared.sessions.lock().await["sess-a"]
                 .last_touch
                 .lock()
                 .expect("touch lock"),
             touched,
-            "diagnostic reads must not keep an abandoned session alive",
+            "diagnostics, lookups, and invalid objects must not keep an abandoned session alive",
+        );
+        assert!(serve.commit_resolved_media("sess-a", &owner, None).await);
+        assert!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock")
+                > touched,
+            "only the resolved response commit renews the VOD session",
         );
 
         assert!(serve.end("sess-a", Terminal::Deleted).await);
@@ -3858,6 +4171,151 @@ mod tests {
             "a tombstone is not live"
         );
         assert!(serve.status("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("sess-a", 0).await;
+        serve.shared.sessions.lock().await.insert(
+            "sess-a".into(),
+            Session {
+                rendition: Arc::clone(&rendition),
+                playback_id: "play-a".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
+                target_height: 360,
+                kind: request("play-a", 0.0).kind,
+                supersession_user: "[\"user_id\",1]".into(),
+                block_budget: Duration::from_secs(8),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                tombstone: None,
+            },
+        );
+
+        let (_, stale_owner) = serve
+            .playlist("sess-a")
+            .await
+            .expect("ours")
+            .expect("playlist");
+        assert!(serve.response_owner_is_live("sess-a", &stale_owner).await);
+        assert!(serve.end("sess-a", Terminal::Deleted).await);
+        assert!(!serve.response_owner_is_live("sess-a", &stale_owner).await);
+        assert!(
+            !serve
+                .commit_resolved_media("sess-a", &stale_owner, Some(0))
+                .await
+        );
+
+        let replacement_touch = Instant::now() - Duration::from_secs(5);
+        serve.shared.sessions.lock().await.insert(
+            "sess-a".into(),
+            Session {
+                rendition,
+                playback_id: "play-b".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 2,
+                target_height: 360,
+                kind: request("play-b", 0.0).kind,
+                supersession_user: "[\"user_id\",1]".into(),
+                block_budget: Duration::from_secs(8),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(replacement_touch),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                tombstone: None,
+            },
+        );
+        assert!(!serve.response_owner_is_live("sess-a", &stale_owner).await);
+        assert!(
+            !serve
+                .commit_resolved_media("sess-a", &stale_owner, Some(0))
+                .await
+        );
+        assert_eq!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            replacement_touch,
+            "an old incarnation cannot renew a new attachment under the same id",
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reap_and_same_id_resurrection_are_one_reader_transition() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+        let (_, stale_owner) = serve
+            .playlist("sess-a")
+            .await
+            .expect("ours")
+            .expect("playlist");
+        *serve.shared.sessions.lock().await["sess-a"]
+            .last_touch
+            .lock()
+            .expect("touch lock") = Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+
+        // Stop the old reap exactly after registry removal but before reader
+        // detach. Resurrection must wait on the stable per-id lifecycle gate,
+        // not attach a successor that the old reap can then remove.
+        let readers = rendition.readers.lock().await;
+        let maintain = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            async move { serve.maintain().await }
+        });
+        wait_until("idle registry removal", Duration::from_secs(2), || {
+            let serve = Arc::clone(&serve);
+            async move { !serve.shared.sessions.lock().await.contains_key("sess-a") }
+        })
+        .await;
+        let resurrect = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let file = file.clone();
+            async move { create(&serve, &file, "sess-a", "play-b", &settings()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !resurrect.is_finished(),
+            "resurrection waits until the old reader detach is complete"
+        );
+
+        drop(readers);
+        maintain.await.expect("maintenance task");
+        resurrect.await.expect("resurrection task");
+        assert!(serve.shared.sessions.lock().await.contains_key("sess-a"));
+        assert_eq!(
+            rendition
+                .readers
+                .lock()
+                .await
+                .get("sess-a")
+                .copied()
+                .expect("replacement reader")
+                .last_served,
+            None,
+            "the replacement reader survives the predecessor's reap"
+        );
+        assert!(
+            !serve
+                .commit_resolved_media("sess-a", &stale_owner, Some(1))
+                .await,
+            "the old response incarnation cannot commit into the replacement"
+        );
+        assert_eq!(
+            rendition.readers.lock().await["sess-a"].last_served,
+            None,
+            "the stale completion did not move the replacement frontier"
+        );
     }
 
     #[tokio::test]
@@ -3959,6 +4417,7 @@ mod tests {
             .expect("unshared rendition")
             .materialize_budget = Duration::from_millis(25);
         rendition.attach_reader("sess-a", 0).await;
+        let touched = Instant::now() - Duration::from_secs(5);
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
@@ -3971,8 +4430,9 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_millis(1),
-                lifecycle: Arc::new(Mutex::new(())),
-                last_touch: StdMutex::new(Instant::now()),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
@@ -3982,6 +4442,14 @@ mod tests {
             serve.segment("sess-a", "seg00001.m4s").await,
             Some(Err(VodError::Pending { .. }))
         ));
+        assert_eq!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            touched,
+            "a pending response does not prove playback demand",
+        );
         tokio::time::sleep(Duration::from_millis(40)).await;
         match serve.segment("sess-a", "seg00001.m4s").await {
             Some(Err(VodError::ProducerFailed(cause))) => {
@@ -3989,6 +4457,14 @@ mod tests {
             }
             other => panic!("watchdog must settle retries typed: {}", describe(other)),
         }
+        assert_eq!(
+            *serve.shared.sessions.lock().await["sess-a"]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            touched,
+            "a producer failure does not renew the attachment",
+        );
     }
 
     /// Pure bookkeeping, faked materialization on purpose: the property under
@@ -4239,7 +4715,7 @@ mod tests {
         );
         // And the init is servable without any producer having spawned.
         match second.segment("sess-b", INIT_NAME).await.expect("ours") {
-            Ok(Some(ready)) => assert!(ready.len > 0),
+            Ok(Some((ready, _))) => assert!(ready.len > 0),
             other => panic!("init.mp4 must serve: {:?}", describe(Some(other))),
         }
         assert!(

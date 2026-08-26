@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "8d4cef2d",
+  "e0eea0ee",
+  "168ad99e",
+  "748272b0",
+  "61872f43",
+  "5326841f",
+  "6631bda0",
+  "7170eafe",
+  "cf31c512",
+  "cfe6f081",
+  "73ef9e1d",
+  "641dfe22",
+  "91202c3f",
+  "64403b07",
+  "f70ea367",
+  "d1a8faea",
+]
+points = ["playback.pipeline", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The rolling-control regressions require a claimed expiry to report its committed terminal facts, make a Snapshot command received at the exact actor deadline claim expiry before replying, and deny a physical producer signal at the same shared deadline even before timer scheduling. Playlist tests distinguish a successfully published response from startup timeout and in-flight waiting, while the retained-window case proves a pruned segment cannot renew the actor lease. The HTTP response commit points keep init, media, conditional, generated-playlist, subtitle, and VOD capability ownership fenced after object validation. The pure browser policy test pins distinct legacy, explicit-demand, and immutable-VOD lease labels in the shipped overlay. Reverting the review corrections revives a post-expiry signal, lets failed requests manufacture liveness, or reports a five-minute VOD lease as legacy."
