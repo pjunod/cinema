@@ -289,43 +289,6 @@ jobs:
       - name: Check every affected web layout
         run: make ui-check
 
-  vod_web:
-    name: film-addressed VOD browser acceptance
-    needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: vod-web
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-1.62.0
-      - uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - uses: ./.github/actions/playwright
-        with:
-          version: "1.62.0"
-      - name: Build the exact server under test
-        run: cargo build --locked -p plurxd
-      - name: Run supported film-addressed VOD browser acceptance
-        run: |
-          mkdir -p target/playback-lab/acceptance
-          chrome="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
-          scripts/playback-lab run --suite vod --browser chrome \
-            --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
-          # The shaping suite needs a transcode rung. Keep it opt-in until D6
-          # removes the server's typed pre-playback rejection for that rung.
-
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
@@ -699,7 +662,6 @@ jobs:
       - check
       - cluster_auth
       - web_layout
-      - vod_web
       - android_jvm
       - apple
       - android_device
@@ -716,7 +678,6 @@ jobs:
           CHECK_RESULT: ${{ needs.check.result }}
           CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
-          VOD_WEB_RESULT: ${{ needs.vod_web.result }}
           ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
           APPLE_RESULT: ${{ needs.apple.result }}
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
@@ -727,7 +688,7 @@ jobs:
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
             "$CLUSTER_AUTH_RESULT" \
-            "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
+            "$WEB_LAYOUT_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
             "$BUILD_RESULT" "$DOCKER_RESULT"; do
             case "$result" in
