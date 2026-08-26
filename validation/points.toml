@@ -469,7 +469,7 @@ paths = [
   "crates/plurxd/src/{cachekeep,logbuf,main,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
-  "crates/plurxd/src/http/{dto,error,extract,mod,network,publication,reading,system}.rs",
+  "crates/plurxd/src/http/{analysis,dto,error,extract,mod,network,publication,reading,system}.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]

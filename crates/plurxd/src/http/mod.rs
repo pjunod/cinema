@@ -5,6 +5,7 @@
 //! Plex-compat façade (a separate crate) and playback routes mount alongside
 //! in later slices.
 
+mod analysis;
 mod auth;
 mod browse;
 mod cluster;
@@ -194,6 +195,8 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
+        .route("/files/{id}/analysis", post(analysis::request))
+        .route("/analysis/jobs", get(analysis::jobs))
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
@@ -7896,6 +7899,52 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(decision["audio_offset_ms"], 0);
+
+        // Analysis control is a separate durable queue, not an alias for the
+        // synchronous ffprobe repair endpoint below. Keep the media worker
+        // preempted so this request remains visibly queued for the status API.
+        let _waiting_viewer = state.transcode.test_mark_live_waiting();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable analysis queue");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    &format!("/api/v1/files/{}/analysis", s.file),
+                    None,
+                    json!({ "force": false, "components": ["fragment_index"] }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, requested) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/analysis", s.file),
+                Some(&admin),
+                json!({ "force": false, "components": ["fragment_index"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{requested}");
+        assert_eq!(requested["file_id"], s.file.to_string());
+        assert_eq!(requested["state"], "queued");
+        tokio::task::yield_now().await;
+        let (status, analysis) = call(&app, get("/api/v1/analysis/jobs", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{analysis}");
+        assert_eq!(
+            analysis["requests"][0]["request_id"],
+            requested["request_id"]
+        );
+        assert_eq!(analysis["files"][0]["item_id"], s.ep.to_string());
+        assert!(analysis["jobs"].as_array().is_some_and(Vec::is_empty));
+        drop(_waiting_viewer);
+
         // Progress on a missing item → 404.
         assert_eq!(
             call(

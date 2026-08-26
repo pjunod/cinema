@@ -81,6 +81,70 @@ BEGIN
 END;
 "#;
 
+/// v31/v13 schema for durable operator requests before content addressing.
+/// Kept separate from [`CLUSTER_FRAGMENT_INDEX_SCHEMA`] so migration fixtures
+/// and deployed v30/v12 databases retain their historical shape.
+pub const ANALYSIS_REQUESTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS analysis_requests (
+    request_id         TEXT PRIMARY KEY,
+    file_id            INTEGER NOT NULL,
+    source_size        INTEGER NOT NULL,
+    source_mtime       INTEGER NOT NULL,
+    component          TEXT NOT NULL CHECK (component IN ('fragment_index')),
+    force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+    target_node_id     TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+    owner_node_id      TEXT,
+    fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+    lease_expires_ms   INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    not_before_ms      INTEGER NOT NULL,
+    result_cache_key   TEXT,
+    last_error_code    TEXT,
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS analysis_requests_due
+    ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);
+CREATE INDEX IF NOT EXISTS analysis_requests_status
+    ON analysis_requests(state, updated_at_ms DESC, request_id);
+CREATE UNIQUE INDEX IF NOT EXISTS analysis_requests_one_active_source
+    ON analysis_requests(file_id, source_size, source_mtime, component, target_node_id)
+    WHERE state IN ('queued', 'running', 'submitted');
+
+CREATE TRIGGER IF NOT EXISTS analysis_requests_cancel_source BEFORE DELETE ON files
+BEGIN
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           last_error_code = 'source_deleted'
+     WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+END;
+CREATE TRIGGER IF NOT EXISTS analysis_requests_supersede_source
+AFTER UPDATE OF size, mtime ON files
+WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+BEGIN
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           last_error_code = 'source_superseded'
+     WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+END;
+CREATE TRIGGER IF NOT EXISTS analysis_requests_bound_terminal_history
+AFTER UPDATE OF state ON analysis_requests
+WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+BEGIN
+    DELETE FROM analysis_requests
+     WHERE request_id IN (
+       SELECT request_id FROM analysis_requests
+        WHERE state IN ('ready', 'failed', 'cancelled')
+          AND request_id <> NEW.request_id
+        ORDER BY updated_at_ms, request_id
+        LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                    WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+END;
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 const BLOB_MAGIC: &[u8; 8] = b"PLRXIDX2";
 const BLOB_FORMAT_VERSION: u16 = 2;
@@ -125,6 +189,48 @@ pub struct ClusterFragmentIndexJob {
     pub not_before_ms: i64,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub last_error_code: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewAnalysisRequest {
+    pub request_id: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub component: String,
+    pub force_rebuild: bool,
+    pub target_node_id: String,
+    pub not_before_ms: i64,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisRequest {
+    pub request_id: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub component: String,
+    pub force_rebuild: bool,
+    pub target_node_id: String,
+    pub state: String,
+    pub owner_node_id: String,
+    pub fence: i64,
+    pub lease_expires_ms: i64,
+    pub attempts: i64,
+    pub not_before_ms: i64,
+    pub result_cache_key: String,
+    pub last_error_code: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisFileLabel {
+    pub file_id: i64,
+    pub item_id: i64,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +258,81 @@ pub struct ClusterFragmentIndexLocation {
 
 #[async_trait]
 pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
+    /// Persist an operator request before the source digest (and therefore the
+    /// content-addressed worker key) is known. Concurrent duplicate requests
+    /// join the one active request for the same file/component/node.
+    async fn enqueue_analysis_request(
+        &self,
+        request: &NewAnalysisRequest,
+    ) -> Result<AnalysisRequest, StoreError>;
+
+    async fn claim_analysis_request(
+        &self,
+        node_id: &str,
+        now_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    async fn renew_analysis_request(
+        &self,
+        request_id: &str,
+        node_id: &str,
+        fence: i64,
+        now_ms: i64,
+        lease_expires_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Atomically resolve a current request into its content-addressed worker
+    /// row and transition the request to submitted. No stale request owner may
+    /// enqueue or reopen work without also committing the fenced handoff.
+    async fn submit_fragment_index_analysis(
+        &self,
+        request: &AnalysisRequest,
+        job: &NewClusterFragmentIndexJob,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    async fn retry_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        error_code: &str,
+        now_ms: i64,
+        retry_at_ms: i64,
+        charge_attempt: bool,
+    ) -> Result<bool, StoreError>;
+
+    async fn fail_analysis_request(
+        &self,
+        request_id: &str,
+        node_id: &str,
+        fence: i64,
+        error_code: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Fold terminal fragment-index results into submitted operator requests.
+    async fn settle_analysis_requests(&self, now_ms: i64) -> Result<u64, StoreError>;
+
+    async fn prune_analysis_requests(
+        &self,
+        older_than_ms: i64,
+        limit: i64,
+    ) -> Result<u64, StoreError>;
+
+    async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    async fn analysis_file_labels(&self, limit: i64) -> Result<Vec<AnalysisFileLabel>, StoreError>;
+
+    async fn cluster_fragment_index_jobs(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ClusterFragmentIndexJob>, StoreError>;
+
+    async fn cluster_fragment_index_job(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<ClusterFragmentIndexJob>, StoreError>;
+
     async fn record_fragment_index_source(
         &self,
         observation: &FragmentIndexSourceObservation,

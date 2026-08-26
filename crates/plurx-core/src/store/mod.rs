@@ -71,8 +71,9 @@ pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
 pub use fragment_index_cluster::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
     cluster_fragment_index_pipeline_digest, decode_cluster_fragment_index_blob,
-    encode_cluster_fragment_index_blob, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
-    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    encode_cluster_fragment_index_blob, AnalysisFileLabel, AnalysisRequest,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
+    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
     NewClusterFragmentIndexJob, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
 };
 pub use publication::{PublicationFence, PublicationStore};

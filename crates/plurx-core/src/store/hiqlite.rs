@@ -38,13 +38,14 @@ use crate::error::StoreError;
 // v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
 // speculative-transcode queue; v10 adds live media-session routing; v11 adds
 // storage-keyed shared-cache generations and reader pins; v12 adds the small
-// replicated catalog and fenced queue for content-addressed fragment indexes.
+// replicated catalog and fenced queue for content-addressed fragment indexes;
+// v13 adds durable operator analysis requests ahead of content addressing.
 // Every additive step
 // is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
 // schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 12;
+pub const AUTH_SCHEMA_VERSION: i64 = 13;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -54,6 +55,7 @@ const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
 const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
 const FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = 11;
+const ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE: i64 = 12;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1467,6 +1469,21 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE) => {
+                    super::hiqlite_fragment_index_cluster::install_schema(self.client().inner())
+                        .await?;
+                    let now = self.now()?;
+                    self.execute(
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3",
+                        params!(
+                            AUTH_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -1619,6 +1636,23 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM analysis_requests".to_owned(), params!()),
+            (
+                "DELETE FROM cluster_fragment_index_locations".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_artifacts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_jobs".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_sources".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_playback_pointers".to_owned(), params!()),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
@@ -2702,7 +2736,8 @@ fn schema_migration_action(
         | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
         | MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
         | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
-        | FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE => {
+        | FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4078,9 +4113,9 @@ mod tests {
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 7,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 8,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v12 step"
+            "this implementation contains every additive v5→v13 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -4147,6 +4182,14 @@ mod tests {
             )
             .expect("fragment-index predecessor"),
             SchemaMigrationAction::MigrateFrom(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("analysis-request predecessor"),
+            SchemaMigrationAction::MigrateFrom(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

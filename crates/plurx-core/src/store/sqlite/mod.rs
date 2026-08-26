@@ -823,6 +823,9 @@ const MIGRATIONS: &[&str] = &[
     // v30: replicated metadata for content-addressed fragment indexes. The
     // blob itself remains outside this database on clustered deployments.
     crate::store::fragment_index_cluster::CLUSTER_FRAGMENT_INDEX_SCHEMA,
+    // v31: durable operator analysis requests. The source hash is deliberately
+    // resolved by a leased worker after the HTTP request has committed.
+    crate::store::fragment_index_cluster::ANALYSIS_REQUESTS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1753,7 +1756,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 30,
+            version, 31,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2750,6 +2753,74 @@ mod tests {
         match SqliteStore::open(&db).map(|_| ()) {
             Err(StoreError::Migration(msg)) => assert!(msg.contains("newer")),
             other => panic!("expected migration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v31_adds_analysis_requests_to_a_real_v30_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(30) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 30)
+                .expect("v30 marker");
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'table' AND name = 'analysis_requests'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("v30 shape"),
+                0,
+                "the historical v30 fixture must not contain the v31 table"
+            );
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.proof', 'survives')",
+                [],
+            )
+            .expect("seed v30 state");
+        }
+
+        SqliteStore::open(&db).expect("migrate v30 to v31");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'migration.proof'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("migration proof"),
+            "survives"
+        );
+        for object in [
+            "analysis_requests",
+            "analysis_requests_due",
+            "analysis_requests_status",
+            "analysis_requests_one_active_source",
+            "analysis_requests_cancel_source",
+            "analysis_requests_supersede_source",
+            "analysis_requests_bound_terminal_history",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [object],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("schema object"),
+                1,
+                "missing v31 schema object {object}"
+            );
         }
     }
 }
