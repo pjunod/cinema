@@ -910,7 +910,7 @@ def pick_playable(base_url, token, items, preferred):
 
 def discover_routes(base_url, token, args, preferred_library=None, preferred_item=None,
                     preferred_player=None, preferred_query=None):
-    """Resolve the nine routes against whatever server we were pointed at.
+    """Resolve the ten routes against whatever server we were pointed at.
 
     Ids are looked up rather than hardcoded so `--base-url` works against a real
     library. The ids themselves never appear in a screenshot — only in the hash
@@ -947,6 +947,7 @@ def discover_routes(base_url, token, args, preferred_library=None, preferred_ite
         "search": {"hash": f"#/search/{query}"},
         "item": {"hash": f"#/item/{item_id}"},
         "activity": {"hash": "#/activity"},
+        "analysis": {"hash": "#/analysis"},
         "settings": {"hash": "#/settings"},
         # No token in localStorage, so `boot()` falls through to the sign-in
         # card. The only route whose container is #app: there is no #main
@@ -1248,12 +1249,21 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # /scan/status calls. The phase is product state, so synchronizing on it
         # preserves the request-count contract without baking a count or an
         # endpoint into this harness.
-        if name in {"home", "activity", "settings"}:
+        if name in {"home", "activity", "analysis", "settings"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:
             resume_activity_polling(page)
         settle_ms = args.settle_ms
+        if name == "analysis":
+            # The status page has already published one settled queue
+            # snapshot. Freeze its two-second route poll at that named state;
+            # otherwise a loaded runner can fit either two or three identical
+            # requests into the later 4.5s observation window.
+            page.evaluate("""() => {
+              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
+              PAGE_TIMER = null;
+            }""")
         if name == "settings":
             # The Libraries tab loads scan status once, then polls every 2s.
             # A fixed sleep lets an overloaded event loop enqueue a third tick

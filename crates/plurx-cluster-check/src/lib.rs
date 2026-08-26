@@ -180,6 +180,14 @@ pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
 const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
+/// Payload retained by each uncoalesced control write.
+///
+/// The former control repeatedly overwrote 80 progress rows. A compacted
+/// database is expected to collapse those versions, so that workload could
+/// prove the commit budget but not the independent retained-byte budget. One
+/// bounded, unique setting per beat gives the negative control exactly the
+/// high-cardinality retained state that the byte gate is meant to reject.
+const GROWTH_RAW_VALUE_BYTES: usize = GROWTH_BYTES_PER_BEAT_BUDGET as usize + 128;
 /// One extra commit window per stream above the deterministic cadence result.
 pub const GROWTH_COMMIT_HEADROOM_PER_STREAM: u64 = 1;
 /// Maximum accepted lag or internal-entry drift in the sampled applied index.
@@ -5888,17 +5896,12 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_before_bytes = after_bytes;
     let raw_snapshot = snapshot_index(&metrics_client).await?;
     let raw_applied_before = applied_index(&metrics_client).await?;
+    let raw_value = "x".repeat(GROWTH_RAW_VALUE_BYTES);
     for beat in 0..GROWTH_INCOMING_BEATS {
-        let user_id = users[usize::try_from(beat % GROWTH_ACTIVE_STREAMS)?];
         store
-            .put_progress(
-                user_id,
-                item_id,
-                i64::try_from((beat / GROWTH_ACTIVE_STREAMS + 1) * 1_000)?,
-                Some(10_000_000),
-            )
+            .put_setting(&format!("cluster-check.raw-growth.{beat:05}"), &raw_value)
             .await
-            .context("raw induced-regression progress write")?;
+            .context("raw induced-regression retained-state write")?;
     }
     let raw_applied_after = applied_index(&metrics_client).await?;
     let raw_measured_snapshot =
