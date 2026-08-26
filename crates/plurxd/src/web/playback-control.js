@@ -57,6 +57,26 @@
       && !!value.capabilities;
   }
 
+  function boundedObservation(value) {
+    if (!value || typeof value !== "object") return null;
+    const observation = {};
+    if (Number.isSafeInteger(value.dropped_frames) && value.dropped_frames >= 0) {
+      observation.dropped_frames = value.dropped_frames;
+    }
+    if (["unknown", "ready", "starved", "failed"].includes(value.decoder_state)) {
+      observation.decoder_state = value.decoder_state;
+    }
+    if (["network", "manifest", "media", "decoder", "drm", "unknown"]
+      .includes(value.error_code)) {
+      observation.error_code = value.error_code;
+    }
+    if (observation.error_code && value.error_detail != null) {
+      const detail = String(value.error_detail).replace(/[\r\n\0]/g, " ").slice(0, 120);
+      if (detail) observation.error_detail = detail;
+    }
+    return Object.keys(observation).length ? observation : null;
+  }
+
   function makeRequest(bootstrap, clientInstanceId, sequence, snapshot) {
     if (!validSnapshot(snapshot)) throw new TypeError("invalid playback-control snapshot");
     const request = Object.assign({}, snapshot, {
@@ -213,6 +233,7 @@
           buffered_through_ms: request.buffered_through_ms,
           observed_download_bps: request.observed_download_bps == null
             ? null : request.observed_download_bps,
+          observation: boundedObservation(request.observation),
         };
         this.onExchange({ request, response, error: null });
         if (request.demand === "end") this.stop();
@@ -272,6 +293,7 @@
         buffered_through_ms: snapshot.buffered_through_ms,
         observed_download_bps: snapshot.observed_download_bps == null
           ? null : snapshot.observed_download_bps,
+        observation: boundedObservation(snapshot.observation),
       };
     }
 

@@ -158,6 +158,7 @@ async function main() {
     position_ms: 3_000,
     buffered_through_ms: 13_000,
     observed_download_bps: 8_000_000,
+    observation: null,
   });
   const changedCapabilities=snapshot(4_000);
   changedCapabilities.capabilities.max_height=720;
@@ -331,6 +332,26 @@ async function main() {
   assert.equal(lateCompletions,0,"a stopped predecessor discards a late success");
   assert.equal(predecessor.status().accepted_sequence,0);
 
+  const triggerDeferred=deferred();
+  const triggerReporter=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"abababab-abab-4bab-8bab-abababababab",
+    snapshot:()=>snapshot(),
+    send:async ()=>triggerDeferred.promise,
+  }).start();
+  const typedTrigger=snapshot(12_000,"failed");
+  typedTrigger.observation={
+    decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
+    ignored_private_field:"must not enter log context",
+  };
+  const triggerContext=triggerReporter.notify(typedTrigger);
+  assert.deepEqual(triggerContext.observation,{
+    decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
+  },"the real reporter preserves bounded typed evidence in an immediate trigger context");
+  triggerReporter.stop();
+  triggerDeferred.resolve(response({generation:bootstrap().generation,control_epoch:7,sequence:1}));
+  await flush();
+
   const endTimers=[];
   const endingSnapshot=snapshot(60_000,"ended");
   endingSnapshot.demand="end";
@@ -464,23 +485,52 @@ async function main() {
     media_failure:true,
     observation:{decoder_state:"failed",error_code:"decoder",error_detail:"videoDecodeError"},
   });
+  video.ended=false; video.paused=false; video.currentTime=30; video.error={code:3};
+  player.controlRenderOverride="failed";
+  player.controlObservationOverride={
+    decoder_state:"ready",error_code:"network",error_detail:"fragLoadError",
+  };
+  assert.deepEqual(adapter.playbackControlSnapshot(video,player).observation,{
+    decoder_state:"ready",error_code:"network",error_detail:"fragLoadError",dropped_frames:2,
+  },"specific HLS evidence wins over the media element's generic error code");
+  video.error=null; player.controlRenderOverride=null; player.controlObservationOverride=null;
 
   const replayCalls=[];
   const replayDone=deferred();
-  const replayAdapter=new Function("play",[
+  const replayAdapter=new Function("playImpl",[
     "let PLAYER={fileId:'file-1',title:'Film',knownDur:90000,durMs:90000,meta:{kind:'movie'}};",
     "let PENDING_ATTEMPT_REASON=null;",
+    "let REPLAY_OPEN_PROMISE=null;",
+    shippedSource("takePlaybackAttemptReason"),
+    "function play(...args){ return playImpl(args,takePlaybackAttemptReason()); }",
     shippedSource("replayEnded"),
-    "return {replayEnded,state:()=>({player:PLAYER,reason:PENDING_ATTEMPT_REASON})};",
-  ].join("\n"))((...args)=>{ replayCalls.push(args); return replayDone.promise; });
+    "return {replayEnded,replacePlayer(value){PLAYER=value;},"+
+      "state:()=>({player:PLAYER,reason:PENDING_ATTEMPT_REASON,replayOpen:!!REPLAY_OPEN_PROMISE})};",
+  ].join("\n"))((args,reason)=>{ replayCalls.push({args,reason}); return replayDone.promise; });
   assert.equal(replayAdapter.replayEnded(),true);
+  replayAdapter.replacePlayer({fileId:"file-1",title:"Film replacement",knownDur:90000});
   assert.equal(replayAdapter.replayEnded(),false,"double-click cannot open two replay sessions");
-  assert.deepEqual(replayCalls[0],["file-1","Film",0,90000,{kind:"movie"}]);
-  assert.equal(replayAdapter.state().reason,"replay");
+  assert.deepEqual(replayCalls[0],{
+    args:["file-1","Film",0,90000,{kind:"movie"}],reason:"replay",
+  });
+  assert.equal(replayAdapter.state().reason,null);
+  assert.equal(replayAdapter.state().replayOpen,true,
+    "the duplicate guard survives replacement of the ended PLAYER object");
   replayDone.resolve();
   await flush();
-  assert.equal(replayAdapter.state().player.replayInFlight,false);
-  assert.equal(replayAdapter.state().reason,null);
+  assert.equal(replayAdapter.state().replayOpen,false);
+
+  const reasonAdapter=new Function([
+    "let PENDING_ATTEMPT_REASON=null;",
+    shippedSource("takePlaybackAttemptReason"),
+    "return {set(value){PENDING_ATTEMPT_REASON=value;},take:takePlaybackAttemptReason};",
+  ].join("\n"))();
+  reasonAdapter.set("quality");
+  const qualityReason=reasonAdapter.take();
+  reasonAdapter.set("subtitle-off");
+  const subtitleReason=reasonAdapter.take();
+  assert.equal(qualityReason,"quality");
+  assert.equal(subtitleReason,"subtitle-off");
 
   let replayClicks=0,elementPlays=0,activities=0;
   const endedToggle=new Function("document","replayEnded","playerActivity",[
@@ -502,6 +552,11 @@ async function main() {
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
   assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
   assert.match(shippedSource("togglePlay"),/if\(v\.ended\) replayEnded\(\)/);
+  const playSource=shippedSource("play");
+  assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<playSource.indexOf("await api("),
+    "play captures its one-shot reason before its first await");
+  assert.match(playSource,/openToken=\+\+PLAY_OPEN_SEQ/);
+  assert.match(playSource,/if\(!openIsAttached\(\)\)[\s\S]*releaseSession/);
 
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");

@@ -477,6 +477,16 @@ pub struct ClientControlSnapshot {
     pub position_ms: Option<i64>,
     pub buffered_through_ms: Option<i64>,
     pub observed_download_bps: Option<u64>,
+    pub observation: Option<ClientControlObservation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlObservation {
+    pub dropped_frames: Option<u64>,
+    pub decoder_state: Option<String>,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -890,6 +900,39 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             .filter(|number| *number <= MAX_DOWNLOAD_BPS)
         {
             context.insert("observed_download_bps".to_owned(), number.into());
+        }
+        if let Some(value) = value.observation.as_ref() {
+            let mut observation = serde_json::Map::new();
+            if let Some(number) = value
+                .dropped_frames
+                .filter(|number| *number <= 1_000_000_000)
+            {
+                observation.insert("dropped_frames".to_owned(), number.into());
+            }
+            if let Some(state) = clipped(&value.decoder_state, 16).filter(|state| {
+                matches!(state.as_str(), "unknown" | "ready" | "starved" | "failed")
+            }) {
+                observation.insert("decoder_state".to_owned(), state.into());
+            }
+            let error_code = clipped(&value.error_code, 16).filter(|code| {
+                matches!(
+                    code.as_str(),
+                    "network" | "manifest" | "media" | "decoder" | "drm" | "unknown"
+                )
+            });
+            if let Some(code) = error_code {
+                observation.insert("error_code".to_owned(), code.into());
+                if let Some(detail) = clipped(&value.error_detail, 120).filter(|detail| {
+                    !detail
+                        .bytes()
+                        .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+                }) {
+                    observation.insert("error_detail".to_owned(), detail.into());
+                }
+            }
+            if !observation.is_empty() {
+                context.insert("observation".to_owned(), observation.into());
+            }
         }
         (!context.is_empty()).then(|| serde_json::Value::Object(context))
     }
@@ -3887,6 +3930,12 @@ mod tests {
             position_ms: Some(90_000),
             buffered_through_ms: Some(90_400),
             observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(3),
+                decoder_state: Some("starved".into()),
+                error_code: None,
+                error_detail: None,
+            }),
         });
         event.control_trigger = Some(ClientControlSnapshot {
             generation: Some("11111111-1111-4111-8111-111111111111".into()),
@@ -3897,6 +3946,12 @@ mod tests {
             position_ms: Some(90_000),
             buffered_through_ms: Some(90_400),
             observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(4),
+                decoder_state: Some("failed".into()),
+                error_code: Some("decoder".into()),
+                error_detail: Some("persistent_decode_stall".into()),
+            }),
         });
 
         let persisted = client_playback_event(&event, 7);
@@ -3908,6 +3963,7 @@ mod tests {
         assert_eq!(accepted["render_state"], "stalled");
         assert_eq!(accepted["buffered_through_ms"], 90_400);
         assert_eq!(accepted["observed_download_bps"], 1_500_000);
+        assert_eq!(accepted["observation"]["decoder_state"], "starved");
         assert!(accepted["generation"]
             .as_str()
             .is_some_and(|value| value.starts_with("g-")));
@@ -3917,6 +3973,14 @@ mod tests {
             .unwrap_or_default()
             .contains("11111111-1111-4111-8111-111111111111"));
         assert_eq!(extra["control_trigger_client"]["render_state"], "failed");
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_code"],
+            "decoder"
+        );
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_detail"],
+            "persistent_decode_stall"
+        );
         assert!(extra["control_trigger_client"].get("sequence").is_none());
     }
 
