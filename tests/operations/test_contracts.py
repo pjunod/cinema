@@ -477,6 +477,17 @@ class OperationsContractCase(unittest.TestCase):
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_required_vod_ci_exercises_only_server_supported_presentations(self):
+        workflow = workflow_job_blocks(".github/workflows/ci.yml")["vod_web"]
+        server = read("crates/plurxd/src/vodserve.rs")
+
+        self.assertIn(
+            "transcode serving is gated on the D6 device measurement",
+            server,
+        )
+        self.assertIn("scripts/playback-lab run --suite vod", workflow)
+        self.assertNotIn("--suite stall-recovery", workflow)
+
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
         def choose(hosted, labels):
             return (
