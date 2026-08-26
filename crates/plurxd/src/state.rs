@@ -24,7 +24,10 @@ use plurx_core::metadata::{self, AniListClient, EnrichReport, TmdbClient};
 use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, TargetedScan};
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
-    keys, ArtworkRepairFence, CatalogueReader, PrometheusStoreSnapshot, PublicationStore, Store,
+    cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
+    encode_cluster_fragment_index_blob, keys, ArtworkRepairFence, CatalogueReader,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, NewClusterFragmentIndexJob,
+    PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -463,13 +466,16 @@ impl AppState {
             runtime_cache,
             renditions,
         } = dirs;
-        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
-            Arc::clone(&store),
-            artwork_dir.clone(),
-            scan_prune_percent,
-            node_id.clone(),
-            Arc::new(membership.clone()),
-        ));
+        let jobs = Arc::new(
+            JobManager::new_with_scan_prune_percent(
+                Arc::clone(&store),
+                artwork_dir.clone(),
+                scan_prune_percent,
+                node_id.clone(),
+                Arc::new(membership.clone()),
+            )
+            .with_membership(membership.clone()),
+        );
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
         let progress = crate::progress::ProgressCoalescer::new(Arc::clone(&store));
@@ -789,6 +795,9 @@ pub struct JobManager {
     /// than sampled once, because committed membership moves under a running
     /// daemon: a learner may be promoted, and a voter may be removed.
     job_authority: Arc<dyn ClusterJobAuthority>,
+    /// Exact committed membership and internal addressing for optional peer
+    /// hydration. Tests and recovery-only construction deliberately omit it.
+    membership: Option<plurx_core::cluster::membership::MembershipManager>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -935,6 +944,33 @@ fn ordered_index_paths(mut paths: Vec<(i64, PathBuf)>, cursor: Option<i64>) -> V
     });
     paths.rotate_left(split);
     paths
+}
+
+fn ordered_cluster_index_paths(
+    paths: Vec<(i64, PathBuf)>,
+    cursor: Option<i64>,
+    node_id: &str,
+) -> Vec<(i64, PathBuf)> {
+    let mut paths = ordered_index_paths(paths, cursor);
+    if cursor.is_none() && !paths.is_empty() {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in node_id.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let offset = usize::try_from(hash % paths.len() as u64).unwrap_or(0);
+        paths.rotate_left(offset);
+    }
+    paths
+}
+
+fn setting_enabled(value: Option<String>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Clears [`JobManager::indexing`] however the pass ends, including the ways a
@@ -1288,6 +1324,7 @@ impl JobManager {
             store,
             coordinator,
             job_authority,
+            membership: None,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
@@ -1309,6 +1346,14 @@ impl JobManager {
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
             last_genre_backfill: Mutex::new(None),
         }
+    }
+
+    fn with_membership(
+        mut self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+    ) -> Self {
+        self.membership = Some(membership);
+        self
     }
 
     async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
@@ -3188,6 +3233,21 @@ impl JobManager {
         // the time. Each node asking, on its own tick, converges everywhere.
         self.sweep_orphaned_vod_rows().await;
 
+        let cluster_cache_enabled =
+            match self.store.get_setting(keys::VOD_INDEX_CLUSTER_CACHE).await {
+                Ok(value) => setting_enabled(value),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read the cluster fragment-index gate");
+                    false
+                }
+            };
+        if cluster_cache_enabled {
+            if self.may_run_cluster_jobs().await {
+                self.build_cluster_fragment_indexes(transcode).await;
+            }
+            return;
+        }
+
         let deadline = std::time::Instant::now() + INDEX_WINDOW;
         let have_dovi = transcode.dv_strippable();
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
@@ -3296,6 +3356,488 @@ impl JobManager {
                 built_files = ?built_file_ids,
                 "fragment indexing pass finished"
             );
+        }
+    }
+
+    async fn build_cluster_fragment_indexes(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
+        const WORKERS_PER_NODE: usize = 2;
+        const CLAIM_TTL_MS: i64 = 60_000;
+
+        let node_id = self.coordinator.node_id().to_owned();
+        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
+        let have_dovi = transcode.dv_strippable();
+        let cache_root = crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir());
+        let libraries = match self.store.list_libraries().await {
+            Ok(libraries) => libraries,
+            Err(error) => {
+                tracing::warn!(%error, "cluster fragment indexing could not list libraries");
+                return;
+            }
+        };
+        let mut paths = Vec::new();
+        for library in libraries {
+            match self.store.library_file_paths(library.id).await {
+                Ok(library_paths) => paths.extend(library_paths),
+                Err(error) => tracing::warn!(
+                    library = library.id,
+                    %error,
+                    "listing files for cluster fragment indexing"
+                ),
+            }
+        }
+        let cursor_key = self.local_job_key(keys::JOB_VOD_INDEX_CURSOR);
+        let cursor = self.job_stamp(&cursor_key).await;
+        let paths = ordered_cluster_index_paths(paths, cursor, &node_id);
+        let deadline = std::time::Instant::now() + INDEX_WINDOW;
+        let mut attempted = 0_usize;
+        let mut enqueued = 0_usize;
+        let mut hydrated = 0_usize;
+        let mut last_examined = None;
+
+        for (examined, (file_id, _)) in paths.into_iter().enumerate() {
+            if attempted >= INDEX_MAX_PER_PASS
+                || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            if !transcode.pretranscode_worker_idle() {
+                break;
+            }
+            last_examined = Some(file_id);
+            let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                continue;
+            };
+            if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                continue;
+            }
+            attempted += 1;
+            let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
+                Ok(version) => version,
+                Err(error) => {
+                    tracing::debug!(file_id, %error, "cluster index source is not readable here");
+                    continue;
+                }
+            };
+            let memo = self
+                .store
+                .fragment_index_source(&node_id, file_id, &object_version)
+                .await
+                .ok()
+                .flatten();
+            let attested =
+                match crate::fragment_index_cluster::attest_source(&node_id, &file, memo.as_ref())
+                    .await
+                {
+                    Ok(attested) => attested,
+                    Err(error) => {
+                        tracing::warn!(file_id, %error, "source attestation failed");
+                        continue;
+                    }
+                };
+            if let Err(error) = self
+                .store
+                .record_fragment_index_source(&attested.observation)
+                .await
+            {
+                tracing::warn!(file_id, %error, "recording source attestation failed");
+                continue;
+            }
+            let pipeline_sha256 =
+                crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, have_dovi);
+            let Some(cache_key) =
+                cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
+            else {
+                continue;
+            };
+            match self.store.cluster_fragment_index_artifact(&cache_key).await {
+                Ok(Some(artifact)) => match crate::fragment_index_cluster::hydrate(
+                    self.store.as_ref(),
+                    self.membership.as_ref(),
+                    &node_id,
+                    &cache_root,
+                    &artifact,
+                )
+                .await
+                {
+                    Ok(Some(index)) => {
+                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                            tracing::warn!(file_id, %error, "installing hydrated fragment index");
+                        } else {
+                            hydrated += 1;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        file_id,
+                        cache_key,
+                        %error,
+                        "hydrating a cluster fragment index"
+                    ),
+                },
+                Ok(None) => {
+                    let now = clock_ms();
+                    let job = NewClusterFragmentIndexJob {
+                        cache_key: cache_key.clone(),
+                        file_id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        source_sha256: attested.observation.source_sha256.clone(),
+                        pipeline_sha256,
+                        not_before_ms: now,
+                        created_at_ms: now,
+                    };
+                    match self.store.enqueue_cluster_fragment_index(&job).await {
+                        Ok(true) => enqueued += 1,
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            file_id,
+                            cache_key,
+                            %error,
+                            "queueing a cluster fragment index"
+                        ),
+                    }
+                }
+                Err(error) => tracing::warn!(file_id, %error, "reading cluster index catalog"),
+            }
+        }
+
+        if let Some(file_id) = last_examined {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &file_id.to_string())
+                .await
+            {
+                tracing::warn!(%error, key = cursor_key, "recording cluster index cursor failed");
+            }
+            self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
+        }
+
+        let mut workers = tokio::task::JoinSet::new();
+        for _ in 0..WORKERS_PER_NODE {
+            if !transcode.pretranscode_worker_idle() {
+                break;
+            }
+            let now = clock_ms();
+            let job = match self
+                .store
+                .claim_cluster_fragment_index(&node_id, now, now.saturating_add(CLAIM_TTL_MS))
+                .await
+            {
+                Ok(Some(job)) => job,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "claiming a cluster fragment-index job");
+                    break;
+                }
+            };
+            workers.spawn(Arc::clone(self).run_cluster_fragment_index_job(
+                Arc::clone(&transcode),
+                job,
+                engine_sha256.clone(),
+                cache_root.clone(),
+                have_dovi,
+            ));
+        }
+        let mut built = 0_usize;
+        while let Some(result) = workers.join_next().await {
+            match result {
+                Ok(true) => built += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "cluster fragment-index worker panicked"),
+            }
+        }
+        if attempted > 0 || built > 0 {
+            tracing::info!(
+                attempted,
+                enqueued,
+                hydrated,
+                built,
+                "cluster fragment-index pass finished"
+            );
+        }
+    }
+
+    async fn run_cluster_fragment_index_job(
+        self: Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+        job: plurx_core::store::ClusterFragmentIndexJob,
+        engine_sha256: String,
+        cache_root: PathBuf,
+        have_dovi: bool,
+    ) -> bool {
+        const RENEW_EVERY: Duration = Duration::from_secs(20);
+        const CLAIM_TTL_MS: i64 = 60_000;
+        const RETRY_MS: i64 = 5 * 60_000;
+        const LOCAL_REFUSAL_MS: i64 = 60_000;
+
+        let node_id = self.coordinator.node_id().to_owned();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let lost = tokio_util::sync::CancellationToken::new();
+        let heartbeat = {
+            let store = Arc::clone(&self.store);
+            let cache_key = job.cache_key.clone();
+            let node_id = node_id.clone();
+            let stop = stop.clone();
+            let lost = lost.clone();
+            let fence = job.fence;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(RENEW_EVERY);
+                loop {
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = interval.tick() => {
+                            let now = clock_ms();
+                            match store.renew_cluster_fragment_index(
+                                &cache_key,
+                                &node_id,
+                                fence,
+                                now,
+                                now.saturating_add(CLAIM_TTL_MS),
+                            ).await {
+                                Ok(true) => {}
+                                Ok(false) | Err(_) => {
+                                    lost.cancel();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
+        let finish_heartbeat =
+            |stop: tokio_util::sync::CancellationToken, heartbeat: tokio::task::JoinHandle<()>| async move {
+                stop.cancel();
+                let _ = heartbeat.await;
+            };
+        let file = match self.store.get_file(job.file_id).await {
+            Ok(Some(file)) if file.size == job.source_size && file.mtime == job.source_mtime => {
+                file
+            }
+            _ => {
+                finish_heartbeat(stop, heartbeat).await;
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .fail_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        "source_superseded",
+                        now,
+                        now.saturating_add(RETRY_MS),
+                    )
+                    .await;
+                return false;
+            }
+        };
+        let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
+            Ok(version) => version,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "claimed index source is not local");
+                finish_heartbeat(stop, heartbeat).await;
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .yield_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        now,
+                        now.saturating_add(LOCAL_REFUSAL_MS),
+                    )
+                    .await;
+                return false;
+            }
+        };
+        let memo = self
+            .store
+            .fragment_index_source(&node_id, file.id, &object_version)
+            .await
+            .ok()
+            .flatten();
+        let attested = match crate::fragment_index_cluster::attest_source(
+            &node_id,
+            &file,
+            memo.as_ref(),
+        )
+        .await
+        {
+            Ok(attested) if attested.observation.source_sha256 == job.source_sha256 => attested,
+            Ok(_) | Err(_) => {
+                finish_heartbeat(stop, heartbeat).await;
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .yield_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        now,
+                        now.saturating_add(LOCAL_REFUSAL_MS),
+                    )
+                    .await;
+                return false;
+            }
+        };
+        let _ = self
+            .store
+            .record_fragment_index_source(&attested.observation)
+            .await;
+        if crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, have_dovi)
+            != job.pipeline_sha256
+        {
+            finish_heartbeat(stop, heartbeat).await;
+            let now = clock_ms();
+            let _ = self
+                .store
+                .fail_cluster_fragment_index(
+                    &job.cache_key,
+                    &node_id,
+                    job.fence,
+                    "pipeline_superseded",
+                    now,
+                    now.saturating_add(RETRY_MS),
+                )
+                .await;
+            return false;
+        }
+
+        let outcome = tokio::select! {
+            outcome = crate::fragindex::build_from_attested_file(
+                &file,
+                &attested.handle,
+                have_dovi,
+                false,
+                transcode.runtime_cache_dir(),
+                index_file_budget(file.duration_ms),
+            ) => Some(outcome),
+            () = lost.cancelled() => None,
+        };
+        finish_heartbeat(stop, heartbeat).await;
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        let index = match outcome {
+            crate::fragindex::IndexOutcome::Built(index) => index,
+            crate::fragindex::IndexOutcome::Truncated { reason, .. } => {
+                tracing::warn!(file_id = file.id, %reason, "cluster fragment index incomplete");
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .fail_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        "truncated",
+                        now,
+                        now.saturating_add(RETRY_MS),
+                    )
+                    .await;
+                return false;
+            }
+            crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                tracing::warn!(file_id = file.id, %reason, "cluster fragment index unsupported");
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .fail_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        "unsupported",
+                        now,
+                        now.saturating_add(RETRY_MS),
+                    )
+                    .await;
+                return false;
+            }
+        };
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+        {
+            let now = clock_ms();
+            let _ = self
+                .store
+                .fail_cluster_fragment_index(
+                    &job.cache_key,
+                    &node_id,
+                    job.fence,
+                    "source_changed",
+                    now,
+                    now.saturating_add(RETRY_MS),
+                )
+                .await;
+            return false;
+        }
+        let still_current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !still_current {
+            return false;
+        }
+        let blob = match encode_cluster_fragment_index_blob(
+            &index,
+            &job.source_sha256,
+            &job.pipeline_sha256,
+        ) {
+            Ok(blob) => blob,
+            Err(error) => {
+                tracing::warn!(file_id = file.id, %error, "encoding cluster fragment index");
+                return false;
+            }
+        };
+        let now = clock_ms();
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: job.cache_key.clone(),
+            file_id: job.file_id,
+            source_size: job.source_size,
+            source_mtime: job.source_mtime,
+            source_sha256: job.source_sha256.clone(),
+            pipeline_sha256: job.pipeline_sha256.clone(),
+            blob_sha256: cluster_fragment_index_blob_sha256(&blob),
+            bytes: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+            built_by_node_id: node_id.clone(),
+            built_at_ms: now,
+        };
+        if let Err(error) =
+            crate::fragment_index_cluster::install_local_blob(&cache_root, &artifact, &blob).await
+        {
+            tracing::warn!(file_id = file.id, %error, "publishing local fragment-index blob");
+            return false;
+        }
+        let location = ClusterFragmentIndexLocation {
+            cache_key: job.cache_key.clone(),
+            node_id: node_id.clone(),
+            bytes: artifact.bytes,
+            verified_at_ms: now,
+            last_seen_at_ms: now,
+        };
+        match self
+            .store
+            .complete_cluster_fragment_index(&job, &artifact, &location, now)
+            .await
+        {
+            Ok(true) => {
+                if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
+                    tracing::warn!(file_id = file.id, %error, "installing built fragment index");
+                }
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(file_id = file.id, %error, "settling cluster fragment index");
+                false
+            }
         }
     }
 

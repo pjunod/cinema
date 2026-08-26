@@ -353,6 +353,10 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/internal/media/fragment-index/{cache_key}",
+            get(internal_media::fragment_index),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,

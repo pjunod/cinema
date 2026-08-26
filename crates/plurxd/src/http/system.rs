@@ -1191,6 +1191,9 @@ pub struct SettingsDto {
     /// Node-local fragment-index pass interval. Defaults to 15 minutes; 0 is
     /// an explicit pause, in which case an unindexed title is refused.
     pub vod_index_mins: i64,
+    /// Default-off content-addressed cluster queue and peer hydration for VOD
+    /// indexes. The cadence above remains the operator's I/O budget.
+    pub vod_index_cluster_cache: bool,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1404,6 +1407,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
+        vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
+            .is_some_and(|value| value.trim() == "1"),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1460,6 +1465,7 @@ pub struct UpdateSettings {
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
     pub vod_index_mins: Option<i64>,
+    pub vod_index_cluster_cache: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1643,6 +1649,12 @@ pub async fn update_settings(
                 keys::PLAYBACK_CONTROL_PROTOCOL_V1,
                 if on { "1" } else { "0" },
             )
+            .await?;
+    }
+    if let Some(on) = req.vod_index_cluster_cache {
+        state
+            .store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(raw) = req

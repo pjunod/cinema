@@ -8,6 +8,9 @@
 
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
+
 use plurx_core::domain::MediaFile;
 use plurx_core::transcode::{
     output_size, EffectiveRateControl, Encoder, OutputGrade, Pacing, Pipeline,
@@ -67,6 +70,101 @@ static DOVI_RESHAPE_HW: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static FRAGMENT_INDEX_ENGINE_DIGEST: tokio::sync::OnceCell<String> =
+    tokio::sync::OnceCell::const_new();
+
+/// Digest the executable bytes and its complete self/dependency reports once
+/// per daemon. Fragment indexes compare copied sample sizes, so two nominally
+/// equal ffmpeg versions are not interchangeable unless the actual engine is.
+pub async fn fragment_index_engine_digest() -> String {
+    FRAGMENT_INDEX_ENGINE_DIGEST
+        .get_or_init(fragment_index_engine_digest_inner)
+        .await
+        .clone()
+}
+
+async fn fragment_index_engine_digest_inner() -> String {
+    let bin = ffmpeg_bin();
+    let resolved = resolve_executable_path(&bin);
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/engine\0");
+    digest.update((bin.len() as u64).to_be_bytes());
+    digest.update(bin.as_bytes());
+
+    if let Some(path) = resolved.as_ref() {
+        match tokio::fs::File::open(path).await {
+            Ok(mut file) => {
+                let mut buffer = vec![0_u8; 256 * 1024];
+                loop {
+                    match file.read(&mut buffer).await {
+                        Ok(0) => break,
+                        Ok(read) => digest.update(&buffer[..read]),
+                        Err(error) => {
+                            digest.update(b"executable-read-error\0");
+                            digest.update(error.to_string().as_bytes());
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                digest.update(b"executable-open-error\0");
+                digest.update(error.to_string().as_bytes());
+            }
+        }
+    } else {
+        digest.update(b"executable-path-unresolved\0");
+    }
+
+    match tokio::process::Command::new(&bin)
+        .arg("-version")
+        .output()
+        .await
+    {
+        Ok(output) => {
+            digest.update((output.stdout.len() as u64).to_be_bytes());
+            digest.update(output.stdout);
+            digest.update((output.stderr.len() as u64).to_be_bytes());
+            digest.update(output.stderr);
+        }
+        Err(error) => digest.update(error.to_string().as_bytes()),
+    }
+
+    #[cfg(target_os = "linux")]
+    let dependency_probe = resolved.as_ref().map(|path| ("ldd", path));
+    #[cfg(target_os = "macos")]
+    let dependency_probe = resolved.as_ref().map(|path| ("otool", path));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let dependency_probe: Option<(&str, &std::path::PathBuf)> = None;
+    if let Some((tool, path)) = dependency_probe {
+        let mut command = tokio::process::Command::new(tool);
+        #[cfg(target_os = "macos")]
+        command.arg("-L");
+        match command.arg(path).output().await {
+            Ok(output) => {
+                digest.update((output.stdout.len() as u64).to_be_bytes());
+                digest.update(output.stdout);
+                digest.update((output.stderr.len() as u64).to_be_bytes());
+                digest.update(output.stderr);
+            }
+            Err(error) => digest.update(error.to_string().as_bytes()),
+        }
+    }
+    hex::encode(digest.finalize())
+}
+
+fn resolve_executable_path(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(bin);
+    if path.components().count() > 1 {
+        return std::fs::canonicalize(path).ok();
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .map(|directory| directory.join(bin))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+}
 
 /// Does this build carry a given bitstream filter? Matched on a whole line of
 /// `ffmpeg -bsfs`, which lists exactly one filter per line — a substring

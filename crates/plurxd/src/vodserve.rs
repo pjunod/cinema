@@ -29,6 +29,8 @@
 
 use std::collections::HashMap;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
@@ -263,6 +265,11 @@ struct Rendition {
     key: String,
     dir: RenditionDir,
     recipe: Recipe,
+    /// One opened source object for the rendition's whole life. Every ffmpeg
+    /// generation inherits this descriptor and every materialization/serve
+    /// checks its object version, so pathname replacement or in-place mutation
+    /// cannot mix two source revisions under one immutable playlist.
+    source: Option<crate::fragment_index_cluster::SourceFence>,
     /// The stored plan — normative, immutable, the source of everything below.
     plan: SegmentPlan,
     /// Rendered ONCE from the plan at attach; identical for the rendition's
@@ -1330,6 +1337,11 @@ impl VodServe {
         rendition: &Arc<Rendition>,
         index: u32,
     ) -> Result<Option<SegmentReady>, VodError> {
+        if self.source_changed(rendition) {
+            let cause = "source changed after the fragment index was selected".to_owned();
+            record_failure(&self.shared, rendition, cause.clone());
+            return Err(VodError::ProducerFailed(cause));
+        }
         let manifest = rendition.manifest.lock().await;
         let Some(SegState::Materialized { at_ms, .. }) = manifest.state(index) else {
             return Ok(None);
@@ -1344,6 +1356,13 @@ impl VodServe {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(VodError::Io(error)),
         }
+    }
+
+    fn source_changed(&self, rendition: &Rendition) -> bool {
+        rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.unchanged())
     }
 
     /// Serving updates the session's reader window and kicks the driver.
@@ -1561,6 +1580,7 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
+        let source = crate::fragment_index_cluster::open_source_fence(&recipe.file).await?;
         let dir = RenditionDir::new(self.base.join(key));
         let existed = tokio::fs::metadata(dir.path()).await.is_ok();
         dir.create()
@@ -1672,6 +1692,7 @@ impl Shared {
             key: key.to_string(),
             dir,
             recipe,
+            source: Some(source),
             playlist: plan.playlist().into_bytes(),
             plan,
             timescale,
@@ -1984,7 +2005,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
-    let args = copy_pipe_args_with_dolby_vision(
+    let mut args = copy_pipe_args_with_dolby_vision(
         &recipe.file,
         start_seconds,
         recipe.audio_index,
@@ -1993,7 +2014,39 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
         recipe.have_dovi,
         recipe.preserve_dolby_vision,
     );
-    let mut child = match tokio::process::Command::new(ffmpeg_bin())
+    #[cfg(unix)]
+    if rendition.source.is_some() {
+        for index in 0..args.len().saturating_sub(1) {
+            if args[index] == "-i" {
+                args[index + 1] = "/dev/fd/3".to_owned();
+            }
+        }
+    }
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    if let Some(source) = rendition.source.as_ref() {
+        use std::os::fd::AsRawFd;
+        let source_fd = source.handle.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = match command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -2317,6 +2370,17 @@ impl vodgen::Sink for RenditionSink {
             // The quiet teardown: `NotFound` is how vodgen learns the session
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        if self
+            .rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.unchanged())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source changed before fragment publication",
+            ));
         }
         let len = bytes.len() as u64;
         {
@@ -2888,6 +2952,7 @@ mod tests {
                 preserve_dolby_vision: false,
                 have_dovi: false,
             },
+            source: None,
             playlist: plan.playlist().into_bytes(),
             timescale: plan.timescale,
             seconds_per_segment: plan.duration_ticks() as f64

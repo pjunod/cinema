@@ -4,7 +4,7 @@
 //! `/api/v1` routes are separate admin views; neither surface starts work.
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::Json;
 use serde::Deserialize;
@@ -37,6 +37,55 @@ pub(crate) async fn snapshot(
 
 fn private_no_store_headers() -> [(HeaderName, &'static str); 1] {
     [(header::CACHE_CONTROL, "private, no-store")]
+}
+
+pub(crate) async fn fragment_index(
+    State(state): State<AppState>,
+    AxumPath(cache_key): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<([(HeaderName, &'static str); 2], Bytes), StatusCode> {
+    let path = format!(
+        "{}{}",
+        crate::fragment_index_cluster::PEER_PATH_PREFIX,
+        cache_key
+    );
+    authorize(&state, &headers, "GET", &path, &[]).await?;
+    let artifact = state
+        .store
+        .cluster_fragment_index_artifact(&cache_key)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let runtime = state
+        .cache_dir
+        .parent()
+        .unwrap_or(state.cache_dir.as_path())
+        .join("runtime");
+    let root = crate::fragment_index_cluster::cache_root(&runtime);
+    match crate::fragment_index_cluster::read_local_blob(&root, &artifact).await {
+        Ok(Some(blob)) => Ok((
+            [
+                (header::CACHE_CONTROL, "private, no-store"),
+                (header::CONTENT_TYPE, "application/octet-stream"),
+            ],
+            Bytes::from(blob),
+        )),
+        Ok(None) => {
+            let _ = state
+                .store
+                .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
+                .await;
+            Err(StatusCode::NOT_FOUND)
+        }
+        Err(error) => {
+            tracing::warn!(cache_key, %error, "refusing a corrupt fragment-index blob");
+            let _ = state
+                .store
+                .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
+                .await;
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
 }
 
 pub(crate) async fn offers(
