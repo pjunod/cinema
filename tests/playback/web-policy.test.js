@@ -104,6 +104,12 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
+test("playback info names the active VOD or live-recovery presentation", () => {
+  const stats = shippedSource("updateStats");
+  assert.match(stats, /PLAYER\.vod\?"VOD":PLAYER\.sessionId\?"Live recovery"/);
+  assert.match(stats, /cardRow\("Presentation"/);
+});
+
 asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
   const requests = [];
   let requestId = 0;
@@ -169,7 +175,7 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
   );
 });
 
-asyncTest("a server that returns the removed live presentation is refused", async () => {
+asyncTest("a temporary live recovery presentation remains playable", async () => {
   const build = new Function(
     "api",
     "newRequestId",
@@ -187,10 +193,8 @@ asyncTest("a server that returns the removed live presentation is refused", asyn
     () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
     policy,
   );
-  await assert.rejects(
-    () => openSession(42, { copy: true }),
-    error => error.code === "server_vod_required" && error.status === 426,
-  );
+  const started = await openSession(42, { copy: true });
+  assert.equal(started.vod, false);
 });
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
@@ -222,19 +226,20 @@ test("VOD diagnostics describe materialization instead of claiming a cache hit",
   assert.doesNotMatch(status({ producer_state: "complete" }), /cache/i);
 });
 
-test("an operator can provision or stop VOD without restoring live HLS", () => {
+test("an operator can control VOD indexing and live recovery independently", () => {
   const panel = shippedSource("playbackPanel");
   const save = shippedSource("savePlayback");
   assert.match(panel, /id="pvod"/);
+  assert.match(panel, /id="pvlr"/);
   assert.match(panel, /id="pvi"/);
   assert.match(panel, /id="pvws"/);
   assert.match(panel, /id="pvmb"/);
   assert.match(save, /vod_presentation:/);
+  assert.match(save, /vod_live_recovery:/);
   assert.match(save, /vod_index_mins:/);
   assert.match(save, /vod_materialize_budget_secs:/);
   assert.match(save, /vod_block_budget_secs:"8"/);
-  assert.match(panel, /neither setting restores live HLS/);
-  assert.doesNotMatch(panel, /falls back safely/);
+  assert.match(panel, /fallback is temporary protection/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
@@ -2047,6 +2052,14 @@ test("the detail screen names every subtitle track, its format and its markers",
     2,
     "exactly one audio and one subtitle track carry the marker",
   );
+});
+
+test("the detail screen shows VOD index readiness before playback", () => {
+  const indexed = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "indexed" });
+  assert.match(indexed, /<dt>VOD index<\/dt><dd><span[^>]*>Indexed<\/span>/);
+  const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
+  assert.match(pending, /Index pending/);
+  assert.match(pending, /live recovery will be used/);
 });
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {

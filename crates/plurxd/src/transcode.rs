@@ -30,15 +30,15 @@ use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::admission::Admission;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::copyseg;
 use crate::ffmpeg::ffmpeg_bin;
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::ffmpeg::pacing_caps;
 use crate::meter::Meter;
 
@@ -48,7 +48,7 @@ const SESSION_IDLE_SECS: u64 = 60;
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -77,7 +77,7 @@ fn session_log_text(text: &str, session_id: &str) -> String {
     text.replace(session_id, &session_log_id(session_id))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
     format!("{label}: {}", session_log_text(&args.join(" "), session_id))
 }
@@ -205,10 +205,10 @@ const SOFTWARE_GRACE: Duration = Duration::from_secs(30);
 /// second while it is working at all, so a frozen `out_time` for this long is
 /// a wedged pipeline — not a 4K decode losing to the clock, which advances
 /// steadily however far behind realtime it falls.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const PROGRESS_STALL: Duration = Duration::from_secs(10);
 /// How often the stall watchdog re-asks, once past its initial grace.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const WATCHDOG_POLL: Duration = Duration::from_secs(5);
 /// Slack on top of the startup-recovery graces, covering the cadence at which
 /// each stage actually renders its verdict: the first-segment watch re-asks
@@ -1108,7 +1108,7 @@ fn spawn_ffmpeg(
 /// feeds the telemetry the watchdog and the activity page already read. Losing
 /// that would leave a segmenter session with no `speed`, no `out_time`, and a
 /// stall watchdog with nothing to watch.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn spawn_ffmpeg_pipe(
     args: &[String],
     session_id: &str,
@@ -1180,7 +1180,7 @@ pub(crate) fn configure_ffmpeg_runtime(
 /// "contains an `=`" — an error message about `filter_units=remove_types=32-34`
 /// contains plenty of those, and swallowing it would hide exactly the failure
 /// a copy session is most likely to have.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn is_progress_line(line: &str) -> bool {
     let Some((key, _)) = line.split_once('=') else {
         return false;
@@ -1208,7 +1208,7 @@ fn is_progress_line(line: &str) -> bool {
 /// fallback watchdog (the exact bug behind a 4K-DV grey screen that spun ffmpeg
 /// for a minute and was never retried). A `.ts` line lands in the playlist only
 /// when a segment is complete.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn session_producing(dir: &std::path::Path) -> bool {
     match tokio::fs::read(dir.join("index.m3u8")).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).lines().any(|l| {
@@ -1226,7 +1226,7 @@ async fn session_producing(dir: &std::path::Path) -> bool {
 /// encoder is motionless on purpose, an exited child is EOF or a kill (both
 /// already have owners reporting them), and a session failed elsewhere is
 /// already being torn down.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug, PartialEq)]
 enum WatchNext {
     /// Nothing wrong, or nothing judgeable: look again next poll.
@@ -1238,7 +1238,7 @@ enum WatchNext {
     Stall,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration) -> WatchNext {
     if failed || exited {
         return WatchNext::Done;
@@ -1254,7 +1254,7 @@ fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration
 /// A replacement can begin immediately after this returns, so `Done` and
 /// `Stall` must be confirmed while holding `Session::child_transition` before
 /// either one acts. `Wait` has no consequence and can go straight to sleep.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn observed_watch_next(session: &Session) -> WatchNext {
     let (replacing_child, exited) = {
         let mut child = session.child.lock().await;
@@ -1294,12 +1294,12 @@ async fn observed_watch_next(session: &Session) -> WatchNext {
 /// purpose — and `apply_ahead_window` restarts the motion clock at resume, so
 /// the suspension itself can never be read back as a stall — and a *cached*
 /// session has no process at all, so there is nothing here to watch.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct WatchdogClaim {
     session: Arc<Session>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl WatchdogClaim {
     fn take(session: &Arc<Session>) -> Option<Self> {
         if session.cached
@@ -1316,14 +1316,14 @@ impl WatchdogClaim {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl Drop for WatchdogClaim {
     fn drop(&mut self) {
         self.session.watchdog_active.store(false, Release);
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: String) {
     // A generous floor before the first verdict: opening a 4K file over NFS
     // and filling a first segment is legitimately slow, and `stalled_for`
@@ -1415,7 +1415,7 @@ async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: Strin
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
     // No process, nothing to judge — and `failed` on a cache entry would be a
     // lie with consequences (its segments exist; readers would refuse them).
@@ -1432,7 +1432,7 @@ async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
 /// The claim is taken synchronously, before the task is scheduled, so a copy
 /// fallback can publish a successor without leaving a scheduler-sized gap in
 /// which no watchdog owns it. An existing watcher makes this a no-op.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
     let Some(claim) = WatchdogClaim::take(&session) else {
         return;
@@ -1444,7 +1444,7 @@ fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn clear_session_dir(dir: &std::path::Path) {
     if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
@@ -1528,7 +1528,7 @@ struct CacheOfferVerification {
     revoke_shared_member: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct PreparedSharedCacheRead {
     dir: PathBuf,
     manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
@@ -1557,7 +1557,7 @@ struct Session {
     /// Exactly one task owns lifetime stall coverage for the current producer.
     /// A copy fallback that follows a predecessor `Done` verdict re-arms it
     /// before publishing the successor; an already-active watcher wins.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     watchdog_active: AtomicBool,
     /// True only while a fallback deliberately replaces one live producer
     /// with another inside this same session. The predecessor's non-zero kill
@@ -1604,7 +1604,7 @@ struct Session {
     /// Exact bounded text-subtitle inode inherited by ffmpeg as `/dev/fd/5`.
     /// Keeping it for the session lifetime also lets a fallback child inherit
     /// the same bytes without reopening a replaceable pathname.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     subtitle_handle: Option<std::fs::File>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
@@ -1772,13 +1772,13 @@ struct Session {
 /// Keeps the replacement marker true across every await between killing the
 /// predecessor and publishing (or failing) its successor. Cancellation clears
 /// it too, so a dropped fallback task cannot leave the session unjudgeable.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct ChildReplacement<'a> {
     session: &'a Session,
     _transition: tokio::sync::MutexGuard<'a, ()>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl Drop for ChildReplacement<'_> {
     fn drop(&mut self) {
         self.session.replacing_child.store(false, Release);
@@ -1855,7 +1855,7 @@ impl Session {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn begin_child_replacement(&self) -> ChildReplacement<'_> {
         let transition = self.child_transition.lock().await;
         self.replacing_child.store(true, Release);
@@ -1865,7 +1865,7 @@ impl Session {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn kill_child_for_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
         // Retirement uses the same transition. If it won first, this
@@ -1905,7 +1905,7 @@ impl Session {
     /// asynchronous deletion completes. An exited child is still replaceable:
     /// the caller re-arms a watchdog synchronously when it publishes that
     /// successor.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn begin_copy_child_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
         if self.retired.load(Acquire)
@@ -1988,7 +1988,7 @@ impl Session {
     /// admission class flips to software, so the speeds measured from here on
     /// are recorded as what they are rather than poisoning the hardware
     /// class's record with a software encoder's numbers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     fn demote_to_software(&self, work: Workload<'_>, permit: crate::admission::SwPermit) {
         self.release_hardware();
         *self.class.lock().expect("class mutex") = work.software_class();
@@ -2107,6 +2107,7 @@ async fn session_info(
     };
     SessionInfo {
         id: id.to_owned(),
+        presentation: "live-recovery",
         file_id: s.file_id,
         item_id: s.item_id,
         item_title: s.item_title.clone(),
@@ -2152,6 +2153,7 @@ async fn session_info(
 fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
     SessionInfo {
         id: info.id,
+        presentation: "vod",
         file_id: info.file_id,
         item_id: info.item_id,
         item_title: info.item_title,
@@ -2850,6 +2852,9 @@ struct ClusterReplacementGates {
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// `vod` for the immutable presentation; `live-recovery` for the
+    /// temporary growing-HLS compatibility engine.
+    pub presentation: &'static str,
     pub file_id: i64,
     pub item_id: i64,
     pub item_title: String,
@@ -3114,7 +3119,7 @@ struct CopySessionOptions {
 }
 
 #[derive(Clone, Copy)]
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct SessionOwner<'a> {
     user_name: &'a str,
     supersession_user: &'a str,
@@ -3312,7 +3317,7 @@ const PRODUCER_RETRY: Duration = Duration::from_secs(5);
 ///
 /// Every field defaults to the production value above and nothing in the
 /// daemon ever changes one — `TranscodeManager::new` takes the default and
-/// there is no setter outside `#[cfg(test)]`. They live here because the
+/// there is no setter outside `#[cfg(any(test, feature = "live-hls-recovery"))]`. They live here because the
 /// resume path is only reachable by *interrupting an encoder that is still
 /// running*, and whether that is possible at all depends on how fast the box
 /// is: a 16-core desktop finished the whole 240-second fixture between two
@@ -3368,7 +3373,7 @@ enum PartEnd {
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
 /// Constructed only after every background permit has been released.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct LiveAdmission {
     encoder: Encoder,
     hw_slot: Option<HwSlot>,
@@ -4731,7 +4736,7 @@ pub struct TranscodeManager {
     /// Shortens [`PLAYLIST_WAIT_BUDGET`] for tests that need the deadline to
     /// actually elapse. Zero (always, in production) means the real budget —
     /// see [`TranscodeManager::playlist_wait`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
 }
 
@@ -4845,7 +4850,7 @@ impl TranscodeManager {
             dovi_passthrough_qsv: false,
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -6352,7 +6357,7 @@ impl TranscodeManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn prepare_shared_cached_read(
         store: Arc<dyn Store>,
         coordinator: Arc<crate::shared_cache::SharedCacheCoordinator>,
@@ -6472,7 +6477,7 @@ impl TranscodeManager {
     /// and a viewer to point at them. It is still a session because the
     /// activity page should show somebody watching, and because the idle
     /// reaper is what eventually forgets them.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn serve_cached(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -8170,64 +8175,68 @@ impl TranscodeManager {
             None => (None, req),
         };
 
-        // The former engine remains buildable only inside its historical
-        // regression harness. No production target contains this branch or
-        // any of the live-start methods it calls.
-        #[cfg(test)]
+        // Immutable VOD remains first. During the index backfill, a typed
+        // prerequisite refusal may use the retained live engine rather than
+        // turning background preparation into a catalogue-wide outage.
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         let info = if req.presentation == Presentation::Live {
-            match req.kind {
-                SessionKind::Transcode { height } => {
-                    self.start_with_audio_offset(
-                        req.file_id,
-                        height,
-                        req.start_seconds,
-                        req.audio_index,
-                        req.subtitle_burn,
-                        req.audio_offset_ms,
-                        user_name,
-                        supersession_user,
-                        replacement_deadline,
-                        takeover,
-                        &req.playback_id,
-                        req.automatic,
-                        req.hdr10,
-                    )
-                    .await?
-                }
-                SessionKind::Copy {
-                    aac,
-                    preserve_dolby_vision,
-                } => {
-                    self.start_copy_with_audio_offset(
-                        req.file_id,
-                        req.start_seconds,
-                        req.audio_index,
-                        req.audio_offset_ms,
-                        CopySessionOptions {
-                            transcode_audio: aac,
-                            preserve_dolby_vision,
-                        },
-                        user_name,
-                        supersession_user,
-                        replacement_deadline,
-                        takeover,
-                        &req.playback_id,
-                        req.automatic,
-                    )
-                    .await?
-                }
-            }
-        } else {
-            self.try_vod_session(
+            self.start_live_recovery_session(
                 req,
                 user_name,
                 supersession_user,
                 replacement_deadline,
-                takeover.is_some(),
+                takeover,
             )
             .await?
+        } else {
+            let vod = self
+                .try_vod_session(
+                    req,
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover.is_some(),
+                )
+                .await;
+            match vod {
+                Ok(info) => info,
+                Err(error) => {
+                    let recovery_code = vod_refusal(&error)
+                        .map(|(code, _)| code.to_owned())
+                        .filter(|code| {
+                            matches!(
+                                code.as_str(),
+                                "vod_index_pending"
+                                    | "vod_transcode_unavailable"
+                                    | "vod_subtitle_burn_unavailable"
+                                    | "vod_source_unsupported"
+                            )
+                        });
+                    if let Some(code) = recovery_code {
+                        if self.live_hls_recovery_enabled().await? {
+                            tracing::warn!(
+                                file_id = req.file_id,
+                                refusal = code,
+                                "VOD prerequisite unavailable; using temporary live-HLS recovery"
+                            );
+                            self.start_live_recovery_session(
+                                req,
+                                user_name,
+                                supersession_user,
+                                replacement_deadline,
+                                takeover,
+                            )
+                            .await?
+                        } else {
+                            return Err(error);
+                        }
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "live-hls-recovery")))]
         let info = self
             .try_vod_session(
                 req,
@@ -8247,6 +8256,76 @@ impl TranscodeManager {
             claim.complete(&info.session_id, &live);
         }
         Ok(info)
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn live_hls_recovery_enabled(&self) -> Result<bool, String> {
+        let configured = self
+            .store
+            .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+            .await
+            .map_err(|error| format!("reading live-HLS recovery setting: {error}"))?;
+        // Regression tests opt in explicitly so existing VOD refusal tests
+        // continue to exercise the refusal contract. The shipped recovery
+        // build is availability-first unless an operator explicitly disables
+        // the fallback.
+        #[cfg(test)]
+        return Ok(configured.as_deref() == Some("1"));
+        #[cfg(not(test))]
+        Ok(configured.as_deref() != Some("0"))
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn start_live_recovery_session(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
+    ) -> Result<StartInfo, String> {
+        match req.kind {
+            SessionKind::Transcode { height } => {
+                self.start_with_audio_offset(
+                    req.file_id,
+                    height,
+                    req.start_seconds,
+                    req.audio_index,
+                    req.subtitle_burn,
+                    req.audio_offset_ms,
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover,
+                    &req.playback_id,
+                    req.automatic,
+                    req.hdr10,
+                )
+                .await
+            }
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+            } => {
+                self.start_copy_with_audio_offset(
+                    req.file_id,
+                    req.start_seconds,
+                    req.audio_index,
+                    req.audio_offset_ms,
+                    CopySessionOptions {
+                        transcode_audio: aac,
+                        preserve_dolby_vision,
+                    },
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover,
+                    &req.playback_id,
+                    req.automatic,
+                )
+                .await
+            }
+        }
     }
 
     /// The only public HLS presentation. A request either receives immutable
@@ -8822,7 +8901,7 @@ impl TranscodeManager {
     /// How an HLS session's input should be paced, given the admin settings
     /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
     /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn pacing(&self, for_copy: bool) -> Pacing {
         let rate = self
             .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
@@ -9504,7 +9583,7 @@ impl TranscodeManager {
     /// capacity back. The permit then carries live ownership for the session's
     /// whole lifetime, keeping every background pool parked after this method
     /// drops the short-lived waiter.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn admit_live(
         &self,
         preferred: Encoder,
@@ -9608,7 +9687,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn start_with_audio_offset(
         &self,
         file_id: i64,
@@ -10072,7 +10151,7 @@ impl TranscodeManager {
     /// downgraded session also stalls, the lifetime watchdog takes it. On a
     /// spawn failure the session is marked failed; the caller checks.
     #[allow(clippy::too_many_arguments)] // one fallback's worth of context
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn downgrade_one_step(
         session: &Session,
         file: &plurx_core::domain::MediaFile,
@@ -10231,7 +10310,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn start_copy_with_audio_offset(
         &self,
         file_id: i64,
@@ -11030,7 +11109,7 @@ impl TranscodeManager {
     /// fence is open. The post-insert load and the loss loop's pre-snapshot
     /// store cover both orderings: either that snapshot sees this session or
     /// this method observes the closed fence and retires it itself.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn register_session(&self, session_id: &str, session: Arc<Session>) -> bool {
         let admitted_generation = self.serving_loss_generation.load(Acquire);
         {
@@ -11598,7 +11677,7 @@ impl TranscodeManager {
     /// budget's *value* is pinned separately against the recovery graces it
     /// has to outlive, which is the relation whose absence caused #263.
     fn playlist_wait(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         {
             let ms = self.playlist_wait_override_ms.load(Relaxed);
             if ms > 0 {
@@ -12465,11 +12544,11 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// Note the **H**igh tier: `should_serve_high_tier_media_playlist` already
 /// collapses a High-tier HDR master to its media rendition for AVPlayer, and
 /// this rung inherits that unchanged.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
@@ -12479,7 +12558,7 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// read, and unlike an fMP4 session there is no `init.mp4` for
 /// `http::hls::exact_hls_context` to open (this muxer writes MPEG-TS). So the
 /// string is the grade's, and the grade is the pipeline's.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
     match grade {
         OutputGrade::Sdr => "avc1.640034,mp4a.40.2".to_owned(),
@@ -12836,14 +12915,14 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
         retired: AtomicBool::new(false),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         watchdog_verdict_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
         cached: false,
         _cache_reader: None,
@@ -17384,14 +17463,14 @@ mod tests {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
             cached,
             _cache_reader: None,

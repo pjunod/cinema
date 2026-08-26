@@ -9064,6 +9064,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unindexed_copy_uses_live_recovery_when_enabled() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, seeded.file, 16).await;
+        let source_item = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read prepared file")
+            .expect("prepared file")
+            .item_id;
+        let (_, indexed_detail) = call(
+            &app,
+            get(&format!("/api/v1/items/{source_item}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(indexed_detail["files"][0]["vod_index_status"], "indexed");
+        assert!(
+            state
+                .store
+                .forget_fragment_index(seeded.file)
+                .await
+                .expect("remove fixture index"),
+            "the setup must leave a real but unindexed source"
+        );
+        let (_, pending_detail) = call(
+            &app,
+            get(&format!("/api/v1/items/{source_item}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(pending_detail["files"][0]["vod_index_status"], "pending");
+        let (_, decision) = call(
+            &app,
+            get(
+                &format!("/api/v1/files/{}/decision", seeded.file),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(decision["vod_indexed"], false, "{decision}");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "1")
+            .await
+            .expect("enable recovery");
+
+        let (status, started) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", seeded.file),
+                Some(&admin),
+                json!({
+                    "playback_id": "unindexed-live-recovery",
+                    "request_id": "unindexed-live-recovery-attempt",
+                    "copy": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        assert_eq!(started["vod"], false, "{started}");
+
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(
+            activity["deliveries"][0]["presentation"], "live-recovery",
+            "{activity}"
+        );
+    }
+
     /// A file whose subtitle list can express every native-subtitle refusal:
     /// an English SRT that converts cleanly, an Italian SRT flagged as the
     /// *container* default (the track route-level Off must never resurrect),

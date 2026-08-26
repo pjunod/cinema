@@ -5056,6 +5056,20 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    func testLiveRecoveryPresentationIsAPlayableHlsSession() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let recovery = try decoder.decode(HlsStart.self, from: Data(#"""
+        {"session_id":"recovery","playlist_url":"/hls/recovery/index.m3u8","vod":false}
+        """#.utf8))
+
+        XCTAssertEqual(
+            PlurxAPI.acceptHlsSessionPresentation(recovery).vod,
+            false,
+            "vod:false identifies live recovery; it does not make the HLS response unplayable"
+        )
+    }
+
     /// Servers from before the Apple DV transport hint can approve Profile 8
     /// as progressive direct play. AVPlayer then advances with audio while the
     /// video plane stays black. The client must losslessly repackage that same

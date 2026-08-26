@@ -525,6 +525,9 @@ pub struct DecisionSelection {
 #[derive(Serialize)]
 pub struct DecisionResponse {
     pub file_id: i64,
+    /// Whether this node has a fragment index matching the current file and
+    /// the copy-video identity selected by this decision.
+    pub vod_indexed: bool,
     #[serde(flatten)]
     pub decision: Decision,
     /// The URL the client should use to play, given the verdict.
@@ -1127,6 +1130,16 @@ pub async fn decision(
         requested_audio,
         container_default_audio,
     );
+    let vod_identity = crate::fragindex::identity_for(
+        &file,
+        crate::ffmpeg::has_dovi_rpu().await,
+        decision.preserve_dolby_vision,
+    );
+    let vod_indexed = state
+        .store
+        .fragment_index(id, &vod_identity)
+        .await?
+        .is_some();
 
     tracing::info!(
         user_id = user.id,
@@ -1188,6 +1201,7 @@ pub async fn decision(
 
     Ok(Json(DecisionResponse {
         file_id: id,
+        vod_indexed,
         source: source_summary(&file),
         decision,
         play_url,

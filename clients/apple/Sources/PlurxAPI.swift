@@ -319,12 +319,14 @@ struct PlurxAPI {
             body: body,
             using: Self.playbackPreparationSession
         )
-        guard started.vod == true else {
-            throw APIError.transport(
-                "This server returned the removed live HLS presentation. Update every server node."
-            )
-        }
-        return started
+        return Self.acceptHlsSessionPresentation(started)
+    }
+
+    /// `vod` describes the presentation the server selected; it is not a
+    /// client compatibility gate. During index recovery the same HLS contract
+    /// is served by the retained live engine and arrives as `vod: false`.
+    static func acceptHlsSessionPresentation(_ started: HlsStart) -> HlsStart {
+        started
     }
 
     func hlsStatus(sessionId: String) async throws -> PlaybackSessionStatus {

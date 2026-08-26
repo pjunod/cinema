@@ -141,7 +141,7 @@ impl ActiveCacheReaders {
     }
 
     /// Hold a cached generation for one live playback session.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     pub(crate) fn begin_playback(&self, recipe: &str) -> Option<CacheReadGuard> {
         self.begin_guard(recipe, true)
     }

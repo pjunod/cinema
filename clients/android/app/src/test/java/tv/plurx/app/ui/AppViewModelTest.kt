@@ -8,8 +8,20 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import retrofit2.HttpException
 import retrofit2.Response
+import tv.plurx.app.data.HlsStart
 
 class AppViewModelTest {
+    @Test
+    fun liveRecoveryPresentationIsAPlayableHlsSession() {
+        val recovery = HlsStart(
+            session_id = "recovery",
+            playlist_url = "/hls/recovery/index.m3u8",
+            vod = false,
+        )
+
+        assertEquals(false, acceptHlsSessionPresentation(recovery).vod)
+    }
+
     @Test
     fun onlyTheResumeControlAuthorizesAStoppedOfflineTransfer() {
         assertEquals(false, OfflineResumeTrigger.Lifecycle.explicitUserAction)

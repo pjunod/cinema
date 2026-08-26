@@ -714,13 +714,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
-        val started = api().createHlsSession(fileId, body)
-        check(started.vod) {
-            "This server returned the removed live HLS presentation. Update every server node."
-        }
-        return started
-    }
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart =
+        acceptHlsSessionPresentation(api().createHlsSession(fileId, body))
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
 
@@ -833,6 +828,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.configureNodeOrigins(ingress.node_urls, origin)
     }
 }
+
+/** `vod` is presentation telemetry, not a compatibility gate. */
+internal fun acceptHlsSessionPresentation(started: HlsStart): HlsStart = started
 
 /**
  * The longest a saved session may hold the splash screen before Home takes

@@ -351,6 +351,12 @@ pub struct FileDto {
     /// from stored stream facts and the same pure policy playback uses; clients
     /// do not need the underlying admin preference values to reproduce it.
     pub playback_defaults: PlaybackDefaultsDto,
+    /// Current node-local immutable-VOD index state for video files.
+    /// `indexed` means the stored row matches this file's current identity;
+    /// `pending` means the background builder still owes it; `unsupported`
+    /// means this codec cannot use the copy-video indexer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vod_index_status: Option<&'static str>,
     /// Start of this file within a multi-file audiobook. Zero for ordinary
     /// media and for the first part. Clients add this to local player time
     /// before posting item progress, so resume remains one continuous book.
@@ -534,6 +540,7 @@ impl FileDto {
             audio_streams: f.audio_streams,
             subtitle_streams: f.subtitle_streams,
             playback_defaults,
+            vod_index_status: None,
             part_offset_ms: 0,
             chapters: Vec::new(),
             available: true,
