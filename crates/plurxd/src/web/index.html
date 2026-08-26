@@ -4758,12 +4758,31 @@ function specBlock(f){
       ? `<dt>VOD index</dt><dd><span class="stat-warn">Index pending</span> · live recovery will be used for segmented playback</dd>`
       : f.vod_index_status==="unsupported"
         ? `<dt>VOD index</dt><dd><span class="muted">Unsupported for this video codec</span></dd>`:"";
+  const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
     ${audRow}
     ${subRow}
     ${vodRow}
-    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}`;
+    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
+}
+function analysisFileControl(f){
+  if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
+  const rebuild=f.vod_index_status==="indexed";
+  const fileId=exactWireId(f);
+  return `<div class="row px-admin th-admin" style="margin-top:10px;gap:8px">
+    <button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>
+    <a class="ghost sm" href="#/analysis">Analysis status</a></div>`;
+}
+async function requestAnalysis(fileId,force,btn){
+  const label=btn&&btn.textContent;
+  if(btn){ btn.disabled=true; btn.textContent=force?"Queueing rebuild…":"Queueing…"; }
+  try{
+    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index"]}});
+    toast(response.joined?"Analysis is already queued":"Analysis queued");
+    location.hash="#/analysis";
+  }catch(error){ toast(error.message||"Couldn’t queue analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){ btn.disabled=false; btn.textContent=label; } }
 }
 // ---- pre-play audio / subtitle selection ----------------------------------
 // A choice made on the detail screen, before there is a player at all. It
@@ -9858,6 +9877,97 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   setPageTimer(()=>renderActivityBody(generation), 3000, generation);
 }
+
+// ---- analysis status -----------------------------------------------------
+// A dedicated operator surface backed by the replicated request and index-job
+// rows. Completed and failed work remains useful after it stops being activity.
+let ANALYSIS_BUSY=0, ANALYSIS_SNAPSHOT=null;
+async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
+  layoutChrome("activity",`<div class="row" style="justify-content:space-between;align-items:center">
+      <h1 style="margin:0">Analysis status</h1><a class="ghost sm" href="#/activity">Activity</a></div>
+    <div class="empty" aria-busy="true">Loading the analysis queue…</div>`);
+  setPagePhase("#/analysis",generation,"shell");
+  if(ANALYSIS_SNAPSHOT){ paintAnalysis(ANALYSIS_SNAPSHOT); setPagePhase("#/analysis",generation,"content"); }
+  await renderAnalysis(generation);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+  setPageTimer(()=>renderAnalysis(generation),2000,generation);
+}
+async function renderAnalysis(generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden"||ANALYSIS_BUSY===generation) return;
+  ANALYSIS_BUSY=generation;
+  try{
+    const snapshot=await api("/analysis/jobs");
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    ANALYSIS_SNAPSHOT=snapshot; paintAnalysis(snapshot);
+    setPageFailure("#/analysis",generation,null); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
+  }catch(error){
+    if(error&&error.status===401) return;
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    const main=document.getElementById("main");
+    if(main) main.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="renderAnalysis()">Retry</button></div></div>`;
+    setPageFailure("#/analysis",generation,"render_error"); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
+  }finally{ if(ANALYSIS_BUSY===generation) ANALYSIS_BUSY=0; }
+}
+function analysisStateLabel(state){
+  return ({queued:"Waiting",running:"Running",submitted:"Submitted",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
+}
+function analysisPhase(request,job){
+  if(request&&request.state==="running") return "Hashing and fencing source";
+  if(job&&job.state==="running") return "Building fragment index";
+  if(job&&job.state==="queued") return "Waiting for media worker";
+  if(request&&request.state==="queued") return "Waiting to inspect source";
+  if((job&&job.state)==="failed"||(request&&request.state)==="failed") return "Stopped with an error";
+  if((job&&job.state)==="ready"||(request&&request.state)==="ready") return "Published and available";
+  return "Resolving analysis request";
+}
+function analysisRows(snapshot){
+  const jobs=snapshot.jobs||[], byKey=new Map(jobs.map(job=>[job.job_id,job]));
+  const files=new Map((snapshot.files||[]).map(file=>[String(file.file_id),file]));
+  const represented=new Set(), rows=[];
+  for(const request of (snapshot.requests||[])){
+    const job=request.result_cache_key?byKey.get(request.result_cache_key):null;
+    if(job) represented.add(job.job_id);
+    rows.push({request,job,file:files.get(String(request.file_id)),file_id:request.file_id,state:job?job.state:request.state,
+      trigger:request.force_rebuild?"Operator rebuild":"Operator",updated:(job&&job.updated_at_ms)||request.updated_at_ms});
+  }
+  for(const job of jobs){
+    if(!represented.has(job.job_id)) rows.push({request:null,job,file:files.get(String(job.file_id)),file_id:job.file_id,state:job.state,
+      trigger:"Background",updated:job.updated_at_ms});
+  }
+  const rank={running:0,queued:1,submitted:2,failed:3,cancelled:4,ready:5};
+  rows.sort((a,b)=>(rank[a.state]??9)-(rank[b.state]??9)||(b.updated||0)-(a.updated||0));
+  return rows;
+}
+function paintAnalysis(snapshot){
+  const all=analysisRows(snapshot), counts={};
+  for(const row of all) counts[row.state]=(counts[row.state]||0)+1;
+  const summary=["running","queued","submitted","failed","ready"].filter(s=>counts[s]).map(s=>`<span><b>${counts[s]}</b> ${esc(analysisStateLabel(s).toLowerCase())}</span>`).join("");
+  const rows=all.map(row=>{
+    const request=row.request, job=row.job;
+    const owner=(job&&job.owner_node_id)||(request&&request.owner_node_id)||(request&&request.target_node_id)||"—";
+    const attempt=(job&&job.attempts)||(request&&request.attempts)||0;
+    const lease=(job&&job.lease_expires_ms)||(request&&request.lease_expires_ms)||0;
+    const error=(job&&job.last_error_code)||(request&&request.last_error_code)||"";
+    const pipeline=job&&job.pipeline_version?` · pipeline ${esc(job.pipeline_version)}`:"";
+    const canRebuild=row.state==="ready"||row.state==="failed"||row.state==="cancelled";
+    const title=row.file&&row.file.item_id?`<a href="#/item/${row.file.item_id}">${esc(row.file.title||`File ${row.file_id}`)}</a>`:`File ${row.file_id}`;
+    return `<tr>
+      <td><b>${title}</b><div class="muted" style="font-size:12px">File ${row.file_id} · ${esc(row.trigger)}${pipeline}</div></td>
+      <td><b>${esc(analysisStateLabel(row.state))}</b><div class="muted" style="font-size:12px">${esc(analysisPhase(request,job))}</div></td>
+      <td><span class="clid">${esc(owner)}</span>${lease?`<div class="muted" style="font-size:12px">lease ${lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"}</div>`:""}</td>
+      <td>${attempt||"—"}</td><td class="muted">${row.updated?fmtAgo(Math.floor(row.updated/1000)):"—"}${error?`<div style="color:var(--bad)">${esc(error.replace(/_/g," "))}</div>`:""}</td>
+      <td style="text-align:right">${canRebuild?`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this)'>Rebuild</button>`:""}</td></tr>`;
+  }).join("");
+  const main=document.getElementById("main"); if(!main) return;
+  main.innerHTML=`<div class="row" style="justify-content:space-between;align-items:center;gap:12px">
+      <div><h1 style="margin:0">Analysis status</h1><div class="muted">Durable work across the content-analysis pipeline</div></div>
+      <a class="ghost sm" href="#/activity">Activity</a></div>
+    ${!snapshot.enabled?`<div class="clrefusal" style="margin-top:16px"><b>Analysis is paused.</b> Enable Cluster index cache in <a href="#/settings">Playback settings</a>. Existing indexes continue serving.</div>`:""}
+    <div class="chips" style="margin-top:16px">${summary||"<span>No jobs yet</span>"}</div>
+    <h2 class="section">Queue and recent work</h2>
+    ${rows?`<table><thead><tr><th>File</th><th>Status</th><th>Owner</th><th>Attempt</th><th>Updated</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      :`<div class="empty">Nothing has been queued yet. Use Analyze now on a video’s detail page.</div>`}`;
+}
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 function activityNodeFailures(d){
   return (d.activity_nodes||[]).filter(node=>node.status&&node.status!=="answered");
@@ -9988,6 +10098,7 @@ function paintActivityBody(d){
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
+    ${ME&&ME.is_admin?`<div style="margin:10px 0 18px"><a class="ghost sm" href="#/analysis">Open analysis status</a></div>`:""}
     <h2 class="section">Offline downloads</h2>
     ${offline.length
       ? `<table><thead><tr><th>Title</th><th>Profile</th><th>Work</th><th>Progress</th><th>Requested</th><th></th></tr></thead><tbody>${offlineRows}</tbody></table>`
@@ -13051,6 +13162,7 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
   if(route==="#/activity") return "activity";
+  if(route==="#/analysis") return "analysis";
   if(route==="#/settings"||route==="#/admin") return "settings";
   return "home";
 }
@@ -13116,6 +13228,7 @@ async function render(){
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
+    else if(h==="#/analysis") await viewAnalysis(generation);
     else if(h==="#/admin"||h==="#/settings") await viewSettings(generation);
     else await viewHome(generation);
     // Converted routes restore at the moment their content lands; this catches

@@ -823,6 +823,9 @@ const MIGRATIONS: &[&str] = &[
     // v30: replicated metadata for content-addressed fragment indexes. The
     // blob itself remains outside this database on clustered deployments.
     crate::store::fragment_index_cluster::CLUSTER_FRAGMENT_INDEX_SCHEMA,
+    // v31: durable operator analysis requests. The source hash is deliberately
+    // resolved by a leased worker after the HTTP request has committed.
+    crate::store::fragment_index_cluster::CLUSTER_FRAGMENT_INDEX_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

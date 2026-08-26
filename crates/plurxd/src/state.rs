@@ -25,9 +25,9 @@ use plurx_core::scan::{self, PlacedFile, ScanProgress, ScanReport, TargetError, 
 use plurx_core::secrets::CredentialKey;
 use plurx_core::store::{
     cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
-    encode_cluster_fragment_index_blob, keys, ArtworkRepairFence, CatalogueReader,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, NewClusterFragmentIndexJob,
-    PrometheusStoreSnapshot, PublicationStore, Store,
+    encode_cluster_fragment_index_blob, keys, AnalysisRequest, ArtworkRepairFence, CatalogueReader,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, PrometheusStoreSnapshot, PublicationStore, Store,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::Serialize;
@@ -1166,7 +1166,7 @@ fn lease_time_remaining(expires_at_unix_ms: i64) -> std::time::Duration {
     std::time::Duration::from_millis(expires_at_unix_ms.saturating_sub(now_unix_ms).max(0) as u64)
 }
 
-fn clock_ms() -> i64 {
+pub(crate) fn clock_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
@@ -1407,6 +1407,43 @@ impl JobManager {
     /// What the pre-transcode pass is working on, or `None` if none is.
     pub async fn producing_now(&self) -> Option<ProducingNow> {
         self.now_producing.lock().await.clone()
+    }
+
+    /// Persist an operator request before any source hashing begins. The
+    /// request row is the acknowledgement boundary: once returned, a restart
+    /// or leader change cannot forget the button press.
+    pub async fn request_file_analysis(
+        &self,
+        file_id: i64,
+        force_rebuild: bool,
+    ) -> Result<(AnalysisRequest, bool), StoreError> {
+        let file = self
+            .store
+            .get_file(file_id)
+            .await?
+            .ok_or_else(|| StoreError::Task("analysis file does not exist".to_owned()))?;
+        let now = clock_ms();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = self
+            .store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                component: "fragment_index".to_owned(),
+                force_rebuild,
+                target_node_id: self.coordinator.node_id().to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            })
+            .await?;
+        let joined = request.request_id != request_id;
+        Ok((request, joined))
+    }
+
+    pub async fn analysis_queue_enabled(&self) -> bool {
+        self.cluster_fragment_index_enabled().await
     }
 
     /// Publish (or clear) the title the pass is on. The pass owns this; it is
@@ -3670,7 +3707,10 @@ impl JobManager {
         }
     }
 
-    async fn work_cluster_fragment_index_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+    pub(crate) async fn work_cluster_fragment_index_queue(
+        self: Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+    ) {
         const GLOBAL_SLOTS: usize = 2;
 
         if self.cluster_index_working.swap(true, Ordering::Relaxed) {
@@ -3682,6 +3722,11 @@ impl JobManager {
         {
             return;
         }
+
+        if let Err(error) = self.store.settle_analysis_requests(clock_ms()).await {
+            tracing::warn!(%error, "settling analysis requests");
+        }
+        self.resolve_analysis_requests(Arc::clone(&transcode)).await;
 
         let mut slots = tokio::task::JoinSet::new();
         for slot in 0..GLOBAL_SLOTS {
@@ -3719,6 +3764,200 @@ impl JobManager {
         if built > 0 {
             tracing::info!(built, "cluster fragment-index queue pass finished");
         }
+    }
+
+    async fn resolve_analysis_requests(self: &Arc<Self>, transcode: Arc<TranscodeManager>) {
+        const MAX_REQUESTS_PER_PASS: usize = 2;
+        const CLAIM_TTL_MS: i64 = 60_000;
+        const RENEW_EVERY: Duration = Duration::from_secs(20);
+        const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+        if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
+            return;
+        }
+        let node_id = self.coordinator.node_id().to_owned();
+        let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
+        let have_dovi = transcode.dv_strippable();
+        for _ in 0..MAX_REQUESTS_PER_PASS {
+            if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle()
+            {
+                break;
+            }
+            let now = clock_ms();
+            let request = match self
+                .store
+                .claim_analysis_request(&node_id, now, now.saturating_add(CLAIM_TTL_MS))
+                .await
+            {
+                Ok(Some(request)) => request,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "claiming an analysis request");
+                    break;
+                }
+            };
+
+            let stop = tokio_util::sync::CancellationToken::new();
+            let lost = tokio_util::sync::CancellationToken::new();
+            let heartbeat = {
+                let store = Arc::clone(&self.store);
+                let request_id = request.request_id.clone();
+                let node_id = node_id.clone();
+                let stop = stop.clone();
+                let lost = lost.clone();
+                let fence = request.fence;
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(RENEW_EVERY);
+                    loop {
+                        tokio::select! {
+                            () = stop.cancelled() => break,
+                            _ = interval.tick() => {
+                                let now = clock_ms();
+                                match store.renew_analysis_request(
+                                    &request_id,
+                                    &node_id,
+                                    fence,
+                                    now,
+                                    now.saturating_add(CLAIM_TTL_MS),
+                                ).await {
+                                    Ok(true) => {}
+                                    Ok(false) | Err(_) => {
+                                        lost.cancel();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+            };
+
+            let outcome = self
+                .resolve_analysis_request(
+                    &request,
+                    &node_id,
+                    &engine_sha256,
+                    have_dovi,
+                    transcode.as_ref(),
+                    &lost,
+                    ATTEST_TIMEOUT,
+                )
+                .await;
+            if let Err(code) = outcome {
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
+                    .await;
+            }
+            stop.cancel();
+            let _ = heartbeat.await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        node_id: &str,
+        engine_sha256: &str,
+        have_dovi: bool,
+        transcode: &TranscodeManager,
+        lost: &tokio_util::sync::CancellationToken,
+        attest_timeout: Duration,
+    ) -> Result<(), &'static str> {
+        let file = self
+            .store
+            .get_file(request.file_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|file| file.size == request.source_size && file.mtime == request.source_mtime)
+            .ok_or("source_superseded")?;
+        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .map_err(|_| "source_unavailable")?;
+        let memo = self
+            .store
+            .fragment_index_source(node_id, file.id, &object_version)
+            .await
+            .ok()
+            .flatten();
+        let attested = tokio::select! {
+            result = crate::fragment_index_cluster::attest_source(node_id, &file, memo.as_ref()) => {
+                result.map_err(|_| "source_attestation_failed")?
+            }
+            () = lost.cancelled() => return Err("claim_lost"),
+            () = tokio::time::sleep(attest_timeout) => return Err("source_attestation_timeout"),
+        };
+        if !transcode.pretranscode_worker_idle()
+            || !self.cluster_fragment_index_enabled().await
+            || lost.is_cancelled()
+        {
+            return Err("preempted");
+        }
+        self.store
+            .record_fragment_index_source(&attested.observation)
+            .await
+            .map_err(|_| "source_record_failed")?;
+        let pipeline_sha256 =
+            crate::fragment_index_cluster::pipeline_digest(&file, engine_sha256, have_dovi);
+        let cache_key =
+            cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
+                .ok_or("invalid_cache_identity")?;
+        let now = clock_ms();
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256: attested.observation.source_sha256,
+            pipeline_sha256,
+            not_before_ms: now,
+            created_at_ms: now,
+        };
+
+        let current = self
+            .store
+            .cluster_fragment_index_job(&cache_key)
+            .await
+            .map_err(|_| "queue_read_failed")?;
+        let accepted = if request.force_rebuild {
+            if current
+                .as_ref()
+                .is_some_and(|job| matches!(job.state.as_str(), "queued" | "running"))
+            {
+                return Err("analysis_already_running");
+            }
+            self.store
+                .force_cluster_fragment_index(&job)
+                .await
+                .map_err(|_| "queue_write_failed")?
+        } else if current
+            .as_ref()
+            .is_some_and(|job| matches!(job.state.as_str(), "queued" | "running" | "ready"))
+        {
+            true
+        } else {
+            self.store
+                .enqueue_cluster_fragment_index(&job)
+                .await
+                .map_err(|_| "queue_write_failed")?
+        };
+        if !accepted {
+            return Err("queue_full_or_busy");
+        }
+        let now = clock_ms();
+        if !self
+            .store
+            .submit_analysis_request(&request.request_id, node_id, request.fence, &cache_key, now)
+            .await
+            .map_err(|_| "request_submit_failed")?
+        {
+            return Err("claim_lost");
+        }
+        let _ = self.store.settle_analysis_requests(now).await;
+        Ok(())
     }
 
     async fn drain_cluster_fragment_index_slot(
