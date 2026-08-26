@@ -354,8 +354,13 @@ pub async fn item_detail(
         } else if !crate::copyseg::supports(f.video_codec.as_deref()) {
             Some("unsupported")
         } else {
-            let identity =
-                crate::fragindex::identity_for(&f, crate::ffmpeg::has_dovi_rpu().await, false);
+            let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+                &f,
+                raw_probe.as_deref(),
+                crate::ffmpeg::has_dovi_rpu().await,
+                false,
+            );
+            let identity = crate::fragindex::identity_for(&f, video);
             Some(
                 if state.store.fragment_index(f.id, &identity).await?.is_some() {
                     "indexed"

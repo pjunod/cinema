@@ -8817,10 +8817,20 @@ mod tests {
             .await
             .expect("file read")
             .expect("file");
-        let outcome = crate::fragindex::build(
+        let probe_json = state
+            .store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("probe read");
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
             &file,
+            probe_json.as_deref(),
             state.transcode.dv_strippable(),
             false,
+        );
+        let outcome = crate::fragindex::build(
+            &file,
+            video,
             state.transcode.runtime_cache_dir(),
             std::time::Duration::from_secs(120),
         )

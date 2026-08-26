@@ -1130,11 +1130,14 @@ pub async fn decision(
         requested_audio,
         container_default_audio,
     );
-    let vod_identity = crate::fragindex::identity_for(
+    let probe_json = state.store.get_file_probe_json(id).await?;
+    let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
+        probe_json.as_deref(),
         crate::ffmpeg::has_dovi_rpu().await,
         decision.preserve_dolby_vision,
     );
+    let vod_identity = crate::fragindex::identity_for(&file, vod_video);
     let vod_indexed = state
         .store
         .fragment_index(id, &vod_identity)
@@ -1528,6 +1531,9 @@ pub async fn stream_mp4(
     let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
     set_selected_audio_default(&mut file.audio_streams, Some(audio));
     let decision = q.caps().decide(&file, dv_strippable(&state));
+    let probe_json = state.store.get_file_probe_json(id).await?;
+    let promote_hevc_parameter_sets =
+        plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
     // Copy HEVC gets an `hvc1` tag so Safari's <video> accepts the fMP4 (an
     // `hev1`-tagged MKV copy otherwise plays audio-only / black in Safari).
     let hevc = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
@@ -1579,6 +1585,7 @@ pub async fn stream_mp4(
         // line parsed a second time somewhere else.
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: decision.preserve_dolby_vision,
+        promote_hevc_parameter_sets,
         readrate,
         tracked,
         serving: state.serving.subscribe(),
@@ -1752,6 +1759,10 @@ struct RemuxSpec<'a> {
     /// Preserve a client-supported Dolby Vision profile instead of stripping
     /// its configuration and RPU metadata to the compatible HDR base.
     preserve_dolby_vision: bool,
+    /// The source hvcC has no parameter-set arrays. Progressive MP4 cannot
+    /// rewrite the init after muxing, so retain the in-band sets and use the
+    /// `hev1`/`dvhe` sample entry that permits them.
+    promote_hevc_parameter_sets: bool,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
     /// to watch this stream's health.
@@ -1818,6 +1829,54 @@ fn spawn_remux_process_owner(
     (RemuxProcessGuard { cancel }, task)
 }
 
+fn progressive_hevc_copy_args(
+    hdr: Option<&str>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "-tag:v".to_owned(),
+        if promote_hevc_parameter_sets {
+            if hdr == Some("dolby_vision") && preserve_dolby_vision {
+                "dvhe"
+            } else {
+                "hev1"
+            }
+        } else {
+            plurx_core::transcode::hevc_copy_tag(hdr, preserve_dolby_vision)
+        }
+        .to_owned(),
+    ];
+    if promote_hevc_parameter_sets && hdr == Some("dolby_vision") && preserve_dolby_vision {
+        // MOV gates dvcC/dvvC behind unofficial strictness. The in-band
+        // Dolby Vision sample entry is `dvhe`, not plain `hev1`; otherwise the
+        // response keeps RPUs while declaring only ordinary HEVC.
+        args.extend(["-strict".to_owned(), "unofficial".to_owned()]);
+    }
+    if !promote_hevc_parameter_sets {
+        args.extend([
+            "-bsf:v".to_owned(),
+            plurx_core::transcode::hevc_copy_bsf_for_client(
+                hdr,
+                have_dovi_bsf,
+                preserve_dolby_vision,
+            ),
+        ]);
+    } else if hdr == Some("dolby_vision") && !preserve_dolby_vision {
+        args.extend([
+            "-bsf:v".to_owned(),
+            if have_dovi_bsf {
+                "dovi_rpu=strip=1,filter_units=remove_types=62-63"
+            } else {
+                "filter_units=remove_types=62-63"
+            }
+            .to_owned(),
+        ]);
+    }
+    args
+}
+
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         path,
@@ -1829,6 +1888,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         hdr,
         have_dovi_bsf,
         preserve_dolby_vision,
+        promote_hevc_parameter_sets,
         readrate,
         tracked,
         mut serving,
@@ -1899,18 +1959,12 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // parameter sets (and no dead DV metadata) — same hygiene, same reasons,
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
-        cmd.args([
-            "-tag:v",
-            plurx_core::transcode::hevc_copy_tag(hdr.as_deref(), preserve_dolby_vision),
-        ]);
-        cmd.args([
-            "-bsf:v",
-            &plurx_core::transcode::hevc_copy_bsf_for_client(
-                hdr.as_deref(),
-                have_dovi_bsf,
-                preserve_dolby_vision,
-            ),
-        ]);
+        cmd.args(progressive_hevc_copy_args(
+            hdr.as_deref(),
+            have_dovi_bsf,
+            preserve_dolby_vision,
+            promote_hevc_parameter_sets,
+        ));
     }
     if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
@@ -2122,6 +2176,31 @@ fn is_progress_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progressive_minimal_hevc_uses_an_in_band_sample_entry() {
+        let args = progressive_hevc_copy_args(None, false, false, true).join(" ");
+        assert!(args.contains("-tag:v hev1"), "{args}");
+        assert!(!args.contains("-strict"), "{args}");
+        assert!(!args.contains("remove_types=32-34"), "{args}");
+    }
+
+    #[test]
+    fn progressive_minimal_dolby_vision_keeps_its_in_band_identity() {
+        let args = progressive_hevc_copy_args(Some("dolby_vision"), true, true, true).join(" ");
+        assert!(args.contains("-tag:v dvhe"), "{args}");
+        assert!(args.contains("-strict unofficial"), "{args}");
+        assert!(!args.contains("-bsf:v"), "{args}");
+
+        let stripped =
+            progressive_hevc_copy_args(Some("dolby_vision"), true, false, true).join(" ");
+        assert!(stripped.contains("-tag:v hev1"), "{stripped}");
+        assert!(
+            stripped.contains("dovi_rpu=strip=1,filter_units=remove_types=62-63"),
+            "{stripped}"
+        );
+        assert!(!stripped.contains("-strict"), "{stripped}");
+    }
 
     fn planned(method: playback::PlaybackMethod) -> Decision {
         Decision {

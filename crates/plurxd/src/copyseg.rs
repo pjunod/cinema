@@ -110,6 +110,11 @@ pub enum Outcome {
     /// where falling back is both possible and correct. Once the playlist is
     /// out, a respawn would rewrite a timeline a player is already holding.
     Unsupported(String),
+    /// The emitted out-of-band HEVC init is not decodable. Retrying through
+    /// ffmpeg's legacy HLS muxer would publish the same invalid decoder
+    /// configuration, so this failure is terminal even when probe metadata
+    /// did not predict that promotion would be needed.
+    InvalidHevcConfiguration(String),
     /// It ran. The counts are what it published, whether it reached the end of
     /// the film or the session was killed under it.
     ///
@@ -357,9 +362,13 @@ pub async fn run<R: AsyncRead + Unpin>(
                             ),
                             Ok(false) => {}
                             Err(e) => {
-                                return Outcome::Unsupported(format!(
-                                    "preparing the HLS init segment: {e}"
-                                ));
+                                let reason = format!("preparing the HLS init segment: {e}");
+                                return match fmp4::validate_hevc_decoder_configuration(&init) {
+                                    Ok(()) => Outcome::Unsupported(reason),
+                                    Err(configuration) => Outcome::InvalidHevcConfiguration(
+                                        format!("{reason}; {configuration}"),
+                                    ),
+                                };
                             }
                         }
                         match fmp4::promote_hdr10_static_metadata(&mut init, &fragment) {
@@ -373,6 +382,11 @@ pub async fn run<R: AsyncRead + Unpin>(
                                     "preparing the HLS init segment: {e}"
                                 ));
                             }
+                        }
+                        if let Err(error) = fmp4::validate_hevc_decoder_configuration(&init) {
+                            return Outcome::InvalidHevcConfiguration(format!(
+                                "validating the HEVC decoder configuration: {error}"
+                            ));
                         }
                         if let Err(e) = out.write_init(&init).await {
                             return Outcome::Unsupported(format!("writing init.mp4: {e}"));
@@ -598,6 +612,30 @@ mod tests {
         (dir, outcome)
     }
 
+    fn replace_hvcc_array_type(bytes: &mut [u8], from: u8, to: u8) {
+        let kind_at = bytes
+            .windows(4)
+            .position(|window| window == b"hvcC")
+            .expect("hvcC box");
+        let payload = kind_at + 4;
+        let arrays = usize::from(bytes[payload + 22]);
+        let mut pos = payload + 23;
+        for _ in 0..arrays {
+            let array_kind = bytes[pos] & 0x3f;
+            let count = u16::from_be_bytes([bytes[pos + 1], bytes[pos + 2]]) as usize;
+            if array_kind == from {
+                bytes[pos] = (bytes[pos] & 0xc0) | to;
+                return;
+            }
+            pos += 3;
+            for _ in 0..count {
+                let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+                pos += 2 + len;
+            }
+        }
+        panic!("hvcC carried no type-{from} array");
+    }
+
     fn playlist(dir: &Path) -> String {
         std::fs::read_to_string(dir.join("index.m3u8")).unwrap_or_default()
     }
@@ -646,6 +684,23 @@ mod tests {
         let mut init = init_with_dolby_brand(true);
         assert!(!sanitize_stale_dolby_brand(&mut init));
         assert!(init.bytes.windows(4).any(|fourcc| fourcc == b"dby1"));
+    }
+
+    #[tokio::test]
+    async fn emitted_hvc1_refuses_an_incomplete_decoder_configuration_without_a_probe_hint() {
+        let mut feed = pipe("closed-gop");
+        // The fixture pipe has removed in-band parameter sets. Leave hvcC
+        // structurally valid but turn its PPS into a duplicate SPS so no
+        // hidden sample data can complete the configuration.
+        replace_hvcc_array_type(&mut feed, 34, 33);
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let Outcome::InvalidHevcConfiguration(reason) = outcome else {
+            panic!("an incomplete emitted hvcC was not terminal: {outcome:?}");
+        };
+        assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
+        assert!(!dir.path().join("init.mp4").exists());
+        assert!(!dir.path().join("index.m3u8").exists());
     }
 
     /// The whole point, end to end: given a source that offers clean cut

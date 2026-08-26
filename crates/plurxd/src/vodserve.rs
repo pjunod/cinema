@@ -42,8 +42,8 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
-    copy_pipe_args_with_dolby_vision, Pacing, COPY_FIRST_SEGMENT_SECONDS, COPY_SEGMENT_MAX_BYTES,
-    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
+    copy_pipe_args_with_dolby_vision, CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS,
+    COPY_SEGMENT_MAX_BYTES, COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -236,8 +236,7 @@ struct Recipe {
     file: MediaFile,
     audio_index: Option<i64>,
     aac: bool,
-    preserve_dolby_vision: bool,
-    have_dovi: bool,
+    video: CopyVideoOptions,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.
     source_object_version: Option<String>,
@@ -459,10 +458,9 @@ impl VodServe {
     async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,
-        have_dovi: bool,
-        preserve_dolby_vision: bool,
+        video: CopyVideoOptions,
     ) -> Result<(FragmentIndex, String, String), String> {
-        if preserve_dolby_vision {
+        if video.preserves_dolby_vision() {
             return Err("the preserved Dolby Vision branch has no v2 artifact".to_owned());
         }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
@@ -487,7 +485,7 @@ impl VodServe {
             .map_err(|error| format!("reading source attestation: {error}"))?
             .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
         let engine = crate::ffmpeg::fragment_index_engine_digest().await;
-        let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, have_dovi);
+        let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
         let cache_key =
             plurx_core::store::cluster_fragment_index_key(&observation.source_sha256, &pipeline)
                 .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
@@ -627,7 +625,19 @@ impl VodServe {
             ));
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        let identity = crate::fragindex::identity_for(file, have_dovi, preserve_dolby_vision);
+        let probe_json = self
+            .shared
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| format!("reading the file probe: {error}"))?;
+        let video = CopyVideoOptions::from_probe(
+            file,
+            probe_json.as_deref(),
+            have_dovi,
+            preserve_dolby_vision,
+        );
+        let identity = crate::fragindex::identity_for(file, video);
         let cluster_cache_enabled = self
             .shared
             .store
@@ -641,9 +651,7 @@ impl VodServe {
                 )
             });
         let cluster_index = if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, have_dovi, preserve_dolby_vision)
-                .await
-                .map(Some)
+            self.try_cluster_fragment_index(file, video).await.map(Some)
         } else {
             Ok(None)
         };
@@ -695,8 +703,7 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
-            preserve_dolby_vision,
-            have_dovi,
+            video,
             source_object_version,
             cluster_cache_key,
         };
@@ -1217,7 +1224,7 @@ impl VodServe {
             file: rendition.recipe.file.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
-            preserve_dolby_vision: rendition.recipe.preserve_dolby_vision,
+            preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
         })
     }
 
@@ -2206,8 +2213,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
         recipe.audio_index,
         recipe.aac,
         Pacing::unpaced(),
-        recipe.have_dovi,
-        recipe.preserve_dolby_vision,
+        recipe.video,
     );
     #[cfg(unix)]
     if rendition.source.is_some() {
@@ -2652,7 +2658,11 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
     hasher.update(identity.mtime_ms.to_le_bytes());
     hasher.update(identity.argv_fingerprint.as_bytes());
     hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
-    hasher.update([u8::from(recipe.aac), u8::from(recipe.preserve_dolby_vision)]);
+    hasher.update([
+        u8::from(recipe.aac),
+        u8::from(recipe.video.preserves_dolby_vision()),
+        u8::from(recipe.video.promotes_parameter_sets()),
+    ]);
     hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
     match recipe.cluster_cache_key.as_deref() {
         Some(cache_key) => {
@@ -2855,8 +2865,7 @@ async fn regenerate_init_head(
         recipe.audio_index,
         recipe.aac,
         Pacing::unpaced(),
-        recipe.have_dovi,
-        recipe.preserve_dolby_vision,
+        recipe.video,
     );
     #[cfg(unix)]
     for index in 0..args.len().saturating_sub(1) {
@@ -3076,8 +3085,7 @@ mod tests {
         let runtime = crate::test_tempdir().expect("runtime cache dir");
         let outcome = crate::fragindex::build(
             file,
-            have_dovi,
-            false,
+            CopyVideoOptions::new(have_dovi, false),
             runtime.path(),
             Duration::from_secs(120),
         )
@@ -3223,8 +3231,7 @@ mod tests {
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
                 aac: true,
-                preserve_dolby_vision: false,
-                have_dovi: false,
+                video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
             },
@@ -4072,8 +4079,7 @@ mod tests {
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
             aac: true,
-            preserve_dolby_vision: false,
-            have_dovi: false,
+            video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
         };

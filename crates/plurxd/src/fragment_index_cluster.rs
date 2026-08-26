@@ -466,8 +466,12 @@ fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
     Ok(format!("{}:{}", metadata.len(), modified.as_nanos()))
 }
 
-pub(crate) fn pipeline_digest(file: &MediaFile, engine_sha256: &str, have_dovi: bool) -> String {
-    let mut args = plurx_core::transcode::copy_index_pipe_args(file, have_dovi, false);
+pub(crate) fn pipeline_digest(
+    file: &MediaFile,
+    engine_sha256: &str,
+    video: plurx_core::transcode::CopyVideoOptions,
+) -> String {
+    let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
     if let Some(input) = args
         .windows(2)
         .position(|window| window[0] == "-i")
