@@ -6187,6 +6187,27 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
         .await
         .expect("remove conflicting partial v12 object");
 
+    // The broken release could also crash after committing a correct object
+    // but before publishing schema version 12. The replacement migration is
+    // idempotent for that exact historical shape and completes the remainder
+    // of the generation in its transaction.
+    client
+        .execute(
+            "CREATE TABLE cluster_fragment_index_sources (
+                node_id          TEXT NOT NULL,
+                file_id          INTEGER NOT NULL,
+                object_version   TEXT NOT NULL,
+                source_size      INTEGER NOT NULL,
+                source_mtime     INTEGER NOT NULL,
+                source_sha256    TEXT NOT NULL,
+                observed_at_ms   INTEGER NOT NULL,
+                PRIMARY KEY (node_id, file_id)
+             ) STRICT",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("seed correctly shaped partial v12 object");
+
     // Let v12 commit, then force v13 to fail. The durable marker must stop at
     // 12 rather than jumping from 11 to the newest schema, and no v13 index or
     // trigger may escape its failed transaction.

@@ -4128,8 +4128,7 @@ mod tests {
             "v11 must advance exactly one step to the fragment-index schema"
         );
         assert_eq!(
-            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE,
-            FRAGMENT_INDEX_SCHEMA_VERSION,
+            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE, FRAGMENT_INDEX_SCHEMA_VERSION,
             "the analysis migration must start from the exact v12 shape"
         );
         assert_eq!(
