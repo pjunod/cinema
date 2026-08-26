@@ -42,7 +42,10 @@ impl SourceFence {
     }
 }
 
-pub(crate) async fn open_source_fence(file: &MediaFile) -> Result<SourceFence, String> {
+pub(crate) async fn open_source_fence(
+    file: &MediaFile,
+    expected_object_version: Option<&str>,
+) -> Result<SourceFence, String> {
     let source = tokio::fs::File::open(&file.path)
         .await
         .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
@@ -50,10 +53,16 @@ pub(crate) async fn open_source_fence(file: &MediaFile) -> Result<SourceFence, S
         .metadata()
         .await
         .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
-    scanner_identity_matches(&metadata, file)?;
+    let object_version = object_version(&metadata)?;
+    if let Some(expected) = expected_object_version {
+        scanner_identity_matches(&metadata, file)?;
+        if expected != object_version {
+            return Err("source changed after cluster index resolution".to_owned());
+        }
+    }
     Ok(SourceFence {
         handle: source.into_std().await,
-        object_version: object_version(&metadata)?,
+        object_version,
     })
 }
 
@@ -63,6 +72,84 @@ pub(crate) fn cache_root(cache_dir: &Path) -> PathBuf {
 
 fn cache_path(root: &Path, cache_key: &str) -> Option<PathBuf> {
     valid_digest(cache_key).then(|| root.join(&cache_key[..2]).join(format!("{cache_key}.idx")))
+}
+
+pub(crate) async fn remove_local_blob(root: &Path, cache_key: &str) -> bool {
+    let Some(path) = cache_path(root, cache_key) else {
+        return false;
+    };
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            tracing::warn!(cache_key, %error, "removing retired fragment-index blob");
+            false
+        }
+    }
+}
+
+/// Reconcile a bounded slice of node-local bytes with the authoritative
+/// catalog. Any catalog read failure aborts the sweep and preserves data.
+pub(crate) async fn sweep_local_orphans(
+    store: &dyn Store,
+    root: &Path,
+    limit: usize,
+) -> Result<usize, String> {
+    let mut removed = 0_usize;
+    let mut examined = 0_usize;
+    let mut directories = match tokio::fs::read_dir(root).await {
+        Ok(directories) => directories,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("list {}: {error}", root.display())),
+    };
+    while let Some(directory) = directories
+        .next_entry()
+        .await
+        .map_err(|error| format!("walk {}: {error}", root.display()))?
+    {
+        if !directory
+            .file_type()
+            .await
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let mut files = tokio::fs::read_dir(directory.path())
+            .await
+            .map_err(|error| error.to_string())?;
+        while let Some(file) = files
+            .next_entry()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            if examined >= limit {
+                return Ok(removed);
+            }
+            let name = file.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(cache_key) = name.strip_suffix(".idx") else {
+                continue;
+            };
+            if !valid_digest(cache_key) {
+                continue;
+            }
+            examined += 1;
+            match store
+                .cluster_fragment_index_artifact(cache_key)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                Some(_) => {}
+                None => {
+                    if remove_local_blob(root, cache_key).await {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 pub(crate) async fn read_local_blob(
@@ -310,10 +397,26 @@ pub(crate) async fn hydrate(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
 ) -> Result<Option<FragmentIndex>, String> {
-    if let Some(blob) = read_local_blob(root, artifact).await? {
-        let index = decode_artifact(&blob, artifact)?;
-        publish_location(store, node_id, artifact).await?;
-        return Ok(Some(index));
+    match read_local_blob(root, artifact).await {
+        Ok(Some(blob)) => {
+            let index = decode_artifact(&blob, artifact)?;
+            publish_location(store, node_id, artifact).await?;
+            return Ok(Some(index));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                cache_key = artifact.cache_key,
+                %error,
+                "discarding a corrupt local fragment-index blob"
+            );
+            if let Some(path) = cache_path(root, &artifact.cache_key) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            let _ = store
+                .forget_cluster_fragment_index_location(&artifact.cache_key, node_id)
+                .await;
+        }
     }
     let Some(membership) = membership else {
         return Ok(None);
@@ -359,7 +462,13 @@ pub(crate) async fn hydrate(
                 .await;
             continue;
         }
-        if !response.status.is_success() || validate_blob(&response.body, artifact).is_err() {
+        if !response.status.is_success() {
+            continue;
+        }
+        if validate_blob(&response.body, artifact).is_err() {
+            let _ = store
+                .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
+                .await;
             continue;
         }
         install_local_blob(root, artifact, &response.body).await?;

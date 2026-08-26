@@ -18,6 +18,14 @@ use crate::media_pool::{
 };
 use crate::state::AppState;
 
+/// Authenticated peers are still fallible. Bound whole-blob verification and
+/// response buffering to four concurrent reads (128 MiB at the wire-format
+/// ceiling) so a buggy voter cannot turn this endpoint into an allocator.
+static FRAGMENT_INDEX_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static FRAGMENT_INDEX_PEER_READS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 pub(crate) async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -49,19 +57,32 @@ pub(crate) async fn fragment_index(
         crate::fragment_index_cluster::PEER_PATH_PREFIX,
         cache_key
     );
-    authorize(&state, &headers, "GET", &path, &[]).await?;
+    let peer_id = authorize(&state, &headers, "GET", &path, &[]).await?;
+    let _read_permit = FRAGMENT_INDEX_READS.try_acquire().map_err(|_| {
+        tracing::warn!(cache_key, "throttling concurrent peer fragment-index reads");
+        StatusCode::TOO_MANY_REQUESTS
+    })?;
+    let peer_reads = FRAGMENT_INDEX_PEER_READS
+        .lock()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .entry(peer_id.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone();
+    let _peer_permit = peer_reads.try_acquire_owned().map_err(|_| {
+        tracing::warn!(
+            cache_key,
+            peer_id,
+            "throttling one peer's fragment-index reads"
+        );
+        StatusCode::TOO_MANY_REQUESTS
+    })?;
     let artifact = state
         .store
         .cluster_fragment_index_artifact(&cache_key)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let runtime = state
-        .cache_dir
-        .parent()
-        .unwrap_or(state.cache_dir.as_path())
-        .join("runtime");
-    let root = crate::fragment_index_cluster::cache_root(&runtime);
+    let root = crate::fragment_index_cluster::cache_root(&state.runtime_cache_dir);
     match crate::fragment_index_cluster::read_local_blob(&root, &artifact).await {
         Ok(Some(blob)) => Ok((
             [
@@ -79,6 +100,7 @@ pub(crate) async fn fragment_index(
         }
         Err(error) => {
             tracing::warn!(cache_key, %error, "refusing a corrupt fragment-index blob");
+            crate::fragment_index_cluster::remove_local_blob(&root, &cache_key).await;
             let _ = state
                 .store
                 .forget_cluster_fragment_index_location(&cache_key, &state.node_id)
@@ -130,15 +152,16 @@ async fn authorize(
     method: &str,
     path: &str,
     body: &[u8],
-) -> Result<(), StatusCode> {
+) -> Result<String, StatusCode> {
     let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let node_id = auth.node_id.clone();
     if state
         .membership
         .authorize_internal_peer_request(&auth, method, path, body)
         .await
         .unwrap_or(false)
     {
-        Ok(())
+        Ok(node_id)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }

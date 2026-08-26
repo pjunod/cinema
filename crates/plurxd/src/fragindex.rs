@@ -21,8 +21,6 @@
 //!   [`IndexOutcome::Truncated`] is the only honest answer there, and the
 //!   caller retries rather than persisting it.
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};

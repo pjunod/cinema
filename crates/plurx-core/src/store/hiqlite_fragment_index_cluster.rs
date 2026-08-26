@@ -7,14 +7,17 @@ use hiqlite::Row;
 use super::fragment_index_cluster::CLUSTER_FRAGMENT_INDEX_SCHEMA;
 use super::hiqlite::{database_error, timeout_store, validate_sql, HiqliteAuthStore};
 use super::{
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewClusterFragmentIndexJob,
+    cluster_fragment_index_key, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewClusterFragmentIndexJob,
 };
 use crate::error::StoreError;
 
 const MAX_ATTEMPTS: i64 = 5;
 const MAX_ACTIVE_JOBS: i64 = 4_096;
 const MAX_ERROR_CODE_BYTES: usize = 64;
+const MAX_LOCAL_EXCLUSIONS: usize = 128;
+const CLAIM_SCAN_LIMIT: i64 = 256;
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     validate_sql(CLUSTER_FRAGMENT_INDEX_SCHEMA)?;
@@ -98,6 +101,14 @@ impl From<&mut Row<'_>> for LocationRow {
             verified_at_ms: row.get("verified_at_ms"),
             last_seen_at_ms: row.get("last_seen_at_ms"),
         })
+    }
+}
+
+struct CacheKeyRow(String);
+
+impl From<&mut Row<'_>> for CacheKeyRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("cache_key"))
     }
 }
 
@@ -219,13 +230,22 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
                           WHERE state IN ('queued', 'running')) < $9
                  ON CONFLICT(cache_key) DO UPDATE SET
+                    file_id = excluded.file_id, source_size = excluded.source_size,
+                    source_mtime = excluded.source_mtime,
+                    source_sha256 = excluded.source_sha256,
+                    pipeline_sha256 = excluded.pipeline_sha256,
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                    attempts = CASE
+                        WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                          OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
+                        ELSE cluster_fragment_index_jobs.attempts END,
                     not_before_ms = excluded.not_before_ms,
                     updated_at_ms = excluded.updated_at_ms,
                     last_error_code = NULL
-                  WHERE cluster_fragment_index_jobs.state = 'failed'
-                    AND cluster_fragment_index_jobs.attempts < $10
-                    AND cluster_fragment_index_jobs.not_before_ms <= excluded.created_at_ms",
+                  WHERE cluster_fragment_index_jobs.state = 'cancelled'
+                     OR (cluster_fragment_index_jobs.state = 'failed'
+                       AND cluster_fragment_index_jobs.attempts < $10
+                       AND cluster_fragment_index_jobs.not_before_ms <= excluded.created_at_ms)",
                 params!(
                     &job.cache_key,
                     job.file_id,
@@ -246,29 +266,45 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     async fn claim_cluster_fragment_index(
         &self,
         node_id: &str,
+        excluded_cache_keys: &[String],
         now_ms: i64,
         lease_expires_ms: i64,
     ) -> Result<Option<ClusterFragmentIndexJob>, StoreError> {
-        if node_id.is_empty() || node_id.len() > 128 || lease_expires_ms <= now_ms {
+        if node_id.is_empty()
+            || node_id.len() > 128
+            || excluded_cache_keys.len() > MAX_LOCAL_EXCLUSIONS
+            || excluded_cache_keys.iter().any(|key| !valid_hex_digest(key))
+            || lease_expires_ms <= now_ms
+        {
             return Err(StoreError::Task(
                 "invalid cluster fragment-index claim".to_owned(),
             ));
         }
+        let excluded_cache_keys = excluded_cache_keys
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         for _ in 0..8 {
             let sql = format!(
                 "SELECT {JOB_COLS} FROM cluster_fragment_index_jobs
                   WHERE ((state = 'queued' AND not_before_ms <= $1)
                       OR (state = 'running' AND lease_expires_ms <= $1))
                     AND attempts < $2 AND fence < 9223372036854775807
-                  ORDER BY created_at_ms, cache_key LIMIT 1"
+                  ORDER BY created_at_ms, cache_key LIMIT $3"
             );
-            let Some(mut candidate) = self
+            let candidates = self
                 .client()
-                .query_consistent_map::<JobRow, _>(sql, params!(now_ms, MAX_ATTEMPTS))
+                .query_consistent_map::<JobRow, _>(
+                    sql,
+                    params!(now_ms, MAX_ATTEMPTS, CLAIM_SCAN_LIMIT),
+                )
                 .await?
                 .into_iter()
-                .next()
                 .map(|row| row.0)
+                .collect::<Vec<_>>();
+            let Some(mut candidate) = candidates
+                .into_iter()
+                .find(|candidate| !excluded_cache_keys.contains(&candidate.cache_key))
             else {
                 return Ok(None);
             };
@@ -301,6 +337,33 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             }
         }
         Ok(None)
+    }
+
+    async fn requeue_cluster_fragment_index(
+        &self,
+        cache_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if !valid_hex_digest(cache_key) {
+            return Err(StoreError::Task(
+                "invalid cluster fragment-index repair key".to_owned(),
+            ));
+        }
+        Ok(self
+            .execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        not_before_ms = $1, updated_at_ms = $1,
+                        last_error_code = 'holders_unavailable'
+                  WHERE cache_key = $2
+                    AND (state = 'ready' OR (state = 'failed'
+                      AND attempts < $3 AND not_before_ms <= $1))
+                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                 WHERE cache_key = $2)",
+                params!(now_ms, cache_key, MAX_ATTEMPTS),
+            )
+            .await?
+            == 1)
     }
 
     async fn renew_cluster_fragment_index(
@@ -353,6 +416,14 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         if artifact.cache_key != job.cache_key
+            || artifact.file_id != job.file_id
+            || artifact.source_size != job.source_size
+            || artifact.source_mtime != job.source_mtime
+            || artifact.source_sha256 != job.source_sha256
+            || artifact.pipeline_sha256 != job.pipeline_sha256
+            || cluster_fragment_index_key(&artifact.source_sha256, &artifact.pipeline_sha256)
+                .as_deref()
+                != Some(job.cache_key.as_str())
             || location.cache_key != job.cache_key
             || artifact.built_by_node_id != job.owner_node_id
             || location.node_id != job.owner_node_id
@@ -374,7 +445,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
                       WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                         WHERE cache_key = $1 AND state = 'running' AND owner_node_id = $9
-                          AND fence = $11 AND lease_expires_ms > $12)
+                          AND fence = $11 AND lease_expires_ms > $12
+                          AND file_id = $2 AND source_size = $3 AND source_mtime = $4
+                          AND source_sha256 = $5 AND pipeline_sha256 = $6)
                      ON CONFLICT(cache_key) DO NOTHING"
                         .to_owned(),
                     params!(
@@ -540,5 +613,84 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             )
             .await?
             == 1)
+    }
+
+    async fn prune_cluster_fragment_indexes(
+        &self,
+        older_than_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        if !(1..=512).contains(&limit) {
+            return Err(StoreError::Task(
+                "invalid cluster fragment-index prune bound".to_owned(),
+            ));
+        }
+        let candidates = self
+            .client()
+            .query_consistent_map::<CacheKeyRow, _>(
+                "SELECT j.cache_key AS cache_key
+                   FROM cluster_fragment_index_jobs j
+                  WHERE j.state IN ('ready', 'failed', 'cancelled')
+                    AND j.updated_at_ms < $1
+                    AND NOT EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_locations l
+                       WHERE l.cache_key = j.cache_key AND l.last_seen_at_ms >= $1)
+                  ORDER BY j.updated_at_ms, j.cache_key LIMIT $2",
+                params!(older_than_ms, limit),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statements = Vec::with_capacity(candidates.len() * 3);
+        for cache_key in &candidates {
+            statements.push((
+                "DELETE FROM cluster_fragment_index_locations
+                  WHERE cache_key = $1
+                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                      WHERE cache_key = $1
+                        AND state IN ('ready', 'failed', 'cancelled')
+                        AND updated_at_ms < $2)"
+                    .to_owned(),
+                params!(cache_key, older_than_ms),
+            ));
+            statements.push((
+                "DELETE FROM cluster_fragment_index_artifacts
+                  WHERE cache_key = $1
+                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                      WHERE cache_key = $1
+                        AND state IN ('ready', 'failed', 'cancelled')
+                        AND updated_at_ms < $2)
+                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
+                      WHERE cache_key = $1 AND last_seen_at_ms >= $2)"
+                    .to_owned(),
+                params!(cache_key, older_than_ms),
+            ));
+            statements.push((
+                "DELETE FROM cluster_fragment_index_jobs
+                  WHERE cache_key = $1
+                    AND state IN ('ready', 'failed', 'cancelled')
+                    AND updated_at_ms < $2
+                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                     WHERE cache_key = $1)"
+                    .to_owned(),
+                params!(cache_key, older_than_ms),
+            ));
+        }
+        let results = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(candidates
+            .into_iter()
+            .zip(results.chunks_exact(3))
+            .filter_map(|(key, result)| (result[1] == 1).then_some(key))
+            .collect())
     }
 }

@@ -339,6 +339,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "prune_cluster_fragment_indexes",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
         module: "sessions.rs",
         method: "claim_media_session_request",
         is_async: true,

@@ -5016,6 +5016,7 @@ impl TranscodeManager {
             cache_parent.join("renditions"),
             ffmpeg_build,
             node_id,
+            None,
         )
     }
 
@@ -5023,6 +5024,7 @@ impl TranscodeManager {
     /// and validates these paths before scratch cleanup; deriving siblings
     /// from a canonicalized `transcode` leaf would move them when only that
     /// legacy child is a relocation symlink.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_cache_layout(
         mut self,
         cache_dir: PathBuf,
@@ -5031,13 +5033,20 @@ impl TranscodeManager {
         rendition_cache: PathBuf,
         ffmpeg_build: String,
         node_id: String,
+        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.subtitle_cache = subtitle_cache;
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
-        self.vod = crate::vodserve::VodServe::new(rendition_cache, Arc::clone(&self.store));
+        self.vod = crate::vodserve::VodServe::new_cluster(
+            rendition_cache,
+            Arc::clone(&self.store),
+            node_id.clone(),
+            crate::fragment_index_cluster::cache_root(&self.runtime_cache),
+            cluster_membership,
+        );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
                 path = %self.runtime_cache.display(),

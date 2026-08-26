@@ -76,7 +76,7 @@ BEGIN
     DELETE FROM cluster_fragment_index_sources WHERE file_id = OLD.id;
     UPDATE cluster_fragment_index_jobs
        SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
-           last_error_code = 'source_deleted', updated_at_ms = unixepoch() * 1000
+           last_error_code = 'source_deleted'
      WHERE file_id = OLD.id AND state IN ('queued', 'running');
 END;
 "#;
@@ -174,9 +174,19 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         job: &NewClusterFragmentIndexJob,
     ) -> Result<bool, StoreError>;
 
+    /// Reopen an existing catalog artifact whose physical holders could not
+    /// supply a valid blob. The immutable artifact remains the expected
+    /// identity while a fenced worker deterministically reconstructs it.
+    async fn requeue_cluster_fragment_index(
+        &self,
+        cache_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
     async fn claim_cluster_fragment_index(
         &self,
         node_id: &str,
+        excluded_cache_keys: &[String],
         now_ms: i64,
         lease_expires_ms: i64,
     ) -> Result<Option<ClusterFragmentIndexJob>, StoreError>;
@@ -236,6 +246,15 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         cache_key: &str,
         node_id: &str,
     ) -> Result<bool, StoreError>;
+
+    /// Remove a bounded set of terminal catalog generations that have not
+    /// had a verified holder within the retention window. Returns artifact
+    /// keys whose node-local bytes may now be removed.
+    async fn prune_cluster_fragment_indexes(
+        &self,
+        older_than_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, StoreError>;
 }
 
 /// Canonical cache identity.  Every component is length-delimited and the

@@ -29,8 +29,6 @@
 
 use std::collections::HashMap;
 use std::io;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
@@ -240,6 +238,13 @@ struct Recipe {
     aac: bool,
     preserve_dolby_vision: bool,
     have_dovi: bool,
+    /// Exact object version whose complete digest selected the cluster blob.
+    /// None on the legacy node-local index path.
+    source_object_version: Option<String>,
+    /// Content/pipeline identity selected by the v2 catalog. This becomes part
+    /// of the rendition directory key so weak legacy metadata cannot alias
+    /// segments across an in-place source rewrite.
+    cluster_cache_key: Option<String>,
 }
 
 /// One attached reader, in plan indexes.
@@ -389,6 +394,9 @@ struct Session {
 struct Shared {
     base: PathBuf,
     store: Arc<dyn Store>,
+    cluster_node_id: Option<String>,
+    cluster_index_root: Option<PathBuf>,
+    cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     sessions: Mutex<HashMap<String, Session>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
     pool: WaitPool,
@@ -406,10 +414,39 @@ pub struct VodServe {
 impl VodServe {
     /// `base` is the renditions root directory (created lazily).
     pub fn new(base: PathBuf, store: Arc<dyn Store>) -> Arc<VodServe> {
+        Self::new_configured(base, store, None, None, None)
+    }
+
+    pub(crate) fn new_cluster(
+        base: PathBuf,
+        store: Arc<dyn Store>,
+        node_id: String,
+        cluster_index_root: PathBuf,
+        membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    ) -> Arc<VodServe> {
+        Self::new_configured(
+            base,
+            store,
+            Some(node_id),
+            Some(cluster_index_root),
+            membership,
+        )
+    }
+
+    fn new_configured(
+        base: PathBuf,
+        store: Arc<dyn Store>,
+        cluster_node_id: Option<String>,
+        cluster_index_root: Option<PathBuf>,
+        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+    ) -> Arc<VodServe> {
         Arc::new(VodServe {
             shared: Arc::new(Shared {
                 base,
                 store,
+                cluster_node_id,
+                cluster_index_root,
+                cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
@@ -417,6 +454,92 @@ impl VodServe {
                 completed_cache: AtomicU64::new(0),
             }),
         })
+    }
+
+    async fn try_cluster_fragment_index(
+        &self,
+        file: &MediaFile,
+        have_dovi: bool,
+        preserve_dolby_vision: bool,
+    ) -> Result<(FragmentIndex, String, String), String> {
+        if preserve_dolby_vision {
+            return Err("the preserved Dolby Vision branch has no v2 artifact".to_owned());
+        }
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Err("the fragment-index engine changed; restart is required".to_owned());
+        }
+        let node_id = self
+            .shared
+            .cluster_node_id
+            .as_deref()
+            .ok_or_else(|| "this process has no cluster index identity".to_owned())?;
+        let root = self
+            .shared
+            .cluster_index_root
+            .as_deref()
+            .ok_or_else(|| "this process has no cluster index cache root".to_owned())?;
+        let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
+        let observation = self
+            .shared
+            .store
+            .fragment_index_source(node_id, file.id, &object_version)
+            .await
+            .map_err(|error| format!("reading source attestation: {error}"))?
+            .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, have_dovi);
+        let cache_key =
+            plurx_core::store::cluster_fragment_index_key(&observation.source_sha256, &pipeline)
+                .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
+        let artifact = self
+            .shared
+            .store
+            .cluster_fragment_index_artifact(&cache_key)
+            .await
+            .map_err(|error| format!("reading cluster index catalog: {error}"))?
+            .filter(|artifact| {
+                artifact.source_size == file.size
+                    && artifact.source_sha256 == observation.source_sha256
+                    && artifact.pipeline_sha256 == pipeline
+            });
+        let Some(artifact) = artifact else {
+            let now = crate::fragment_index_cluster::unix_ms();
+            let _ = self
+                .shared
+                .store
+                .enqueue_cluster_fragment_index(&plurx_core::store::NewClusterFragmentIndexJob {
+                    cache_key,
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    source_sha256: observation.source_sha256,
+                    pipeline_sha256: pipeline,
+                    not_before_ms: now,
+                    created_at_ms: now,
+                })
+                .await;
+            return Err("the exact v2 artifact is queued".to_owned());
+        };
+        let index = crate::fragment_index_cluster::hydrate(
+            self.shared.store.as_ref(),
+            self.shared.cluster_membership.as_ref(),
+            node_id,
+            root,
+            &artifact,
+        )
+        .await?;
+        let Some(index) = index else {
+            let _ = self
+                .shared
+                .store
+                .requeue_cluster_fragment_index(
+                    &artifact.cache_key,
+                    crate::fragment_index_cluster::unix_ms(),
+                )
+                .await;
+            return Err("no verified holder could supply the v2 artifact".to_owned());
+        };
+        Ok((index, object_version, artifact.cache_key))
     }
 
     /// Keep VOD lifecycle telemetry on the same node-local event stream as
@@ -502,12 +625,54 @@ impl VodServe {
         };
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
         let identity = crate::fragindex::identity_for(file, have_dovi, preserve_dolby_vision);
-        let index = self
+        let cluster_cache_enabled = self
             .shared
             .store
-            .fragment_index(file.id, &identity)
+            .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
             .await
-            .map_err(|error| format!("reading the fragment index: {error}"))?;
+            .map_err(|error| format!("reading the cluster index gate: {error}"))?
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        let cluster_index = if cluster_cache_enabled {
+            self.try_cluster_fragment_index(file, have_dovi, preserve_dolby_vision)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        };
+        let (index, source_object_version, cluster_cache_key) = match cluster_index {
+            Ok(Some((index, object_version, cache_key))) => {
+                (Some(index), Some(object_version), Some(cache_key))
+            }
+            Ok(None) => (
+                self.shared
+                    .store
+                    .fragment_index(file.id, &identity)
+                    .await
+                    .map_err(|error| format!("reading the fragment index: {error}"))?,
+                None,
+                None,
+            ),
+            Err(reason) => {
+                // The first rollout phase is write/shadow plus prefer-v2.
+                // Per-key fallback preserves an already healthy v1 title
+                // until this exact source/pipeline key is fully available.
+                tracing::debug!(file_id = file.id, %reason, "v2 fragment index unavailable; using v1");
+                (
+                    self.shared
+                        .store
+                        .fragment_index(file.id, &identity)
+                        .await
+                        .map_err(|error| format!("reading the fragment index: {error}"))?,
+                    None,
+                    None,
+                )
+            }
+        };
         let Some(index) = index else {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_index_pending",
@@ -529,6 +694,8 @@ impl VodServe {
             aac,
             preserve_dolby_vision,
             have_dovi,
+            source_object_version,
+            cluster_cache_key,
         };
         let key = rendition_key(&recipe, &identity);
         let rendition = self
@@ -1197,6 +1364,11 @@ impl VodServe {
         rendition: &Arc<Rendition>,
         budget: Duration,
     ) -> Result<SegmentReady, VodError> {
+        if self.source_changed(rendition) {
+            let cause = "source changed after the fragment index was selected".to_owned();
+            record_failure(&self.shared, rendition, cause.clone());
+            return Err(VodError::ProducerFailed(cause));
+        }
         self.shared
             .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
         rendition.kick();
@@ -1217,6 +1389,12 @@ impl VodServe {
                 let ready = open_ready(&path, &format!("{}-init", rendition.key))
                     .await
                     .map_err(VodError::Io)?;
+                if self.source_changed(rendition) {
+                    let cause =
+                        "source changed while the rendition init was being opened".to_owned();
+                    record_failure(&self.shared, rendition, cause.clone());
+                    return Err(VodError::ProducerFailed(cause));
+                }
                 return Ok(ready);
             }
             if let Some(cause) = rendition.failure() {
@@ -1580,7 +1758,11 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        let source = crate::fragment_index_cluster::open_source_fence(&recipe.file).await?;
+        let source = crate::fragment_index_cluster::open_source_fence(
+            &recipe.file,
+            recipe.source_object_version.as_deref(),
+        )
+        .await?;
         let dir = RenditionDir::new(self.base.join(key));
         let existed = tokio::fs::metadata(dir.path()).await.is_ok();
         dir.create()
@@ -1614,7 +1796,7 @@ impl Shared {
                         // session's life. Run a HEAD regeneration now — spawn
                         // the generation child, read only to its muxer init,
                         // verify against the stored digests.
-                        match regenerate_init_head(&recipe, &identity).await {
+                        match regenerate_init_head(&recipe, &source, &identity).await {
                             Ok(served) => {
                                 // Match keeps every surviving segment.
                                 dir.write_init(&served.bytes).await.map_err(|error| {
@@ -1994,6 +2176,16 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
 async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: u32) {
+    if rendition.recipe.cluster_cache_key.is_some()
+        && !crate::ffmpeg::fragment_index_engine_is_current().await
+    {
+        record_failure(
+            shared,
+            rendition,
+            "the v2 fragment-index engine changed; restart is required".to_owned(),
+        );
+        return;
+    }
     // A spawn position must be a VIDEO entry — the scheduler can name an
     // audio-tail index (a blocked GET on the tail is real demand), but the
     // generation that serves it starts at the last video boundary and its
@@ -2170,6 +2362,20 @@ async fn establish_or_verify(
     muxer: &Init,
     epoch: u64,
 ) -> bool {
+    if rendition.recipe.cluster_cache_key.is_some()
+        && !crate::ffmpeg::fragment_index_engine_is_current().await
+    {
+        on_generation_end(
+            shared,
+            rendition,
+            Outcome::Failed(Failure::Stream(
+                "the v2 fragment-index engine changed before init publication".to_owned(),
+            )),
+            epoch,
+        )
+        .await;
+        return false;
+    }
     let served = {
         let mut state = rendition.identity.lock().await;
         match &state.identity {
@@ -2382,6 +2588,14 @@ impl vodgen::Sink for RenditionSink {
                 "source changed before fragment publication",
             ));
         }
+        if self.rendition.recipe.cluster_cache_key.is_some()
+            && !crate::ffmpeg::fragment_index_engine_is_current().await
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "v2 fragment-index engine changed before fragment publication",
+            ));
+        }
         let len = bytes.len() as u64;
         {
             let mut manifest = self.rendition.manifest.lock().await;
@@ -2437,6 +2651,13 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
     hasher.update(recipe.audio_index.unwrap_or(-1).to_le_bytes());
     hasher.update([u8::from(recipe.aac), u8::from(recipe.preserve_dolby_vision)]);
     hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+    match recipe.cluster_cache_key.as_deref() {
+        Some(cache_key) => {
+            hasher.update(b"cluster-v2\0");
+            hasher.update(cache_key.as_bytes());
+        }
+        None => hasher.update(b"legacy-v1\0"),
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -2612,8 +2833,20 @@ fn sub_saturating(counter: &AtomicU64, bytes: u64) {
 /// manifest gets its `init.mp4` back without producing a single segment: the
 /// §2 ruling made the init reproducible independently of the segments, so a
 /// verified head is proof enough to keep every adopted byte.
-async fn regenerate_init_head(recipe: &Recipe, identity: &InitIdentity) -> Result<Init, String> {
-    let args = copy_pipe_args_with_dolby_vision(
+async fn regenerate_init_head(
+    recipe: &Recipe,
+    source: &crate::fragment_index_cluster::SourceFence,
+    identity: &InitIdentity,
+) -> Result<Init, String> {
+    if recipe.cluster_cache_key.is_some()
+        && !crate::ffmpeg::fragment_index_engine_is_current().await
+    {
+        return Err("the v2 fragment-index engine changed before head regeneration".to_owned());
+    }
+    if !source.unchanged() {
+        return Err("source changed before head regeneration".to_owned());
+    }
+    let mut args = copy_pipe_args_with_dolby_vision(
         &recipe.file,
         0.0,
         recipe.audio_index,
@@ -2622,7 +2855,37 @@ async fn regenerate_init_head(recipe: &Recipe, identity: &InitIdentity) -> Resul
         recipe.have_dovi,
         recipe.preserve_dolby_vision,
     );
-    let mut child = tokio::process::Command::new(ffmpeg_bin())
+    #[cfg(unix)]
+    for index in 0..args.len().saturating_sub(1) {
+        if args[index] == "-i" {
+            args[index + 1] = "/dev/fd/3".to_owned();
+        }
+    }
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let source_fd = source.handle.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -2639,6 +2902,14 @@ async fn regenerate_init_head(recipe: &Recipe, identity: &InitIdentity) -> Resul
     let _ = child.kill().await;
     let (_consumed, muxer) =
         head.map_err(|error| format!("reading the head regeneration's init: {error}"))?;
+    if !source.unchanged() {
+        return Err("source changed during head regeneration".to_owned());
+    }
+    if recipe.cluster_cache_key.is_some()
+        && !crate::ffmpeg::fragment_index_engine_is_current().await
+    {
+        return Err("the v2 fragment-index engine changed during head regeneration".to_owned());
+    }
     identity
         .served_init_for(&muxer)
         .map_err(|refused| refused.to_string())
@@ -2951,6 +3222,8 @@ mod tests {
                 aac: true,
                 preserve_dolby_vision: false,
                 have_dovi: false,
+                source_object_version: None,
+                cluster_cache_key: None,
             },
             source: None,
             playlist: plan.playlist().into_bytes(),
@@ -3796,6 +4069,8 @@ mod tests {
             aac: true,
             preserve_dolby_vision: false,
             have_dovi: false,
+            source_object_version: None,
+            cluster_cache_key: None,
         };
         let video_ms = index_video_ms(&index);
         assert!(video_ms > 0);
