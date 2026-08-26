@@ -265,7 +265,8 @@ async fn wait_for_fragment_index(daemon: &mut Daemon) {
         daemon.assert_running("waiting for the fragment index");
         let diagnostics = daemon.diagnostics();
         if diagnostics.lines().any(|line| {
-            line.contains("fragment indexing pass finished") && line.contains("built=1")
+            line.contains("fragment indexing pass finished")
+                && strip_ansi_csi(line).contains("built=1")
         }) {
             return;
         }
@@ -275,6 +276,39 @@ async fn wait_for_fragment_index(daemon: &mut Daemon) {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Remove terminal control sequences before matching structured log fields.
+///
+/// CI deliberately exports `CARGO_TERM_COLOR=always`, and the daemon's tracing
+/// formatter can therefore put SGR escapes around both `built` and `=1` even
+/// though stdout is redirected to a file. The message itself remains plain,
+/// so only normalize candidate lines instead of copying the whole growing log
+/// on every poll.
+fn strip_ansi_csi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < bytes.len() && !(0x40..=0x7e).contains(&bytes[index]) {
+                index += 1;
+            }
+            index = index.saturating_add(1);
+        } else {
+            plain.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(plain).expect("removing ASCII control sequences preserves UTF-8")
+}
+
+#[test]
+fn fragment_index_completion_match_ignores_forced_terminal_color() {
+    let line = "fragment indexing pass finished \x1b[3mattempted\x1b[0m\x1b[2m=\x1b[0m1 \
+                \x1b[3mbuilt\x1b[0m\x1b[2m=\x1b[0m1";
+    assert!(strip_ansi_csi(line).contains("built=1"));
 }
 
 fn write_av_fixture(path: &Path) {
