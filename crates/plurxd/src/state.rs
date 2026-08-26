@@ -3898,9 +3898,7 @@ impl JobManager {
                         if let Err(error) = self
                             .store
                             .retry_analysis_request(
-                                &request.request_id,
-                                &node_id,
-                                request.fence,
+                                &request,
                                 code,
                                 now,
                                 now.saturating_add(delay_ms),

@@ -400,20 +400,21 @@ impl ClusterFragmentIndexStore for SqliteStore {
 
     async fn retry_analysis_request(
         &self,
-        request_id: &str,
-        node_id: &str,
-        fence: i64,
+        request: &AnalysisRequest,
         error_code: &str,
         now_ms: i64,
         retry_at_ms: i64,
         charge_attempt: bool,
     ) -> Result<bool, StoreError> {
-        if error_code.is_empty() || error_code.len() > MAX_ERROR_CODE_BYTES || retry_at_ms <= now_ms
+        if request.state != "running"
+            || request.owner_node_id.is_empty()
+            || error_code.is_empty()
+            || error_code.len() > MAX_ERROR_CODE_BYTES
+            || retry_at_ms <= now_ms
         {
             return Err(StoreError::Task("invalid analysis retry".to_owned()));
         }
-        let request_id = request_id.to_owned();
-        let node_id = node_id.to_owned();
+        let request = request.clone();
         let error_code = error_code.to_owned();
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -429,9 +430,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     retry_at_ms,
                     error_code,
                     now_ms,
-                    request_id,
-                    node_id,
-                    fence
+                    request.request_id,
+                    request.owner_node_id,
+                    request.fence
                 ],
             )? == 1)
         })
@@ -1552,15 +1553,7 @@ mod tests {
             .expect("request claim");
         assert_eq!(claimed.attempts, 1);
         assert!(store
-            .retry_analysis_request(
-                &claimed.request_id,
-                "node-a",
-                claimed.fence,
-                "foreground_preempted",
-                11,
-                21,
-                false,
-            )
+            .retry_analysis_request(&claimed, "foreground_preempted", 11, 21, false,)
             .await
             .expect("yield request"));
         let retried = store.analysis_requests(10).await.expect("list requests");
@@ -1783,9 +1776,7 @@ mod tests {
             assert_eq!(claimed.attempts, expected_attempt);
             assert!(store
                 .retry_analysis_request(
-                    &claimed.request_id,
-                    "node-a",
-                    claimed.fence,
+                    &claimed,
                     "source_attestation_failed",
                     now + 1,
                     now + 2,

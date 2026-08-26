@@ -294,9 +294,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
 
     async fn retry_analysis_request(
         &self,
-        request_id: &str,
-        node_id: &str,
-        fence: i64,
+        request: &AnalysisRequest,
         error_code: &str,
         now_ms: i64,
         retry_at_ms: i64,

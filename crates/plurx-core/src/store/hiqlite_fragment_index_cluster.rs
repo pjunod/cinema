@@ -493,15 +493,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
 
     async fn retry_analysis_request(
         &self,
-        request_id: &str,
-        node_id: &str,
-        fence: i64,
+        request: &AnalysisRequest,
         error_code: &str,
         now_ms: i64,
         retry_at_ms: i64,
         charge_attempt: bool,
     ) -> Result<bool, StoreError> {
-        if error_code.is_empty() || error_code.len() > MAX_ERROR_CODE_BYTES || retry_at_ms <= now_ms
+        if request.state != "running"
+            || request.owner_node_id.is_empty()
+            || error_code.is_empty()
+            || error_code.len() > MAX_ERROR_CODE_BYTES
+            || retry_at_ms <= now_ms
         {
             return Err(StoreError::Task("invalid analysis retry".to_owned()));
         }
@@ -519,9 +521,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     retry_at_ms,
                     error_code,
                     now_ms,
-                    request_id,
-                    node_id,
-                    fence
+                    &request.request_id,
+                    &request.owner_node_id,
+                    request.fence
                 ),
             )
             .await?
