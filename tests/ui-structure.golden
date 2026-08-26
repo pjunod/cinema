@@ -775,7 +775,7 @@ catalog|item@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=tr
 catalog|item@1280x860|dom|dd > div.langnote[text]|1
 catalog|item@1280x860|dom|dd > div.trks[text]|1
 catalog|item@1280x860|dom|dd > div.trks|1
-catalog|item@1280x860|dom|dd > span.stat-good[text]|1
+catalog|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
 catalog|item@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|item@1280x860|dom|div#pxlibs > div.px-sec[text]|1
 catalog|item@1280x860|dom|div#pxlibs > nav.px-nav|1
@@ -830,8 +830,8 @@ catalog|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
 catalog|item@1280x860|dom|div.version > dl.specs|1
 catalog|item@1280x860|dom|dl.specs > dd.fn[text]|1
-catalog|item@1280x860|dom|dl.specs > dd[text]|1
-catalog|item@1280x860|dom|dl.specs > dd|3
+catalog|item@1280x860|dom|dl.specs > dd[text]|2
+catalog|item@1280x860|dom|dl.specs > dd|2
 catalog|item@1280x860|dom|dl.specs > dt[text]|5
 catalog|item@1280x860|dom|h1[text] > button.ghost.px-admin.sm[aria-label=* text]|1
 catalog|item@1280x860|dom|main#main > div.hero.px-hero.px-noart|1
@@ -894,7 +894,7 @@ catalog|item@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=tru
 catalog|item@390x780|dom|dd > div.langnote[text]|1
 catalog|item@390x780|dom|dd > div.trks[text]|1
 catalog|item@390x780|dom|dd > div.trks|1
-catalog|item@390x780|dom|dd > span.stat-good[text]|1
+catalog|item@390x780|dom|dd[text] > span.stat-warn[text]|1
 catalog|item@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|item@390x780|dom|div#pxlibs > div.px-sec[text]|1
 catalog|item@390x780|dom|div#pxlibs > nav.px-nav|1
@@ -949,8 +949,8 @@ catalog|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
 catalog|item@390x780|dom|div.version > dl.specs|1
 catalog|item@390x780|dom|dl.specs > dd.fn[text]|1
-catalog|item@390x780|dom|dl.specs > dd[text]|1
-catalog|item@390x780|dom|dl.specs > dd|3
+catalog|item@390x780|dom|dl.specs > dd[text]|2
+catalog|item@390x780|dom|dl.specs > dd|2
 catalog|item@390x780|dom|dl.specs > dt[text]|5
 catalog|item@390x780|dom|h1[text] > button.ghost.px-admin.sm[aria-label=* text]|1
 catalog|item@390x780|dom|main#main > div.hero.px-hero.px-noart|1
@@ -2653,7 +2653,7 @@ classic|item@1280x860|dom|button.ghost.sm > span.tsw|1
 classic|item@1280x860|dom|dd > div.langnote[text]|1
 classic|item@1280x860|dom|dd > div.trks[text]|1
 classic|item@1280x860|dom|dd > div.trks|1
-classic|item@1280x860|dom|dd > span.stat-good[text]|1
+classic|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
 classic|item@1280x860|dom|div > button.ghost.profile.sm|1
 classic|item@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|item@1280x860|dom|div > button.ghost.sm[text]|1
@@ -2691,8 +2691,8 @@ classic|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
 classic|item@1280x860|dom|div.version > dl.specs|1
 classic|item@1280x860|dom|dl.specs > dd.fn[text]|1
-classic|item@1280x860|dom|dl.specs > dd[text]|1
-classic|item@1280x860|dom|dl.specs > dd|3
+classic|item@1280x860|dom|dl.specs > dd[text]|2
+classic|item@1280x860|dom|dl.specs > dd|2
 classic|item@1280x860|dom|dl.specs > dt[text]|5
 classic|item@1280x860|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@1280x860|dom|header.top > a.logo[text]|1
@@ -2740,7 +2740,7 @@ classic|item@390x780|dom|button.ghost.sm > span.tsw|1
 classic|item@390x780|dom|dd > div.langnote[text]|1
 classic|item@390x780|dom|dd > div.trks[text]|1
 classic|item@390x780|dom|dd > div.trks|1
-classic|item@390x780|dom|dd > span.stat-good[text]|1
+classic|item@390x780|dom|dd[text] > span.stat-warn[text]|1
 classic|item@390x780|dom|div > button.ghost.profile.sm|1
 classic|item@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|item@390x780|dom|div > button.ghost.sm[text]|1
@@ -2778,8 +2778,8 @@ classic|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
 classic|item@390x780|dom|div.version > dl.specs|1
 classic|item@390x780|dom|dl.specs > dd.fn[text]|1
-classic|item@390x780|dom|dl.specs > dd[text]|1
-classic|item@390x780|dom|dl.specs > dd|3
+classic|item@390x780|dom|dl.specs > dd[text]|2
+classic|item@390x780|dom|dl.specs > dd|2
 classic|item@390x780|dom|dl.specs > dt[text]|5
 classic|item@390x780|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@390x780|dom|header.top > a.logo[text]|1
@@ -4293,7 +4293,7 @@ theater|item@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|item@1280x860|dom|dd > div.langnote[text]|1
 theater|item@1280x860|dom|dd > div.trks[text]|1
 theater|item@1280x860|dom|dd > div.trks|1
-theater|item@1280x860|dom|dd > span.stat-good[text]|1
+theater|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
 theater|item@1280x860|dom|div#app > header.th-top|1
 theater|item@1280x860|dom|div#app > main#main|1
 theater|item@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -4334,8 +4334,8 @@ theater|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
 theater|item@1280x860|dom|div.version > dl.specs|1
 theater|item@1280x860|dom|dl.specs > dd.fn[text]|1
-theater|item@1280x860|dom|dl.specs > dd[text]|1
-theater|item@1280x860|dom|dl.specs > dd|3
+theater|item@1280x860|dom|dl.specs > dd[text]|2
+theater|item@1280x860|dom|dl.specs > dd|2
 theater|item@1280x860|dom|dl.specs > dt[text]|5
 theater|item@1280x860|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@1280x860|dom|header.th-top > a.logo[text]|1
@@ -4384,7 +4384,7 @@ theater|item@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|item@390x780|dom|dd > div.langnote[text]|1
 theater|item@390x780|dom|dd > div.trks[text]|1
 theater|item@390x780|dom|dd > div.trks|1
-theater|item@390x780|dom|dd > span.stat-good[text]|1
+theater|item@390x780|dom|dd[text] > span.stat-warn[text]|1
 theater|item@390x780|dom|div#app > header.th-top|1
 theater|item@390x780|dom|div#app > main#main|1
 theater|item@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -4425,8 +4425,8 @@ theater|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
 theater|item@390x780|dom|div.version > dl.specs|1
 theater|item@390x780|dom|dl.specs > dd.fn[text]|1
-theater|item@390x780|dom|dl.specs > dd[text]|1
-theater|item@390x780|dom|dl.specs > dd|3
+theater|item@390x780|dom|dl.specs > dd[text]|2
+theater|item@390x780|dom|dl.specs > dd|2
 theater|item@390x780|dom|dl.specs > dt[text]|5
 theater|item@390x780|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@390x780|dom|header.th-top > a.logo[text]|1

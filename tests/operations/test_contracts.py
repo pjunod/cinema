@@ -54,6 +54,14 @@ class OperationsContractCase(unittest.TestCase):
             script.index("page.wait_for_timeout(args.settle_ms)"),
         )
 
+    def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
+        script = read("scripts/ui-baseline")
+        seed = script.index("    def seed(self):")
+        pinned = script.index('{"vod_index_mins": 0}', seed)
+        libraries = script.index("for name, kind, share in LIBRARIES:", seed)
+
+        self.assertLess(pinned, libraries)
+
     def test_ui_baseline_releases_and_retries_real_player_captures(self):
         script = read("scripts/ui-baseline")
 
