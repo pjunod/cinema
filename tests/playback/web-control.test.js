@@ -347,15 +347,51 @@ async function main() {
   assert.equal(endTimers.some(timer=>timer.ms===5_000),false,
     "accepted end never arms another cadence exchange");
 
+  const endRaceResponse=deferred();
+  const endRaceSnapshot=snapshot(60_000,"ended");
+  endRaceSnapshot.demand="end";
+  const oldReplayController=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    snapshot:()=>endRaceSnapshot,
+    send:async ()=>endRaceResponse.promise,
+  }).start();
+  oldReplayController.notify(snapshot(0,"rendering"));
+  assert.equal(oldReplayController.status().pending,true,
+    "a replay signal can arrive while terminal end is still in flight");
+  oldReplayController.stop();
+  const replacementRequests=[];
+  const freshReplayController=new control.Reporter({
+    bootstrap:Object.assign(bootstrap(),{generation:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}),
+    clientInstanceId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    snapshot:()=>snapshot(0,"rendering"),
+    send:async (_url,request)=>{ replacementRequests.push(request); return response(request); },
+  }).start();
+  await flush();
+  endRaceResponse.resolve(response({generation:bootstrap().generation,control_epoch:7,sequence:1}));
+  await flush();
+  assert.equal(oldReplayController.status().accepted_sequence,0,
+    "the stopped terminal controller discards its late end response and queued active snapshot");
+  assert.equal(replacementRequests.length,1);
+  assert.equal(replacementRequests[0].sequence,1,
+    "replay starts in a fresh controller sequence space");
+  assert.equal(freshReplayController.status().accepted_sequence,1);
+  freshReplayController.stop();
+
   const adapter = new Function(
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
-    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC",
+    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls",
     [
       shippedSource("playbackControlCapabilities"),
       shippedSource("playbackControlSelection"),
       shippedSource("playbackControlBufferedRange"),
+      shippedSource("playbackControlObservationOverride"),
+      shippedSource("playbackControlHlsFatal"),
       shippedSource("playbackControlSnapshot"),
-      "return {playbackControlSnapshot};",
+      "let PLAYER=null;",
+      shippedSource("notifyPlaybackControl"),
+      "return {playbackControlSnapshot,playbackControlHlsFatal,notify(player,render,observation){"+
+        "PLAYER=player; const result=notifyPlaybackControl(render,observation); PLAYER=null; return result; }};",
     ].join("\n"),
   )(
     {vcodec:"h264,hevc",maxheight:2160,hdr10t:1,dv:0},
@@ -365,6 +401,7 @@ async function main() {
     ()=>0,
     8_000,
     15,
+    {ErrorTypes:{MEDIA_ERROR:"mediaError",NETWORK_ERROR:"networkError"}},
   );
   const video={
     currentTime:10,paused:false,ended:false,seeking:false,readyState:4,playbackRate:1,error:null,
@@ -382,7 +419,22 @@ async function main() {
   assert.equal(seeking.seek_target_ms,20_000);
   video.seeking=false; player._seekPreview=null;
   player.waitAt=performance.now()-9_000;
-  assert.equal(adapter.playbackControlSnapshot(video,player).render_state,"stalled");
+  const inferredSupply=adapter.playbackControlSnapshot(video,player);
+  assert.equal(inferredSupply.render_state,"stalled");
+  assert.equal(inferredSupply.observation.decoder_state,"starved");
+  player.controlReporter={notify:()=>adapter.playbackControlSnapshot(video,player)};
+  const supplyEvidence=adapter.notify(player,"stalled",{decoder_state:"starved"});
+  assert.deepEqual(supplyEvidence.observation,
+    {decoder_state:"starved",dropped_frames:2});
+  const decodeEvidence=adapter.notify(player,"stalled",{
+    decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
+  });
+  assert.deepEqual(decodeEvidence.observation,{
+    decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
+    dropped_frames:2,
+  });
+  player.controlObservationOverride=null;
+  player.controlRenderOverride=null;
   player.waitAt=null; video.ended=true; video.paused=true; video.currentTime=20;
   const truncated=adapter.playbackControlSnapshot(video,player);
   assert.equal(truncated.demand,"active");
@@ -392,12 +444,64 @@ async function main() {
   assert.equal(complete.demand,"end");
   assert.equal(complete.render_state,"ended");
 
+  assert.deepEqual(adapter.playbackControlHlsFatal(
+    {type:"networkError",details:"fragLoadError"},true),{
+    media_failure:false,
+    observation:{decoder_state:"ready",error_code:"network",error_detail:"fragLoadError"},
+  });
+  assert.deepEqual(adapter.playbackControlHlsFatal(
+    {type:"networkError",details:"manifestLoadError"},false),{
+    media_failure:false,
+    observation:{decoder_state:"unknown",error_code:"manifest",error_detail:"manifestLoadError"},
+  });
+  assert.deepEqual(adapter.playbackControlHlsFatal(
+    {type:"mediaError",details:"bufferStalledError"},true),{
+    media_failure:true,
+    observation:{decoder_state:"failed",error_code:"media",error_detail:"bufferStalledError"},
+  });
+  assert.deepEqual(adapter.playbackControlHlsFatal(
+    {type:"mediaError",details:"videoDecodeError"},true),{
+    media_failure:true,
+    observation:{decoder_state:"failed",error_code:"decoder",error_detail:"videoDecodeError"},
+  });
+
+  const replayCalls=[];
+  const replayDone=deferred();
+  const replayAdapter=new Function("play",[
+    "let PLAYER={fileId:'file-1',title:'Film',knownDur:90000,durMs:90000,meta:{kind:'movie'}};",
+    "let PENDING_ATTEMPT_REASON=null;",
+    shippedSource("replayEnded"),
+    "return {replayEnded,state:()=>({player:PLAYER,reason:PENDING_ATTEMPT_REASON})};",
+  ].join("\n"))((...args)=>{ replayCalls.push(args); return replayDone.promise; });
+  assert.equal(replayAdapter.replayEnded(),true);
+  assert.equal(replayAdapter.replayEnded(),false,"double-click cannot open two replay sessions");
+  assert.deepEqual(replayCalls[0],["file-1","Film",0,90000,{kind:"movie"}]);
+  assert.equal(replayAdapter.state().reason,"replay");
+  replayDone.resolve();
+  await flush();
+  assert.equal(replayAdapter.state().player.replayInFlight,false);
+  assert.equal(replayAdapter.state().reason,null);
+
+  let replayClicks=0,elementPlays=0,activities=0;
+  const endedToggle=new Function("document","replayEnded","playerActivity",[
+    shippedSource("togglePlay"),"togglePlay();",
+  ].join("\n"))(
+    {getElementById:()=>({ended:true,paused:true,play:()=>{elementPlays+=1;},pause:()=>{}})},
+    ()=>{replayClicks+=1;},()=>{activities+=1;},
+  );
+  assert.equal(endedToggle,undefined);
+  assert.equal(replayClicks,1);
+  assert.equal(elementPlays,0,"ended media is never restarted behind its stopped controller");
+  assert.equal(activities,1);
+
   assert.match(shippedSource("wirePlayer"),/visibilitychange[^\n]*notifyPlaybackControl/);
-  assert.match(shippedSource("persistentWait"),/notifyPlaybackControl\("stalled"\)/);
-  assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed"\)/);
+  assert.match(shippedSource("persistentWait"),/error_code:"decoder"/);
+  assert.match(shippedSource("persistentWait"),/notifyPlaybackControl\("stalled",controlObservation\)/);
+  assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
   assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
   assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
+  assert.match(shippedSource("togglePlay"),/if\(v\.ended\) replayEnded\(\)/);
 
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");

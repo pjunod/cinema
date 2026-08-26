@@ -3161,7 +3161,10 @@ function persistentWait(v,p,began,generation){
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
   // exchange, leaving the server with only the earlier `waiting` fact.
-  const controlTrigger=notifyPlaybackControl("stalled");
+  const controlObservation=kind==="supply"
+    ? {decoder_state:"starved"}
+    : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  const controlTrigger=notifyPlaybackControl("stalled",controlObservation);
   recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
   const action=PlaybackPolicy.stallRecoveryAction({
@@ -5634,7 +5637,9 @@ function attachHls(video, playlistUrl, startAt){
         return;
       }
       console.warn("[cinema] hls.js fatal",d.type,d.details);
-      const controlTrigger=notifyPlaybackControl("failed");
+      const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
+      const isMedia=hlsFailure.media_failure;
+      const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
       clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
         control_trigger:controlTrigger}, playbackContext()));
       if(finishStallRecovery("failed",String(d.details||d.type||"hls.js fatal error"))){
@@ -5660,8 +5665,6 @@ function attachHls(video, playlistUrl, startAt){
       // deliberately left alone: a different encode does not fix an
       // unreachable server, and re-encoding a title because the wifi dropped
       // is the "downgrade on a guess" this whole change refuses to do.
-      const isMedia=(Hls.ErrorTypes && d.type===Hls.ErrorTypes.MEDIA_ERROR)
-                    || /codec|decode|parsing/i.test(String(d.details||""));
       const fallback=PLAYER && PlaybackPolicy.fallbackAction({
         method:PLAYER.method,
         alreadyTried:PLAYER.triedFallback,
@@ -5840,6 +5843,41 @@ function playbackControlBufferedRange(v,p,positionMs){
   }catch(e){}
   return {from:null,through:positionMs};
 }
+// Recovery handlers know facts the media element cannot expose: whether a
+// persistent wait ran out of bytes or stalled with bytes already buffered,
+// and whether hls.js stopped on a manifest, network, media, or decoder error.
+// Admit only protocol enums and a tightly-bounded single-line detail so a
+// library error object can never leak arbitrary fields into the wire request.
+function playbackControlObservationOverride(value){
+  if(!value||typeof value!=="object") return null;
+  const observation={};
+  if(["unknown","ready","starved","failed"].includes(value.decoder_state))
+    observation.decoder_state=value.decoder_state;
+  if(["network","manifest","media","decoder","drm","unknown"].includes(value.error_code))
+    observation.error_code=value.error_code;
+  if(observation.error_code && value.error_detail!=null){
+    const detail=String(value.error_detail).replace(/[\r\n\0]/g," ").slice(0,120);
+    if(detail) observation.error_detail=detail;
+  }
+  return Object.keys(observation).length?observation:null;
+}
+function playbackControlHlsFatal(data,started){
+  const detail=String(data&&data.details||"");
+  const type=String(data&&data.type||"");
+  const errorTypes=typeof Hls!=="undefined"&&Hls.ErrorTypes;
+  const mediaFailure=!!((errorTypes && data&&data.type===errorTypes.MEDIA_ERROR)
+    || /codec|decode|parsing/i.test(detail));
+  const manifestFailure=/manifest/i.test(detail);
+  const networkFailure=!mediaFailure && !!((errorTypes&&data&&data.type===errorTypes.NETWORK_ERROR)
+    || /network|loaderror|loadtimeout/i.test(type+" "+detail));
+  const observation=mediaFailure
+    ? {decoder_state:"failed",error_code:/codec|decode/i.test(detail)?"decoder":"media",
+        error_detail:detail||type||"hls_media_fatal"}
+    : {decoder_state:started?"ready":"unknown",
+        error_code:manifestFailure?"manifest":networkFailure?"network":"unknown",
+        error_detail:detail||type||"hls_fatal"};
+  return {media_failure:mediaFailure,observation};
+}
 function playbackControlSnapshot(v,p){
   if(!v||!p) return null;
   const seeking=!!v.seeking || p._seekPreview!=null;
@@ -5875,6 +5913,8 @@ function playbackControlSnapshot(v,p){
     if(q&&Number.isFinite(q.droppedVideoFrames)) dropped=Math.max(0,Math.round(q.droppedVideoFrames));
   }catch(e){}
   const observation={decoder_state:v.error?"failed":render==="stalled"?"starved":p.started?"ready":"unknown"};
+  const triggerObservation=playbackControlObservationOverride(p.controlObservationOverride);
+  if(triggerObservation) Object.assign(observation,triggerObservation);
   if(dropped!=null) observation.dropped_frames=dropped;
   if(v.error){ observation.error_code="media"; observation.error_detail=`media_code_${v.error.code||0}`; }
   const bps=p.hls&&Number(p.hls.bandwidthEstimate);
@@ -5905,10 +5945,12 @@ async function sendPlaybackControl(url,body,signal){
 function stopPlaybackControl(p){
   if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
 }
-function notifyPlaybackControl(renderOverride){
+function notifyPlaybackControl(renderOverride,observationOverride){
   const p=PLAYER;
   if(!p) return null;
   if(["stalled","failed"].includes(renderOverride)) p.controlRenderOverride=renderOverride;
+  const observation=playbackControlObservationOverride(observationOverride);
+  if(observation) p.controlObservationOverride=observation;
   return p.controlReporter?p.controlReporter.notify():null;
 }
 function startPlaybackControl(v,p,bootstrap){
@@ -5976,6 +6018,7 @@ async function openSession(fileId, opts){
 function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
+  t.controlObservationOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
@@ -8041,7 +8084,29 @@ function pbTick(){
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused?"Play":"Pause"); } }
-function togglePlay(){ const v=document.getElementById("video"); if(!v) return; if(v.paused||v.ended) v.play().catch(()=>{}); else v.pause(); playerActivity(); }
+// A control generation is terminal once the server accepts demand=end. The
+// ended media element can technically be played again, but that would reuse a
+// reporter which has deliberately stopped and, for HLS, a completed session.
+// Replay therefore takes the normal cold-open path and gets a fresh delivery
+// session, control generation, and sequence space before the first frame.
+function replayEnded(){
+  const p=PLAYER;
+  if(!p||!p.fileId||p.replayInFlight) return false;
+  p.replayInFlight=true;
+  PENDING_ATTEMPT_REASON="replay";
+  Promise.resolve(play(p.fileId,p.title||"",0,p.knownDur||p.durMs||0,p.meta)).catch(()=>{}).finally(()=>{
+    if(PENDING_ATTEMPT_REASON==="replay") PENDING_ATTEMPT_REASON=null;
+    if(PLAYER===p) p.replayInFlight=false;
+  });
+  return true;
+}
+function togglePlay(){
+  const v=document.getElementById("video"); if(!v) return;
+  if(v.ended) replayEnded();
+  else if(v.paused) v.play().catch(()=>{});
+  else v.pause();
+  playerActivity();
+}
 // Directional nudges coalesce: accumulate against a frozen base, preview live
 // on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
 // button (or an arrow) doesn't restart the transcode stream over and over.
@@ -8125,7 +8190,7 @@ function wirePlayer(){
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
   ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>p.addEventListener(ev,playerActivity));
-  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
+  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled

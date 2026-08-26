@@ -28,6 +28,13 @@ snapshot includes:
   that capability snapshot changes; and
 - dropped-frame and decoder/error evidence where the browser exposes it.
 
+Recovery callbacks add evidence the media element cannot infer on its own. An
+empty-buffer persistent wait reports a starved decoder, while a wait with
+healthy runway reports a decoder failure. Fatal hls.js events retain decoder
+readiness for network or manifest failures and report failed media/decoder
+state for media-path failures. Only protocol enums and a bounded, single-line
+error detail can enter this override.
+
 One exchange may be in flight. New callbacks replace the queued snapshot
 instead of allocating more requests, and the reporter enforces the server's
 250 ms admission floor before sending the newest state. Sequences are assigned
@@ -41,6 +48,12 @@ one snapshot. Terminal authorization/stale-session errors and a response that
 violates the passive protocol stop visibly instead of retrying forever.
 Closing or replacing the player cancels its
 request without turning cancellation into a playback failure.
+
+An accepted `end` is terminal for that controller. Pressing Play on ended media
+uses the ordinary playback-open path from position zero rather than calling
+`HTMLMediaElement.play()` on the completed source. The replay therefore gets a
+new delivery session, control generation, and sequence space; a late response
+from the ended controller cannot alter its successor.
 
 A six-second client exchange deadline bounds a transport that never returns;
 it is two seconds beyond M1's complete four-second ingress/relay budget. Its
