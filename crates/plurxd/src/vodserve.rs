@@ -576,6 +576,13 @@ impl VodServe {
     /// Tombstones remain addressable long enough to return their typed 410,
     /// but they are no longer deliveries and therefore stay out of this list.
     pub async fn delivery_infos(&self) -> Vec<VodDeliveryInfo> {
+        self.delivery_infos_bounded(usize::MAX).await
+    }
+
+    /// Newest active VOD handles, bounded before they leave the registry.
+    /// Cluster activity snapshots use this form so a node cannot make peer
+    /// diagnostics enumerate more sessions than the wire contract can carry.
+    pub async fn delivery_infos_bounded(&self, limit: usize) -> Vec<VodDeliveryInfo> {
         let sessions = self.shared.sessions.lock().await;
         let mut infos = sessions
             .iter()
@@ -602,6 +609,7 @@ impl VodServe {
                 .cmp(&left.started_unix)
                 .then(left.id.cmp(&right.id))
         });
+        infos.truncate(limit);
         infos
     }
 

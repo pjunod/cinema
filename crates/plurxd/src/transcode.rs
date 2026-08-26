@@ -10765,6 +10765,16 @@ impl TranscodeManager {
         self.list_deliveries_bounded(usize::MAX).await
     }
 
+    /// Bounded VOD identities for the cluster-only activity snapshot. These
+    /// are already complete delivery facts, unlike historical live-session
+    /// candidates, and never consult the removed presentation engine.
+    pub(crate) async fn vod_delivery_infos_bounded(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::vodserve::VodDeliveryInfo> {
+        self.vod.delivery_infos_bounded(limit).await
+    }
+
     /// A diagnostics-safe prefix that bounds the expensive per-session
     /// telemetry reads before they begin.
     pub async fn list_deliveries_bounded(
