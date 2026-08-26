@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["bf8001af"]
+points = ["cluster.page-reads"]
+checks = ["cluster-auth"]
+reason = "The retained real-daemon activity contract now distinguishes admission to the voter roster from application of replicated schema and media state. It waits until the joined node can read the exact replicated file before requiring that node's local VOD index, so loaded runners cannot race membership acceptance while a genuine follower catch-up or index failure still times out with both daemon diagnostics."
