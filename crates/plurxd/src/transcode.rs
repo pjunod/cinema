@@ -1741,6 +1741,10 @@ struct Session {
     /// command while the HTTP-owned transition guard is still held.
     #[cfg(test)]
     control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after producer policy is applied but before the flow
+    /// ticket is completed back to a waiting control response.
+    #[cfg(test)]
+    flow_completion_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -7046,6 +7050,8 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: cache_reader,
@@ -10313,6 +10319,8 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -10907,6 +10915,8 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -11491,6 +11501,27 @@ impl TranscodeManager {
         session.control.wait_for_flow(flow_ticket).await;
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+        // Convergence is not enough if retirement or replacement won while
+        // this response waited. Re-enter the exact physical-transition gate,
+        // revalidate this Arc against the registry, and keep the gate through
+        // the status join so an active success cannot describe a stale child.
+        let _final_transition = session.child_transition.lock().await;
+        if session.control.is_retired() {
+            return Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded,
+            ));
+        }
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return Some(Err(
+                crate::playback_control::ControlStateError::OwnerTransition,
+            ));
+        }
         let status = session_info(
             &session_id,
             &session,
@@ -11499,6 +11530,22 @@ impl TranscodeManager {
             global_ahead_bytes,
         )
         .await;
+        if session.control.is_retired() {
+            return Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded,
+            ));
+        }
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return Some(Err(
+                crate::playback_control::ControlStateError::OwnerTransition,
+            ));
+        }
         Some(Ok(crate::playback_control::LocalControlResult {
             disposition,
             accepted_sequence,
@@ -12990,6 +13037,17 @@ impl TranscodeManager {
                     break;
                 }
                 manager.flow_control(&session, &session_id).await;
+                #[cfg(test)]
+                let flow_pause = session
+                    .flow_completion_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                #[cfg(test)]
+                if let Some(pause) = flow_pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
                 handled = ticket;
                 session.control.complete_flow(ticket);
             }
@@ -13778,6 +13836,7 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
+        flow_completion_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
         cached: false,
@@ -14271,6 +14330,67 @@ mod tests {
         };
         assert!(status.suspended);
         assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
+    }
+
+    #[tokio::test]
+    async fn retirement_before_flow_completion_cannot_escape_as_active_control() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .flow_completion_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let control = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                            crate::playback_control::ClientPlatform::Web,
+                        ),
+                    })
+                    .await
+            })
+        };
+
+        // The actor accepted and producer policy ran, but the ticket has not
+        // yet released the HTTP response. Retirement wins in that interval.
+        pause.wait().await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session(&session_id, "test-retirement")
+                .await
+        );
+        pause.wait().await;
+        assert!(matches!(
+            control.await.expect("control task"),
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+                    | crate::playback_control::ControlStateError::OwnerTransition
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -19057,6 +19177,7 @@ mod tests {
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
+            flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
             cached,

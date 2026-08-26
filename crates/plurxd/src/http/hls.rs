@@ -1896,7 +1896,11 @@ async fn control_local_inner(
         accepted_sequence: result.accepted_sequence,
         server_time_unix_ms: unix_ms(),
         lease: crate::playback_control::PlaybackLeaseView {
-            state: "active".to_owned(),
+            state: match &result.status {
+                crate::transcode::HlsSessionInfo::Live(status) => status.lease_state,
+                crate::transcode::HlsSessionInfo::Vod(_) => "active",
+            }
+            .to_owned(),
             renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
             expires_at_unix_ms: result.lease_expires_at_unix_ms,
         },

@@ -115,7 +115,10 @@ those tickets and media-frontier tickets. HTTP cancellation therefore cannot
 cancel an accepted producer transition, while a streamed response can publish
 EOF immediately after committing lease/frontier state instead of waiting
 behind encoder replacement or signal serialization. A successful control
-response waits for its ticket, so it still reports physically converged state.
+response waits for its ticket, then reacquires the child-transition gate and
+revalidates the exact registry incarnation through its final status snapshot.
+Retirement or replacement in that interval returns a terminal/transition
+error, never a contradictory successful response labeled active.
 
 Every resolved HTTP object carries an opaque engine/incarnation token to its
 final response path. Buffered objects commit only after the complete bounded
