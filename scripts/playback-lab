@@ -112,10 +112,11 @@ function usage() {
 Usage:
   scripts/playback-lab doctor [--browser chrome|safari|edge|firefox]
   scripts/playback-lab fixtures [--rebuild] [--fixtures DIR]
-  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod] [--case TEXT]
+  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
+                             [--case TEXT] [--exclude-case TEXT]
   scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
                              [--browser chrome|safari|edge|firefox]
-                             [--case TEXT] [--observe SECONDS]
+                             [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
                              [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
@@ -199,7 +200,7 @@ function caseName(testCase) {
   return `${testCase.fixture} :: ${testCase.quality} :: ${testCase.operation}`;
 }
 
-function expandCases(manifest, suiteName, filter) {
+function expandCases(manifest, suiteName, filter, excludeFilter) {
   const suite = manifest.suites[suiteName];
   if (!suite) throw new Error(`unknown suite ${suiteName}; choose smoke, full, stall-recovery, or vod`);
   const fixtures = fixtureMap(manifest);
@@ -229,15 +230,20 @@ function expandCases(manifest, suiteName, filter) {
     if (seen.has(name)) continue;
     seen.add(name);
     if (filter && !name.toLowerCase().includes(String(filter).toLowerCase())) continue;
+    if (excludeFilter && name.toLowerCase().includes(String(excludeFilter).toLowerCase())) continue;
     selected.push({ ...testCase, name });
   }
-  if (selected.length === 0) throw new Error(filter ? `no cases match ${filter}` : "suite has no cases");
+  if (selected.length === 0) {
+    if (filter) throw new Error(`no cases match ${filter}`);
+    if (excludeFilter) throw new Error(`no cases remain after excluding ${excludeFilter}`);
+    throw new Error("suite has no cases");
+  }
   return selected;
 }
 
-function printPlan(manifest, suiteName, filter) {
+function printPlan(manifest, suiteName, filter, excludeFilter) {
   const fixtures = fixtureMap(manifest);
-  const cases = expandCases(manifest, suiteName, filter);
+  const cases = expandCases(manifest, suiteName, filter, excludeFilter);
   process.stdout.write(`Suite: ${suiteName} (${cases.length} cases)\n\n`);
   process.stdout.write(" #  fixture                          quality   operation\n");
   process.stdout.write("--  -------------------------------  --------  ---------------\n");
@@ -2804,7 +2810,7 @@ async function runSuite(manifest, options, dependencies = {}) {
   // Parsed before the corpus is built: a typo in the profile should cost a
   // second, not the 195 MB fixture build and a server boot.
   const profile = parseNetworkProfile(options.network_profile);
-  const plan = printPlan(manifest, suite, options.case);
+  const plan = printPlan(manifest, suite, options.case, options.exclude_case);
   const requiresVod = manifest.suites[suite]?.requires_vod === true;
   const shapedCases = plan.cases.filter((testCase) => testCase.operation === "shaped-cliff");
   if ((shapedCases.length || manifest.suites[suite]?.requires_network_profile) && !profile) {
@@ -3289,7 +3295,9 @@ async function main() {
   const manifest = loadManifest();
   if (command === "doctor") doctor(options);
   else if (command === "fixtures") await buildFixtures(manifest, options);
-  else if (command === "plan") printPlan(manifest, options.suite || "smoke", options.case);
+  else if (command === "plan") {
+    printPlan(manifest, options.suite || "smoke", options.case, options.exclude_case);
+  }
   else throw new Error(`unknown command ${command}`);
 }
 

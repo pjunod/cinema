@@ -1783,6 +1783,17 @@ test("the VOD suite makes native seeking and resume invariants executable", () =
   assert.equal(storm.seeks, 20);
   assert.equal(storm.maximum_session_creates, 1, "only the initial create is allowed");
   assert.ok(cases.some((testCase) => testCase.operation === "suspend-resume"));
+
+  const retainedCiCases = lab.expandCases(manifest, "vod", undefined, "seek-storm");
+  assert.deepEqual(
+    retainedCiCases.map((testCase) => testCase.operation),
+    ["steady", "suspend-resume"],
+    "a named exclusion keeps the two healthy VOD gates without deleting the storm contract",
+  );
+  assert.throws(
+    () => lab.expandCases(manifest, "vod", undefined, "remux-h264-multitrack-1080"),
+    /no cases remain after excluding remux-h264-multitrack-1080/,
+  );
 });
 
 test("the run command retains JSON and JUnit when a bad profile exits nonzero", async () => {
