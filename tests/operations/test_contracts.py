@@ -369,6 +369,25 @@ class OperationsContractCase(unittest.TestCase):
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
+        # Instrumenting the cluster harness made the diagnostic badge depend on
+        # replicated-store deadlines and turned one slow worker into a red CI
+        # badge. Keep coverage on the same runner-neutral lane as `check`.
+        self.assertIn(
+            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
+            coverage,
+        )
+        self.assertIn("git add coverage.json coverage.svg", coverage)
+
+        # Shields cannot fetch badge data anonymously from a private branch.
+        # GitHub serves both badge images to authorized repository viewers.
+        readme = read("README.md")
+        self.assertIn(
+            "ci.yml/badge.svg?branch=main&event=push",
+            readme,
+        )
+        self.assertIn("blob/badges/coverage.svg?raw=true", readme)
+        self.assertNotIn("img.shields.io/endpoint", readme)
+        self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
         docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
         self.assertNotIn("needs: check", docker)
