@@ -259,8 +259,45 @@ async fn wait_for_two_voters(
     }
 }
 
+async fn wait_for_remote_file(
+    client: &reqwest::Client,
+    daemon: &mut Daemon,
+    base: &str,
+    token: &str,
+    item_id: i64,
+    file_id: i64,
+) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        daemon.assert_running("waiting for the joined node to apply replicated state");
+        if let Ok(response) = client
+            .get(format!("{base}/api/v1/items/{item_id}"))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            if response.status().is_success() {
+                if let Ok(body) = response.json::<Value>().await {
+                    if body["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file["id"] == file_id))
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "joined node did not apply the fixture's replicated file state:\n{}",
+            daemon.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn wait_for_fragment_index(daemon: &mut Daemon) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         daemon.assert_running("waiting for the fragment index");
         let diagnostics = daemon.diagnostics();
@@ -501,6 +538,12 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .expect("item detail JSON");
     let file_id = detail["files"][0]["id"].as_i64().expect("file id");
     let b_base = format!("http://127.0.0.1:{b_http_port}");
+
+    // Roster membership means the join was accepted; it does not mean the new
+    // voter has already applied the schema and file rows needed by its
+    // node-local VOD indexer. Make that prerequisite observable before waiting
+    // on the indexer's completed-work signal.
+    wait_for_remote_file(&client, &mut node_b, &b_base, &token, item_id, file_id).await;
 
     // VOD deliberately refuses to start until this node-local prerequisite is
     // durable. Wait on the scheduler's completed-work signal instead of racing
