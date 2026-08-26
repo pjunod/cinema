@@ -343,6 +343,29 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   assert.equal(requests.length, 2);
 });
 
+test("cockpit Settings makes the active tab and long System values distinct", async () => {
+  // Panoptic and Redline once painted every tab through the generic accent
+  // button rule. The selected tab therefore differed only by a two-pixel edge
+  // in the same hue. Its own filled state must outrank that generic rule.
+  assert.match(
+    SHIPPED_UI,
+    /\.settabs>button\.settab\.active:not\(\.ghost\):not\(\.pbtn\)[\s\S]*?background:var\(--accent\);color:var\(--btn-ink\)/,
+  );
+  assert.match(
+    SHIPPED_UI,
+    /\.settabs>button\.settab:not\(\.ghost\):not\(\.pbtn\)[\s\S]*?background:rgba\(255,255,255,\.025\)/,
+  );
+
+  // System's values are prose and paths, not cockpit labels. Keep the label
+  // treatment on dt, restore natural case/wrapping on dd, and give storage's
+  // potentially huge root list the shrinking column rather than max-content.
+  assert.match(SHIPPED_UI, /\.kvgrid dd\{[\s\S]*?text-transform:none;word-break:normal/);
+  assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
+  assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
+  assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
+  assert.match(shippedSource("systemPanel"), /class="system-now-watch"/);
+});
+
 test("an old Settings tick cannot block or release a newer generation", async () => {
   const location={hash:"#/settings"}, requests=[]; let tab="libraries";
   const document={visibilityState:"visible",getElementById:()=>null};
