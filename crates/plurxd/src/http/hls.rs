@@ -3493,6 +3493,13 @@ async fn vod_segment_response(
             .read_to_end(&mut init)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if init.len() as u64 != ready.len {
+            return Err(ApiError::Internal(format!(
+                "VOD init ended after {} of {} advertised bytes",
+                init.len(),
+                ready.len
+            )));
+        }
         if let Some(file_id) = state.transcode.vod_session_file_id(session).await {
             if let Ok(Some(file)) = state.store.get_file(file_id).await {
                 if normalize_high_tier_hevc_init(&file, &mut init) {
@@ -3573,25 +3580,41 @@ async fn vod_segment_response(
         requested_range.is_none(),
     );
     let stream = futures_util::stream::unfold(
-        (Some(reader), Some(completion)),
-        |(reader, completion)| async move {
+        (Some(reader), Some(completion), 0_u64, len),
+        |(reader, completion, delivered, expected)| async move {
             let mut reader = reader?;
             match reader.next().await {
-                Some(Ok(bytes)) => Some((Ok(bytes), (Some(reader), completion))),
-                Some(Err(error)) => Some((Err(error), (None, None))),
+                Some(Ok(bytes)) => {
+                    let delivered = delivered.saturating_add(bytes.len() as u64);
+                    Some((Ok(bytes), (Some(reader), completion, delivered, expected)))
+                }
+                Some(Err(error)) => Some((Err(error), (None, None, delivered, expected))),
                 None => {
-                    if let Some((manager, session, owner, kind, object, complete_object)) =
-                        completion
-                    {
-                        let _ = manager
-                            .commit_resolved_media(
-                                &session,
-                                &owner,
-                                kind,
-                                Some(&object),
-                                complete_object,
-                            )
-                            .await;
+                    if delivered == expected {
+                        if let Some((manager, session, owner, kind, object, complete_object)) =
+                            completion
+                        {
+                            let _ = manager
+                                .commit_resolved_media(
+                                    &session,
+                                    &owner,
+                                    kind,
+                                    Some(&object),
+                                    complete_object,
+                                )
+                                .await;
+                        }
+                    } else {
+                        let session = completion
+                            .as_ref()
+                            .map(|(_, session, _, _, _, _)| session.as_str())
+                            .unwrap_or_default();
+                        tracing::warn!(
+                            session = %crate::transcode::session_log_id(session),
+                            delivered_bytes = delivered,
+                            expected_bytes = expected,
+                            "VOD response reached EOF before its advertised length"
+                        );
                     }
                     None
                 }
@@ -3725,6 +3748,18 @@ async fn segment_local(
                 return Err(ApiError::Internal(error.to_string()));
             }
         };
+        if init.len() as u64 != opened.len {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "init ended after {} of {} advertised bytes",
+                    init.len(),
+                    opened.len
+                ),
+            );
+            delivery.fail(&error);
+            return Err(ApiError::Internal(error.to_string()));
+        }
         if let Ok((_, file, _)) = session_file(state, session).await {
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
