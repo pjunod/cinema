@@ -303,6 +303,29 @@ test("every server verdict reaches exactly one initial web transport", () => {
   }
 });
 
+test("a missing node-local VOD index falls back only where progressive remux works", () => {
+  assert.equal(
+    policy.indexPendingFallback({
+      code: "vod_index_pending",
+      method: "remux",
+      nativeHls: false,
+    }),
+    "progressive_remux",
+  );
+  for (const input of [
+    { code: "vod_index_pending", method: "remux", nativeHls: true },
+    { code: "vod_index_pending", method: "transcode", nativeHls: false },
+    { code: "producer_failed", method: "remux", nativeHls: false },
+  ]) {
+    assert.equal(policy.indexPendingFallback(input), "fail", JSON.stringify(input));
+  }
+  assert.match(
+    shippedSource("startCopyHls"),
+    /indexPendingFallback[\s\S]*?stream\.mp4[\s\S]*?copyHls=false/,
+    "the shipped session-open path must attach the progressive response",
+  );
+});
+
 test("native HLS is Safari-only unless MSE is unavailable", () => {
   assert.equal(
     policy.nativeHlsAvailable({
