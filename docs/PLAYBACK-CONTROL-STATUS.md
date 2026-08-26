@@ -80,11 +80,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Complete on `278ddff4`; final ledger-only commit pending |
-| Adversarial diff review | **Approved** on the complete exact diff at `278ddff4`; the reviewer ran no tests or compile commands |
+| Implementation | Complete on `87d8d7d9`; final status-only commit pending |
+| Adversarial diff review | **Approved** on the complete exact diff at `87d8d7d9`; the reviewer ran no tests or compile commands |
 | Unit/focused tests | Two exact deadline regressions passed, then `make test` passed: 1,878 passed, 0 failed, 3 ignored |
-| Full local gate | Unit portion green; remaining validation targets are running next |
-| Hosted CI | Draft PR exists; hosted merge gates follow the remaining local validation |
+| Full local gate | `make validate` passed on `87d8d7d9`: 13 passed, 0 failed, 2 optional Playwright checks skipped because the local module is absent |
+| Hosted CI | Draft PR exists; ready-for-review and hosted merge gates are next |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger
