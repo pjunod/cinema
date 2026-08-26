@@ -16,6 +16,7 @@
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
 mod fragindex;
+mod fragment_index_cluster;
 mod renditionplan;
 mod sqlite;
 mod telemetry;
@@ -30,6 +31,8 @@ mod hiqlite_catalog;
 mod hiqlite_coordination;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_durable;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_import;
 #[cfg(feature = "hiqlite-store")]
@@ -65,6 +68,13 @@ pub use self::hiqlite::{
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
+pub use fragment_index_cluster::{
+    cluster_fragment_index_blob_sha256, cluster_fragment_index_key,
+    cluster_fragment_index_pipeline_digest, decode_cluster_fragment_index_blob,
+    encode_cluster_fragment_index_blob, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewClusterFragmentIndexJob, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+};
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
 
@@ -321,6 +331,10 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
+    /// off so an upgrade never starts full-library reads without the operator's
+    /// topology measurement and explicit opt-in.
+    pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
@@ -2213,6 +2227,7 @@ pub trait Store:
     + PlaybackTelemetryStore
     + NetworkPriorStore
     + FragmentIndexStore
+    + ClusterFragmentIndexStore
     + RenditionPlanStore
     + CoordinationStore
     + FencedPublicationStore
@@ -2241,6 +2256,7 @@ impl<T> Store for T where
         + PlaybackTelemetryStore
         + NetworkPriorStore
         + FragmentIndexStore
+        + ClusterFragmentIndexStore
         + RenditionPlanStore
         + RenditionPlanStore
         + CoordinationStore
