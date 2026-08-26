@@ -400,7 +400,7 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .expect("library id");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let item_id = loop {
+    let file_id = loop {
         let page = client
             .get(format!("{a_base}/api/v1/libraries/{library_id}/items"))
             .bearer_auth(&token)
@@ -415,24 +415,29 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
             .and_then(|items| items.first())
             .and_then(|item| item["id"].as_i64())
         {
-            break item_id;
+            let detail = client
+                .get(format!("{a_base}/api/v1/items/{item_id}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("item detail")
+                .json::<Value>()
+                .await
+                .expect("item detail JSON");
+            if let Some(file_id) = detail["files"]
+                .as_array()
+                .and_then(|files| files.first())
+                .and_then(|file| file["id"].as_i64())
+            {
+                break file_id;
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "library scan did not publish fixture"
+            "library scan did not publish fixture with a file"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let detail = client
-        .get(format!("{a_base}/api/v1/items/{item_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .expect("item detail")
-        .json::<Value>()
-        .await
-        .expect("item detail JSON");
-    let file_id = detail["files"][0]["id"].as_i64().expect("file id");
     let b_base = format!("http://127.0.0.1:{b_http}");
 
     let hls = client
