@@ -369,6 +369,7 @@ class OperationsContractCase(unittest.TestCase):
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
+        self.assertIn("--failure-mode all", coverage)
 
         docker = workflow.split("  docker:", 1)[1].split("\n  pr_gate:", 1)[0]
         self.assertNotIn("needs: check", docker)

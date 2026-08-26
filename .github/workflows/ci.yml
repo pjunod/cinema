@@ -548,7 +548,10 @@ jobs:
         with:
           major: "6"
       - name: Measure line coverage
-        run: cargo llvm-cov --workspace --summary-only --json --output-path cov.json
+        # Tests intentionally terminate helper processes. A helper can leave one
+        # truncated .profraw behind even though the suite and every other profile
+        # completed; merge the valid profiles, but still fail if none are valid.
+        run: cargo llvm-cov --workspace --summary-only --json --output-path cov.json --failure-mode all
       - name: Build the shields.io badge JSON
         run: |
           pct=$(jq -r '.data[0].totals.lines.percent' cov.json)
